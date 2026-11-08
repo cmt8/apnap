@@ -10,11 +10,14 @@ One file per rules area, written **before** that area is implemented (CLAUDE.md 
 
 | Area | File | Milestone |
 |---|---|---|
+| 101.4 APNAP, 117 Priority | [117-priority-101.4-apnap.md](117-priority-101.4-apnap.md) | M1 |
+| 601/602/605 Casting, abilities, mana (+107.3, 115, 700.2) | [601-casting-602-activating-605-mana.md](601-casting-602-activating-605-mana.md) | M1 |
+| 608 Resolution (+701.6) | [608-resolution.md](608-resolution.md) | M1 |
 | 704 State-based actions | [704-sba.md](704-sba.md) | M0 (subset), M2 |
 | 603 Triggered abilities | — | M2 |
 | 613 Layers | — | M2 |
 | 614–616 Replacement/prevention | — | M2 |
-| 800.4 Leaving the game | — | M3 |
+| 800.4 Leaving the game | [800.4-leaving-the-game.md](800.4-leaving-the-game.md) | M1 (pulled forward) |
 | 903 Commander (incl. 903.9) | — | M3 |
 
 Excerpts are committed verbatim by explicit decision (D-012). If the repo is ever
