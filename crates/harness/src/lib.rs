@@ -1,5 +1,7 @@
 //! Headless game running. Not part of the pure engine: may use std, files, threads.
 
+pub mod text;
+
 use ai::RandomAgent;
 use engine_core::rng::splitmix64;
 use engine_core::state::GameResult;

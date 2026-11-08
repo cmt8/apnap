@@ -2,9 +2,17 @@
 //!   run [--seed N] [--games G] [--save-replay PATH]
 //!   determinism [--seed N] [--runs R]
 //!   replay PATH
+//!   watch [--seed N]            narrate a random-agent game
+//!   play [--seed N] [--save-replay PATH]   you (P0) vs a random agent, in the terminal
 //!   bless                       (rewrite crates/harness/tests/golden/m0.txt)
 
-use harness::{GOLDEN_SEEDS, PlayOptions, Replay, golden_line, play_random, run_replay};
+use ai::RandomAgent;
+use engine_core::{Agent, ChoiceKind, OptionDesc, PendingDecision, PlayerId, Primitive, Response};
+use harness::text::{Narrator, board, decision_prompt};
+use harness::{
+    GOLDEN_SEEDS, PlayOptions, Replay, agent_seed, golden_line, m0_game, play_random, run_replay,
+};
+use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
 fn flag(args: &[String], name: &str) -> Option<String> {
@@ -91,6 +99,16 @@ fn main() -> ExitCode {
             );
             ExitCode::SUCCESS
         }
+        "watch" => {
+            let seed = num(&args, "--seed", 42);
+            let rec = play_random(seed, PlayOptions::default()).expect("game");
+            let mut n = Narrator::new(&m0_game(seed));
+            for line in n.lines(&rec.events, None) {
+                println!("{line}");
+            }
+            ExitCode::SUCCESS
+        }
+        "play" => play(&args),
         "bless" => {
             let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/m0.txt");
             let mut out = String::from(
@@ -110,4 +128,109 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Trivially forced decisions the terminal UI answers for you (a UI concern, spec §6
+/// "stops"): priority when passing is the only option, and picks with exactly one answer.
+fn forced(d: &PendingDecision) -> Option<Response> {
+    match d.prim {
+        Primitive::PickN { min, max } => {
+            let n = d.options.len();
+            if d.kind == ChoiceKind::Priority && n == 1 {
+                Some(Response::Pick(vec![0]))
+            } else if min == n && max == n {
+                Some(Response::Pick((0..n).collect()))
+            } else if n == 1 && min == 1 {
+                Some(Response::Pick(vec![0]))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn parse_response(d: &PendingDecision, line: &str) -> Result<Response, String> {
+    let nums: Result<Vec<u64>, _> = line.split_whitespace().map(str::parse).collect();
+    let nums = nums.map_err(|_| "enter numbers separated by spaces".to_string())?;
+    let r = match d.prim {
+        Primitive::PickN { .. } => Response::Pick(nums.iter().map(|&x| x as usize).collect()),
+        Primitive::PickNumber { .. } => match nums.as_slice() {
+            [x] => Response::Number(*x as u32),
+            _ => return Err("enter one number".into()),
+        },
+        Primitive::Allocate { .. } => Response::Allocate(nums.iter().map(|&x| x as u32).collect()),
+        Primitive::Order => Response::Order(nums.iter().map(|&x| x as usize).collect()),
+    };
+    d.validate(&r).map_err(|e| format!("not legal: {e}"))?;
+    Ok(r)
+}
+
+fn play(args: &[String]) -> ExitCode {
+    let seed = flag(args, "--seed").map_or_else(
+        || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(1, |d| d.as_secs())
+        },
+        |v| v.parse().expect("bad --seed"),
+    );
+    let me = PlayerId(0);
+    let mut st = m0_game(seed);
+    let mut narrator = Narrator::new(&st);
+    let mut bot = RandomAgent::new(agent_seed(seed, 1));
+    let mut responses = Vec::new();
+    println!(
+        "apnap M0 terminal play — you are P0, seed {seed}. 'q' quits. Cards are vanilla test cards."
+    );
+    let stdin = std::io::stdin();
+    let mut lines = stdin.lock().lines();
+    let mut out = engine_core::start(&mut st);
+    loop {
+        for l in narrator.lines(&out.events, Some(PlayerId(1))) {
+            println!("{l}");
+        }
+        let Some(d) = out.next.clone() else { break };
+        let r = if d.player != me {
+            bot.decide(&engine_core::player_view(&st, d.player), &d)
+        } else if let Some(r) = forced(&d) {
+            r
+        } else {
+            let v = engine_core::player_view(&st, me);
+            if d.kind == ChoiceKind::Priority || matches!(d.options.first(), Some(OptionDesc::Keep))
+            {
+                print!("\n{}", board(&v));
+            }
+            loop {
+                print!("{}> ", decision_prompt(&v, &d));
+                std::io::stdout().flush().ok();
+                let Some(Ok(line)) = lines.next() else {
+                    return save_and_exit(args, seed, responses);
+                };
+                if line.trim() == "q" {
+                    return save_and_exit(args, seed, responses);
+                }
+                match parse_response(&d, &line) {
+                    Ok(r) => break r,
+                    Err(e) => println!("  {e}"),
+                }
+            }
+        };
+        responses.push(r.clone());
+        out = engine_core::step(&mut st, r).expect("validated response");
+    }
+    save_and_exit(args, seed, responses)
+}
+
+fn save_and_exit(args: &[String], seed: u64, responses: Vec<Response>) -> ExitCode {
+    if let Some(path) = flag(args, "--save-replay") {
+        let replay = Replay {
+            cr_version: engine_core::CR_VERSION.into(),
+            seed,
+            responses,
+        };
+        std::fs::write(&path, serde_json::to_string_pretty(&replay).unwrap()).expect("write");
+        println!("replay written to {path}");
+    }
+    ExitCode::SUCCESS
 }

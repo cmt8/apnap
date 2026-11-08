@@ -47,6 +47,8 @@ cargo xtask check-deps                                    # dependency direction
 cargo build -p engine-core -p card-model --target thumbv7em-none-eabihf   # no_std proof
 cargo run -p harness -- run --seed 42 --games 10          # random-agent games
 cargo run -p harness -- determinism --seed 42 --runs 3    # identical hashes
+cargo run -p harness -- watch --seed 42                   # narrated random-agent game
+cargo run -p harness -- play [--seed N]                   # you (P0) vs a random agent in the terminal
 cargo run -p harness -- run --seed 42 --save-replay r.json && cargo run -p harness -- replay r.json
 cargo run -p harness -- bless                             # ONLY when a hash change is intended; review why
 ```
@@ -66,7 +68,13 @@ cargo run -p harness -- bless                             # ONLY when a hash cha
 - `crates/ai` — agents (M0: RandomAgent). `crates/harness` — CLI + determinism/golden/property tests.
 - `crates/card-db`, `crates/app` — stubs until M1/M4. `crates/xtask` — check-deps.
 
-## Current milestone: M0 — DONE (2026-11-08). Next: M1 (do not start without the user's OK).
+## Current milestone: M1 — IN PROGRESS (started 2026-11-08). M0 done 2026-11-08.
+M1 scope (spec §13 as amended): CR 117/601.2/602/605/608 casting + abilities, 4-player turn
+order, CR 800.4a (pulled forward), RON test cards via card-db, resumable resolution steps,
+remove D-010 simplifications. Acceptance: atomic tests 117.3–117.5, 101.4, 608.2b fizzle,
+800.4a; 4 random agents x 1,000 games, 0 panics.
+
+### M0 summary
 M0 delivered: workspace, CI, ids/zones/GameState, move_object, seeded RNG, step() with
 PendingDecision suspension, serde round-trip, harness with random agents; all three M0
 acceptance criteria tested (`crates/harness/tests/determinism.rs`).
