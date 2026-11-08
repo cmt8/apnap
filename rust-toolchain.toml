@@ -1,4 +1,5 @@
 [toolchain]
-channel = "1.99.1"
+# Track stable (D-017). New clippy lints on a stable release may need a small fix-up PR.
+channel = "stable"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

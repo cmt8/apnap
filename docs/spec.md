@@ -13,7 +13,7 @@ Build it as a Rust workspace with a pure, deterministic engine crate. Every muta
 ## 1. Goals and Non-Goals
 
 ### Goals
-1. Play 4-player free-for-all Commander: 1 human vs 3 CPU opponents, on Linux (Arch) desktop.
+1. Play 4-player free-for-all Commander: 1 human vs 3 CPU opponents, on Linux (Arch) desktop. Also traditional 60-card 1v1 constructed (20 life). Formats are game configuration (`GameConfig`), not forks of the engine (decisions.md D-004). Windows and macOS targets later.
 2. A rules engine that is a **pure deterministic state machine**: actions in, new state plus events out, seeded RNG, serializable state, bit-for-bit replays.
 3. **Cloneable state** cheap enough for AI search (thousands of clones per decision).
 4. **Data-driven cards**: most cards are RON data composed from a shared vocabulary of costs, effects, targets, conditions, triggers, statics and replacements.
@@ -22,7 +22,7 @@ Build it as a Rust workspace with a pure, deterministic engine crate. Every muta
 7. Later: search AI (determinized MCTS, then ISMCTS).
 
 ### Non-Goals (for v1)
-- Networked multiplayer, deckbuilding UI, draft or other formats.
+- Networked multiplayer, deckbuilding UI, draft/limited and other variant formats (beyond Commander and 1v1 constructed).
 - Full card-pool coverage. The engine must **refuse to load unverified cards** rather than approximate them. kiln-mtg makes this explicit ("the engine never pretends a card works"), and it is the right policy.\[3\]
 - Mobile or web builds. Keep the engine `no I/O` so WASM stays possible later, but don't target it now.
 - Distributing any Wizards assets in the repo (see §12).
@@ -74,15 +74,16 @@ Build it as a Rust workspace with a pure, deterministic engine crate. Every muta
   - 117.5: "Each time a player would get priority, the game first performs all applicable state-based actions as a single event … then repeats this process until no state-based actions are performed. Then triggered abilities are put on the stack … These steps repeat in order until no further state-based actions are performed and no abilities trigger."\[34\]
   - 103.4c / 119.1c: Commander starting life is 40. 104.3j: "a player who's been dealt 21 or more combat damage by the same commander over the course of the game loses the game."\[34\]
   - 903.8: a commander cast from the command zone "costs an additional {2} for each previous time the player casting it has cast it from the command zone that game."\[35\]\[36\]
-- **Action for Claude Code:** before implementing each rules area, extract the exact current text of the governing sections (603.3b, 613.1–613.8, 614–616, 704, 800.4, 903) from the local TXT into `docs/rules-notes/<area>.md`, and write the atomic tests from that text. This spec paraphrases them below. The paraphrases are not authoritative.
+- **Action for Claude Code:** before implementing each rules area, extract the exact current text of the governing sections (603.3b, 613.1–613.8, 614–616, 704, 800.4, 903) from the local TXT into `docs/rules-notes/<area>.md`, and write the atomic tests from that text. This spec paraphrases them below. The paraphrases are not authoritative. (Decision D-012: these verbatim excerpts *are* committed; the full TXT is not. Revisit before publishing the repo.)
 
 ---
 
 ## 4. Cargo Workspace Layout
 
 ```
-mtg/
+apnap/   (repo root)
 ├── Cargo.toml                 # [workspace], shared lints: deny(warnings) in CI
+├── rust-toolchain.toml        # channel = "stable" + rustfmt/clippy (D-017)
 ├── CLAUDE.md                  # invariants, commands, milestone status (keep < 300 lines)
 ├── docs/{rules/ (gitignored), rules-notes/, decisions.md}
 ├── crates/
@@ -101,11 +102,12 @@ mtg/
 │   ├── cards/                 # data: cards/<first-letter>/<oracle_slug>.ron + custom.rs
 │   ├── ai/                    # heuristic agent, evaluator, later mcts/ismcts
 │   ├── harness/               # CLI: run games headless, replay, fuzz, coverage report
-│   └── app/                   # eframe/egui desktop UI, image cache, settings
-└── tests/{rules/, cards/, golden/}
+│   ├── app/                   # eframe/egui desktop UI, image cache, settings
+│   └── xtask/                 # `cargo xtask check-deps`: enforces the dependency rules below
+└── (tests live per crate; integration/golden tests in crates/harness/tests/)
 ```
 
-Dependency rule: `engine-core` depends only on `card-model`, `serde`, `rand_chacha` (seeded, portable), `smallvec`, and optionally `im`/`rpds`. **`app` and `ai` depend on `engine-core`, never the reverse.** CI enforces this.
+Dependency rule: `engine-core` depends only on `card-model`, `serde`, `rand_chacha` (seeded, portable) + `rand_core`, and optionally `smallvec`/`im`/`rpds`. **`app` and `ai` depend on `engine-core`, never the reverse.** CI enforces this with `cargo xtask check-deps` (internal edge table + an allowlist of the pure crates' transitive deps). `engine-core` and `card-model` are `#![no_std]` + `alloc`, and CI builds them for a bare-metal target, so I/O, threads, clocks and `HashMap` are compile errors (D-003). `card-db` (RON parsing, Scryfall import) is std-side; the engine only sees compiled `CardDef`s.
 
 ---
 
@@ -121,7 +123,9 @@ pub struct Timestamp(u64);        // CR 613.7; global counter
 pub enum Zone { Library, Hand, Battlefield, Graveyard, Stack, Exile, Command }
 
 pub struct GameState {
-    pub rng: ChaCha8Rng,                       // the ONLY randomness source
+    pub config: GameConfig,                    // format, players, starting life/hand (D-004)
+    pub catalog: Arc<CardCatalog>,             // card defs, serialized once per game (D-005)
+    pub rng: GameRng,                          // ChaCha8 wrapper: the ONLY randomness source (D-006)
     pub next_object_id: u32, pub next_timestamp: u64,
     pub objects: BTreeMap<ObjectId, GameObject>,   // or im::OrdMap for cheap clones
     pub players: SmallVec<[PlayerState; 4]>,
@@ -134,13 +138,14 @@ pub struct GameState {
     pub pending_triggers: Vec<PendingTrigger>,
     pub combat: Option<CombatState>,
     pub lki: LkiCache,                         // last-known information snapshots
-    pub resolution: Vec<ResolutionFrame>,      // explicit continuation stack (serializable)
+    pub frames: Vec<Frame>,                    // explicit continuation stack (serializable), D-002
+    pub pending: Option<PendingDecision>,      // what the engine is suspended on
     pub layer_cache: LayerCacheHandle,         // derived; #[serde(skip)]
-    pub log_hash: u64,                         // rolling hash of events for golden tests
+    pub log_hash: u64,                         // rolling FNV-1a hash of events (D-007)
 }
 
 pub struct PlayerState {
-    pub id: PlayerId, pub life: i32,            // starts 40 (CR 103.4c)
+    pub id: PlayerId, pub life: i32,            // config.starting_life: 40 Commander (CR 103.4c), 20 otherwise (103.4)
     pub has_lost: bool, pub has_left: bool,
     pub mana_pool: ManaPool, pub poison: u32, pub lands_played_this_turn: u8,
     pub commander_damage_taken: BTreeMap<CardInstanceId, u32>,
@@ -150,7 +155,7 @@ pub struct PlayerState {
 
 pub struct GameObject {
     pub id: ObjectId, pub card_instance: CardInstanceId,
-    pub card: Arc<CardDef>,          // immutable printed data + compiled abilities
+    pub card: CardDefId,             // index into state.catalog (immutable printed data + compiled abilities)
     pub owner: PlayerId, pub controller: PlayerId,
     pub zone: Zone, pub timestamp: Timestamp,
     pub status: Status,              // tapped, face_down, phased_out...
@@ -167,9 +172,9 @@ pub enum StackItem {
 }
 ```
 
-**Characteristics are never stored mutably.** `fn chars(state, id) -> &Characteristics` returns the layer-computed view (memoized per state generation). Printed data lives in `Arc<CardDef>`.
+**Characteristics are never stored mutably.** `fn chars(state, id) -> &Characteristics` returns the layer-computed view (memoized per state generation). Printed data lives in the catalog (`Arc<CardCatalog>`, one per game; objects hold a `CardDefId`, D-005).
 
-**Clone cost.** With `Arc<CardDef>`, `SmallVec` and ~300–500 live objects in a 4-player Commander game, a plain `#[derive(Clone)]` is a few tens of KB of memcpy. Measure before reaching for persistent maps. phase-rs uses `rpds` structural sharing, which is the fallback if profiling shows clone cost dominates search.\[1\]
+**Clone cost.** With a shared catalog, `SmallVec` and ~300–500 live objects in a 4-player Commander game, a plain `#[derive(Clone)]` is a few tens of KB of memcpy. Measure before reaching for persistent maps. phase-rs uses `rpds` structural sharing, which is the fallback if profiling shows clone cost dominates search.\[1\]
 
 ### Actions, events and decisions
 
@@ -184,11 +189,11 @@ pub struct PendingDecision {
     pub options: Vec<OptionDesc>,// stable order (timestamp/seat order)
 }
 
-pub enum Primitive {
-    PickN { min: usize, max: usize },
+pub enum Primitive {                // sizes come from options.len() (D-008)
+    PickN { min: usize, max: usize },   // Response::Pick is a set; order ignored
     PickNumber { min: u32, max: u32 },
-    Allocate { total: u32, recipients: usize, per_min: Vec<u32>, per_max: Vec<u32> },
-    Order { n: usize },
+    Allocate { total: u32, per_min: Vec<u32>, per_max: Vec<u32> },
+    Order,
 }
 
 pub enum ChoiceKind {
@@ -212,6 +217,8 @@ pub struct StepOutput { pub events: Vec<Event>, pub next: Option<PendingDecision
 ```
 
 **Why this shape (decision = data, not callback).** MTG-Ichor's `DecisionProvider` is a trait the engine calls.\[2\] We invert it: the engine **suspends** and returns a `PendingDecision`, and the driver feeds back a `Response`. That makes the engine re-entrant without async, makes every game a plain list of `Response`s (a replay), and lets the AI clone the state at any suspension point. Internally, resolution code is written as an explicit continuation/state machine (`ResolutionFrame` stack in `GameState`) so that "pause mid-resolution for a choice" is serializable. **This is the single most important structural decision. Get it right in M0.**
+
+*As built (D-002):* the stack is `GameState.frames: Vec<Frame>`, and it holds **everything** that can suspend, not only resolution: setup, mulligans, the step driver, priority, casting (including a partly paid cost), resolution, declarations, damage division, cleanup discard. The pending decision is stored in `GameState.pending`, so a loaded save knows what it is waiting on. `step` validates the response before any mutation; an illegal response leaves the state bit-identical. Options are structured `OptionDesc` values that frames read back, so the option list is the single source of truth for what an index means.
 
 The four primitives follow MTG-Ichor's minimal set. Adding a new decision means adding a `ChoiceKind` variant, and the compiler then points at every UI/AI match arm.\[2\]
 
@@ -250,7 +257,7 @@ loop {
 
 Key rules:
 - **Passes in succession** counts only players still in the game. Reset it on any action (CR 117.4).
-- **Triggers are stacked in APNAP order** (CR 603.3b; verify the text). The AP puts all of theirs on first, in the order they choose, then each NAP in turn order, so the last NAP's triggers resolve first. This matters for 4-player Commander and is easy to get wrong.
+- **Triggers are stacked in APNAP order** (CR 603.3b). The AP puts theirs on first, in the order they choose, then each NAP in turn order, so the last NAP's triggers resolve first. This matters for 4-player Commander and is easy to get wrong. **Correction (verified against the 2026-11-06 text):** 603.3b is a *two-part* process. First each player, in APNAP order, puts on the stack their triggered abilities "with a trigger condition that isn't another ability triggering". Second, each player, in APNAP order, puts on all remaining ones. Then SBAs/triggers repeat.
 - **Mana abilities** don't use the stack. They are offered inside `PayMana` decisions (and as a priority-window "float mana" option). Auto-payment is a UI/AI convenience that produces the same `Response`s.
 - **No player gets priority in untap**, and usually not in cleanup (117.3a).\[34\] Cleanup repeats if SBAs or triggers happen.
 - **"Stops" are a UI concern, not an engine concern.** The engine always asks. The `app` layer auto-passes using user-configured stops. This avoids the Forge bug where the human wasn't offered a response window because the engine evaluated "can respond" with AI mana logic.\[37\]
@@ -345,7 +352,7 @@ Every state change is a `GameAction` proposal (`MoveZone`, `Damage`, `GainLife`,
 2. If more than one applies, asks the **affected object's controller / affected player** to choose one (`ChoiceKind::ChooseReplacement`), applying self-replacement effects first. Apply it, mark it used for this event, and loop until none remain (CR 616.1; verify exact ordering text in the local TXT).
 3. Performs the mutated event and emits `Event`s.
 
-The commander "may put it into the command zone" choice is modeled per the current 903.9 text. As of recent rules it is a **state-based-action-style owner choice when the commander is in graveyard or exile** (903.9a).\[36\] Older rules used a replacement effect for hand/library.\[39\] Implement exactly what the current TXT says and add golden tests for "commander dies → owner chooses."
+The commander "may put it into the command zone" choice is modeled per the current 903.9 text. **Correction (verified against the 2026-11-06 text): both mechanisms are current.** 903.9a: if a commander is in a graveyard or in exile and was put there since SBAs were last checked, its owner may put it into the command zone; this is a state-based action. 903.9b: if a commander would be put into its owner's hand or library from anywhere, its owner may put it into the command zone instead; this is a replacement effect that "may apply more than once to the same event" (an exception to 614.5). Golden tests: "commander dies → owner chooses (SBA)" and "commander bounced/tucked → owner chooses (replacement)."
 
 ### 8.2 Triggered abilities (CR 603)
 - Triggers watch **performed events** (post-replacement). This is why the chokepoint lands first, following MTG-Ichor's ordering.\[2\]
@@ -378,7 +385,7 @@ fn compute_characteristics(state: &GameState) -> LayeredView {
 ### 8.5 Combat with multiple defending players
 - `DeclareAttackers` options: for each untapped creature, choose `{no attack} ∪ {each opponent still in game} ∪ {each planeswalker/battle they control}`. Encode as a **per-creature sequence of choices** inside a declaration transaction, validated at the end (requirements/restrictions, attack costs). This avoids the combinatorial option list behind Forge's #7625 hang.
 - Blockers are declared by **each defending player in APNAP order** (each defender only blocks creatures attacking them or their permanents).
-- Damage assignment uses the current 2025+ rules (MTG-Ichor notes the "2025 damage-assignment rules (CR 506–511)").\[2\] Read the current 510.1 text before implementing. Don't rely on memory of "damage assignment order."
+- Damage assignment uses the current 2025+ rules (MTG-Ichor notes the "2025 damage-assignment rules (CR 506–511)").\[2\] Read the current 510.1 text before implementing. Don't rely on memory of "damage assignment order." *As built (D-016):* 510.1c says a creature blocked by two or more creatures "assigns its combat damage to those creatures divided as its controller chooses among them." This is one `Allocate` decision per multiply-blocked attacker; there is no damage assignment order.
 - Commander damage: `DamageDealt{combat: true, is_commander: true}` increments `commander_damage_taken[card_instance]`. The designation follows the card across zone changes, so key by `CardInstanceId`, not the per-zone `ObjectId`.\[40\]
 
 ### 8.6 Commander rules (CR 903)
@@ -389,7 +396,7 @@ fn compute_characteristics(state: &GameState) -> LayeredView {
 - 21 combat damage from the same commander → loss (104.3j/903.10a), checked as an SBA.\[41\]
 
 ### 8.7 Player leaving the game (CR 800.4; verify exact text)
-When a player loses in multiplayer: all objects they own leave the game, effects giving them control of others' objects end, spells/abilities they control on the stack cease to exist, and turn order skips them. Golden tests: "player loses while their Control Magic-style aura is on another player's creature," "player loses with their trigger on the stack," "player loses during their own turn."
+When a player loses in multiplayer: all objects they own leave the game, effects giving them control of others' objects end, spells/abilities they control on the stack cease to exist, and turn order skips them. **Correction (verified against the 2026-11-06 text of 800.4a), in this order:** all objects *owned* by that player leave the game, and any effects giving that player control of any objects or players end. Then objects on the stack they controlled that are *not represented by cards* cease to exist. Then any objects *still controlled* by that player are **exiled**. This is not a state-based action; it happens as soon as the player leaves. If they had priority, priority passes to the next player in turn order who is still in the game. **Scheduled for M1** (pulled forward from M3, because M1's 4-player soak eliminates players). Golden tests: "player loses while their Control Magic-style aura is on another player's creature," "player loses with their trigger on the stack," "player loses during their own turn."
 
 ---
 
@@ -434,7 +441,7 @@ Information Set MCTS (Cowling, Powley & Whitehouse 2012) searches a single tree 
 - Tauri (2.12) means a React/TS front end.\[45\] phase-rs shows this works, but on Linux it depends on WebKitGTK. phase-rs documents the AppImage burning "close to a full core at idle on the NVIDIA proprietary driver" and silent audio without GStreamer plugins.\[1\] That's avoidable friction on Arch.
 
 UI architecture:
-- The `app` thread owns `GameState`. The AI runs on worker threads with **cloned** state and returns a `Response` over a channel. The UI renders only `PlayerView(human)`.
+- The `app` thread owns `GameState`. The AI runs on worker threads and receives its own `PlayerView` (plus, for search AIs, a `Determinizer` that samples hidden information), never the real state (invariant 6). It returns a `Response` over a channel. The UI renders only `PlayerView(human)`.
 - Layout: four player areas, stack panel, event log (rendered from `Event`s), command zone with tax shown, commander-damage matrix (4×4), phase bar with configurable stops.
 - Every `ChoiceKind` gets a widget. Targeting is click-to-select among highlighted `options` indices, which the engine already validates.
 - Images: lazy-download Scryfall `normal` images into `~/.cache/<app>/cards/` on first view. Text-only fallback rendering for offline use.
@@ -466,16 +473,19 @@ UI architecture:
 - Workspace, CI (`fmt`, `clippy -D warnings`, tests), CLAUDE.md, `GameState`, IDs, zones, `move_object`, seeded RNG, `step()` with suspension/`PendingDecision`, serde round-trip.
 - ✅ Two players with vanilla creatures and basic lands play a full game via `harness` with random agents. ✅ The same seed + responses → identical event hash across 3 runs and across a save/load in the middle of a game. ✅ `clone()` of a mid-game state then replaying the same responses → identical events.
 
+*M0 status: done 2026-11-08 (see decisions.md D-001–D-016).*
+
 **M1: Priority, stack, turn structure, mana, casting (2–3 wks)**
 - CR 117 priority with passes-in-succession, 601.2 casting pipeline (modes, targets, X, cost totals, mana payment), activated and mana abilities, resolution, 4-player turn order.
-- ✅ Atomic tests for 117.3–117.5, APNAP choice order (101.4), fizzling on illegal targets. ✅ 4 random agents complete 1,000 games without panic.
+- **Added for M1:** CR 800.4a player leaving the game (pulled forward from M3); the card vocabulary in `card-model` with RON test cards loaded and validated by `card-db`; resolution built as resumable effect steps so M2's replacement choices can suspend mid-action; removal of the M0 simplifications (D-010).
+- ✅ Atomic tests for 117.3–117.5, APNAP choice order (101.4), fizzling on illegal targets, 800.4a. ✅ 4 random agents complete 1,000 games without panic.
 
 **M2: Chokepoint, replacement, triggers, SBAs, layers (4–6 wks; the core)**
 - In order: action chokepoint → replacement/prevention pipeline → triggers + LKI + APNAP stacking → SBAs → layers 1–7 with dependency ordering.
 - ✅ Golden tests: Doubling Season + token creation; two competing replacement effects with player choice; dies-trigger reading LKI power; Glorious Anthem + −1/−1 counters + "becomes 0/1"; a dependency case; legend rule; simultaneous lethal damage to multiple players.
 
 **M3: Combat + Commander + multiplayer exits; heuristic AI v1 (3–4 wks)**
-- Multi-defender attacks, per-defender blocks in APNAP, damage assignment per current CR, first/double strike, trample, deathtouch, lifelink, menace, vigilance, flying/reach; CR 903 (command zone, tax, 21 damage, color identity validation, 40 life); CR 800.4 player leaving.
+- Multi-defender attacks, per-defender blocks in APNAP, damage assignment per current CR, first/double strike, trample, deathtouch, lifelink, menace, vigilance, flying/reach; CR 903 (command zone, tax, 21 damage, color identity validation, 40 life); CR 800.4 player leaving (core implemented in M1; M3 adds the control-change and aura cases).
 - ✅ Commander tax test across 3 casts. ✅ 21 commander damage across a death and recast. ✅ Player leaves with their aura on another player's creature and their trigger on the stack. ✅ Heuristic AI never takes lethal commander damage when a legal non-losing block exists (property test over generated boards).
 
 **M4: Four precons fully playable + egui app (4–6 wks)**
@@ -491,7 +501,7 @@ UI architecture:
 
 ---
 
-## 14. CLAUDE.md (paste this as the repo's CLAUDE.md seed)
+## 14. CLAUDE.md (original seed; the live version in the repo root supersedes this)
 
 ```markdown
 # CLAUDE.md: MTG Commander engine
@@ -540,6 +550,7 @@ cargo run -p app
 
 ## Caveats
 
+- *Update 2026-11-08:* 603.3b, 800.4a and 903.9 have now been checked against the November 6, 2026 text and corrected above. 704 is quoted in `docs/rules-notes/704-sba.md`. 613 and 614–616 remain unverified.
 - CR paraphrases in §8 for 603, 613, 614–616, 704, 800.4 and 903.9 were not verified verbatim against the November 6, 2026 text in this research. Only 101.4, 117.3–117.5, 103.4c/119.1c, 104.3j and 903.8 were quoted from the official text (August 7, 2026 edition, unchanged in those sections per later bulletins). Claude Code must extract current text before implementing each area.
 - Acceptance thresholds (35% MCTS win rate, 2 s p95) are engineering targets, not published benchmarks. Recalibrate after M3 once heuristic-agent strength is known.
 

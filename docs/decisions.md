@@ -6,7 +6,7 @@ CR = Comprehensive Rules effective 2026-11-06.
 ## D-001 Workspace layout (M0, 2026-11-08)
 Crate names follow spec §4 (`engine-core`, `card-model`, `card-db`, `cards`, `ai`, `harness`,
 `app`) at the repo root (spec draws `mtg/`). Added `xtask` (repo automation, `cargo xtask …`
-alias in `.cargo/config.toml`). Toolchain pinned in `rust-toolchain.toml` (1.99.1), edition 2024.
+alias in `.cargo/config.toml`). Toolchain in `rust-toolchain.toml` (see D-017), edition 2024, MSRV 1.99.
 `card-db` and `app` are stubs; `app` has no egui dependency until M4.
 
 ## D-002 Suspend/resume model: a unified, serializable continuation stack (M0)
@@ -122,6 +122,13 @@ the app may choose a compact binary format in M4.
 "If two or more creatures are blocking it, it assigns its combat damage to those creatures
 divided as its controller chooses among them." No damage assignment order (removed by the
 2025 rules). Implemented as an `Allocate` decision per multiply-blocked attacker.
+
+## D-017 Track the `stable` toolchain instead of pinning 1.99.1 (2026-11-08)
+Pinning an exact version broke rust-analyzer in the user's editor: it runs cargo with
+`RUSTUP_AUTO_INSTALL=0`, and only `stable` was installed there. Determinism doesn't depend
+on the compiler (D-006, D-007, and the golden test would catch it if it did), so the pin was
+only protecting against new clippy lints failing `-D warnings`. Accepted cost: an occasional
+small lint-fix commit when a new stable comes out. `rust-version = "1.99"` remains as the MSRV.
 
 ---
 
