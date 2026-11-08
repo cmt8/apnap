@@ -6,6 +6,8 @@
 
 use crate::ids::{CardInstanceId, ObjectId, PlayerId};
 use crate::mana::ManaType;
+use crate::stack::Target;
+use alloc::vec::Vec;
 use crate::turn::Step;
 use crate::zones::Zone;
 use serde::{Deserialize, Serialize};

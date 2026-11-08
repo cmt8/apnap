@@ -1,0 +1,11 @@
+// {T}: Add one mana of any color. A noncreature mana source: usable the turn it arrives.
+CardScript(
+    verified: true,
+    tests: ["cr_605_3b_mana_ability_any_color"],
+    card: (
+        name: "Test Prism",
+        mana_cost: Some("{2}"),
+        card_types: [Artifact],
+        abilities: [Mana(cost: (tap: true), produce: AnyColor)],
+    ),
+)

@@ -74,6 +74,34 @@ order, CR 800.4a (pulled forward), RON test cards via card-db, resumable resolut
 remove D-010 simplifications. Acceptance: atomic tests 117.3–117.5, 101.4, 608.2b fizzle,
 800.4a; 4 random agents x 1,000 games, 0 panics.
 
+### M1 WIP handoff (branch `m1-wip`, 2026-11-08) — DOES NOT COMPILE YET; `main` is green
+Done on the branch: rules-notes for 101.4/117/601/602/605/608/800.4 (also on main);
+card-model vocabulary (Keyword, AbilityDef, Body/Mode, TargetFilter, Cost, Effect, ManaType,
+`{X}`, ManaCost as text, CardScript); card-db RON loader + validation (+tests); RON card files
+and decks in crates/cards (M0 vanilla pool + M1 test cards); engine: mana.rs (bipartite
+feasibility, generic-allocation choice), stack.rs, targeting.rs, actions.rs (stack-aware
+moves, PutAbilityOnStack, SetStackChoices, RemoveAbility, GainLife/LoseLife, LeaveGame =
+CR 800.4a), sba.rs (multiplayer losers leave), frames/cast.rs (601.2/602.2 pipeline),
+frames/resolve.rs (work list, fizzle, counter, APNAP each-player choices),
+frames/priority.rs (abilities, flash, floating mana), first_priority_player (800.4j).
+Next steps, in order:
+1. Re-apply the new `Event` variants (AbilityActivated, ModesChosen, XChosen, TargetsChosen,
+   Fizzled, Countered, AbilityRemoved, Sacrificed, ObjectLeftGame, PlayerLeftGame; events.rs
+   needs `use crate::stack::Target; use alloc::vec::Vec;`) and `OptionDesc` variants
+   (ActivateAbility{source,index}, Mode{index}, Target{target}, Mana{mana}; decision.rs needs
+   `use crate::stack::Target;`) — the scripted edit didn't apply because rustfmt had
+   reflowed those enums.
+2. Fix the remaining compile errors: engine.rs (`stack: Vec::new()`, drop the 2-player limit),
+   view.rs (stack view from `st.stack`), `remove(_fizzled)` param in resolve.rs.
+3. harness: load cards via card-db (`cards::CARDS`/`DECKS`), m0_game = m0_vanilla deck,
+   m1_game(seed, players) = m1_red_green; text.rs option_line for new variants; scenario
+   builder + driver for atomic tests; `fuzz --games --players --threads`.
+4. Tests: rules_m1.rs (the test names cited in the card files + rules-notes), every verified
+   card's tests exist, 4-player determinism/save-load/clone, 1,000 4p random games.
+5. Re-bless golden hashes (catalog/state shape changed; explain in the commit). Log D-018
+   (800.4 pulled into M1), D-019 (no rewinds: only completable choices), D-020 (resolution
+   work list), D-021 (M1 mana abilities cost exactly {T}) in docs/decisions.md.
+
 ### M0 summary
 M0 delivered: workspace, CI, ids/zones/GameState, move_object, seeded RNG, step() with
 PendingDecision suspension, serde round-trip, harness with random agents; all three M0

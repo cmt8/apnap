@@ -1,16 +1,19 @@
 //! The single mutation chokepoint (spec §8.1, CLAUDE.md invariant 2).
 //!
-//! Every observable change to the game is a [`GameAction`] passed to [`execute`]. In M0 the
-//! action is performed directly; M2 inserts the CR 614–616 replacement/prevention pipeline
-//! here (which is also where a `ChooseReplacement` suspension will originate).
+//! Every observable change to the game is a [`GameAction`] passed to [`execute`]. Until M2
+//! the action is performed directly; M2 inserts the CR 614–616 replacement/prevention
+//! pipeline here (which is also where a `ChooseReplacement` suspension will originate; the
+//! resolution work list, D-020, is what lets the caller resume around it).
 
 use crate::events::{DamageTarget, Event, LossReason};
 use crate::ids::{ObjectId, PlayerId};
 use crate::mana::{ManaRequirement, ManaType};
 use crate::objects::GameObject;
+use crate::stack::{StackKind, StackObject, Target};
 use crate::state::GameState;
 use crate::zones::{LibraryPosition, Zone};
 use alloc::vec::Vec;
+use card_model::CardDefId;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GameAction {
@@ -23,30 +26,19 @@ pub enum GameAction {
         controller: Option<PlayerId>,
     },
     /// CR 121.1. Drawing from an empty library sets the CR 704.5b flag.
-    Draw {
-        player: PlayerId,
-    },
-    Shuffle {
-        player: PlayerId,
-    },
-    Tap {
-        object: ObjectId,
-    },
-    Untap {
-        object: ObjectId,
-    },
-    AddMana {
-        player: PlayerId,
-        mana: ManaType,
-    },
+    Draw { player: PlayerId },
+    Shuffle { player: PlayerId },
+    Tap { object: ObjectId },
+    Untap { object: ObjectId },
+    AddMana { player: PlayerId, mana: ManaType },
+    /// CR 601.2h: pay specific symbols plus the chosen generic allocation.
     PayMana {
         player: PlayerId,
         requirement: ManaRequirement,
+        generic: [u32; 6],
     },
     /// CR 500.5: unspent mana empties as a step ends.
-    EmptyManaPool {
-        player: PlayerId,
-    },
+    EmptyManaPool { player: PlayerId },
     /// CR 120.3: damage to a player causes life loss; to a creature, it is marked.
     Damage {
         source: ObjectId,
@@ -54,20 +46,35 @@ pub enum GameAction {
         amount: u32,
         combat: bool,
     },
+    GainLife { player: PlayerId, amount: u32 },
+    LoseLife { player: PlayerId, amount: u32 },
     /// CR 514.2.
-    RemoveDamage {
+    RemoveDamage { object: ObjectId },
+    LoseGame { player: PlayerId, reason: LossReason },
+    /// CR 602.2a: create an activated ability object on top of the stack.
+    PutAbilityOnStack {
+        controller: PlayerId,
+        source: ObjectId,
+        source_card: CardDefId,
+        index: u16,
+    },
+    /// CR 601.2b–c: record the announced modes, X and targets of a stack object.
+    SetStackChoices {
         object: ObjectId,
+        modes: Vec<u8>,
+        x: u32,
+        targets: Vec<Vec<Target>>,
     },
-    LoseGame {
-        player: PlayerId,
-        reason: LossReason,
-    },
+    /// CR 608.2n / 608.2b / 701.6a: an ability leaves the stack and ceases to exist.
+    RemoveAbility { ability: ObjectId },
+    /// CR 800.4a: a player leaves a multiplayer game.
+    LeaveGame { player: PlayerId },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionResult {
     Done,
-    /// The new object id after a zone change.
+    /// The new object id after a zone change (or the new ability object).
     Moved(ObjectId),
     /// The drawn card's new id, or `None` if the library was empty.
     Drew(Option<ObjectId>),
@@ -119,12 +126,13 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
         GameAction::PayMana {
             player,
             requirement,
+            generic,
         } => {
-            let pool = &mut st.player_mut(player).mana_pool;
-            let before = pool.total();
-            requirement.pay_from(pool);
-            let amount = before - pool.total();
-            st.emit(Event::ManaPaid { player, amount });
+            requirement.pay(&mut st.player_mut(player).mana_pool, &generic);
+            st.emit(Event::ManaPaid {
+                player,
+                amount: requirement.total(),
+            });
             ActionResult::Done
         }
         GameAction::EmptyManaPool { player } => {
@@ -152,18 +160,20 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 combat,
             });
             match target {
-                DamageTarget::Player(p) => {
-                    let delta = -(amount as i32);
-                    let ps = st.player_mut(p);
-                    ps.life += delta;
-                    let life = ps.life;
-                    st.emit(Event::LifeChanged {
-                        player: p,
-                        delta,
-                        life,
-                    });
-                }
+                DamageTarget::Player(p) => change_life(st, p, -(amount as i32)),
                 DamageTarget::Object(o) => st.object_mut(o).damage_marked += amount,
+            }
+            ActionResult::Done
+        }
+        GameAction::GainLife { player, amount } => {
+            if amount > 0 {
+                change_life(st, player, amount as i32);
+            }
+            ActionResult::Done
+        }
+        GameAction::LoseLife { player, amount } => {
+            if amount > 0 {
+                change_life(st, player, -(amount as i32));
             }
             ActionResult::Done
         }
@@ -177,7 +187,69 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             st.emit(Event::PlayerLost { player, reason });
             ActionResult::Done
         }
+        GameAction::PutAbilityOnStack {
+            controller,
+            source,
+            source_card,
+            index,
+        } => {
+            let id = st.alloc_object_id();
+            st.stack.push(StackObject {
+                id,
+                controller,
+                kind: StackKind::Ability {
+                    source,
+                    source_card,
+                    index,
+                },
+                modes: Vec::new(),
+                x: 0,
+                targets: Vec::new(),
+            });
+            st.emit(Event::AbilityActivated {
+                player: controller,
+                ability: id,
+                source,
+            });
+            ActionResult::Moved(id)
+        }
+        GameAction::SetStackChoices {
+            object,
+            modes,
+            x,
+            targets,
+        } => {
+            let so = st
+                .stack
+                .iter_mut()
+                .find(|s| s.id == object)
+                .expect("stack object");
+            so.modes = modes;
+            so.x = x;
+            so.targets = targets;
+            ActionResult::Done
+        }
+        GameAction::RemoveAbility { ability } => {
+            st.stack.retain(|s| s.id != ability);
+            st.emit(Event::AbilityRemoved { ability });
+            ActionResult::Done
+        }
+        GameAction::LeaveGame { player } => {
+            leave_game(st, player);
+            ActionResult::Done
+        }
     }
+}
+
+fn change_life(st: &mut GameState, p: PlayerId, delta: i32) {
+    let ps = st.player_mut(p);
+    ps.life += delta;
+    let life = ps.life;
+    st.emit(Event::LifeChanged {
+        player: p,
+        delta,
+        life,
+    });
 }
 
 /// Convenience wrapper: move an object and return its new id.
@@ -202,25 +274,24 @@ pub fn move_object(
     }
 }
 
-/// `move_object` (spec §5): the only code that changes an object's zone.
-fn perform_move(
-    st: &mut GameState,
-    id: ObjectId,
-    to: Zone,
-    position: LibraryPosition,
-    controller: Option<PlayerId>,
-) -> ObjectId {
+/// Take `id` out of its zone (list, stack, combat). Returns the removed object.
+fn detach(st: &mut GameState, id: ObjectId) -> GameObject {
     let old = st
         .objects
         .remove(&id)
         .unwrap_or_else(|| panic!("move of missing object {id:?}"));
-    let list = st.zones.list_mut(old.zone, old.owner);
-    let pos = list
-        .iter()
-        .position(|x| *x == id)
-        .unwrap_or_else(|| panic!("{id:?} not in its zone list"));
-    list.remove(pos);
-
+    if old.zone == Zone::Stack {
+        let before = st.stack.len();
+        st.stack.retain(|s| s.id != id);
+        debug_assert_eq!(st.stack.len() + 1, before, "{id:?} not on the stack");
+    } else {
+        let list = st.zones.list_mut(old.zone, old.owner);
+        let pos = list
+            .iter()
+            .position(|x| *x == id)
+            .unwrap_or_else(|| panic!("{id:?} not in its zone list"));
+        list.remove(pos);
+    }
     // CR 506.4: a permanent that leaves the battlefield is removed from combat.
     if old.zone == Zone::Battlefield
         && let Some(c) = st.combat.as_mut()
@@ -230,7 +301,18 @@ fn perform_move(
             a.blockers.retain(|b| *b != id);
         }
     }
+    old
+}
 
+/// `move_object` (spec §5): the only code that changes an object's zone.
+fn perform_move(
+    st: &mut GameState,
+    id: ObjectId,
+    to: Zone,
+    position: LibraryPosition,
+    controller: Option<PlayerId>,
+) -> ObjectId {
+    let old = detach(st, id);
     // CR 400.7 (2026-11-06): a new object with no memory of its previous existence.
     let new_id = st.alloc_object_id();
     let timestamp = st.alloc_timestamp();
@@ -251,10 +333,21 @@ fn perform_move(
         summoning_sick: to == Zone::Battlefield,
     };
     st.objects.insert(new_id, obj);
-    let list = st.zones.list_mut(to, old.owner);
-    match (to, position) {
-        (Zone::Library, LibraryPosition::Bottom) => list.insert(0, new_id),
-        _ => list.push(new_id),
+    if to == Zone::Stack {
+        st.stack.push(StackObject {
+            id: new_id,
+            controller,
+            kind: StackKind::Spell,
+            modes: Vec::new(),
+            x: 0,
+            targets: Vec::new(),
+        });
+    } else {
+        let list = st.zones.list_mut(to, old.owner);
+        match (to, position) {
+            (Zone::Library, LibraryPosition::Bottom) => list.insert(0, new_id),
+            _ => list.push(new_id),
+        }
     }
     st.emit(Event::ZoneChange {
         old: id,
@@ -266,7 +359,42 @@ fn perform_move(
     new_id
 }
 
-/// Objects in `zone` (battlefield/stack/exile/command) or a player's zone, in index order.
-pub fn zone_objects(st: &GameState, zone: Zone, owner: PlayerId) -> Vec<ObjectId> {
-    st.zones.list(zone, owner).clone()
+/// CR 800.4a (2026-11-06), in order. M1 has no control-changing effects, so "effects which
+/// give that player control of any objects or players end" has nothing to do yet (M3).
+fn leave_game(st: &mut GameState, p: PlayerId) {
+    // (1) All objects owned by that player leave the game.
+    let owned: Vec<ObjectId> = st
+        .objects
+        .values()
+        .filter(|o| o.owner == p)
+        .map(|o| o.id)
+        .collect();
+    for id in owned {
+        detach(st, id);
+        st.emit(Event::ObjectLeftGame { object: id });
+    }
+    // (2) Objects on the stack they control that aren't represented by cards cease to exist.
+    let abilities: Vec<ObjectId> = st
+        .stack
+        .iter()
+        .filter(|s| s.controller == p && s.is_ability())
+        .map(|s| s.id)
+        .collect();
+    for ability in abilities {
+        st.stack.retain(|s| s.id != ability);
+        st.emit(Event::AbilityRemoved { ability });
+    }
+    // (3) Objects still controlled by that player are exiled.
+    let controlled: Vec<ObjectId> = st
+        .objects
+        .values()
+        .filter(|o| o.controller == p && matches!(o.zone, Zone::Battlefield | Zone::Stack))
+        .map(|o| o.id)
+        .collect();
+    for id in controlled {
+        perform_move(st, id, Zone::Exile, LibraryPosition::Top, None);
+    }
+    // Their mana pool and life no longer matter; priority is handled by the priority frame.
+    st.player_mut(p).mana_pool = Default::default();
+    st.emit(Event::PlayerLeftGame { player: p });
 }

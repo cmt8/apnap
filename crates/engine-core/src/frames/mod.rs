@@ -8,13 +8,17 @@
 //! - All game mutation goes through `actions::execute`.
 //! - Nothing that is needed after a suspension may live in a Rust local; put it in the frame.
 
+mod cast;
 mod combat;
 mod priority;
+mod resolve;
 mod setup;
 mod turn;
 
+pub use cast::{CastFrame, CastSource, CastStage};
 pub use combat::{CombatDamageFrame, DeclareAttackersFrame, DeclareBlockersFrame};
-pub use priority::{CastFrame, CastStage, PriorityFrame};
+pub use priority::PriorityFrame;
+pub use resolve::{ResolveFrame, Work};
 pub use setup::{MulliganFrame, MulliganStage, SetupFrame};
 pub use turn::StepStage;
 
@@ -35,10 +39,10 @@ pub enum Frame {
     Step(StepStage),
     /// CR 117: a player would receive priority.
     Priority(PriorityFrame),
-    /// CR 601.2: casting a spell.
-    CastSpell(CastFrame),
+    /// CR 601.2 / 602.2: casting a spell or activating an ability.
+    Cast(CastFrame),
     /// CR 608: resolve the top object of the stack.
-    Resolve,
+    Resolve(ResolveFrame),
     /// CR 508.1
     DeclareAttackers(DeclareAttackersFrame),
     /// CR 509.1
@@ -143,8 +147,8 @@ impl Frame {
             Frame::Mulligan(f) => f.run(st, input),
             Frame::Step(s) => s.run(st, input),
             Frame::Priority(f) => f.run(st, input),
-            Frame::CastSpell(f) => f.run(st, input),
-            Frame::Resolve => priority::resolve_top(st, input),
+            Frame::Cast(f) => f.run(st, input),
+            Frame::Resolve(f) => f.run(st, input),
             Frame::DeclareAttackers(f) => f.run(st, input),
             Frame::DeclareBlockers(f) => f.run(st, input),
             Frame::CombatDamage(f) => f.run(st, input),

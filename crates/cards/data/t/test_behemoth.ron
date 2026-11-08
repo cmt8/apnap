@@ -1,0 +1,12 @@
+CardScript(
+    verified: true,
+    tests: ["criterion_1_full_game_completes"],
+    card: (
+        name: "Test Behemoth",
+        mana_cost: Some("{4}{G}{G}"),
+        card_types: [Creature],
+        creature_types: ["Construct"],
+        power: Some(6),
+        toughness: Some(6),
+    ),
+)

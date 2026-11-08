@@ -1,0 +1,10 @@
+// The M0 deck: vanilla creatures and basic lands only.
+DeckFile(
+    name: "M0 vanilla red-green",
+    cards: [
+        (12, "Forest"), (12, "Mountain"),
+        (4, "Test Sprout"), (4, "Test Bruiser"), (4, "Test Grazer"), (2, "Test Behemoth"),
+        (4, "Test Spark"), (4, "Test Raider"), (4, "Test Brute"), (4, "Test Giant"),
+        (4, "Test Golem"), (2, "Test Wisp"),
+    ],
+)

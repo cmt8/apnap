@@ -1,0 +1,14 @@
+// Flash (CR 702.8): can be cast any time its controller could cast an instant.
+CardScript(
+    verified: true,
+    tests: ["cr_702_8_flash_creature_on_opponents_turn"],
+    card: (
+        name: "Test Quickling",
+        mana_cost: Some("{1}{G}"),
+        card_types: [Creature],
+        creature_types: ["Faerie"],
+        power: Some(2),
+        toughness: Some(1),
+        keywords: [Flash],
+    ),
+)

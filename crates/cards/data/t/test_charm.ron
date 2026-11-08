@@ -1,0 +1,16 @@
+// Choose one — Test Charm deals 1 damage to target creature; or target player gains 3 life;
+// or you draw a card.
+CardScript(
+    verified: true,
+    tests: ["cr_700_2a_modes_without_legal_targets_unavailable"],
+    card: (
+        name: "Test Charm",
+        mana_cost: Some("{1}{G}"),
+        card_types: [Instant],
+        abilities: [Spell(Modal(min: 1, max: 1, modes: [
+            (targets: [Creature], effect: DealDamage(to: Target(0), amount: Fixed(1))),
+            (targets: [Player], effect: GainLife(who: Target(0), amount: Fixed(3))),
+            (effect: Draw(who: You, amount: Fixed(1))),
+        ]))],
+    ),
+)

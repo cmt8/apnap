@@ -1,0 +1,11 @@
+// Each player sacrifices a creature.
+CardScript(
+    verified: true,
+    tests: ["cr_101_4_each_player_sacrifices_simultaneously"],
+    card: (
+        name: "Test Edict",
+        mana_cost: Some("{1}{G}"),
+        card_types: [Sorcery],
+        abilities: [Spell(Effect((effect: EachPlayer(SacrificeCreature(1)))))],
+    ),
+)

@@ -1,0 +1,14 @@
+// Test Shock deals 2 damage to any target.
+CardScript(
+    verified: true,
+    tests: ["cr_608_2b_fizzles_when_all_targets_illegal", "cr_117_3c_caster_gets_priority_again"],
+    card: (
+        name: "Test Shock",
+        mana_cost: Some("{R}"),
+        card_types: [Instant],
+        abilities: [Spell(Effect((
+            targets: [AnyTarget],
+            effect: DealDamage(to: Target(0), amount: Fixed(2)),
+        )))],
+    ),
+)

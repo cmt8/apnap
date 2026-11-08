@@ -33,6 +33,18 @@ impl GameConfig {
         }
     }
 
+    /// A free-for-all multiplayer game (CR 806) with the attack-multiple-players option
+    /// (CR 802) and constructed decks: 20 life (CR 103.4).
+    pub fn free_for_all(num_players: u8) -> Self {
+        GameConfig {
+            format: Format::Constructed,
+            num_players,
+            starting_life: 20,
+            starting_hand_size: 7,
+            max_hand_size: 7,
+        }
+    }
+
     pub fn commander(num_players: u8) -> Self {
         GameConfig {
             format: Format::Commander,

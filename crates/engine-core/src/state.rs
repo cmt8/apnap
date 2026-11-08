@@ -10,6 +10,7 @@ use crate::ids::{ObjectId, PlayerId};
 use crate::mana::ManaPool;
 use crate::objects::GameObject;
 use crate::rng::GameRng;
+use crate::stack::{StackKind, StackObject};
 use crate::turn::TurnState;
 use crate::zones::{Zone, ZoneIndex};
 use alloc::collections::BTreeMap;
@@ -66,6 +67,8 @@ pub struct GameState {
     pub objects: BTreeMap<ObjectId, GameObject>,
     pub players: Vec<PlayerState>,
     pub zones: ZoneIndex,
+    /// The stack (CR 405); last = top. See `stack.rs`.
+    pub stack: Vec<StackObject>,
     pub turn: TurnState,
     pub combat: Option<CombatState>,
     /// Explicit continuation stack (spec's `ResolutionFrame`s); last = top. Everything that
@@ -146,9 +149,26 @@ impl GameState {
             .collect()
     }
 
-    /// CR 101.4 (2026-11-06): active player, then nonactive players in turn order.
+    /// CR 101.4 (2026-11-06): active player, then nonactive players in turn order. If the
+    /// active player has left the game (CR 800.4j) the order starts with the next player.
     pub fn apnap_order(&self) -> Vec<PlayerId> {
         self.turn_order_from(self.turn.active)
+    }
+
+    /// Who receives priority when "the active player" would (CR 117.3a–b): the active
+    /// player, or — if they have left the game during their turn — the next player in turn
+    /// order (CR 800.4j (2026-11-06)).
+    pub fn first_priority_player(&self) -> PlayerId {
+        let ap = self.turn.active;
+        if self.in_game(ap) {
+            ap
+        } else {
+            self.next_in_turn_order(ap)
+        }
+    }
+
+    pub fn stack_object(&self, id: ObjectId) -> Option<&StackObject> {
+        self.stack.iter().find(|s| s.id == id)
     }
 
     pub fn opponents(&self, p: PlayerId) -> Vec<PlayerId> {
@@ -212,6 +232,26 @@ impl GameState {
                         "{id:?} in {o:?}'s {zone:?} but owned by {:?}",
                         obj.owner
                     ));
+                }
+            }
+        }
+        for so in &self.stack {
+            match so.kind {
+                StackKind::Spell => {
+                    let Some(obj) = self.objects.get(&so.id) else {
+                        return Err(format!("stack spell {:?} has no object", so.id));
+                    };
+                    if obj.zone != Zone::Stack {
+                        return Err(format!("stack spell {:?} has zone {:?}", so.id, obj.zone));
+                    }
+                    if seen.insert(so.id, Zone::Stack).is_some() {
+                        return Err(format!("{:?} listed twice", so.id));
+                    }
+                }
+                StackKind::Ability { .. } => {
+                    if self.objects.contains_key(&so.id) {
+                        return Err(format!("stack ability {:?} is also a card object", so.id));
+                    }
                 }
             }
         }

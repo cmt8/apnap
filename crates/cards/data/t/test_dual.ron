@@ -1,0 +1,10 @@
+// A nonbasic land with two basic land types: two intrinsic mana abilities (CR 305.6).
+CardScript(
+    verified: true,
+    tests: ["cr_305_6_dual_land_either_color"],
+    card: (
+        name: "Test Dual",
+        card_types: [Land],
+        land_types: [Mountain, Forest],
+    ),
+)

@@ -75,9 +75,11 @@ impl StepStage {
                     Step::Draw => {
                         // CR 103.8a: in a two-player game the starting player skips the draw
                         // step of their first turn. CR 103.8c: not in other multiplayer games.
-                        let skip = st.turn.turn_number == 1
+                        // CR 800.4j: no draw if the active player has left the game.
+                        let skip = (st.turn.turn_number == 1
                             && st.num_players() == 2
-                            && Some(ap) == st.turn.starting_player;
+                            && Some(ap) == st.turn.starting_player)
+                            || !st.in_game(ap);
                         if !skip {
                             // CR 504.1
                             execute(st, GameAction::Draw { player: ap });
@@ -110,12 +112,13 @@ impl StepStage {
                     | Step::End => Flow::then(Frame::Step(StepStage::Priority)),
                 }
             }
+            // CR 117.3a (CR 800.4j: the next player if the active player has left).
             StepStage::Priority => Flow::Continue(vec![
                 Frame::Step(StepStage::End {
                     repeat_cleanup: false,
                 }),
                 Frame::Priority(PriorityFrame {
-                    player: ap,
+                    player: st.first_priority_player(),
                     passes: 0,
                 }),
             ]),
@@ -138,7 +141,7 @@ impl StepStage {
                             repeat_cleanup: true,
                         }),
                         Frame::Priority(PriorityFrame {
-                            player: ap,
+                            player: st.first_priority_player(),
                             passes: 0,
                         }),
                     ])

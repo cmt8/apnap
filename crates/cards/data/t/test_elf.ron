@@ -1,0 +1,14 @@
+// {T}: Add {G}. A creature mana ability: summoning sickness applies (CR 602.5a).
+CardScript(
+    verified: true,
+    tests: ["cr_602_5a_summoning_sick_mana_creature"],
+    card: (
+        name: "Test Elf",
+        mana_cost: Some("{G}"),
+        card_types: [Creature],
+        creature_types: ["Elf"],
+        power: Some(1),
+        toughness: Some(1),
+        abilities: [Mana(cost: (tap: true), produce: One(Green))],
+    ),
+)

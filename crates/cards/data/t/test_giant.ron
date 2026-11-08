@@ -1,0 +1,12 @@
+CardScript(
+    verified: true,
+    tests: ["criterion_1_full_game_completes"],
+    card: (
+        name: "Test Giant",
+        mana_cost: Some("{3}{R}{R}"),
+        card_types: [Creature],
+        creature_types: ["Construct"],
+        power: Some(5),
+        toughness: Some(4),
+    ),
+)

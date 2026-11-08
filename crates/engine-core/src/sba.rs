@@ -1,6 +1,6 @@
 //! State-based actions (CR 704 (2026-11-06); verbatim text in docs/rules-notes/704-sba.md).
 //!
-//! M0 implements 704.5a, 704.5b, 704.5f and 704.5g. All applicable SBAs are gathered from
+//! Implemented: 704.5a, 704.5b, 704.5f and 704.5g. All applicable SBAs are gathered from
 //! ONE snapshot and then performed simultaneously as a single event (CR 704.3). SBAs are
 //! never checked during resolution: the only callers are the priority frame (CR 117.5) and
 //! the cleanup step (CR 514.3a).
@@ -60,12 +60,18 @@ pub(crate) fn check_once(st: &mut GameState) -> bool {
     for id in to_graveyard {
         move_object(st, id, Zone::Graveyard, LibraryPosition::Top, None);
     }
-    let any_loss = !losers.is_empty();
+    let lost: Vec<PlayerId> = losers.iter().map(|(p, _)| *p).collect();
     for (player, reason) in losers {
         execute(st, GameAction::LoseGame { player, reason });
     }
-    if any_loss {
+    if !lost.is_empty() {
         check_game_over(st);
+        if !st.is_over() {
+            // CR 800.4a: in a multiplayer game, a player who loses leaves the game at once.
+            for player in lost {
+                execute(st, GameAction::LeaveGame { player });
+            }
+        }
     }
     true
 }
@@ -84,11 +90,8 @@ fn check_game_over(st: &mut GameState) {
     match remaining.as_slice() {
         [] => finish(st, None),
         [w] => finish(st, Some(*w)),
-        _ => {
-            // TODO(M3): CR 800.4a — a player leaving a multiplayer game. `new_game` rejects
-            // >2 players until then, so this is unreachable in M0.
-            unreachable!("multiplayer elimination requires CR 800.4 (M3)")
-        }
+        // Multiplayer: the game continues (CR 800.4).
+        _ => {}
     }
 }
 

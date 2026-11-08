@@ -1,0 +1,14 @@
+// Counter target spell.
+CardScript(
+    verified: true,
+    tests: ["cr_701_6a_countered_spell_to_graveyard", "cr_115_5_spell_cannot_target_itself"],
+    card: (
+        name: "Test Snuff",
+        mana_cost: Some("{1}{R}"),
+        card_types: [Instant],
+        abilities: [Spell(Effect((
+            targets: [Spell],
+            effect: Counter(what: Target(0)),
+        )))],
+    ),
+)

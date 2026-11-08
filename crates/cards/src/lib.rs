@@ -1,97 +1,94 @@
-//! Card data.
-//!
-//! M0 ships only an **invented** vanilla test pool, built in Rust: basic lands (whose names
-//! are basic land types, CR 305.6) and creatures with made-up "Test …" names. Real cards
-//! become RON scripts in `cards/<letter>/<slug>.ron` from M1/M4, joined to Scryfall data
-//! fetched at runtime (spec §12). No Wizards/Scryfall assets live in this repo.
+//! Card data, as RON files (spec §7): `data/<first-letter>/<slug>.ron` card scripts and
+//! `decks/*.ron` deck lists. This crate only embeds the files; `card-db` parses and validates
+//! them. Only invented "Test …" cards and basic lands live here: no Wizards/Scryfall assets
+//! (CLAUDE.md invariant 13). A test checks this list matches the files on disk.
 
-use card_model::{BasicLandType, CardCatalog, CardDef, CardDefId, CardType, ManaCost, Supertype};
-
-fn basic_land(name: &str, t: BasicLandType) -> CardDef {
-    CardDef {
-        name: name.into(),
-        mana_cost: None,
-        supertypes: vec![Supertype::Basic],
-        card_types: vec![CardType::Land],
-        land_types: vec![t],
-        creature_types: vec![],
-        power: None,
-        toughness: None,
-    }
+macro_rules! card {
+    ($p:literal) => {
+        (concat!("crates/cards/data/", $p), include_str!(concat!("../data/", $p)))
+    };
 }
 
-fn vanilla(name: &str, cost: &str, power: i32, toughness: i32) -> CardDef {
-    CardDef {
-        name: name.into(),
-        mana_cost: Some(ManaCost::parse(cost).expect("valid cost")),
-        supertypes: vec![],
-        card_types: vec![CardType::Creature],
-        land_types: vec![],
-        creature_types: vec!["Construct".into()],
-        power: Some(power),
-        toughness: Some(toughness),
-    }
+macro_rules! deck {
+    ($p:literal) => {
+        (concat!("crates/cards/decks/", $p), include_str!(concat!("../decks/", $p)))
+    };
 }
 
-/// The M0 test pool: name, cost, power, toughness.
-pub const M0_CREATURES: &[(&str, &str, i32, i32)] = &[
-    ("Test Sprout", "{G}", 1, 1),
-    ("Test Bruiser", "{1}{G}", 2, 2),
-    ("Test Grazer", "{2}{G}", 3, 3),
-    ("Test Behemoth", "{4}{G}{G}", 6, 6),
-    ("Test Spark", "{R}", 1, 1),
-    ("Test Raider", "{1}{R}", 2, 1),
-    ("Test Brute", "{2}{R}", 3, 2),
-    ("Test Giant", "{3}{R}{R}", 5, 4),
-    ("Test Golem", "{3}", 2, 3),
-    // Exercises CR 704.5f (toughness 0) every time it resolves.
-    ("Test Wisp", "{1}", 1, 0),
+/// `(path, contents)` of every card script.
+pub const CARDS: &[(&str, &str)] = &[
+    card!("f/forest.ron"),
+    card!("m/mountain.ron"),
+    card!("t/test_behemoth.ron"),
+    card!("t/test_blaze.ron"),
+    card!("t/test_bruiser.ron"),
+    card!("t/test_brute.ron"),
+    card!("t/test_charger.ron"),
+    card!("t/test_charm.ron"),
+    card!("t/test_dual.ron"),
+    card!("t/test_edict.ron"),
+    card!("t/test_elf.ron"),
+    card!("t/test_giant.ron"),
+    card!("t/test_golem.ron"),
+    card!("t/test_grazer.ron"),
+    card!("t/test_pinger.ron"),
+    card!("t/test_prism.ron"),
+    card!("t/test_quickling.ron"),
+    card!("t/test_raider.ron"),
+    card!("t/test_riot.ron"),
+    card!("t/test_shock.ron"),
+    card!("t/test_snuff.ron"),
+    card!("t/test_spark.ron"),
+    card!("t/test_sprout.ron"),
+    card!("t/test_wisp.ron"),
 ];
 
-/// Catalog with the two basic lands followed by `M0_CREATURES`.
-pub fn m0_catalog() -> CardCatalog {
-    let mut c = CardCatalog::default();
-    c.add(basic_land("Forest", BasicLandType::Forest));
-    c.add(basic_land("Mountain", BasicLandType::Mountain));
-    for &(name, cost, p, t) in M0_CREATURES {
-        c.add(vanilla(name, cost, p, t));
-    }
-    c
-}
+/// `(path, contents)` of every deck list.
+pub const DECKS: &[(&str, &str)] = &[
+    deck!("m0_vanilla.ron"),
+    deck!("m1_red_green.ron"),
+];
 
-/// A 60-card red-green vanilla deck: 12 Forest, 12 Mountain, and 36 creatures
-/// (4 each of eight test creatures, 2 Test Behemoth, 2 Test Wisp).
-pub fn m0_deck(catalog: &CardCatalog) -> Vec<CardDefId> {
-    let id = |n: &str| {
-        catalog
-            .find(n)
-            .unwrap_or_else(|| panic!("{n} not in catalog"))
-    };
-    let mut deck = Vec::with_capacity(60);
-    deck.extend(std::iter::repeat_n(id("Forest"), 12));
-    deck.extend(std::iter::repeat_n(id("Mountain"), 12));
-    for &(name, ..) in M0_CREATURES {
-        let copies = match name {
-            "Test Behemoth" => 2,
-            "Test Wisp" => 2,
-            _ => 4,
-        };
-        deck.extend(std::iter::repeat_n(id(name), copies));
-    }
-    assert_eq!(deck.len(), 60);
-    deck
+/// Contents of the deck file named `file` (e.g. `"m1_red_green.ron"`).
+pub fn deck(file: &str) -> Option<&'static str> {
+    DECKS
+        .iter()
+        .find(|(p, _)| p.ends_with(&format!("/{file}")))
+        .map(|(_, t)| *t)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn deck_is_sixty_and_names_are_unique() {
-        let c = m0_catalog();
-        assert_eq!(m0_deck(&c).len(), 60);
-        for (i, d) in c.defs.iter().enumerate() {
-            assert_eq!(c.find(&d.name), Some(CardDefId(i as u32)));
+    fn ron_files(dir: &str) -> Vec<String> {
+        fn walk(d: &std::path::Path, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "ron") {
+                    out.push(p.to_string_lossy().replace('\\', "/"));
+                }
+            }
         }
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
+        let mut out = Vec::new();
+        walk(&base, &mut out);
+        let prefix = base.to_string_lossy().replace('\\', "/");
+        let mut rel: Vec<String> = out
+            .into_iter()
+            .map(|p| format!("crates/cards/{dir}{}", &p[prefix.len()..]))
+            .collect();
+        rel.sort();
+        rel
+    }
+
+    #[test]
+    fn embedded_lists_match_files_on_disk() {
+        let cards: Vec<String> = CARDS.iter().map(|(p, _)| p.to_string()).collect();
+        assert_eq!(cards, ron_files("data"), "update CARDS in crates/cards/src/lib.rs");
+        let decks: Vec<String> = DECKS.iter().map(|(p, _)| p.to_string()).collect();
+        assert_eq!(decks, ron_files("decks"), "update DECKS in crates/cards/src/lib.rs");
     }
 }

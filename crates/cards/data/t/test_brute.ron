@@ -1,0 +1,12 @@
+CardScript(
+    verified: true,
+    tests: ["criterion_1_full_game_completes"],
+    card: (
+        name: "Test Brute",
+        mana_cost: Some("{2}{R}"),
+        card_types: [Creature],
+        creature_types: ["Construct"],
+        power: Some(3),
+        toughness: Some(2),
+    ),
+)

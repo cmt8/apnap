@@ -1,0 +1,11 @@
+// Each player discards a card.
+CardScript(
+    verified: true,
+    tests: ["cr_101_4_each_player_discards_in_apnap_order"],
+    card: (
+        name: "Test Riot",
+        mana_cost: Some("{2}{R}"),
+        card_types: [Sorcery],
+        abilities: [Spell(Effect((effect: EachPlayer(Discard(1)))))],
+    ),
+)

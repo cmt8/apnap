@@ -1,0 +1,14 @@
+// Haste (CR 702.10): can attack and use {T} abilities the turn it arrives.
+CardScript(
+    verified: true,
+    tests: ["cr_702_10_haste_attacks_immediately"],
+    card: (
+        name: "Test Charger",
+        mana_cost: Some("{2}{R}"),
+        card_types: [Creature],
+        creature_types: ["Construct"],
+        power: Some(2),
+        toughness: Some(2),
+        keywords: [Haste],
+    ),
+)

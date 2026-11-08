@@ -1,6 +1,6 @@
 [package]
 name = "card-db"
-description = "Scryfall bulk import -> oracle.bin, RON script loading/validation. Stub until M1/M4."
+description = "Loads and validates RON card scripts and deck lists into a CardCatalog. Scryfall import arrives in M4."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 card-model.workspace = true
+serde = { workspace = true, features = ["std"] }
+ron = "0.12.3"
 
 [lints]
 workspace = true

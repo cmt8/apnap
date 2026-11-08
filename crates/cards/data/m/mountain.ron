@@ -1,0 +1,10 @@
+CardScript(
+    verified: true,
+    tests: ["cr_305_6_basic_land_mana"],
+    card: (
+        name: "Mountain",
+        supertypes: [Basic],
+        card_types: [Land],
+        land_types: [Mountain],
+    ),
+)

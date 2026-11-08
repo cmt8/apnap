@@ -31,13 +31,13 @@ pub struct DeclareAttackersFrame {
 
 impl DeclareAttackersFrame {
     pub(crate) fn new(st: &GameState) -> Self {
-        // CR 508.1a: untapped, and controlled continuously since the turn began (CR 302.6;
-        // no haste in M0).
+        // CR 508.1a: untapped, and either haste or controlled continuously since the turn
+        // began (CR 302.6, 702.10b).
         let candidates = creatures_controlled_by(st, st.turn.active)
             .into_iter()
             .filter(|&id| {
                 let o = st.object(id);
-                !o.tapped && !o.summoning_sick
+                !o.tapped && (!o.summoning_sick || chars(st, id).has(card_model::Keyword::Haste))
             })
             .collect();
         DeclareAttackersFrame {
@@ -111,6 +111,7 @@ impl DeclareBlockersFrame {
             .as_ref()
             .map(|c| c.attackers.iter().map(|a| a.defender).collect())
             .unwrap_or_default();
+        // CR 802.4: each defending player, in APNAP order, declares all their blocks.
         let defenders = st
             .apnap_order()
             .into_iter()

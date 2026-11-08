@@ -34,7 +34,6 @@ pub enum LibraryPosition {
 /// Ordering conventions (documented in CLAUDE.md):
 /// - library: index 0 = **bottom**, last = **top** (draw = pop).
 /// - graveyard: last = most recently put there (top).
-/// - stack: last = top.
 /// - battlefield/hand/exile/command: insertion order (= timestamp order for the battlefield).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZoneIndex {
@@ -42,7 +41,6 @@ pub struct ZoneIndex {
     pub hands: Vec<Vec<ObjectId>>,
     pub graveyards: Vec<Vec<ObjectId>>,
     pub battlefield: Vec<ObjectId>,
-    pub stack: Vec<ObjectId>,
     pub exile: Vec<ObjectId>,
     pub command: Vec<ObjectId>,
 }
@@ -58,15 +56,16 @@ impl ZoneIndex {
     }
 
     /// The list for `zone`; `owner` selects the per-player list where relevant.
+    /// The stack is not here: it is `GameState::stack` (see `stack.rs`).
     pub fn list(&self, zone: Zone, owner: PlayerId) -> &Vec<ObjectId> {
         match zone {
             Zone::Library => &self.libraries[owner.index()],
             Zone::Hand => &self.hands[owner.index()],
             Zone::Graveyard => &self.graveyards[owner.index()],
             Zone::Battlefield => &self.battlefield,
-            Zone::Stack => &self.stack,
             Zone::Exile => &self.exile,
             Zone::Command => &self.command,
+            Zone::Stack => panic!("the stack is GameState::stack"),
         }
     }
 
@@ -76,9 +75,9 @@ impl ZoneIndex {
             Zone::Hand => &mut self.hands[owner.index()],
             Zone::Graveyard => &mut self.graveyards[owner.index()],
             Zone::Battlefield => &mut self.battlefield,
-            Zone::Stack => &mut self.stack,
             Zone::Exile => &mut self.exile,
             Zone::Command => &mut self.command,
+            Zone::Stack => panic!("the stack is GameState::stack"),
         }
     }
 
@@ -95,7 +94,6 @@ impl ZoneIndex {
             }
         }
         out.push((Zone::Battlefield, None, &self.battlefield));
-        out.push((Zone::Stack, None, &self.stack));
         out.push((Zone::Exile, None, &self.exile));
         out.push((Zone::Command, None, &self.command));
         out

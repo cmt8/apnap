@@ -1,6 +1,6 @@
 [package]
 name = "cards"
-description = "Card data. M0: an invented vanilla test pool (no Wizards card names beyond basic land types)."
+description = "Card data: RON card scripts and deck lists (invented test cards and basic lands only)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,6 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-card-model.workspace = true
 
 [lints]
 workspace = true

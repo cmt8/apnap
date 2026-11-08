@@ -1,0 +1,12 @@
+CardScript(
+    verified: true,
+    tests: ["cr_704_5f_zero_toughness_dies"],
+    card: (
+        name: "Test Wisp",
+        mana_cost: Some("{1}"),
+        card_types: [Creature],
+        creature_types: ["Construct"],
+        power: Some(1),
+        toughness: Some(0),
+    ),
+)

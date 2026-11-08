@@ -1,0 +1,12 @@
+CardScript(
+    verified: true,
+    tests: ["criterion_1_full_game_completes"],
+    card: (
+        name: "Test Raider",
+        mana_cost: Some("{1}{R}"),
+        card_types: [Creature],
+        creature_types: ["Construct"],
+        power: Some(2),
+        toughness: Some(1),
+    ),
+)

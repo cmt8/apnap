@@ -7,6 +7,7 @@
 
 use crate::ids::{ObjectId, PlayerId};
 use crate::mana::ManaType;
+use crate::stack::Target;
 use alloc::vec::Vec;
 use core::fmt;
 use serde::{Deserialize, Serialize};
@@ -69,7 +70,8 @@ pub enum ChoiceKind {
     },
     ChooseModes,
     ChooseX,
-    /// CR 601.2g–h: activate a mana ability while paying a cost.
+    /// CR 601.2g–h: activate a mana ability while paying a cost (PickN), or choose which
+    /// floating mana pays the generic part (Allocate over `OptionDesc::Mana`).
     PayMana,
     /// CR 508.1: one decision per potential attacker (pick 0 or 1 defender).
     DeclareAttackers,
@@ -81,7 +83,7 @@ pub enum ChoiceKind {
     ChooseReplacement,
     CommanderToCommandZone,
     SearchLibrary,
-    /// CR 514.1 cleanup discard (and later discard effects).
+    /// CR 514.1 cleanup discard, and discard effects (CR 701.9).
     Discard,
     Sacrifice,
     MayAbility,

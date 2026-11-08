@@ -1,0 +1,14 @@
+// The M1 deck: every M1 mechanic (mana creatures/artifacts, dual lands, activated abilities,
+// targets, X, modes, counters, APNAP each-player effects, haste, flash). 60 cards.
+DeckFile(
+    name: "M1 red-green",
+    cards: [
+        (8, "Forest"), (8, "Mountain"), (4, "Test Dual"),
+        (3, "Test Elf"), (2, "Test Prism"),
+        (2, "Test Sprout"), (3, "Test Bruiser"), (3, "Test Grazer"), (2, "Test Raider"),
+        (2, "Test Brute"), (1, "Test Giant"), (1, "Test Wisp"),
+        (3, "Test Pinger"), (2, "Test Charger"), (2, "Test Quickling"),
+        (3, "Test Shock"), (2, "Test Blaze"), (3, "Test Charm"), (2, "Test Snuff"),
+        (2, "Test Riot"), (2, "Test Edict"),
+    ],
+)

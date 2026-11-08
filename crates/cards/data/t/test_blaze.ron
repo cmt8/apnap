@@ -1,0 +1,14 @@
+// Test Blaze deals X damage to any target.
+CardScript(
+    verified: true,
+    tests: ["cr_107_3a_x_announced_and_paid"],
+    card: (
+        name: "Test Blaze",
+        mana_cost: Some("{X}{R}"),
+        card_types: [Sorcery],
+        abilities: [Spell(Effect((
+            targets: [AnyTarget],
+            effect: DealDamage(to: Target(0), amount: X),
+        )))],
+    ),
+)

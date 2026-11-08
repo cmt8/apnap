@@ -1,0 +1,12 @@
+CardScript(
+    verified: true,
+    tests: ["criterion_1_full_game_completes"],
+    card: (
+        name: "Test Spark",
+        mana_cost: Some("{R}"),
+        card_types: [Creature],
+        creature_types: ["Construct"],
+        power: Some(1),
+        toughness: Some(1),
+    ),
+)
