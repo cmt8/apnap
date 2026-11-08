@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# Internal crates
+card-model = { path = "crates/card-model" }
+engine-core = { path = "crates/engine-core" }
+cards = { path = "crates/cards" }
+ai = { path = "crates/ai" }
+# External: engine-side deps MUST be no_std-capable (default-features = false).
+serde = { version = "1.0.229", default-features = false, features = ["derive", "alloc", "rc"] }
+rand_chacha = { version = "0.10.0", default-features = false }
+rand_core = { version = "0.10.1", default-features = false }
+# External: std-side (harness/app/xtask/tests only)
+serde_json = "1.0.154"
+proptest = "1.12.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+print_stdout = "allow"
+
+[profile.dev]
+opt-level = 1
+
+[profile.test]
+opt-level = 2

@@ -1,0 +1,7 @@
+# seed log_hash state_hash — regenerate ONLY with `cargo run -p harness -- bless`
+1 eecb185c119f9a5e ae03643b3e06ea80
+2 1e21c77d6f988f5a 02d0c5868bae98c2
+3 e4ee8aa75dc8aae3 c3b2117e124eb40c
+42 9ce5f5094fd48fbf 5b5158fea14ddcc7
+1337 e39e48fb00962db3 2593ed33a4990632
+12648430 333eb0c5fcdb6d8a 02b56a620a0633f1

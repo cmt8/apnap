@@ -1,0 +1,22 @@
+[package]
+name = "engine-core"
+description = "Pure, deterministic MTG rules engine (no_std + alloc). No I/O, threads, clock or ambient RNG."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Allowed normal dependencies are enforced by `cargo xtask check-deps` (spec §4):
+# card-model, serde, rand_chacha, rand_core (+ their transitive deps). Nothing else.
+[dependencies]
+card-model.workspace = true
+serde.workspace = true
+rand_chacha.workspace = true
+rand_core.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "harness"
+description = "Headless game runner: random-agent games, replays, determinism checks, golden hashes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+engine-core.workspace = true
+card-model.workspace = true
+cards.workspace = true
+ai.workspace = true
+serde = { workspace = true, features = ["std"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
