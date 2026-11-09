@@ -7,7 +7,7 @@ use crate::effects::{ContinuousInstance, Shield};
 use crate::events::Event;
 use crate::frames::Frame;
 use crate::hash::{StableHasher, stable_hash};
-use crate::ids::{ObjectId, PlayerId};
+use crate::ids::{CardInstanceId, ObjectId, PlayerId};
 use crate::mana::ManaPool;
 use crate::objects::GameObject;
 use crate::rng::GameRng;
@@ -32,6 +32,11 @@ pub struct PlayerState {
     pub lands_played_this_turn: u32,
     /// CR 704.5b: attempted to draw from an empty library since SBAs were last checked.
     pub drew_from_empty_library: bool,
+    /// CR 903.10a / 704.6c: combat damage dealt to this player by each commander (keyed by
+    /// the commander *card*, CR 903.3).
+    pub commander_damage: BTreeMap<CardInstanceId, u32>,
+    /// CR 903.8: how many times this player has cast each commander from the command zone.
+    pub commander_casts: BTreeMap<CardInstanceId, u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +86,10 @@ pub struct GameState {
     /// Prevention shields (CR 615.7).
     pub shields: Vec<Shield>,
     pub next_effect_id: u32,
+    /// CR 903.3: the commander cards (owner, card), in seat order.
+    pub commanders: Vec<(PlayerId, CardInstanceId)>,
+    /// CR 903.9a: commanders put into a graveyard or exile since SBAs were last checked.
+    pub commander_moved: Vec<ObjectId>,
     /// Triggered abilities waiting to be put on the stack (CR 603.3).
     pub pending_triggers: Vec<PendingTrigger>,
     /// Whether the last state check (CR 704.3) performed any SBA or put any trigger on the
@@ -185,6 +194,13 @@ impl GameState {
         } else {
             self.next_in_turn_order(ap)
         }
+    }
+
+    /// CR 903.3: is this object a commander (its card is)?
+    pub fn is_commander(&self, id: ObjectId) -> bool {
+        self.objects
+            .get(&id)
+            .is_some_and(|o| self.commanders.iter().any(|(_, c)| *c == o.card_instance))
     }
 
     pub fn stack_object(&self, id: ObjectId) -> Option<&StackObject> {

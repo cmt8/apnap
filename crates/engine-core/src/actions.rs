@@ -83,6 +83,11 @@ pub enum GameAction {
         object: ObjectId,
         controller: PlayerId,
     },
+    /// CR 903.8: a commander was cast from the command zone (the tax grows).
+    CommanderCast {
+        player: PlayerId,
+        card: crate::ids::CardInstanceId,
+    },
     /// CR 113.7a: an ability on the stack remembers its source as it last existed.
     RecordSourceLki {
         ability: ObjectId,
@@ -292,6 +297,13 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             st.shields.retain(|s| s.remaining > 0);
             ActionResult::Done
         }
+        GameAction::CommanderCast { player, card } => {
+            *st.player_mut(player)
+                .commander_casts
+                .entry(card)
+                .or_default() += 1;
+            ActionResult::Done
+        }
         GameAction::Attach { aura, to } => {
             st.object_mut(aura).attached_to = Some(to);
             st.emit(Event::Attached { aura, to });
@@ -386,6 +398,15 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 amount,
                 combat,
             });
+            // CR 903.10a: combat damage dealt to a player by a commander is tallied per
+            // commander card (CR 903.3).
+            if combat
+                && let DamageTarget::Player(p) = target
+                && st.is_commander(source)
+            {
+                let card = st.object(source).card_instance;
+                *st.player_mut(p).commander_damage.entry(card).or_default() += amount;
+            }
             match target {
                 DamageTarget::Player(p) => change_life(st, p, -(amount as i32)),
                 DamageTarget::Object(o) => {
@@ -591,6 +612,12 @@ fn perform_move(
             (Zone::Library, LibraryPosition::Bottom) => list.insert(0, new_id),
             _ => list.push(new_id),
         }
+    }
+    // CR 903.9a: remember commanders put into a graveyard or exile until SBAs are checked.
+    if matches!(to, Zone::Graveyard | Zone::Exile)
+        && st.commanders.iter().any(|(_, c)| *c == old.card_instance)
+    {
+        st.commander_moved.push(new_id);
     }
     st.emit(Event::ZoneChange {
         old: id,

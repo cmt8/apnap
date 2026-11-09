@@ -128,7 +128,13 @@ fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
             }
         }
     }
-    for &card in hand {
+    // CR 903.8: a player may cast a commander they own from the command zone.
+    let commanders = st
+        .zones
+        .command
+        .iter()
+        .filter(|&&c| st.object(c).owner == p);
+    for &card in hand.iter().chain(commanders) {
         if can_begin(st, p, CastSource::Card(card)) {
             opts.push(OptionDesc::CastSpell { card });
         }

@@ -25,6 +25,8 @@ pub enum LossReason {
     ZeroLife,
     /// CR 704.5b
     DrewFromEmptyLibrary,
+    /// CR 704.6c / 903.10a: 21 or more combat damage from one commander.
+    CommanderDamage,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

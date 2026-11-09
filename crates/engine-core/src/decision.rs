@@ -140,6 +140,11 @@ pub enum OptionDesc {
     Shield {
         id: u32,
     },
+    /// "Yes" for an optional choice (e.g. CR 903.9a/b: put the commander into the command
+    /// zone).
+    Accept,
+    /// "No" for an optional choice (decline an optional replacement effect).
+    Decline,
     /// A triggered ability waiting to go on the stack (CR 603.3b).
     Trigger {
         source: ObjectId,

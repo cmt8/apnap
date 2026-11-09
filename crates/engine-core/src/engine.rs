@@ -36,6 +36,8 @@ pub enum SetupError {
         players: u8,
     },
     UnknownCard(CardDefId),
+    /// CR 903.3: a commander must be a legendary creature card.
+    InvalidCommander(CardDefId),
 }
 
 impl fmt::Display for SetupError {
@@ -52,6 +54,18 @@ pub fn new_game(
     config: GameConfig,
     catalog: Arc<CardCatalog>,
     decks: &[Vec<CardDefId>],
+    seed: u64,
+) -> Result<GameState, SetupError> {
+    new_game_with_commanders(config, catalog, decks, &[], seed)
+}
+
+/// A game where `commanders[seat]` (if given) is that player's commander (CR 903.3). Decks
+/// exclude the commander. CR 903.6 / 103.2c: commanders start in the command zone.
+pub fn new_game_with_commanders(
+    config: GameConfig,
+    catalog: Arc<CardCatalog>,
+    decks: &[Vec<CardDefId>],
+    commanders: &[Option<CardDefId>],
     seed: u64,
 ) -> Result<GameState, SetupError> {
     if !(2..=8).contains(&config.num_players) {
@@ -73,6 +87,8 @@ pub fn new_game(
                 mana_pool: ManaPool::default(),
                 lands_played_this_turn: 0,
                 drew_from_empty_library: false,
+                commander_damage: BTreeMap::new(),
+                commander_casts: BTreeMap::new(),
             })
             .collect(),
         config,
@@ -88,6 +104,8 @@ pub fn new_game(
         continuous: Vec::new(),
         shields: Vec::new(),
         next_effect_id: 0,
+        commanders: Vec::new(),
+        commander_moved: Vec::new(),
         pending_triggers: Vec::new(),
         last_check_acted: false,
         layer_cache: Default::default(),
@@ -109,7 +127,12 @@ pub fn new_game(
     };
     for (seat, deck) in decks.iter().enumerate() {
         let owner = PlayerId(seat as u8);
-        for &card in deck {
+        let commander = commanders.get(seat).copied().flatten();
+        let entries = commander
+            .map(|c| (c, Zone::Command))
+            .into_iter()
+            .chain(deck.iter().map(|&c| (c, Zone::Library)));
+        for (card, zone) in entries {
             if card.0 as usize >= st.catalog.defs.len() {
                 return Err(SetupError::UnknownCard(card));
             }
@@ -125,7 +148,7 @@ pub fn new_game(
                     card,
                     owner,
                     controller: owner,
-                    zone: Zone::Library,
+                    zone,
                     timestamp,
                     tapped: false,
                     damage_marked: 0,
@@ -137,8 +160,20 @@ pub fn new_game(
                     last_controller: owner,
                 },
             );
-            // CR 401.1: each player's deck becomes their library.
-            st.zones.libraries[seat].push(id);
+            if zone == Zone::Command {
+                let def = st.catalog.get(card);
+                // CR 903.3: a legendary creature card.
+                if !(def.has_type(card_model::CardType::Creature)
+                    && def.supertypes.contains(&card_model::Supertype::Legendary))
+                {
+                    return Err(SetupError::InvalidCommander(card));
+                }
+                st.commanders.push((owner, card_instance));
+                st.zones.command.push(id);
+            } else {
+                // CR 401.1: each player's deck becomes their library.
+                st.zones.libraries[seat].push(id);
+            }
         }
     }
     Ok(st)

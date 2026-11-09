@@ -1,5 +1,9 @@
 //! The state check (CR 117.5 / 704.3): perform state-based actions until none apply, then
 //! put waiting triggered abilities on the stack, and repeat until neither happens.
+//!
+//! Two SBAs need a player's choice before the batch is performed: the legend rule (CR 704.5j,
+//! which one to keep) and the commander's return (CR 903.9a / 704.6d, "may"). Choices are
+//! made in APNAP order; then everything is performed simultaneously as one batch.
 
 use super::{ApplyFrame, Flow, Frame, Input, PutTriggersFrame};
 use crate::decision::{ChoiceKind, OptionDesc};
@@ -22,10 +26,11 @@ pub struct StateCheckFrame {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CheckStage {
     Gather,
-    /// CR 704.5j: each player with legend-rule groups chooses which one to keep, in APNAP order.
-    Legend {
+    /// CR 704.5j legend-rule groups, then CR 903.9a commander returns, in APNAP order.
+    Choices {
         events: Vec<Proposed>,
         groups: Vec<(PlayerId, Vec<ObjectId>)>,
+        commanders: Vec<(PlayerId, ObjectId)>,
         next: usize,
     },
 }
@@ -46,7 +51,7 @@ impl StateCheckFrame {
             match core::mem::replace(&mut self.stage, CheckStage::Gather) {
                 CheckStage::Gather => {
                     let g = sba::gather(st);
-                    if g.events.is_empty() && g.legend.is_empty() {
+                    if g.events.is_empty() && g.legend.is_empty() && g.commander.is_empty() {
                         if !st.pending_triggers.is_empty() {
                             // CR 603.3 / 117.5: triggers go on the stack, then check again.
                             self.acted = true;
@@ -58,38 +63,58 @@ impl StateCheckFrame {
                         st.last_check_acted = self.acted;
                         return Flow::done();
                     }
-                    self.acted = true;
                     let order = st.apnap_order();
+                    let rank = |p: &PlayerId| order.iter().position(|q| q == p);
                     let mut groups = g.legend;
-                    groups.sort_by_key(|(p, _)| order.iter().position(|q| q == p));
-                    self.stage = CheckStage::Legend {
+                    groups.sort_by_key(|(p, _)| rank(p));
+                    let mut commanders: Vec<(PlayerId, ObjectId)> = g
+                        .commander
+                        .into_iter()
+                        .map(|id| (st.object(id).owner, id))
+                        .collect();
+                    commanders.sort_by_key(|(p, _)| rank(p));
+                    self.stage = CheckStage::Choices {
                         events: g.events,
                         groups,
+                        commanders,
                         next: 0,
                     };
                 }
-                CheckStage::Legend {
+                CheckStage::Choices {
                     mut events,
                     groups,
+                    commanders,
                     mut next,
                 } => {
                     if let Some(inp) = input.take() {
-                        let Some(OptionDesc::Card { card: keep }) = inp.picked_one().cloned()
-                        else {
-                            unreachable!()
-                        };
-                        for &o in &groups[next].1 {
-                            if o != keep {
-                                events.push(Proposed::moving(o, Zone::Graveyard, MoveCause::Rule));
+                        match inp.picked_one().cloned() {
+                            Some(OptionDesc::Card { card: keep }) => {
+                                for &o in &groups[next].1 {
+                                    if o != keep {
+                                        events.push(Proposed::moving(
+                                            o,
+                                            Zone::Graveyard,
+                                            MoveCause::Rule,
+                                        ));
+                                    }
+                                }
                             }
+                            // CR 903.9a: the owner chose to put it into the command zone.
+                            Some(OptionDesc::Accept) => {
+                                let (_, id) = commanders[next - groups.len()];
+                                events.push(Proposed::moving(id, Zone::Command, MoveCause::Rule));
+                            }
+                            Some(OptionDesc::Decline) => {}
+                            o => unreachable!("{o:?}"),
                         }
                         next += 1;
                     }
                     if let Some((player, ids)) = groups.get(next).cloned() {
                         let options = ids.iter().map(|&card| OptionDesc::Card { card }).collect();
-                        self.stage = CheckStage::Legend {
+                        self.stage = CheckStage::Choices {
                             events,
                             groups,
+                            commanders,
                             next,
                         };
                         return Flow::ask_one(
@@ -99,7 +124,26 @@ impl StateCheckFrame {
                             options,
                         );
                     }
+                    if let Some(&(owner, _)) = commanders.get(next - groups.len()) {
+                        self.stage = CheckStage::Choices {
+                            events,
+                            groups,
+                            commanders,
+                            next,
+                        };
+                        return Flow::ask_one(
+                            Frame::StateCheck(self),
+                            owner,
+                            ChoiceKind::CommanderToCommandZone,
+                            vec![OptionDesc::Accept, OptionDesc::Decline],
+                        );
+                    }
+                    if events.is_empty() {
+                        // Only declined optional SBAs: nothing was performed (check again).
+                        continue;
+                    }
                     // CR 704.3: all applicable SBAs are performed simultaneously.
+                    self.acted = true;
                     let apply = ApplyFrame::new(st, events);
                     return Flow::Continue(vec![Frame::StateCheck(self), Frame::Apply(apply)]);
                 }

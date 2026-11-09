@@ -351,6 +351,8 @@ pub fn option_line(v: &PlayerView, o: &OptionDesc) -> String {
             )
         }
         OptionDesc::Shield { id } => format!("prevention shield #{id}"),
+        OptionDesc::Accept => "yes".into(),
+        OptionDesc::Decline => "no".into(),
         OptionDesc::Trigger { source, index } => {
             format!("{}'s triggered ability ({index})", view_name(v, *source))
         }

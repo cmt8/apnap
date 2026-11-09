@@ -69,12 +69,16 @@ impl ApplyFrame {
 
     pub(crate) fn run(mut self, st: &mut GameState, input: Option<Input>) -> Flow {
         if let Some(inp) = input {
-            let key = match inp.picked_one().cloned() {
-                Some(OptionDesc::Replacement { source, index }) => RepKey::Static { source, index },
-                Some(OptionDesc::Shield { id }) => RepKey::Shield(id),
+            match inp.picked_one().cloned() {
+                Some(OptionDesc::Replacement { source, index }) => {
+                    self.apply_front(st, RepKey::Static { source, index })
+                }
+                Some(OptionDesc::Shield { id }) => self.apply_front(st, RepKey::Shield(id)),
+                Some(OptionDesc::Accept) => self.apply_front(st, RepKey::CommanderReturn),
+                // Declining an optional effect: it won't be offered again for this event.
+                Some(OptionDesc::Decline) => self.queue[0].applied.push(RepKey::CommanderReturn),
                 o => unreachable!("not a replacement option: {o:?}"),
-            };
-            self.apply_front(st, key);
+            }
         }
         while let Some(front) = self.queue.first() {
             let apps = applicable(st, front);
@@ -83,20 +87,25 @@ impl ApplyFrame {
                     let p = self.queue.remove(0);
                     self.ready.push(p.event);
                 }
-                // CR 616.1f: one applicable effect simply applies; then re-check.
-                [only] => self.apply_front(st, *only),
+                // CR 616.1f: one applicable (mandatory) effect simply applies; then re-check.
+                [only] if !only.optional() => self.apply_front(st, *only),
                 // CR 616.1 / 616.1e: the affected player chooses one to apply.
                 many => {
                     let player = affected_player(st, &front.event);
-                    let options = many
+                    let mut options: Vec<OptionDesc> = many
                         .iter()
                         .map(|k| match *k {
                             RepKey::Static { source, index } => {
                                 OptionDesc::Replacement { source, index }
                             }
                             RepKey::Shield(id) => OptionDesc::Shield { id },
+                            RepKey::CommanderReturn => OptionDesc::Accept,
                         })
                         .collect();
+                    // An optional effect may be declined (CR 903.9b "may").
+                    if many.iter().any(|k| k.optional()) {
+                        options.push(OptionDesc::Decline);
+                    }
                     return Flow::ask_one(
                         Frame::Apply(self),
                         player,

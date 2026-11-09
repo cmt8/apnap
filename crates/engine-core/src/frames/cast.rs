@@ -56,6 +56,25 @@ pub struct CastFrame {
     pub modes: Vec<u8>,
     pub x: u32,
     pub targets: Vec<Vec<Target>>,
+    /// CR 903.8: commander tax (generic mana), locked in when the cast is announced.
+    pub tax: u32,
+    /// Cast from the command zone (CR 903.8: counts toward future tax).
+    pub from_command: Option<crate::ids::CardInstanceId>,
+}
+
+/// CR 903.8: the commander tax `p` would pay to cast `card` from the command zone now.
+pub(crate) fn commander_tax(st: &GameState, p: PlayerId, card: ObjectId) -> u32 {
+    let o = st.object(card);
+    if o.zone == Zone::Command {
+        2 * st
+            .player(p)
+            .commander_casts
+            .get(&o.card_instance)
+            .copied()
+            .unwrap_or(0)
+    } else {
+        0
+    }
 }
 
 /// What is being cast or activated, resolved from the catalog.
@@ -108,6 +127,13 @@ fn requirement(cost: &Option<ManaCost>, x: u32) -> ManaRequirement {
     cost.as_ref()
         .map(|c| ManaRequirement::from_cost(c, x))
         .unwrap_or_default()
+}
+
+/// CR 601.2f: the total cost — the mana cost plus additional costs such as commander tax.
+fn total(cost: &Option<ManaCost>, x: u32, tax: u32) -> ManaRequirement {
+    let mut r = requirement(cost, x);
+    r.generic += tax;
+    r
 }
 
 /// CR 302.6 / 602.5a: can this permanent's `{T}` abilities be activated now?
@@ -184,8 +210,12 @@ pub(crate) fn sorcery_timing(st: &GameState, p: PlayerId) -> bool {
 pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool {
     match &source {
         CastSource::Card(card) => {
+            let o = st.object(*card);
+            // From your hand, or your commander from the command zone (CR 903.8).
+            let from_ok = o.owner == p
+                && (o.zone == Zone::Hand || (o.zone == Zone::Command && st.is_commander(*card)));
             let c = chars(st, *card);
-            if c.is(CardType::Land) {
+            if !from_ok || c.is(CardType::Land) {
                 return false;
             }
             // CR 117.1a, 702.8a
@@ -221,7 +251,11 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
     {
         return false;
     }
-    feasible(st, p, &requirement(&prop.cost, 0), prop.tap)
+    let tax = match &source {
+        CastSource::Card(card) => commander_tax(st, p, *card),
+        _ => 0,
+    };
+    feasible(st, p, &total(&prop.cost, 0, tax), prop.tap)
 }
 
 impl CastFrame {
@@ -234,6 +268,8 @@ impl CastFrame {
             modes: Vec::new(),
             x: 0,
             targets: Vec::new(),
+            tax: 0,
+            from_command: None,
         }
     }
 
@@ -274,6 +310,13 @@ impl CastFrame {
         loop {
             match self.stage {
                 CastStage::Announce => {
+                    if let CastSource::Card(card) = &self.source {
+                        // CR 903.8 / 601.2f: commander tax, determined before the card moves.
+                        self.tax = commander_tax(st, p, *card);
+                        if st.object(*card).zone == Zone::Command {
+                            self.from_command = Some(st.object(*card).card_instance);
+                        }
+                    }
                     let put = |st: &mut GameState, a: GameAction| match execute(st, a) {
                         crate::actions::ActionResult::Moved(id) => id,
                         r => unreachable!("{r:?}"),
@@ -375,7 +418,7 @@ impl CastFrame {
                             });
                         } else {
                             let mut max = 0;
-                            while feasible(st, p, &requirement(&prop.cost, max + 1), prop.tap) {
+                            while feasible(st, p, &total(&prop.cost, max + 1, self.tax), prop.tap) {
                                 max += 1;
                             }
                             return self.ask(
@@ -447,7 +490,7 @@ impl CastFrame {
                 CastStage::Pay => {
                     // CR 601.2f: total cost, locked in. CR 601.2g: mana abilities.
                     let prop = self.proposal(st);
-                    let req = requirement(&prop.cost, self.x);
+                    let req = total(&prop.cost, self.x, self.tax);
                     if let Some(inp) = input.take() {
                         let Some(OptionDesc::TapForMana { source, mana }) =
                             inp.picked_one().cloned()
@@ -508,7 +551,7 @@ impl CastFrame {
                 CastStage::PayGeneric => {
                     let inp = input.take().expect("generic allocation");
                     let prop = self.proposal(st);
-                    let req = requirement(&prop.cost, self.x);
+                    let req = total(&prop.cost, self.x, self.tax);
                     let mut alloc = [0u32; 6];
                     for (i, &n) in inp.allocation().iter().enumerate() {
                         let OptionDesc::Mana { mana } = inp.decision.options[i] else {
@@ -543,6 +586,9 @@ impl CastFrame {
         }
         if let Some(source) = tap {
             execute(st, GameAction::Tap { object: source });
+        }
+        if let Some(card) = self.from_command {
+            execute(st, GameAction::CommanderCast { player: p, card });
         }
         if let CastSource::Card(_) = self.source {
             let spell = self.object.unwrap();

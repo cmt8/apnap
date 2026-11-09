@@ -40,7 +40,7 @@ pub mod zones;
 pub use agent::Agent;
 pub use config::{Format, GameConfig};
 pub use decision::{ChoiceKind, IllegalResponse, OptionDesc, PendingDecision, Primitive, Response};
-pub use engine::{SetupError, StepOutput, new_game, start, step};
+pub use engine::{SetupError, StepOutput, new_game, new_game_with_commanders, start, step};
 pub use events::Event;
 pub use ids::{CardInstanceId, ObjectId, PlayerId, Timestamp};
 pub use state::GameState;

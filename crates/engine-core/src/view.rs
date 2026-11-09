@@ -3,6 +3,7 @@
 //! libraries are counts only.
 
 use crate::decision::PendingDecision;
+use crate::ids::CardInstanceId;
 use crate::ids::{ObjectId, PlayerId};
 use crate::layers::chars;
 use crate::mana::ManaPool;
@@ -11,7 +12,7 @@ use crate::state::{CombatState, GameState};
 use crate::turn::Step;
 use alloc::string::String;
 use alloc::vec::Vec;
-use card_model::CardType;
+use card_model::{CardType, CounterKind, Keyword};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +27,13 @@ pub struct ObjectView {
     pub tapped: bool,
     pub damage_marked: u32,
     pub summoning_sick: bool,
+    pub keywords: Vec<Keyword>,
+    pub mana_value: u32,
+    pub counters: Vec<(CounterKind, u32)>,
+    /// CR 903.3: a commander (public information).
+    pub is_commander: bool,
+    pub card_instance: CardInstanceId,
+    pub attached_to: Option<ObjectId>,
 }
 
 /// A spell or ability on the stack.
@@ -51,6 +59,10 @@ pub struct PlayerPublic {
     pub library_size: usize,
     pub mana_pool: ManaPool,
     pub graveyard: Vec<ObjectView>,
+    /// CR 903.10a: combat damage taken from each commander card.
+    pub commander_damage: Vec<(CardInstanceId, u32)>,
+    /// CR 903.8: casts from the command zone, per commander card.
+    pub commander_casts: Vec<(CardInstanceId, u32)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +78,8 @@ pub struct PlayerView {
     /// Bottom to top. Everything on the stack is public.
     pub stack: Vec<StackView>,
     pub exile: Vec<ObjectView>,
+    /// The command zone (public).
+    pub command: Vec<ObjectView>,
     pub combat: Option<CombatState>,
     /// The pending decision, if it is the viewer's.
     pub decision: Option<PendingDecision>,
@@ -85,6 +99,12 @@ fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
         tapped: o.tapped,
         damage_marked: o.damage_marked,
         summoning_sick: o.summoning_sick,
+        mana_value: c.mana_cost.as_ref().map_or(0, |m| m.mana_value()),
+        keywords: c.keywords,
+        counters: o.counters.iter().map(|(k, n)| (*k, *n)).collect(),
+        is_commander: st.is_commander(id),
+        card_instance: o.card_instance,
+        attached_to: o.attached_to,
     }
 }
 
@@ -109,6 +129,8 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
                 library_size: st.zones.libraries[p.id.index()].len(),
                 mana_pool: p.mana_pool,
                 graveyard: views(st, &st.zones.graveyards[p.id.index()]),
+                commander_damage: p.commander_damage.iter().map(|(c, n)| (*c, *n)).collect(),
+                commander_casts: p.commander_casts.iter().map(|(c, n)| (*c, *n)).collect(),
             })
             .collect(),
         hand: views(st, &st.zones.hands[viewer.index()]),
@@ -135,6 +157,7 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
             })
             .collect(),
         exile: views(st, &st.zones.exile),
+        command: views(st, &st.zones.command),
         combat: st.combat.clone(),
         decision: st.pending.clone().filter(|d| d.player == viewer),
     }

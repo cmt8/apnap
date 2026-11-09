@@ -127,6 +127,17 @@ pub enum RepKey {
     Static { source: ObjectId, index: u16 },
     /// A prevention shield (CR 615.7).
     Shield(u32),
+    /// CR 903.9b: "If a commander would be put into its owner's hand or library from
+    /// anywhere, its owner may put it into the command zone instead." Optional; a rule, not an
+    /// ability of any object.
+    CommanderReturn,
+}
+
+impl RepKey {
+    /// Optional effects may be declined (the affected player is always asked).
+    pub fn optional(self) -> bool {
+        matches!(self, RepKey::CommanderReturn)
+    }
 }
 
 /// A proposed event plus the effects already applied to it (CR 614.5).
@@ -218,6 +229,16 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
             }
         }
     }
+    // CR 903.9b
+    if let Proposed::Move {
+        object,
+        to: Zone::Hand | Zone::Library,
+        ..
+    } = &p.event
+        && st.is_commander(*object)
+    {
+        out.push(RepKey::CommanderReturn);
+    }
     out.retain(|k| !p.applied.contains(k));
     out
 }
@@ -300,6 +321,27 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
                 amount: amount - n,
                 combat,
             })
+        }
+        RepKey::CommanderReturn => {
+            let mut ev = ev;
+            if let Proposed::Move {
+                to,
+                position,
+                shuffle,
+                counters,
+                tapped,
+                attach_to,
+                ..
+            } = &mut ev
+            {
+                *to = Zone::Command;
+                *position = LibraryPosition::Top;
+                *shuffle = false;
+                counters.clear();
+                *tapped = false;
+                *attach_to = None;
+            }
+            Some(ev)
         }
         RepKey::Static { source, index } => {
             let AbilityDef::Replacement { with, .. } =

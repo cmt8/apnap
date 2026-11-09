@@ -26,6 +26,8 @@ use card_model::{CardType, CounterKind, Supertype};
 #[derive(Debug, Default)]
 pub(crate) struct Gathered {
     pub events: Vec<Proposed>,
+    /// CR 903.9a: commanders whose owner may move them to the command zone.
+    pub commander: Vec<ObjectId>,
     /// CR 704.5j: (controller, legendary permanents sharing a name).
     pub legend: Vec<(PlayerId, Vec<ObjectId>)>,
 }
@@ -48,12 +50,28 @@ pub(crate) fn gather(st: &mut GameState) -> Gathered {
                 player: p.id,
                 reason: LossReason::DrewFromEmptyLibrary,
             });
+        } else if p.commander_damage.values().any(|d| *d >= 21) {
+            // CR 704.6c / 903.10a
+            g.events.push(Proposed::LoseGame {
+                player: p.id,
+                reason: LossReason::CommanderDamage,
+            });
         }
     }
     // 704.5b and 704.5h look back only to the previous check.
     for p in &mut st.players {
         p.drew_from_empty_library = false;
     }
+    // CR 903.9a: a commander in a graveyard or exile that was put there since SBAs were last
+    // checked (still there, as the same object).
+    g.commander = core::mem::take(&mut st.commander_moved)
+        .into_iter()
+        .filter(|id| {
+            st.objects
+                .get(id)
+                .is_some_and(|o| matches!(o.zone, Zone::Graveyard | Zone::Exile))
+        })
+        .collect();
 
     // CR 704.5d: a token in a zone other than the battlefield ceases to exist.
     for o in st.objects.values() {
