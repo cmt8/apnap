@@ -54,6 +54,13 @@ pub const M2_LABELS: &[&str] = &[
     "Priority/PickN",
 ];
 
+/// M3 (Commander games) adds the commander's return (CR 903.9a) and trample's damage split.
+pub const M3_LABELS: &[&str] = &[
+    "CommanderToCommandZone/PickN",
+    "AssignCombatDamage/Number",
+    "Priority/PickN",
+];
+
 /// Indices worth suspending at: the first occurrence of each label, a mid-payment point
 /// (PayMana right after another PayMana: mana already in pool), and every `stride`-th.
 pub fn interesting_points(rec: &GameRecord, stride: usize) -> Vec<usize> {

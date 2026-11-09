@@ -638,6 +638,10 @@ pub enum Effect {
     Destroy {
         what: ObjRef,
     },
+    /// "Return [it] to its owner's hand."
+    ReturnToHand {
+        what: ObjRef,
+    },
     /// CR 111: create `count` tokens (a token card in the catalog) under `who`'s control.
     CreateToken {
         token: String,

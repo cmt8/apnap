@@ -1,0 +1,14 @@
+CardScript(
+    verified: true,
+    tests: ["cr_903_5_commander_deck_validation"],
+    card: (
+        name: "Test Wildheart",
+        mana_cost: Some("{1}{R}{G}"),
+        supertypes: [Legendary],
+        card_types: [Creature],
+        creature_types: ["Elf"],
+        power: Some(3),
+        toughness: Some(3),
+        keywords: [Haste, Lifelink],
+    ),
+)

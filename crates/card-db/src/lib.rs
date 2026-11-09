@@ -7,8 +7,9 @@
 //! printed characteristics, and only invented "Test …" cards and basic lands exist.
 
 use card_model::{
-    AbilityDef, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript, CardType, Effect, Mode,
-    ObjRef, PlayerRef, ReplaceWith, Replaces, TargetFilter, TargetRef,
+    AbilityDef, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript, CardType, Color, Effect,
+    ManaCost, ManaProduce, ManaSymbol, ManaType, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces,
+    Supertype, TargetFilter, TargetRef,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -315,7 +316,9 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         },
         Effect::EachPlayer(_) => {}
         Effect::DamageEachPlayer { amount: a } => amount(a, p),
-        Effect::Destroy { what } | Effect::Apply { what, .. } => obj(what, p),
+        Effect::Destroy { what } | Effect::ReturnToHand { what } | Effect::Apply { what, .. } => {
+            obj(what, p)
+        }
         Effect::PutCounters { what, count, .. } => {
             obj(what, p);
             amount(count, p);
@@ -336,7 +339,127 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
 #[derive(Clone, Debug, Deserialize)]
 pub struct DeckFile {
     pub name: String,
+    /// CR 903.3: the commander (Commander decks only), not counted in `cards`.
+    #[serde(default)]
+    pub commander: Option<String>,
     pub cards: Vec<(u32, String)>,
+}
+
+/// A deck resolved against a catalog.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Deck {
+    pub name: String,
+    pub commander: Option<CardDefId>,
+    pub cards: Vec<CardDefId>,
+}
+
+/// Parse a deck list (with an optional commander) and resolve names against `catalog`.
+pub fn load_deck_file(src: Source<'_>, catalog: &CardCatalog) -> Result<Deck, LoadError> {
+    let deck: DeckFile = ron::from_str(src.text).map_err(|e| err(src.path, e.to_string()))?;
+    let find = |name: &str| {
+        catalog
+            .find(name)
+            .ok_or_else(|| err(src.path, format!("unknown card {name:?}")))
+    };
+    let mut cards = Vec::new();
+    for (n, name) in &deck.cards {
+        let id = find(name)?;
+        cards.extend(std::iter::repeat_n(id, *n as usize));
+    }
+    let commander = deck.commander.as_deref().map(find).transpose()?;
+    Ok(Deck {
+        name: deck.name,
+        commander,
+        cards,
+    })
+}
+
+/// CR 903.4: a card's color identity — the colors of mana symbols in its mana cost or rules
+/// text, plus its color indicator. (Basic land types are handled by CR 903.5d.)
+pub fn color_identity(def: &CardDef) -> Vec<Color> {
+    let mut out: Vec<Color> = def.colors.clone().unwrap_or_default();
+    let add_cost = |m: &ManaCost, out: &mut Vec<Color>| {
+        for s in &m.symbols {
+            if let ManaSymbol::Colored(c) = s {
+                out.push(*c);
+            }
+        }
+    };
+    if let Some(m) = &def.mana_cost {
+        add_cost(m, &mut out);
+    }
+    for a in &def.abilities {
+        match a {
+            AbilityDef::Activated { cost, .. } | AbilityDef::Mana { cost, .. } => {
+                if let Some(m) = &cost.mana {
+                    add_cost(m, &mut out);
+                }
+                if let AbilityDef::Mana {
+                    produce: ManaProduce::One(t),
+                    ..
+                } = a
+                    && let Some(c) = Color::ALL
+                        .into_iter()
+                        .find(|c| ManaType::from_color(*c) == *t)
+                {
+                    out.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// CR 903.5: Commander deck construction rules (and 903.3 for the commander).
+pub fn validate_commander_deck(catalog: &CardCatalog, deck: &Deck) -> Vec<String> {
+    let mut p = Vec::new();
+    let Some(cmd) = deck.commander else {
+        return vec!["a Commander deck needs a commander (CR 903.3)".into()];
+    };
+    let c = catalog.get(cmd);
+    if !(c.has_type(CardType::Creature) && c.supertypes.contains(&Supertype::Legendary)) {
+        p.push(format!("{} isn't a legendary creature (CR 903.3)", c.name));
+    }
+    if deck.cards.len() + 1 != 100 {
+        p.push(format!(
+            "{} cards including the commander; must be exactly 100 (CR 903.5a)",
+            deck.cards.len() + 1
+        ));
+    }
+    let identity = color_identity(c);
+    let mut seen = BTreeSet::new();
+    for &id in deck.cards.iter().chain(std::iter::once(&cmd)) {
+        let d = catalog.get(id);
+        if d.token {
+            p.push(format!("{} is a token definition", d.name));
+        }
+        if !d.supertypes.contains(&Supertype::Basic) && !seen.insert(id) {
+            p.push(format!("more than one {} (CR 903.5b)", d.name));
+        }
+        if let Some(bad) = color_identity(d)
+            .into_iter()
+            .find(|x| !identity.contains(x))
+        {
+            p.push(format!(
+                "{} has {bad:?} outside the commander's color identity (CR 903.5c)",
+                d.name
+            ));
+        }
+        if let Some(t) = d
+            .land_types
+            .iter()
+            .find(|t| !identity.contains(&t.produces()))
+        {
+            p.push(format!(
+                "{} has the basic land type {t:?} (CR 903.5d)",
+                d.name
+            ));
+        }
+    }
+    p
 }
 
 /// Parse a deck list and resolve its card names against `catalog`, in list order.

@@ -1,0 +1,14 @@
+CardScript(
+    verified: true,
+    tests: ["cr_702_19b_trample_assigns_excess_to_player"],
+    card: (
+        name: "Test Trampler",
+        mana_cost: Some("{3}{G}"),
+        supertypes: [],
+        card_types: [Creature],
+        creature_types: ["Warrior"],
+        power: Some(4),
+        toughness: Some(4),
+        keywords: [Trample],
+    ),
+)

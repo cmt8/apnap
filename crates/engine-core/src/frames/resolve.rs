@@ -391,6 +391,10 @@ impl ResolveFrame {
                 }
                 _ => Vec::new(),
             },
+            Effect::ReturnToHand { what } => match self.obj(st, k, what) {
+                Some(o) => vec![Proposed::moving(o, Zone::Hand, MoveCause::Rule)],
+                None => Vec::new(),
+            },
             Effect::Destroy { what } => match self.obj(st, k, what) {
                 // CR 701.8a
                 Some(o) => vec![Proposed::moving(o, Zone::Graveyard, MoveCause::Destroy)],

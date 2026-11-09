@@ -1,0 +1,15 @@
+// Enchant creature. You control enchanted creature. (Layer 2.)
+CardScript(
+    verified: true,
+    tests: ["cr_613_1b_aura_gains_control", "cr_800_4a_leaving_player_aura_and_trigger"],
+    card: (
+        name: "Test Puppetry",
+        mana_cost: Some("{2}{R}{R}"),
+        card_types: [Enchantment],
+        creature_types: ["Aura"],
+        abilities: [
+            Enchant(Creature),
+            Static(affected: Enchanted, effects: [GainControl]),
+        ],
+    ),
+)

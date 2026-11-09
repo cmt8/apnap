@@ -1,0 +1,11 @@
+// Return target creature to its owner's hand.
+CardScript(
+    verified: true,
+    tests: ["cr_903_9b_commander_instead_of_hand"],
+    card: (
+        name: "Test Recall",
+        mana_cost: Some("{1}{G}"),
+        card_types: [Instant],
+        abilities: [Spell(Effect((targets: [Creature], effect: ReturnToHand(what: Target(0)))))],
+    ),
+)

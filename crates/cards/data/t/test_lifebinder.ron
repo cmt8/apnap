@@ -1,0 +1,14 @@
+CardScript(
+    verified: true,
+    tests: ["cr_702_15b_lifelink"],
+    card: (
+        name: "Test Lifebinder",
+        mana_cost: Some("{1}{G}"),
+        supertypes: [],
+        card_types: [Creature],
+        creature_types: ["Warrior"],
+        power: Some(2),
+        toughness: Some(2),
+        keywords: [Lifelink],
+    ),
+)

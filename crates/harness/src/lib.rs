@@ -26,13 +26,24 @@ pub enum Setup {
     M1 { players: u8 },
     /// M2: `players` players with the M2 deck (`decks/m2_mixed.ron`).
     M2 { players: u8 },
+    /// M3: a Commander game (CR 903) with `players` players, using the four commander decks
+    /// in seat order (`decks/commander_*.ron`).
+    Commander { players: u8 },
 }
+
+/// The Commander decks, in seat order.
+pub const COMMANDER_DECKS: &[&str] = &[
+    "commander_warlord.ron",
+    "commander_matriarch.ron",
+    "commander_tyrant.ron",
+    "commander_wildheart.ron",
+];
 
 impl Setup {
     pub fn players(self) -> u8 {
         match self {
             Setup::M0Vanilla => 2,
-            Setup::M1 { players } | Setup::M2 { players } => players,
+            Setup::M1 { players } | Setup::M2 { players } | Setup::Commander { players } => players,
         }
     }
 
@@ -42,12 +53,17 @@ impl Setup {
             Setup::M0Vanilla => "m0".into(),
             Setup::M1 { players } => format!("m1-{players}p"),
             Setup::M2 { players } => format!("m2-{players}p"),
+            Setup::Commander { players } => format!("cmd-{players}p"),
         }
     }
 
     pub fn parse(label: &str) -> Option<Setup> {
         if label == "m0" {
             return Some(Setup::M0Vanilla);
+        }
+        if let Some(rest) = label.strip_prefix("cmd-") {
+            let n = rest.strip_suffix('p')?.parse().ok()?;
+            return Some(Setup::Commander { players: n });
         }
         if let Some(rest) = label.strip_prefix("m2-") {
             let n = rest.strip_suffix('p')?.parse().ok()?;
@@ -58,12 +74,28 @@ impl Setup {
     }
 
     pub fn game(self, seed: u64) -> GameState {
+        if let Setup::Commander { players } = self {
+            let decks: Vec<card_db::Deck> = (0..players as usize)
+                .map(|i| deck_file(COMMANDER_DECKS[i % COMMANDER_DECKS.len()]))
+                .collect();
+            let cards: Vec<Vec<CardDefId>> = decks.iter().map(|d| d.cards.clone()).collect();
+            let commanders: Vec<Option<CardDefId>> = decks.iter().map(|d| d.commander).collect();
+            return engine_core::new_game_with_commanders(
+                GameConfig::commander(players),
+                catalog(),
+                &cards,
+                &commanders,
+                seed,
+            )
+            .expect("valid commander setup");
+        }
         let (config, deck_file) = match self {
             Setup::M0Vanilla => (GameConfig::constructed_1v1(), "m0_vanilla.ron"),
             Setup::M1 { players: 2 } => (GameConfig::constructed_1v1(), "m1_red_green.ron"),
             Setup::M1 { players } => (GameConfig::free_for_all(players), "m1_red_green.ron"),
             Setup::M2 { players: 2 } => (GameConfig::constructed_1v1(), "m2_mixed.ron"),
             Setup::M2 { players } => (GameConfig::free_for_all(players), "m2_mixed.ron"),
+            Setup::Commander { .. } => unreachable!("handled above"),
         };
         let d = deck(deck_file);
         let decks = vec![d; config.num_players as usize];
@@ -89,6 +121,14 @@ pub fn catalog() -> Arc<CardCatalog> {
             }
         })
         .clone()
+}
+
+/// A deck file (with its commander, if any) from `crates/cards/decks/<file>`.
+pub fn deck_file(file: &str) -> card_db::Deck {
+    let text = cards::deck(file).unwrap_or_else(|| panic!("no deck {file}"));
+    let path = format!("crates/cards/decks/{file}");
+    card_db::load_deck_file(card_db::Source { path: &path, text }, &catalog())
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// A deck from `crates/cards/decks/<file>`, resolved against [`catalog`].

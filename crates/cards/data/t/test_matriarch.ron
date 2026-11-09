@@ -1,0 +1,14 @@
+CardScript(
+    verified: true,
+    tests: ["cr_903_9a_commander_from_graveyard_to_command_zone"],
+    card: (
+        name: "Test Matriarch",
+        mana_cost: Some("{3}{G}"),
+        supertypes: [Legendary],
+        card_types: [Creature],
+        creature_types: ["Elf"],
+        power: Some(3),
+        toughness: Some(5),
+        keywords: [Vigilance],
+    ),
+)

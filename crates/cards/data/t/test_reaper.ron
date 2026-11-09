@@ -1,0 +1,14 @@
+CardScript(
+    verified: true,
+    tests: ["cr_702_2c_deathtouch_trample_one_is_lethal"],
+    card: (
+        name: "Test Reaper",
+        mana_cost: Some("{2}{G}"),
+        supertypes: [],
+        card_types: [Creature],
+        creature_types: ["Warrior"],
+        power: Some(2),
+        toughness: Some(2),
+        keywords: [Deathtouch, Trample],
+    ),
+)

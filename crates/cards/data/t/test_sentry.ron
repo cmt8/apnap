@@ -1,0 +1,14 @@
+CardScript(
+    verified: true,
+    tests: ["cr_702_20b_vigilance"],
+    card: (
+        name: "Test Sentry",
+        mana_cost: Some("{2}{G}"),
+        supertypes: [],
+        card_types: [Creature],
+        creature_types: ["Warrior"],
+        power: Some(2),
+        toughness: Some(3),
+        keywords: [Vigilance],
+    ),
+)

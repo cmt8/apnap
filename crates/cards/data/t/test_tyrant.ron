@@ -1,0 +1,14 @@
+CardScript(
+    verified: true,
+    tests: ["cr_903_9b_commander_instead_of_hand"],
+    card: (
+        name: "Test Tyrant",
+        mana_cost: Some("{3}{R}{R}"),
+        supertypes: [Legendary],
+        card_types: [Creature],
+        creature_types: ["Dragon"],
+        power: Some(5),
+        toughness: Some(3),
+        keywords: [Menace],
+    ),
+)

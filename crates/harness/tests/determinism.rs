@@ -9,7 +9,7 @@
 
 mod common;
 
-use common::{M0_LABELS, M1_LABELS, M2_LABELS, interesting_points, label};
+use common::{M0_LABELS, M1_LABELS, M2_LABELS, M3_LABELS, interesting_points, label};
 use engine_core::state::GameState;
 use harness::{GameRecord, PlayOptions, Setup, feed, load_json, play_random, save_json};
 use std::collections::BTreeSet;
@@ -63,12 +63,18 @@ fn tier(setup: Setup) -> u8 {
         Setup::M0Vanilla => 0,
         Setup::M1 { .. } => 1,
         Setup::M2 { .. } => 2,
+        Setup::Commander { .. } => 3,
     }
 }
 
 /// The labels each tier's cases must cover between them.
 fn assert_covered(covered: &BTreeSet<(u8, String)>, what: &str) {
-    for (t, labels) in [(0, M0_LABELS), (1, M1_LABELS), (2, M2_LABELS)] {
+    for (t, labels) in [
+        (0, M0_LABELS),
+        (1, M1_LABELS),
+        (2, M2_LABELS),
+        (3, M3_LABELS),
+    ] {
         for l in labels {
             assert!(
                 covered.contains(&(t, l.to_string())),

@@ -1,0 +1,14 @@
+CardScript(
+    verified: true,
+    tests: ["cr_510_4_first_strike_deals_damage_first"],
+    card: (
+        name: "Test Duelist",
+        mana_cost: Some("{1}{R}"),
+        supertypes: [],
+        card_types: [Creature],
+        creature_types: ["Warrior"],
+        power: Some(2),
+        toughness: Some(1),
+        keywords: [FirstStrike],
+    ),
+)

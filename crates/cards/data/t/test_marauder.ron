@@ -1,0 +1,14 @@
+CardScript(
+    verified: true,
+    tests: ["cr_702_111b_menace"],
+    card: (
+        name: "Test Marauder",
+        mana_cost: Some("{1}{R}"),
+        supertypes: [],
+        card_types: [Creature],
+        creature_types: ["Warrior"],
+        power: Some(2),
+        toughness: Some(2),
+        keywords: [Menace],
+    ),
+)

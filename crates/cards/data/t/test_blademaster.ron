@@ -1,0 +1,14 @@
+CardScript(
+    verified: true,
+    tests: ["cr_510_4_double_strike_deals_damage_twice"],
+    card: (
+        name: "Test Blademaster",
+        mana_cost: Some("{2}{R}"),
+        supertypes: [],
+        card_types: [Creature],
+        creature_types: ["Warrior"],
+        power: Some(2),
+        toughness: Some(2),
+        keywords: [DoubleStrike],
+    ),
+)

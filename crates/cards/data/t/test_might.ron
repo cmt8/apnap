@@ -1,0 +1,15 @@
+// Enchant creature. Enchanted creature gets +2/+2 and has trample.
+CardScript(
+    verified: true,
+    tests: ["cr_303_4_aura_attaches_and_falls_off"],
+    card: (
+        name: "Test Might",
+        mana_cost: Some("{G}"),
+        card_types: [Enchantment],
+        creature_types: ["Aura"],
+        abilities: [
+            Enchant(Creature),
+            Static(affected: Enchanted, effects: [ModifyPT(2, 2), AddKeywords([Trample])]),
+        ],
+    ),
+)

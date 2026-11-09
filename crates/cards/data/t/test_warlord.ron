@@ -1,0 +1,14 @@
+CardScript(
+    verified: true,
+    tests: ["cr_903_8_commander_tax_across_three_casts", "cr_903_10a_commander_damage_across_death_and_recast"],
+    card: (
+        name: "Test Warlord",
+        mana_cost: Some("{2}{R}{G}"),
+        supertypes: [Legendary],
+        card_types: [Creature],
+        creature_types: ["Giant"],
+        power: Some(4),
+        toughness: Some(4),
+        keywords: [Trample],
+    ),
+)
