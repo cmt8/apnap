@@ -1,0 +1,6 @@
+RealCard(
+    oracle_id: "856245a6-c697-4f03-90be-77d8eb2d274e",
+    name: "Terrian, World Tyrant",
+    verified: true,
+    tests: ["terrian_world_tyrant_is_a_legendary_9_7"],
+)

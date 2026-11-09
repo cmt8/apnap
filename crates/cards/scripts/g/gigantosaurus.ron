@@ -1,0 +1,6 @@
+RealCard(
+    oracle_id: "e666bae7-dd51-4921-8b89-7e8d423caba0",
+    name: "Gigantosaurus",
+    verified: true,
+    tests: ["gigantosaurus_is_a_vanilla_10_10"],
+)

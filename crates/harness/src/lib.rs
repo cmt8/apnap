@@ -228,6 +228,42 @@ pub fn deck_file(file: &str) -> card_db::Deck {
         .unwrap_or_else(|e| panic!("{e}"))
 }
 
+/// The self-contained cards plus every verified real-card script, compiled against the
+/// printed data in the local Scryfall cache. Panics with the fetch hint if the cache is
+/// missing (decisions.md D-035): run `cargo run -p harness -- fetch-cards` once.
+pub fn full_catalog() -> Arc<CardCatalog> {
+    static CATALOG: OnceLock<Arc<CardCatalog>> = OnceLock::new();
+    CATALOG
+        .get_or_init(|| {
+            let data =
+                card_db::scryfall::cached(&precon_card_names()).unwrap_or_else(|e| panic!("{e}"));
+            let src =
+                |list: &'static [(&'static str, &'static str)]| -> Vec<card_db::Source<'static>> {
+                    list.iter()
+                        .map(|&(path, text)| card_db::Source { path, text })
+                        .collect()
+                };
+            // Unverified scripts are skipped in strict play: only verified ones are loaded.
+            let verified: Vec<card_db::Source<'static>> = src(cards::SCRIPTS)
+                .into_iter()
+                .filter(|s| card_db::parse_real(*s).is_ok_and(|r| r.verified))
+                .collect();
+            match card_db::load_full_catalog(
+                &src(cards::CARDS),
+                &verified,
+                &data,
+                card_db::Strictness::Strict,
+            ) {
+                Ok(c) => Arc::new(c),
+                Err(errs) => {
+                    let msg: Vec<String> = errs.iter().map(ToString::to_string).collect();
+                    panic!("real-card scripts failed to load:\n{}", msg.join("\n"))
+                }
+            }
+        })
+        .clone()
+}
+
 /// A deck from `crates/cards/decks/<file>`, resolved against [`catalog`].
 pub fn deck(file: &str) -> Vec<CardDefId> {
     let text = cards::deck(file).unwrap_or_else(|| panic!("no deck {file}"));

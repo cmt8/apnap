@@ -1,0 +1,7 @@
+RealCard(
+    oracle_id: "50372c54-359c-4ee6-9e21-1e40ba53652d",
+    name: "Segovian Angel",
+    verified: true,
+    tests: ["segovian_angel_has_flying_and_vigilance"],
+    keywords: [Flying, Vigilance],
+)

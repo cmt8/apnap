@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 /// A real card's script file (`crates/cards/scripts/<letter>/<slug>.ron`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "RealCard")]
 pub struct RealCardScript {
     /// Scryfall oracle id: the join key (names can change; oracle ids don't).
     pub oracle_id: String,
