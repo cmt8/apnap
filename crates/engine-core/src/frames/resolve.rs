@@ -132,11 +132,11 @@ impl ResolveFrame {
     }
 
     fn damage(&self, st: &GameState, target: DamageTarget, amount: u32) -> Proposed {
+        let c = self.source_chars(st);
         Proposed::Damage {
             source: self.source,
-            deathtouch: self
-                .source_chars(st)
-                .is_some_and(|c| c.has(Keyword::Deathtouch)),
+            deathtouch: c.as_ref().is_some_and(|c| c.has(Keyword::Deathtouch)),
+            lifelink: c.as_ref().is_some_and(|c| c.has(Keyword::Lifelink)),
             target,
             amount,
             combat: false,
@@ -234,11 +234,35 @@ impl ResolveFrame {
             StackKind::Spell => {
                 self.source = top.id;
                 if chars(st, top.id).is_permanent_type() {
-                    // CR 608.3a: it becomes a permanent under its controller's control.
+                    // CR 608.3b: an Aura spell checks its target; if it's illegal, the spell
+                    // doesn't resolve and goes to its owner's graveyard.
+                    let mut attach = None;
+                    if let Some(filter) = st.card_def(top.id).enchant() {
+                        let target = top.targets.first().and_then(|t| t.first()).copied();
+                        match target {
+                            Some(t @ Target::Object(o))
+                                if is_legal(st, filter, t, top.controller, Some(top.id)) =>
+                            {
+                                attach = Some(o)
+                            }
+                            _ => {
+                                st.emit(Event::Fizzled { object: top.id });
+                                return Some(self.leave_stack(st, MoveCause::Fizzled));
+                            }
+                        }
+                    }
+                    // CR 608.3a: it becomes a permanent under its controller's control (an
+                    // Aura enters attached to its target, CR 303.4).
                     st.emit(Event::Resolved { spell: top.id });
                     let mut mv = Proposed::moving(top.id, Zone::Battlefield, MoveCause::Resolve);
-                    if let Proposed::Move { controller, .. } = &mut mv {
+                    if let Proposed::Move {
+                        controller,
+                        attach_to,
+                        ..
+                    } = &mut mv
+                    {
                         *controller = Some(top.controller);
+                        *attach_to = attach;
                     }
                     return Some(Flow::then(Frame::Apply(ApplyFrame::new(st, vec![mv]))));
                 }
@@ -477,7 +501,10 @@ fn each_player_options(
                 .battlefield
                 .iter()
                 .copied()
-                .filter(|&id| st.object(id).controller == p && chars(st, id).is(CardType::Creature))
+                .filter(|&id| {
+                    let c = chars(st, id);
+                    c.controller == p && c.is(CardType::Creature)
+                })
                 .collect(),
         ),
         EachPlayerAction::Draw(_) => unreachable!("Draw has no choice"),

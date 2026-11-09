@@ -133,7 +133,7 @@ fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
         }
     }
     for &source in &st.zones.battlefield {
-        if st.object(source).controller != p {
+        if crate::layers::controller_of(st, source) != p {
             continue;
         }
         for (index, a) in abilities(st, source) {

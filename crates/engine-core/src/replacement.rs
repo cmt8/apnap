@@ -53,10 +53,14 @@ pub enum Proposed {
         counters: Vec<(CounterKind, u32)>,
         /// Shuffle its new library afterwards ("shuffle it into its owner's library").
         shuffle: bool,
+        /// An Aura entering attached to this object (CR 303.4).
+        attach_to: Option<ObjectId>,
     },
     Damage {
         source: ObjectId,
         deathtouch: bool,
+        /// CR 702.15b: the source has lifelink.
+        lifelink: bool,
         target: DamageTarget,
         amount: u32,
         combat: bool,
@@ -111,6 +115,7 @@ impl Proposed {
             tapped: false,
             counters: Vec::new(),
             shuffle: false,
+            attach_to: None,
         }
     }
 }
@@ -138,7 +143,8 @@ pub fn affected_player(st: &GameState, ev: &Proposed) -> PlayerId {
         st.objects
             .get(&o)
             .map(|x| match x.zone {
-                Zone::Battlefield | Zone::Stack => x.controller,
+                Zone::Battlefield => crate::layers::controller_of(st, x.id),
+                Zone::Stack => x.controller,
                 _ => x.owner,
             })
             .unwrap_or(st.turn.active)
@@ -217,7 +223,7 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
 }
 
 fn applies(st: &GameState, source: ObjectId, replaces: Replaces, ev: &Proposed) -> bool {
-    let you = st.object(source).controller;
+    let you = crate::layers::controller_of(st, source);
     match (replaces, ev) {
         (
             Replaces::CreateTokens,
@@ -227,10 +233,9 @@ fn applies(st: &GameState, source: ObjectId, replaces: Replaces, ev: &Proposed) 
         ) => *controller == you && *count > 0,
         (Replaces::PutCountersOnYourPermanents, Proposed::PutCounters { object, count, .. }) => {
             *count > 0
-                && st
-                    .objects
-                    .get(object)
-                    .is_some_and(|o| o.zone == Zone::Battlefield && o.controller == you)
+                && st.objects.get(object).is_some_and(|o| {
+                    o.zone == Zone::Battlefield && crate::layers::controller_of(st, o.id) == you
+                })
         }
         // CR 614.16 / 122.6: counters it enters with count too.
         (
@@ -271,6 +276,7 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
             let Proposed::Damage {
                 source,
                 deathtouch,
+                lifelink,
                 target,
                 amount,
                 combat,
@@ -289,6 +295,7 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
             (amount > n).then_some(Proposed::Damage {
                 source,
                 deathtouch,
+                lifelink,
                 target,
                 amount: amount - n,
                 combat,
@@ -307,137 +314,40 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
     }
 }
 
-fn modify(ev: Proposed, with: ReplaceWith) -> Proposed {
-    match (with, ev) {
-        (
-            ReplaceWith::Twice,
-            Proposed::CreateTokens {
-                token,
-                count,
-                controller,
-            },
-        ) => Proposed::CreateTokens {
-            token,
-            count: count * 2,
-            controller,
-        },
-        (
-            ReplaceWith::Twice,
-            Proposed::PutCounters {
-                object,
-                kind,
-                count,
-            },
-        ) => Proposed::PutCounters {
-            object,
-            kind,
-            count: count * 2,
-        },
-        (
-            ReplaceWith::Twice,
-            Proposed::Move {
-                object,
-                to,
-                position,
-                controller,
-                cause,
-                tapped,
-                counters,
-                shuffle,
-            },
-        ) => Proposed::Move {
-            object,
-            to,
-            position,
-            controller,
-            cause,
-            tapped,
-            counters: counters.into_iter().map(|(k, n)| (k, n * 2)).collect(),
-            shuffle,
-        },
-        (
-            ReplaceWith::Exile,
-            Proposed::Move {
-                object,
-                controller,
-                cause,
-                ..
-            },
-        ) => Proposed::Move {
-            object,
-            to: Zone::Exile,
-            position: LibraryPosition::Top,
-            controller,
-            cause,
-            tapped: false,
-            counters: Vec::new(),
-            shuffle: false,
-        },
-        (
-            ReplaceWith::ShuffleIntoLibrary,
-            Proposed::Move {
-                object,
-                controller,
-                cause,
-                ..
-            },
-        ) => Proposed::Move {
-            object,
-            to: Zone::Library,
-            position: LibraryPosition::Top,
-            controller,
-            cause,
-            tapped: false,
-            counters: Vec::new(),
-            shuffle: true,
-        },
-        (
-            ReplaceWith::EntersTapped,
-            Proposed::Move {
-                object,
-                to,
-                position,
-                controller,
-                cause,
-                counters,
-                shuffle,
-                ..
-            },
-        ) => Proposed::Move {
-            object,
-            to,
-            position,
-            controller,
-            cause,
-            tapped: true,
-            counters,
-            shuffle,
-        },
-        (
-            ReplaceWith::EntersWithCounters { kind, n },
-            Proposed::Move {
-                object,
-                to,
-                position,
-                controller,
-                cause,
-                tapped,
-                mut counters,
-                shuffle,
-            },
-        ) => {
-            counters.push((kind, n));
-            Proposed::Move {
-                object,
-                to,
-                position,
-                controller,
-                cause,
-                tapped,
-                counters,
-                shuffle,
+fn modify(mut ev: Proposed, with: ReplaceWith) -> Proposed {
+    match (&mut ev, with) {
+        (Proposed::CreateTokens { count, .. }, ReplaceWith::Twice)
+        | (Proposed::PutCounters { count, .. }, ReplaceWith::Twice) => *count *= 2,
+        (Proposed::Move { counters, .. }, ReplaceWith::Twice) => {
+            for (_, n) in counters.iter_mut() {
+                *n *= 2;
             }
         }
-        (w, e) => unreachable!("{w:?} can't modify {e:?} (applicability checked)"),
+        (
+            Proposed::Move {
+                to,
+                position,
+                tapped,
+                counters,
+                shuffle,
+                attach_to,
+                ..
+            },
+            ReplaceWith::Exile | ReplaceWith::ShuffleIntoLibrary,
+        ) => {
+            let library = with == ReplaceWith::ShuffleIntoLibrary;
+            *to = if library { Zone::Library } else { Zone::Exile };
+            *position = LibraryPosition::Top;
+            *tapped = false;
+            counters.clear();
+            *shuffle = library;
+            *attach_to = None;
+        }
+        (Proposed::Move { tapped, .. }, ReplaceWith::EntersTapped) => *tapped = true,
+        (Proposed::Move { counters, .. }, ReplaceWith::EntersWithCounters { kind, n }) => {
+            counters.push((kind, n))
+        }
+        (e, w) => unreachable!("{w:?} can't modify {e:?} (applicability checked)"),
     }
+    ev
 }

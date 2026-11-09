@@ -78,7 +78,7 @@ fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
         id,
         name: c.name,
         owner: o.owner,
-        controller: o.controller,
+        controller: crate::layers::controller_of(st, id),
         card_types: c.card_types.to_vec(),
         power: c.power,
         toughness: c.toughness,

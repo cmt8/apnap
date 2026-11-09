@@ -65,6 +65,8 @@ impl Scenario {
                 counters: Default::default(),
                 is_token: self.st.catalog.get(card).token,
                 deathtouch_damage: false,
+                attached_to: None,
+                last_controller: owner,
             },
         );
         if zone == Zone::Stack {

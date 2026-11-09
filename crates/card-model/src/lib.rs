@@ -260,6 +260,14 @@ pub struct CardDef {
 }
 
 impl CardDef {
+    /// CR 702.5a: the Aura's enchant restriction, if any.
+    pub fn enchant(&self) -> Option<TargetFilter> {
+        self.abilities.iter().find_map(|a| match a {
+            AbilityDef::Enchant(f) => Some(*f),
+            _ => None,
+        })
+    }
+
     /// Printed colors (CR 105.2, 202.2).
     pub fn printed_colors(&self) -> Vec<Color> {
         if let Some(c) = &self.colors {
@@ -297,8 +305,20 @@ impl CardDef {
 /// Keyword abilities (CR 702). M1: the two that change timing rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Keyword {
-    /// CR 702.2: lethal from any damage (SBA 704.5h).
+    /// CR 702.2: lethal from any damage (SBA 704.5h, and 702.2c for assignment).
     Deathtouch,
+    /// CR 702.4: deals combat damage in both damage steps.
+    DoubleStrike,
+    /// CR 702.7: deals combat damage in the first damage step.
+    FirstStrike,
+    /// CR 702.15: its damage also gains its controller that much life.
+    Lifelink,
+    /// CR 702.111: can't be blocked except by two or more creatures.
+    Menace,
+    /// CR 702.19: excess combat damage may go to the player.
+    Trample,
+    /// CR 702.20: attacking doesn't cause it to tap.
+    Vigilance,
     /// CR 702.8
     Flash,
     /// CR 702.9: can't be blocked except by creatures with flying and/or reach.
@@ -341,6 +361,9 @@ pub enum AbilityDef {
         replaces: Replaces,
         with: ReplaceWith,
     },
+    /// CR 702.5: "Enchant [filter]" — what an Aura spell targets and what the Aura can
+    /// enchant (CR 303.4a).
+    Enchant(TargetFilter),
 }
 
 /// Whose / which player, relative to the ability's controller.
@@ -411,14 +434,18 @@ pub enum Condition {
 pub enum Affected {
     /// The source permanent itself.
     This,
+    /// The object the source is attached to ("enchanted creature", CR 303.4m).
+    Enchanted,
     /// Every permanent matching the selector (re-evaluated continuously, CR 611.3a).
     All(Selector),
 }
 
 /// The parts of a continuous effect, each applied in its own layer (CR 613.1, 613.6).
-/// Layers 1a/1b/2/3 have no vocabulary yet (D-023); the layer walk has their slots.
+/// Layers 1a/1b/3 have no vocabulary yet (D-023); the layer walk has their slots.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ContinuousEffect {
+    /// Layer 2: "You control [affected]" — the effect's controller gains control.
+    GainControl,
     /// Layer 4: add card types and/or subtypes ("is also a creature").
     AddTypes {
         #[serde(default)]

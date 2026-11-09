@@ -206,6 +206,16 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                     p.push(at("a static ability needs at least one effect".into()));
                 }
             }
+            AbilityDef::Enchant(f) => {
+                if !(c.has_type(CardType::Enchantment)
+                    && c.creature_types.iter().any(|t| t == "Aura"))
+                {
+                    p.push(at("only Auras have enchant (CR 702.5a)".into()));
+                }
+                if *f != TargetFilter::Creature {
+                    p.push(at("M3 supports only \"Enchant creature\" (D-029)".into()));
+                }
+            }
             AbilityDef::Replacement { replaces, with } => {
                 let ok = matches!(
                     (replaces, with),

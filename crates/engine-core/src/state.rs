@@ -47,6 +47,11 @@ pub struct AttackInfo {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CombatState {
     pub attackers: Vec<AttackInfo>,
+    /// 0 = the (first) combat damage step, 1 = the second one (CR 510.4).
+    pub damage_step: u8,
+    /// CR 510.4: a creature had first or double strike as the first damage step began.
+    pub extra_damage_step: bool,
+    pub first_strikers: Vec<ObjectId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -12,7 +12,7 @@ use crate::actions::{GameAction, execute, move_object};
 use crate::decision::{ChoiceKind, OptionDesc, Primitive, Response};
 use crate::events::Event;
 use crate::ids::{ObjectId, PlayerId};
-use crate::layers::{abilities, chars};
+use crate::layers::{abilities, chars, controller_of};
 use crate::mana::{ManaMask, ManaRequirement, ManaType, mask_of, types_in};
 use crate::stack::Target;
 use crate::state::GameState;
@@ -69,7 +69,15 @@ struct Proposal {
 fn proposal(st: &GameState, source: &CastSource) -> Proposal {
     match source {
         CastSource::Card(card) => Proposal {
-            body: st.card_def(*card).spell_ability().cloned(),
+            // CR 303.4a: an Aura spell targets what its enchant ability allows.
+            body: st.card_def(*card).spell_ability().cloned().or_else(|| {
+                st.card_def(*card).enchant().map(|f| {
+                    Body::Effect(card_model::Mode {
+                        targets: vec![f],
+                        effect: card_model::Effect::Seq(Vec::new()),
+                    })
+                })
+            }),
             cost: chars(st, *card).mana_cost,
             tap: None,
         },
@@ -120,7 +128,7 @@ pub(crate) fn mana_sources(
         .battlefield
         .iter()
         .copied()
-        .filter(|&id| Some(id) != exclude && st.object(id).controller == p)
+        .filter(|&id| Some(id) != exclude && controller_of(st, id) == p)
         .filter_map(|id| {
             let c = chars(st, id);
             let mut mask: ManaMask = 0;
@@ -190,7 +198,7 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
         CastSource::Ability { source, index } => {
             let (source, index) = (*source, *index);
             let o = st.object(source);
-            if o.controller != p || o.zone != Zone::Battlefield {
+            if o.zone != Zone::Battlefield || controller_of(st, source) != p {
                 return false;
             }
             // CLAUDE.md invariant 4: only abilities the permanent currently has.

@@ -49,7 +49,7 @@ pub(crate) fn snapshot(st: &GameState, id: ObjectId) -> Lki {
     Lki {
         card: o.card,
         chars: chars(st, id),
-        controller: o.controller,
+        controller: crate::layers::controller_of(st, id),
         is_token: o.is_token,
     }
 }
@@ -102,7 +102,7 @@ fn battlefield_sources(st: &GameState) -> Vec<Source<'_>> {
         .map(|&id| Source {
             id,
             card: st.object(id).card,
-            controller: st.object(id).controller,
+            controller: crate::layers::controller_of(st, id),
             abilities: abilities(st, id),
             lki: None,
         })
@@ -162,11 +162,12 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                         ObjFilter::This => e == src.id,
                         ObjFilter::Matching(sel) => {
                             let o = st.object(e);
+                            let c = chars(st, e);
                             matches_parts(
                                 sel,
-                                &chars(st, e),
+                                &c,
                                 e,
-                                o.controller,
+                                c.controller,
                                 o.is_token,
                                 src.id,
                                 src.controller,

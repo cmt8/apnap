@@ -72,6 +72,17 @@ pub enum GameAction {
     },
     /// CR 514.2: "until end of turn" and "this turn" effects end.
     ExpireEndOfTurn,
+    /// CR 303.4: attach an Aura to an object.
+    Attach {
+        aura: ObjectId,
+        to: ObjectId,
+    },
+    /// CR 613.1b / 302.6: a permanent's (layered) controller changed; it is summoning sick
+    /// for its new controller.
+    ControlChanged {
+        object: ObjectId,
+        controller: PlayerId,
+    },
     /// CR 113.7a: an ability on the stack remembers its source as it last existed.
     RecordSourceLki {
         ability: ObjectId,
@@ -206,6 +217,8 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                     counters: Default::default(),
                     is_token: true,
                     deathtouch_damage: false,
+                    attached_to: None,
+                    last_controller: controller,
                 },
             );
             st.zones.battlefield.push(id);
@@ -277,6 +290,18 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 sh.remaining -= n.min(sh.remaining);
             }
             st.shields.retain(|s| s.remaining > 0);
+            ActionResult::Done
+        }
+        GameAction::Attach { aura, to } => {
+            st.object_mut(aura).attached_to = Some(to);
+            st.emit(Event::Attached { aura, to });
+            ActionResult::Done
+        }
+        GameAction::ControlChanged { object, controller } => {
+            let o = st.object_mut(object);
+            o.last_controller = controller;
+            o.summoning_sick = true;
+            st.emit(Event::ControlChanged { object, controller });
             ActionResult::Done
         }
         GameAction::RecordSourceLki { ability, chars } => {
@@ -546,6 +571,8 @@ fn perform_move(
         counters: Default::default(),
         is_token: old.is_token,
         deathtouch_damage: false,
+        attached_to: None,
+        last_controller: controller,
     };
     st.objects.insert(new_id, obj);
     if to == Zone::Stack {
@@ -600,12 +627,15 @@ fn leave_game(st: &mut GameState, p: PlayerId) {
         st.stack.retain(|s| s.id != ability);
         st.emit(Event::AbilityRemoved { ability });
     }
+    // Control effects from objects that just left have ended (layer 2 is recomputed).
+    st.generation += 1;
     // (3) Objects still controlled by that player are exiled.
     let controlled: Vec<ObjectId> = st
         .objects
         .values()
-        .filter(|o| o.controller == p && matches!(o.zone, Zone::Battlefield | Zone::Stack))
+        .filter(|o| matches!(o.zone, Zone::Battlefield | Zone::Stack))
         .map(|o| o.id)
+        .filter(|&id| crate::layers::controller_of(st, id) == p)
         .collect();
     for id in controlled {
         perform_move(st, id, Zone::Exile, LibraryPosition::Top, None);

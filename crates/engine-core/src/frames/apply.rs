@@ -7,6 +7,7 @@ use crate::actions::{GameAction, execute};
 use crate::decision::{ChoiceKind, OptionDesc};
 use crate::events::Event;
 use crate::ids::ObjectId;
+use crate::layers::controller_of;
 use crate::replacement::{
     MoveCause, Pending, Proposed, RepKey, affected_player, applicable, apply,
 };
@@ -157,6 +158,7 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
                 tapped,
                 counters,
                 shuffle,
+                attach_to,
             } => {
                 let Some(o) = st.objects.get(&object) else {
                     continue; // already gone (e.g. moved earlier in this batch)
@@ -198,14 +200,33 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
                 if shuffle {
                     execute(st, GameAction::Shuffle { player: owner });
                 }
+                if let Some(target) = attach_to
+                    && to == Zone::Battlefield
+                {
+                    // CR 303.4: the Aura enters attached.
+                    execute(
+                        st,
+                        GameAction::Attach {
+                            aura: new,
+                            to: target,
+                        },
+                    );
+                }
             }
             Proposed::Damage {
                 source,
                 deathtouch,
+                lifelink,
                 target,
                 amount,
                 combat,
             } => {
+                // CR 702.15b: lifelink's life gain is part of the damage event; the source's
+                // controller (its owner if it has none) gains the life.
+                let gainer = lki
+                    .get(&source)
+                    .map(|l| l.controller)
+                    .or_else(|| st.objects.get(&source).map(|o| controller_of(st, o.id)));
                 execute(
                     st,
                     GameAction::Damage {
@@ -216,6 +237,12 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
                         deathtouch,
                     },
                 );
+                if lifelink
+                    && amount > 0
+                    && let Some(player) = gainer
+                {
+                    execute(st, GameAction::GainLife { player, amount });
+                }
             }
             Proposed::Draw { player } => {
                 execute(st, GameAction::Draw { player });

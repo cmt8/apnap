@@ -28,6 +28,11 @@ pub struct GameObject {
     pub is_token: bool,
     /// CR 704.5h: dealt damage by a source with deathtouch since SBAs were last checked.
     pub deathtouch_damage: bool,
+    /// CR 303.4: the object this Aura is attached to.
+    pub attached_to: Option<ObjectId>,
+    /// The layered controller last seen by the engine; a change marks the permanent
+    /// summoning sick (CR 302.6). Bookkeeping for `layers::sync_control`.
+    pub last_controller: PlayerId,
 }
 
 impl GameObject {

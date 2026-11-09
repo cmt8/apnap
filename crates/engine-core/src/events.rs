@@ -149,6 +149,20 @@ pub enum Event {
     Replaced {
         source: ObjectId,
     },
+    /// CR 303.4
+    Attached {
+        aura: ObjectId,
+        to: ObjectId,
+    },
+    /// CR 613.1b: the permanent's controller is now `controller`.
+    ControlChanged {
+        object: ObjectId,
+        controller: PlayerId,
+    },
+    /// CR 509.1 / 734: a block declaration broke a restriction (menace) and was undone.
+    BlockDeclarationIllegal {
+        player: PlayerId,
+    },
     /// CR 603.2: a triggered ability of `source` triggered.
     Triggered {
         source: ObjectId,

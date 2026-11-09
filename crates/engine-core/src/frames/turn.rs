@@ -43,7 +43,7 @@ pub(crate) fn begin_turn(st: &mut GameState, active: PlayerId) {
     // recent turn began are no longer summoning sick.
     for id in st.zones.battlefield.clone() {
         let o = st.object_mut(id);
-        if o.controller == active {
+        if o.last_controller == active {
             o.summoning_sick = false;
         }
     }
@@ -69,7 +69,7 @@ impl StepStage {
                         // CR 502.3: untap all permanents the active player controls.
                         for id in st.zones.battlefield.clone() {
                             let o = st.object(id);
-                            if o.controller == ap && o.tapped {
+                            if o.tapped && crate::layers::controller_of(st, id) == ap {
                                 execute(st, GameAction::Untap { object: id });
                             }
                         }
@@ -169,6 +169,15 @@ impl StepStage {
                             player: PlayerId(p as u8),
                         },
                     );
+                }
+                // CR 510.4: after a first-strike damage step comes a second damage step.
+                if step == Step::CombatDamage
+                    && let Some(c) = st.combat.as_mut()
+                    && c.extra_damage_step
+                    && c.damage_step == 0
+                {
+                    c.damage_step = 1;
+                    return Flow::then(Frame::Step(StepStage::Begin));
                 }
                 if step == Step::EndOfCombat {
                     // CR 511.3: all creatures are removed from combat.

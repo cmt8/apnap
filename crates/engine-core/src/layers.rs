@@ -52,11 +52,14 @@ pub struct Characteristics {
     pub abilities: Vec<u16>,
     pub power: Option<i32>,
     pub toughness: Option<i32>,
+    /// Layer 2 (CR 613.1b). Off the battlefield/stack: the owner.
+    pub controller: PlayerId,
 }
 
 impl Characteristics {
-    pub fn printed(d: &CardDef) -> Self {
+    pub fn printed(d: &CardDef, controller: PlayerId) -> Self {
         Characteristics {
+            controller,
             name: d.name.clone(),
             mana_cost: d.mana_cost.clone(),
             colors: d.printed_colors(),
@@ -113,7 +116,36 @@ pub fn chars(st: &GameState, id: ObjectId) -> Characteristics {
     {
         return c.clone();
     }
-    Characteristics::printed(st.card_def(id))
+    Characteristics::printed(st.card_def(id), st.object(id).controller)
+}
+
+/// Notice permanents whose layered controller changed since the engine last looked, and
+/// record it (summoning sickness, CR 302.6). Called by the driver after every frame step.
+pub(crate) fn sync_control(st: &mut GameState) {
+    let v = view(st);
+    let changed: Vec<(ObjectId, PlayerId)> = v
+        .iter()
+        .filter(|(id, c)| st.object(**id).last_controller != c.controller)
+        .map(|(id, c)| (*id, c.controller))
+        .collect();
+    for (object, controller) in changed {
+        crate::actions::execute(
+            st,
+            crate::actions::GameAction::ControlChanged { object, controller },
+        );
+    }
+}
+
+/// The current controller of `id`: layered on the battlefield (CR 613.1b), the controller of
+/// a spell on the stack, otherwise its owner.
+pub fn controller_of(st: &GameState, id: ObjectId) -> PlayerId {
+    let o = st.object(id);
+    if o.zone == Zone::Battlefield
+        && let Some(c) = view(st).get(&id)
+    {
+        return c.controller;
+    }
+    o.controller
 }
 
 /// The printed abilities `id` currently has, with their indices.
@@ -147,7 +179,7 @@ pub fn matches(
     source: ObjectId,
     controller: PlayerId,
 ) -> bool {
-    matches_parts(sel, c, o.id, o.controller, o.is_token, source, controller)
+    matches_parts(sel, c, o.id, c.controller, o.is_token, source, controller)
 }
 
 /// [`matches`] for an object that may no longer exist (last known information).
@@ -203,6 +235,7 @@ const LAYERS: [Layer; 11] = [
 
 fn layer_of(e: &ContinuousEffect) -> Layer {
     match e {
+        ContinuousEffect::GainControl => Layer::L2,
         ContinuousEffect::AddTypes { .. } => Layer::L4,
         ContinuousEffect::SetColors(_) => Layer::L5,
         ContinuousEffect::AddKeywords(_)
@@ -256,6 +289,15 @@ impl Walk<'_> {
         }
     }
 
+    /// "You" for this effect: a static ability's source's current controller (layer 2 may
+    /// have changed it), or the controller of a resolved effect.
+    fn you(&self, e: &Eff<'_>, view: &View) -> PlayerId {
+        match e.key {
+            Key::Static { .. } => view.get(&e.source).map_or(e.controller, |c| c.controller),
+            Key::Resolved(_) => e.controller,
+        }
+    }
+
     fn affected(&self, e: &Eff<'_>, view: &View) -> Vec<ObjectId> {
         if let Some(set) = self.started.get(&e.key) {
             return set
@@ -277,19 +319,31 @@ impl Walk<'_> {
                     Vec::new()
                 }
             }
-            Aff::Dynamic(Affected::All(sel)) => view
-                .iter()
-                .filter(|(id, c)| matches(sel, c, self.st.object(**id), e.source, e.controller))
-                .map(|(id, _)| *id)
+            Aff::Dynamic(Affected::All(sel)) => {
+                let you = self.you(e, view);
+                view.iter()
+                    .filter(|(id, c)| matches(sel, c, self.st.object(**id), e.source, you))
+                    .map(|(id, _)| *id)
+                    .collect()
+            }
+            // CR 303.4m: "enchanted [object]" = whatever the source is attached to.
+            Aff::Dynamic(Affected::Enchanted) => self
+                .st
+                .objects
+                .get(&e.source)
+                .and_then(|o| o.attached_to)
+                .filter(|t| view.contains_key(t))
+                .into_iter()
                 .collect(),
         }
     }
 
     fn apply(&self, e: &Eff<'_>, layer: Layer, set: &[ObjectId], view: &mut View) {
+        let you = self.you(e, view);
         for part in e.parts.iter().filter(|p| layer_of(p) == layer) {
             for id in set {
                 if let Some(c) = view.get_mut(id) {
-                    apply_part(c, part);
+                    apply_part(c, part, you);
                 }
             }
         }
@@ -311,7 +365,7 @@ impl Walk<'_> {
     }
 }
 
-fn apply_part(c: &mut Characteristics, part: &ContinuousEffect) {
+fn apply_part(c: &mut Characteristics, part: &ContinuousEffect, you: PlayerId) {
     fn add<T: PartialEq + Clone>(v: &mut Vec<T>, items: &[T]) {
         for i in items {
             if !v.contains(i) {
@@ -320,6 +374,8 @@ fn apply_part(c: &mut Characteristics, part: &ContinuousEffect) {
         }
     }
     match part {
+        // Layer 2: "you control [it]".
+        ContinuousEffect::GainControl => c.controller = you,
         ContinuousEffect::AddTypes {
             card_types,
             subtypes,
@@ -363,7 +419,12 @@ fn compute(st: &GameState) -> View {
         .zones
         .battlefield
         .iter()
-        .map(|&id| (id, Characteristics::printed(st.card_def(id))))
+        .map(|&id| {
+            (
+                id,
+                Characteristics::printed(st.card_def(id), st.object(id).controller),
+            )
+        })
         .collect();
 
     // Every effect that could take part: statics of permanents (existence is checked per

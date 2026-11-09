@@ -133,6 +133,8 @@ pub fn new_game(
                     counters: Default::default(),
                     is_token: false,
                     deathtouch_damage: false,
+                    attached_to: None,
+                    last_controller: owner,
                 },
             );
             // CR 401.1: each player's deck becomes their library.
@@ -183,7 +185,9 @@ fn run(st: &mut GameState, mut input: Option<Input>) -> StepOutput {
             .frames
             .pop()
             .expect("frame stack exhausted without game over");
-        match frame.run(st, input.take()) {
+        let flow = frame.run(st, input.take());
+        crate::layers::sync_control(st);
+        match flow {
             crate::frames::Flow::Continue(frames) => st.frames.extend(frames),
             crate::frames::Flow::Suspend(frame, decision) => {
                 st.frames.push(*frame);

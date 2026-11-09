@@ -15,6 +15,7 @@ use crate::events::{Event, LossReason};
 use crate::ids::{ObjectId, PlayerId};
 use crate::layers::chars;
 use crate::replacement::{MoveCause, Proposed};
+use crate::stack::Target;
 use crate::state::{GameResult, GameState};
 use crate::zones::Zone;
 use alloc::collections::BTreeMap;
@@ -85,9 +86,29 @@ pub(crate) fn gather(st: &mut GameState) -> Gathered {
         }
         if c.supertypes.contains(&Supertype::Legendary) {
             legends
-                .entry((o.controller, c.name.clone()))
+                .entry((c.controller, c.name.clone()))
                 .or_default()
                 .push(id);
+        }
+        // CR 704.5m / 303.4c: an Aura attached to an illegal object, or to nothing, goes to
+        // its owner's graveyard.
+        if let Some(filter) = st.card_def(id).enchant() {
+            let legal = o.attached_to.is_some_and(|t| {
+                st.objects
+                    .get(&t)
+                    .is_some_and(|x| x.zone == Zone::Battlefield)
+                    && crate::targeting::is_legal(
+                        st,
+                        filter,
+                        Target::Object(t),
+                        c.controller,
+                        Some(id),
+                    )
+            });
+            if !legal {
+                g.events
+                    .push(Proposed::moving(id, Zone::Graveyard, MoveCause::Rule));
+            }
         }
         // CR 704.5q: +1/+1 and -1/-1 counters annihilate.
         let n = o

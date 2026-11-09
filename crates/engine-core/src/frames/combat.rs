@@ -3,7 +3,7 @@
 
 use super::{ApplyFrame, Flow, Frame, Input};
 use crate::actions::{GameAction, execute};
-use crate::decision::{ChoiceKind, OptionDesc, Primitive};
+use crate::decision::{ChoiceKind, OptionDesc, Primitive, Response};
 use crate::events::{DamageTarget, Event};
 use crate::ids::{ObjectId, PlayerId};
 use crate::layers::chars;
@@ -19,7 +19,10 @@ fn creatures_controlled_by(st: &GameState, p: PlayerId) -> Vec<ObjectId> {
         .battlefield
         .iter()
         .copied()
-        .filter(|&id| st.object(id).controller == p && chars(st, id).is(CardType::Creature))
+        .filter(|&id| {
+            let c = chars(st, id);
+            c.controller == p && c.is(CardType::Creature)
+        })
         .collect()
 }
 
@@ -74,9 +77,12 @@ impl DeclareAttackersFrame {
                 options,
             );
         }
-        // CR 508.1c–e: no restrictions/requirements/banding in M0. CR 508.1f: tap attackers.
+        // CR 508.1c–e: no restrictions/requirements/banding yet. CR 508.1f: tap attackers
+        // (CR 702.20b: unless they have vigilance).
         for &(attacker, _) in &self.chosen {
-            execute(st, GameAction::Tap { object: attacker });
+            if !chars(st, attacker).has(Keyword::Vigilance) {
+                execute(st, GameAction::Tap { object: attacker });
+            }
         }
         // CR 508.1k: they become attacking creatures.
         let mut combat = CombatState::default();
@@ -167,6 +173,16 @@ impl DeclareBlockersFrame {
                     options,
                 );
             }
+            // CR 509.1b / 702.111b: a creature with menace can't be blocked except by two or
+            // more creatures. An illegal declaration returns to before it (CR 734): nothing
+            // has happened yet, so this defender simply declares again.
+            if !self.menace_ok(st, defender) {
+                let mine: Vec<ObjectId> = self.candidates.clone();
+                self.chosen.retain(|(b, _)| !mine.contains(b));
+                self.next = 0;
+                st.emit(Event::BlockDeclarationIllegal { player: defender });
+                continue;
+            }
             self.defender_idx += 1;
             self.start_defender(st);
         }
@@ -187,6 +203,22 @@ impl DeclareBlockersFrame {
         Flow::done()
     }
 
+    fn menace_ok(&self, st: &GameState, defender: PlayerId) -> bool {
+        let combat = st.combat.as_ref().expect("combat");
+        combat
+            .attackers
+            .iter()
+            .filter(|a| a.defender == defender && chars(st, a.attacker).has(Keyword::Menace))
+            .all(|a| {
+                let n = self
+                    .chosen
+                    .iter()
+                    .filter(|(b, at)| *at == a.attacker && self.candidates.contains(b))
+                    .count();
+                n != 1
+            })
+    }
+
     fn start_defender(&mut self, st: &GameState) {
         self.next = 0;
         self.candidates = match self.defenders.get(self.defender_idx) {
@@ -201,81 +233,199 @@ impl DeclareBlockersFrame {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CombatDamageFrame {
+    pub started: bool,
+    /// CR 510.4: the creatures that assign combat damage in this step.
+    pub assigners: Vec<ObjectId>,
     /// Index into `combat.attackers` of the next attacker to assign for.
     pub next: usize,
+    /// Trample: the amount the current attacker assigns to the player (chosen first).
+    pub to_player: Option<u32>,
     pub assignments: Vec<(ObjectId, DamageTarget, u32)>,
 }
 
 impl CombatDamageFrame {
+    /// CR 510.4 / 702.7b: who assigns damage in this combat damage step.
+    fn choose_assigners(st: &mut GameState) -> Vec<ObjectId> {
+        let combat = st.combat.as_ref().expect("combat");
+        let mut all: Vec<ObjectId> = combat.attackers.iter().map(|a| a.attacker).collect();
+        for a in &combat.attackers {
+            all.extend(a.blockers.iter().copied());
+        }
+        let strikes = |st: &GameState, id: ObjectId, k: Keyword| chars(st, id).has(k);
+        if combat.damage_step == 0 {
+            let first: Vec<ObjectId> = all
+                .iter()
+                .copied()
+                .filter(|&c| {
+                    strikes(st, c, Keyword::FirstStrike) || strikes(st, c, Keyword::DoubleStrike)
+                })
+                .collect();
+            if first.is_empty() {
+                return all;
+            }
+            let c = st.combat.as_mut().expect("combat");
+            c.first_strikers = first.clone();
+            c.extra_damage_step = true;
+            first
+        } else {
+            // The second step: creatures that had neither first nor double strike as the first
+            // step began, plus those that currently have double strike.
+            let had_first = combat.first_strikers.clone();
+            all.into_iter()
+                .filter(|&c| !had_first.contains(&c) || strikes(st, c, Keyword::DoubleStrike))
+                .collect()
+        }
+    }
+
+    /// CR 702.19b / 702.2c: damage that is lethal to `blocker` now, counting damage already
+    /// marked and damage assigned to it earlier in this step.
+    fn lethal(&self, st: &GameState, blocker: ObjectId, deathtouch: bool) -> u32 {
+        let c = chars(st, blocker);
+        let already: u32 = self
+            .assignments
+            .iter()
+            .filter(|(_, t, _)| *t == DamageTarget::Object(blocker))
+            .map(|(_, _, n)| *n)
+            .sum();
+        let remaining =
+            (c.toughness.unwrap_or(0) - st.object(blocker).damage_marked as i32 - already as i32)
+                .max(0) as u32;
+        if deathtouch {
+            remaining.min(1)
+        } else {
+            remaining
+        }
+    }
+
     pub(crate) fn run(mut self, st: &mut GameState, input: Option<Input>) -> Flow {
         let ap = st.turn.active;
+        if !self.started {
+            self.started = true;
+            self.assigners = Self::choose_assigners(st);
+        }
         let attackers = st
             .combat
             .as_ref()
             .map(|c| c.attackers.clone())
             .unwrap_or_default();
         if let Some(inp) = input {
-            // CR 510.1c: damage divided among blockers as the attacker's controller chooses.
-            let a = &attackers[self.next];
-            for (i, &amount) in inp.allocation().iter().enumerate() {
-                let OptionDesc::DamageRecipient { object } = inp.decision.options[i] else {
-                    unreachable!()
-                };
-                if amount > 0 {
-                    self.assignments
-                        .push((a.attacker, DamageTarget::Object(object), amount));
+            match &inp.response {
+                // Trample, part 1: how much goes to the player.
+                Response::Number(n) => self.to_player = Some(*n),
+                // CR 510.1c: damage divided among blockers as the attacker's controller chooses.
+                Response::Allocate(v) => {
+                    let a = &attackers[self.next];
+                    for (i, &amount) in v.iter().enumerate() {
+                        let OptionDesc::DamageRecipient { object } = inp.decision.options[i] else {
+                            unreachable!()
+                        };
+                        if amount > 0 {
+                            self.assignments.push((
+                                a.attacker,
+                                DamageTarget::Object(object),
+                                amount,
+                            ));
+                        }
+                    }
+                    self.finish_attacker(&attackers);
                 }
+                r => unreachable!("{r:?}"),
             }
-            self.next += 1;
         }
         // CR 510.1: first the active player assigns for each attacking creature…
         while let Some(a) = attackers.get(self.next) {
-            let power = chars(st, a.attacker).power.unwrap_or(0);
-            if power <= 0 {
-                // CR 510.1a
+            let c = chars(st, a.attacker);
+            let power = c.power.unwrap_or(0);
+            if power <= 0 || !self.assigners.contains(&a.attacker) {
+                // CR 510.1a / 510.4
                 self.next += 1;
                 continue;
             }
             let power = power as u32;
-            if !a.blocked {
-                // CR 510.1b
-                if st.in_game(a.defender) {
-                    self.assignments
-                        .push((a.attacker, DamageTarget::Player(a.defender), power));
+            let trample = c.has(Keyword::Trample);
+            let deathtouch = c.has(Keyword::Deathtouch);
+            let player = st
+                .in_game(a.defender)
+                .then_some(DamageTarget::Player(a.defender));
+            if !a.blocked || (a.blockers.is_empty() && trample) {
+                // CR 510.1b, 702.19d
+                if let Some(t) = player {
+                    self.assignments.push((a.attacker, t, power));
                 }
-            } else {
-                match a.blockers.as_slice() {
-                    [] => {}
-                    [b] => self
-                        .assignments
-                        .push((a.attacker, DamageTarget::Object(*b), power)),
-                    many => {
-                        let n = many.len();
-                        let options = many
-                            .iter()
-                            .map(|&object| OptionDesc::DamageRecipient { object })
-                            .collect();
-                        let ask = Flow::ask(
+                self.next += 1;
+                continue;
+            }
+            if a.blockers.is_empty() {
+                self.next += 1;
+                continue;
+            }
+            let lethal: Vec<u32> = a
+                .blockers
+                .iter()
+                .map(|&b| self.lethal(st, b, deathtouch))
+                .collect();
+            let to_player = if trample {
+                // CR 702.19b: lethal to every blocker first; the excess may go to the player.
+                let max = power.saturating_sub(lethal.iter().sum());
+                match self.to_player {
+                    Some(n) => n,
+                    None if max > 0 && player.is_some() => {
+                        return Flow::ask(
                             Frame::CombatDamage(self),
                             ap,
                             ChoiceKind::AssignCombatDamage,
-                            Primitive::Allocate {
-                                total: power,
-                                per_min: vec![0; n],
-                                per_max: vec![power; n],
-                            },
-                            options,
+                            Primitive::PickNumber { min: 0, max },
+                            Vec::new(),
                         );
-                        return ask;
                     }
+                    None => 0,
                 }
+            } else {
+                0
+            };
+            if to_player > 0
+                && let Some(t) = player
+            {
+                self.assignments.push((a.attacker, t, to_player));
             }
-            self.next += 1;
+            let rest = power - to_player;
+            match a.blockers.as_slice() {
+                [b] => {
+                    if rest > 0 {
+                        self.assignments
+                            .push((a.attacker, DamageTarget::Object(*b), rest));
+                    }
+                    self.finish_attacker(&attackers);
+                }
+                many if rest > 0 => {
+                    let n = many.len();
+                    let per_min = if to_player > 0 { lethal } else { vec![0; n] };
+                    let options = many
+                        .iter()
+                        .map(|&object| OptionDesc::DamageRecipient { object })
+                        .collect();
+                    return Flow::ask(
+                        Frame::CombatDamage(self),
+                        ap,
+                        ChoiceKind::AssignCombatDamage,
+                        Primitive::Allocate {
+                            total: rest,
+                            per_min,
+                            per_max: vec![rest; n],
+                        },
+                        options,
+                    );
+                }
+                _ => self.finish_attacker(&attackers),
+            }
         }
-        // …then each defending player assigns for each blocking creature (CR 510.1d). In M0
-        // a blocker blocks exactly one attacker, so no choice is needed.
+        // …then each defending player assigns for each blocking creature (CR 510.1d). No card
+        // lets a creature block more than one attacker yet, so no choice is needed.
         for a in &attackers {
             for &b in &a.blockers {
+                if !self.assigners.contains(&b) {
+                    continue;
+                }
                 let power = chars(st, b).power.unwrap_or(0);
                 if power > 0 {
                     self.assignments
@@ -287,17 +437,26 @@ impl CombatDamageFrame {
         // the prevention/replacement pipeline).
         let events: Vec<Proposed> = core::mem::take(&mut self.assignments)
             .into_iter()
-            .map(|(source, target, amount)| Proposed::Damage {
-                source,
-                deathtouch: chars(st, source).has(Keyword::Deathtouch),
-                target,
-                amount,
-                combat: true,
+            .map(|(source, target, amount)| {
+                let c = chars(st, source);
+                Proposed::Damage {
+                    source,
+                    deathtouch: c.has(Keyword::Deathtouch),
+                    lifelink: c.has(Keyword::Lifelink),
+                    target,
+                    amount,
+                    combat: true,
+                }
             })
             .collect();
         if events.is_empty() {
             return Flow::done();
         }
         Flow::then(Frame::Apply(ApplyFrame::new(st, events)))
+    }
+
+    fn finish_attacker(&mut self, _attackers: &[AttackInfo]) {
+        self.to_player = None;
+        self.next += 1;
     }
 }
