@@ -58,6 +58,8 @@ cargo run -p harness -- play [--setup cmd-4p] [--seed N]  # you (P0) vs random a
 cargo run --release -p harness -- fuzz --setup cmd-4p --agents h-vs-r --games 200   # AI strength
 cargo run -p harness -- run --seed 42 --save-replay r.json && cargo run -p harness -- replay r.json
 cargo run -p harness -- bless                             # ONLY when a hash change is intended; review why
+cargo run -p harness -- fetch-cards                       # printed data for the precons -> ~/.cache/apnap
+cargo run -p harness -- coverage [--verbose]              # which precon cards are scripted/verified
 ```
 
 ## Definition of done for any change
@@ -72,10 +74,11 @@ cargo run -p harness -- bless                             # ONLY when a hash cha
   (chokepoint, move_object, LeaveGame = 800.4a), `sba.rs`, `layers.rs` (chars; printed-only until M2),
   `decision.rs`, `events.rs`, `state.rs`, `view.rs`, `rng.rs`, `hash.rs`.
 - `crates/card-model` — card vocabulary types (no_std; externally tagged; ManaCost as text).
-- `crates/cards` — RON card scripts `data/<letter>/<slug>.ron` and `decks/*.ron` (invented
-  "Test …" cards + basic lands). Adding a file? Add it to `CARDS`/`DECKS` (a test checks).
+- `crates/cards` — `data/` (self-contained: invented "Test …" cards, tokens, basics),
+  `scripts/` (real cards: behaviour only, D-035), `decks/*.ron`. Embedded by `build.rs`.
 - `crates/card-db` — parses + validates RON into a `CardCatalog` (strict mode rejects
-  unverified cards; every verified card must name existing tests). Scryfall import: M4.
+  unverified cards; every verified card must name existing tests); `scryfall.rs` (runtime
+  fetch + cache), `real.rs` (script + printed data -> CardDef).
 - `crates/ai` — agents: RandomAgent, HeuristicAgent (D-033). `crates/harness` — CLI, `Setup`
   (m0 / m1-Np / m2-Np / cmd-Np), `--agents random|heuristic|h-vs-r`,
   `script::Script` test driver, determinism/golden/property/rules tests.
@@ -86,7 +89,16 @@ cargo run -p harness -- bless                             # ONLY when a hash cha
   `frames/put_triggers.rs` (603), `frames/check.rs` (117.5/704.3), `effects.rs` (resolved
   continuous effects, shields), `testing.rs` (feature `test-support`: scenario builder, D-022).
 
-## Current milestone: M3 — DONE (2026-11-09). Next: M4 (do not start without the user's OK).
+## Current milestone: M4 — IN PROGRESS (started 2026-11-09), branch `m4-wip`
+Decisions: D-034 (precons: Calling All Angels, Wretched Ranks, Reign of Dragons,
+Tramplesaurus Rex), D-035 (real-card pipeline; Scryfall data only in the user's cache).
+Order: groundwork (DONE: frozen decklists, `harness fetch-cards`, `harness coverage`,
+real-card script format) → egui app → cards deck by deck until `harness coverage` is 100%.
+Real-card work needs `cargo run -p harness -- fetch-cards` once (network).
+Acceptance (spec §13 M4): coverage 100% verified, each card >= 1 test, 10,000 AI 4-player
+games clean, the app playable by mouse with a widget per ChoiceKind, save/load/replay in app.
+
+## Previous milestone: M3 — DONE (2026-11-09).
 M3 delivered: combat keywords (first/double strike, trample + deathtouch, lifelink, vigilance,
 menace; D-031), Auras + layer-2 control with summoning-sickness tracking (D-029/D-030),
 Commander (903: command zone, tax, commander damage, 903.9a SBA choice, 903.9b optional

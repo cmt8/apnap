@@ -123,6 +123,103 @@ pub fn catalog() -> Arc<CardCatalog> {
         .clone()
 }
 
+/// The four M4 precons (decisions.md D-034), in seat order.
+pub const PRECON_DECKS: &[&str] = &[
+    "precon_calling_all_angels.ron",
+    "precon_wretched_ranks.ron",
+    "precon_reign_of_dragons.ron",
+    "precon_tramplesaurus_rex.ron",
+];
+
+/// A precon's unresolved list: (deck name, commander, [(count, card name)]).
+pub fn precon_list(file: &str) -> card_db::DeckFile {
+    let text = cards::deck(file).unwrap_or_else(|| panic!("no deck {file}"));
+    let path = format!("crates/cards/decks/{file}");
+    card_db::parse_deck_file(card_db::Source { path: &path, text })
+        .unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// Every card name the precons need from Scryfall (everything except the self-contained
+/// basic lands), sorted and de-duplicated.
+pub fn precon_card_names() -> Vec<String> {
+    let have = catalog();
+    let mut names: Vec<String> = PRECON_DECKS
+        .iter()
+        .flat_map(|f| {
+            let d = precon_list(f);
+            d.cards.into_iter().map(|(_, n)| n).chain(d.commander)
+        })
+        .filter(|n| have.find(n).is_none())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Where a precon card stands (spec §10.6 coverage report).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Coverage {
+    /// A self-contained card (basic land).
+    BuiltIn,
+    /// Scripted, verified, and compiles against its printed data.
+    Verified,
+    /// Scripted but not yet verified.
+    Unverified,
+    /// A script exists but doesn't load: the problems.
+    Broken(Vec<String>),
+    /// No script yet. `printed_ok` = its printed data is representable today.
+    Missing { printed_problems: Vec<String> },
+}
+
+/// Coverage of one card name against the scripts in `crates/cards/scripts`.
+pub fn coverage_of(name: &str, data: &card_db::scryfall::ScryfallData) -> Coverage {
+    if catalog().find(name).is_some() {
+        return Coverage::BuiltIn;
+    }
+    let script = cards::SCRIPTS.iter().find_map(|&(path, text)| {
+        let src = card_db::Source { path, text };
+        card_db::parse_real(src)
+            .ok()
+            .filter(|s| s.name == name)
+            .map(|s| (src, s))
+    });
+    match script {
+        Some((src, s)) => match card_db::compile_real(src, data) {
+            Ok(cs) => {
+                let problems = card_db::validate(&cs, card_db::Strictness::AllowUnverified);
+                if !problems.is_empty() {
+                    Coverage::Broken(problems)
+                } else if s.verified {
+                    Coverage::Verified
+                } else {
+                    Coverage::Unverified
+                }
+            }
+            Err(errs) => Coverage::Broken(errs.into_iter().map(|e| e.msg).collect()),
+        },
+        None => {
+            // Dry run: can the printed data be represented at all?
+            let printed_problems = match data.get(name) {
+                None => vec![card_db::scryfall::FETCH_HINT.to_string()],
+                Some(card) => {
+                    let empty = card_db::real::RealCardScript {
+                        oracle_id: card.oracle_id.clone().unwrap_or_default(),
+                        name: card.name.clone(),
+                        verified: false,
+                        tests: vec![],
+                        keywords: vec![],
+                        abilities: vec![],
+                    };
+                    card_db::real::compile(&empty, card)
+                        .err()
+                        .unwrap_or_default()
+                }
+            };
+            Coverage::Missing { printed_problems }
+        }
+    }
+}
+
 /// A deck file (with its commander, if any) from `crates/cards/decks/<file>`.
 pub fn deck_file(file: &str) -> card_db::Deck {
     let text = cards::deck(file).unwrap_or_else(|| panic!("no deck {file}"));

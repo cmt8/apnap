@@ -6,6 +6,8 @@
 //!   replay PATH
 //!   watch [--setup S] [--seed N]       narrate a random-agent game
 //!   play [--setup S] [--seed N] [--save-replay PATH]   you (P0) vs random agents
+//!   fetch-cards                        download the precons' printed card data into the cache
+//!   coverage [--verbose]               per-precon script/verification status
 //!   bless                              rewrite crates/harness/tests/golden/games.txt
 
 use engine_core::{Agent, ChoiceKind, OptionDesc, PendingDecision, PlayerId, Primitive, Response};
@@ -151,6 +153,94 @@ fn main() -> ExitCode {
             } else {
                 ExitCode::FAILURE
             }
+        }
+        "fetch-cards" => {
+            // Downloads printed card data for the precon pool into the user's cache
+            // (never into the repository).
+            let names = harness::precon_card_names();
+            match card_db::scryfall::fetch(&names) {
+                Ok((data, fetched)) => {
+                    println!(
+                        "{} cards needed, {fetched} downloaded, {} now cached in {}",
+                        names.len(),
+                        data.cards.len(),
+                        card_db::scryfall::cache_dir().display()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("fetch failed: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "coverage" => {
+            let data = match card_db::scryfall::cached(&harness::precon_card_names()) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let verbose = args.iter().any(|a| a == "--verbose");
+            let (mut total, mut done) = (0usize, 0usize);
+            for file in harness::PRECON_DECKS {
+                let d = harness::precon_list(file);
+                let names: Vec<String> = d
+                    .commander
+                    .iter()
+                    .cloned()
+                    .chain(d.cards.iter().map(|(_, n)| n.clone()))
+                    .collect();
+                let mut counts = [0usize; 5];
+                let mut lines = Vec::new();
+                for n in &names {
+                    let (i, note) = match harness::coverage_of(n, &data) {
+                        harness::Coverage::BuiltIn => (0, String::new()),
+                        harness::Coverage::Verified => (1, String::new()),
+                        harness::Coverage::Unverified => (2, "scripted, not verified".into()),
+                        harness::Coverage::Broken(p) => (3, format!("BROKEN: {}", p.join("; "))),
+                        harness::Coverage::Missing { printed_problems }
+                            if printed_problems.is_empty() =>
+                        {
+                            (4, "no script".into())
+                        }
+                        harness::Coverage::Missing { printed_problems } => (
+                            4,
+                            format!(
+                                "no script; printed data needs: {}",
+                                printed_problems.join("; ")
+                            ),
+                        ),
+                    };
+                    counts[i] += 1;
+                    if i >= 2 && (verbose || i == 3) {
+                        lines.push(format!("    {n}: {note}"));
+                    }
+                }
+                let ok = counts[0] + counts[1];
+                total += names.len();
+                done += ok;
+                println!(
+                    "{}: {}/{} verified ({} built-in, {} verified, {} unverified, {} broken, {} missing)",
+                    d.name,
+                    ok,
+                    names.len(),
+                    counts[0],
+                    counts[1],
+                    counts[2],
+                    counts[3],
+                    counts[4]
+                );
+                for l in lines {
+                    println!("{l}");
+                }
+            }
+            println!(
+                "total: {done}/{total} deck slots verified ({}%)",
+                done * 100 / total.max(1)
+            );
+            ExitCode::SUCCESS
         }
         "watch" => {
             let seed = num(&args, "--seed", 42);

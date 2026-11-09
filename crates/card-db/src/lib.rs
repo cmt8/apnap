@@ -2,9 +2,12 @@
 //! [`CardCatalog`] for the engine (spec §7). A malformed or semantically wrong script fails
 //! **at load time** with its file path, never at game time.
 //!
-//! Scryfall bulk-data import (printed characteristics for real cards, fetched at runtime
-//! into the XDG cache, spec §12) arrives in M4. Until then every script carries its own
-//! printed characteristics, and only invented "Test …" cards and basic lands exist.
+//! Two kinds of card file: self-contained scripts ([`CardScript`]: invented "Test …" cards,
+//! token definitions, basic lands) and real-card scripts ([`real::RealCardScript`]: behaviour
+//! only; printed data comes from the Scryfall cache, [`scryfall`]).
+
+pub mod real;
+pub mod scryfall;
 
 use card_model::{
     AbilityDef, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript, CardType, Color, Effect,
@@ -56,55 +59,98 @@ pub fn parse_script(src: Source<'_>) -> Result<CardScript, LoadError> {
     ron::from_str(src.text).map_err(|e| err(src.path, e.to_string()))
 }
 
-/// Load, validate and compile card scripts into a catalog (in source order).
+/// Load, validate and compile self-contained card scripts into a catalog (in source order).
 pub fn load_catalog(
     sources: &[Source<'_>],
     strictness: Strictness,
 ) -> Result<CardCatalog, Vec<LoadError>> {
+    load_full_catalog(sources, &[], &scryfall::ScryfallData::default(), strictness)
+}
+
+/// Like [`load_catalog`], then appends the real cards in `scripts` (in source order),
+/// compiled against the printed data in `data`. Self-contained cards keep their ids.
+pub fn load_full_catalog(
+    sources: &[Source<'_>],
+    scripts: &[Source<'_>],
+    data: &scryfall::ScryfallData,
+    strictness: Strictness,
+) -> Result<CardCatalog, Vec<LoadError>> {
     let mut errors = Vec::new();
-    let mut catalog = CardCatalog::default();
-    let mut names = BTreeSet::new();
+    let mut entries: Vec<(&str, CardScript)> = Vec::new();
     for src in sources {
-        let script = match parse_script(*src) {
-            Ok(s) => s,
-            Err(e) => {
-                errors.push(e);
-                continue;
-            }
-        };
+        match parse_script(*src) {
+            Ok(s) => entries.push((src.path, s)),
+            Err(e) => errors.push(e),
+        }
+    }
+    for src in scripts {
+        match compile_real(*src, data) {
+            Ok(s) => entries.push((src.path, s)),
+            Err(mut e) => errors.append(&mut e),
+        }
+    }
+    let mut catalog = CardCatalog::default();
+    let mut paths: Vec<&str> = Vec::new();
+    let mut names = BTreeSet::new();
+    for (path, script) in entries {
         let problems = validate(&script, strictness);
         if !names.insert(script.card.name.clone()) {
             errors.push(err(
-                src.path,
+                path,
                 format!("duplicate card name {:?}", script.card.name),
             ));
         }
         if problems.is_empty() {
             catalog.add(script.card);
+            paths.push(path);
         } else {
-            errors.extend(problems.into_iter().map(|m| err(src.path, m)));
+            errors.extend(problems.into_iter().map(|m| err(path, m)));
         }
     }
     // Second pass: CreateToken must name a token definition in the catalog.
-    for (i, def) in catalog.defs.iter().enumerate() {
+    for (def, path) in catalog.defs.iter().zip(&paths) {
         for name in token_names(def) {
             match catalog.find(&name) {
                 Some(id) if catalog.get(id).token => {}
-                Some(_) => errors.push(err(
-                    sources[i].path,
-                    format!("{name:?} is not a token definition"),
-                )),
-                None => errors.push(err(sources[i].path, format!("unknown token {name:?}"))),
+                Some(_) => errors.push(err(path, format!("{name:?} is not a token definition"))),
+                None => errors.push(err(path, format!("unknown token {name:?}"))),
             }
         }
         if def.token && def.mana_cost.is_some() {
-            errors.push(err(sources[i].path, "tokens have no mana cost (CR 111.3)"));
+            errors.push(err(path, "tokens have no mana cost (CR 111.3)"));
         }
     }
     if errors.is_empty() {
         Ok(catalog)
     } else {
         Err(errors)
+    }
+}
+
+/// Parse a real-card script without compiling it.
+pub fn parse_real(src: Source<'_>) -> Result<real::RealCardScript, LoadError> {
+    ron::from_str(src.text).map_err(|e| err(src.path, e.to_string()))
+}
+
+/// Parse a real-card script and compile it against its printed data.
+pub fn compile_real(
+    src: Source<'_>,
+    data: &scryfall::ScryfallData,
+) -> Result<CardScript, Vec<LoadError>> {
+    let script = parse_real(src).map_err(|e| vec![e])?;
+    let Some(card) = data.get(&script.name) else {
+        return Err(vec![err(
+            src.path,
+            format!("{:?}: {}", script.name, scryfall::FETCH_HINT),
+        )]);
+    };
+    match real::compile(&script, card) {
+        Ok(card) => Ok(CardScript {
+            verified: script.verified,
+            tests: script.tests,
+            card,
+        }),
+        Err(problems) => Err(problems.into_iter().map(|m| err(src.path, m)).collect()),
     }
 }
 
@@ -343,6 +389,11 @@ pub struct DeckFile {
     #[serde(default)]
     pub commander: Option<String>,
     pub cards: Vec<(u32, String)>,
+}
+
+/// Parse a deck list without resolving its card names.
+pub fn parse_deck_file(src: Source<'_>) -> Result<DeckFile, LoadError> {
+    ron::from_str(src.text).map_err(|e| err(src.path, e.to_string()))
 }
 
 /// A deck resolved against a catalog.

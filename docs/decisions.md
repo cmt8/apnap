@@ -309,6 +309,36 @@ combat tricks, holding up counters, mana planning. It wins 199/200 four-player C
 games against three random agents; the property test over generated boards shows it never
 takes avoidable lethal commander damage.
 
+## D-034 M4 precons: the four mono-colored FDC decks (user decision 2026-11-09)
+Calling All Angels (W, Giada, Font of Hope), Wretched Ranks (B, Ghoulcaller Gisa), Reign of
+Dragons (R, Lathliss, Dragon Queen), Tramplesaurus Rex (G, Ghalta, Primal Hunger); released
+2026-10-02. Chosen from a measured comparison of 25 precons (MTGJSON decklists + rules
+text): 254 unique nonbasic cards, no planeswalkers, no vehicles, one Saga, one library
+search. Decklists (names and counts only) are frozen in `crates/cards/decks/precon_*.ron`.
+M4 order (user decision): groundwork → egui app → cards deck by deck.
+
+## D-035 Real cards: behaviour-only scripts + printed data fetched at runtime (user decision 2026-11-09)
+- `crates/cards/scripts/<letter>/<slug>.ron` holds a `RealCardScript`: oracle id, name,
+  verified/tests, and *our encoding* of keywords and abilities. No rules text, no printed
+  characteristics. `card-db::real::compile` joins it with the card's Scryfall data (mana
+  cost, type line, P/T, colors) into a `CardDef`, and refuses anything it can't represent
+  exactly (hybrid mana, `*` P/T, multi-faced layouts) — never approximate (invariant 8). A
+  script keyword that Scryfall doesn't list for the card is an error.
+- Printed data is fetched only at runtime into `$APNAP_CACHE_DIR` or the platform cache dir
+  (`~/.cache/apnap/scryfall/cards.json`), via Scryfall's batched `/cards/collection` endpoint
+  (75 names/request, paused, identified User-Agent), only for the cards the deck pool needs,
+  and never re-fetched once cached. Spec §12 suggested the bulk file + a bincode `oracle.bin`;
+  for ~254 cards four small requests and a JSON cache are simpler and kinder to Scryfall.
+  Revisit when the pool grows.
+- Real-card tests and CI need the cache: `cargo run -p harness -- fetch-cards`. Without it
+  they fail with that hint. Tests of invented cards stay fully offline.
+- The self-contained catalog (invented cards, tokens, basic lands) keeps its ids; real
+  cards are appended after it (`load_full_catalog`), so golden hashes of non-precon games
+  don't depend on Scryfall data.
+- `crates/cards` embeds its files through `build.rs` (sorted paths), replacing the
+  hand-maintained list.
+- `harness coverage` is the spec §10.6 report.
+
 ---
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
