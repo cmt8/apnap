@@ -11,6 +11,7 @@ use crate::mana::types_in;
 use crate::replacement::{MoveCause, Proposed};
 use crate::state::GameState;
 use crate::zones::Zone;
+use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use card_model::{AbilityDef, CardType};
@@ -75,7 +76,7 @@ impl PriorityFrame {
                         // player (CR 800.4j: or the next player) receives priority.
                         Flow::Continue(vec![
                             Frame::Priority(PriorityFrame::new(st.first_priority_player(), 0)),
-                            Frame::Resolve(ResolveFrame::new()),
+                            Frame::Resolve(Box::new(ResolveFrame::new())),
                         ])
                     }
                 } else {

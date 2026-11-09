@@ -50,7 +50,7 @@ pub enum Frame {
     /// CR 601.2 / 602.2: casting a spell or activating an ability.
     Cast(CastFrame),
     /// CR 608: resolve the top object of the stack.
-    Resolve(ResolveFrame),
+    Resolve(Box<ResolveFrame>),
     /// CR 508.1
     DeclareAttackers(DeclareAttackersFrame),
     /// CR 509.1
@@ -162,7 +162,7 @@ impl Frame {
             Frame::Step(s) => s.run(st, input),
             Frame::Priority(f) => f.run(st, input),
             Frame::Cast(f) => f.run(st, input),
-            Frame::Resolve(f) => f.run(st, input),
+            Frame::Resolve(f) => (*f).run(st, input),
             Frame::DeclareAttackers(f) => f.run(st, input),
             Frame::DeclareBlockers(f) => f.run(st, input),
             Frame::CombatDamage(f) => f.run(st, input),

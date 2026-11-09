@@ -19,6 +19,7 @@ use crate::state::GameState;
 use crate::targeting::is_legal;
 use crate::triggers::condition_holds;
 use crate::zones::Zone;
+use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use card_model::{
@@ -155,7 +156,10 @@ impl ResolveFrame {
                     let events = self.eval(st, k, effect);
                     if !events.is_empty() {
                         let apply = ApplyFrame::new(st, events);
-                        return Flow::Continue(vec![Frame::Resolve(self), Frame::Apply(apply)]);
+                        return Flow::Continue(vec![
+                            Frame::Resolve(Box::new(self)),
+                            Frame::Apply(apply),
+                        ]);
                     }
                 }
                 Work::EachPlayerChoose {
@@ -195,7 +199,7 @@ impl ResolveFrame {
                             .map(|card| OptionDesc::Card { card })
                             .collect();
                         return Flow::ask(
-                            Frame::Resolve(self),
+                            Frame::Resolve(Box::new(self)),
                             p,
                             kind,
                             Primitive::PickN { min: n, max: n },
@@ -214,7 +218,10 @@ impl ResolveFrame {
                         .collect();
                     if !events.is_empty() {
                         let apply = ApplyFrame::new(st, events);
-                        return Flow::Continue(vec![Frame::Resolve(self), Frame::Apply(apply)]);
+                        return Flow::Continue(vec![
+                            Frame::Resolve(Box::new(self)),
+                            Frame::Apply(apply),
+                        ]);
                     }
                 }
             }
