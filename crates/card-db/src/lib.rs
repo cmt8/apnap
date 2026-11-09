@@ -8,7 +8,7 @@
 
 use card_model::{
     AbilityDef, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript, CardType, Effect, Mode,
-    PlayerRef, TargetFilter, TargetRef,
+    ObjRef, PlayerRef, ReplaceWith, Replaces, TargetFilter, TargetRef,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -84,11 +84,56 @@ pub fn load_catalog(
             errors.extend(problems.into_iter().map(|m| err(src.path, m)));
         }
     }
+    // Second pass: CreateToken must name a token definition in the catalog.
+    for (i, def) in catalog.defs.iter().enumerate() {
+        for name in token_names(def) {
+            match catalog.find(&name) {
+                Some(id) if catalog.get(id).token => {}
+                Some(_) => errors.push(err(
+                    sources[i].path,
+                    format!("{name:?} is not a token definition"),
+                )),
+                None => errors.push(err(sources[i].path, format!("unknown token {name:?}"))),
+            }
+        }
+        if def.token && def.mana_cost.is_some() {
+            errors.push(err(sources[i].path, "tokens have no mana cost (CR 111.3)"));
+        }
+    }
     if errors.is_empty() {
         Ok(catalog)
     } else {
         Err(errors)
     }
+}
+
+fn bodies(def: &CardDef) -> Vec<&Body> {
+    def.abilities
+        .iter()
+        .filter_map(|a| match a {
+            AbilityDef::Spell(b)
+            | AbilityDef::Activated { body: b, .. }
+            | AbilityDef::Triggered { body: b, .. } => Some(b),
+            _ => None,
+        })
+        .collect()
+}
+
+fn token_names(def: &CardDef) -> Vec<String> {
+    fn walk(e: &Effect, out: &mut Vec<String>) {
+        match e {
+            Effect::Seq(v) => v.iter().for_each(|x| walk(x, out)),
+            Effect::CreateToken { token, .. } => out.push(token.clone()),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for b in bodies(def) {
+        for m in b.modes() {
+            walk(&m.effect, &mut out);
+        }
+    }
+    out
 }
 
 /// Semantic checks for one script. Returns every problem found.
@@ -112,8 +157,8 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
     if land && c.mana_cost.is_some() {
         p.push("lands have no mana cost (they are played, not cast)".into());
     }
-    if !land && c.mana_cost.is_none() {
-        p.push("non-land cards need a mana cost (M1)".into());
+    if !land && !c.token && c.mana_cost.is_none() {
+        p.push("non-land, non-token cards need a mana cost".into());
     }
     if !c.land_types.is_empty() && !land {
         p.push("basic land types on a non-land".into());
@@ -151,6 +196,35 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
             AbilityDef::Mana { cost, .. } => {
                 if !(cost.tap && cost.mana.is_none()) {
                     p.push(at("M1 mana abilities must cost exactly {T} (D-021)".into()));
+                }
+            }
+            AbilityDef::Triggered { body, .. } => {
+                check_body(body, false, &mut |m| p.push(at(m)));
+            }
+            AbilityDef::Static { effects, .. } => {
+                if effects.is_empty() {
+                    p.push(at("a static ability needs at least one effect".into()));
+                }
+            }
+            AbilityDef::Replacement { replaces, with } => {
+                let ok = matches!(
+                    (replaces, with),
+                    (Replaces::CreateTokens, ReplaceWith::Twice)
+                        | (Replaces::PutCountersOnYourPermanents, ReplaceWith::Twice)
+                        | (Replaces::CardToGraveyard, ReplaceWith::Exile)
+                        | (
+                            Replaces::ThisDies,
+                            ReplaceWith::Exile | ReplaceWith::ShuffleIntoLibrary
+                        )
+                        | (
+                            Replaces::ThisEnters,
+                            ReplaceWith::EntersTapped | ReplaceWith::EntersWithCounters { .. }
+                        )
+                );
+                if !ok {
+                    p.push(at(format!(
+                        "unsupported replacement {replaces:?} -> {with:?}"
+                    )));
                 }
             }
         }
@@ -196,6 +270,15 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             }
         }
     };
+    let obj = |r: &ObjRef, p: &mut dyn FnMut(String)| {
+        if let ObjRef::Target(i) = r {
+            match mode.targets.get(*i as usize) {
+                Some(TargetFilter::Creature | TargetFilter::AnyTarget) => {}
+                Some(f) => p(format!("ObjRef::Target({i}) refers to a {f:?} target")),
+                None => p(format!("ObjRef::Target({i}) has no target slot")),
+            }
+        }
+    };
     match e {
         Effect::Seq(v) => {
             for x in v {
@@ -221,6 +304,21 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             other => p(format!("Counter needs a Spell target slot, got {other:?}")),
         },
         Effect::EachPlayer(_) => {}
+        Effect::DamageEachPlayer { amount: a } => amount(a, p),
+        Effect::Destroy { what } | Effect::Apply { what, .. } => obj(what, p),
+        Effect::PutCounters { what, count, .. } => {
+            obj(what, p);
+            amount(count, p);
+        }
+        Effect::CreateToken { count, who, .. } => {
+            amount(count, p);
+            player(who, p);
+        }
+        Effect::PreventNext { to, .. } => {
+            if slot(to).is_none() {
+                p(format!("{to:?} has no target slot"));
+            }
+        }
     }
 }
 

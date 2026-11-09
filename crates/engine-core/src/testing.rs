@@ -62,6 +62,9 @@ impl Scenario {
                 tapped: false,
                 damage_marked: 0,
                 summoning_sick: false,
+                counters: Default::default(),
+                is_token: self.st.catalog.get(card).token,
+                deathtouch_damage: false,
             },
         );
         if zone == Zone::Stack {
@@ -69,6 +72,7 @@ impl Scenario {
                 id,
                 controller: owner,
                 kind: StackKind::Spell,
+                source_lki: None,
                 modes: Vec::new(),
                 x: 0,
                 targets: Vec::new(),
@@ -110,12 +114,13 @@ impl Scenario {
     /// The scenario begins with the active player about to receive priority in the current
     /// step (state-based actions are checked first, as always). Call `engine_core::start`.
     pub fn build(mut self) -> GameState {
+        self.st.generation += 1; // invalidate the layer cache after direct writes
         let player = self.st.first_priority_player();
         self.st.frames = vec![
             Frame::Step(StepStage::End {
                 repeat_cleanup: false,
             }),
-            Frame::Priority(PriorityFrame { player, passes: 0 }),
+            Frame::Priority(PriorityFrame::new(player, 0)),
         ];
         self.st
     }

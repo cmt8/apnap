@@ -85,6 +85,12 @@ pub fn new_game(
         objects: BTreeMap::new(),
         zones: ZoneIndex::new(n),
         stack: Vec::new(),
+        continuous: Vec::new(),
+        shields: Vec::new(),
+        next_effect_id: 0,
+        pending_triggers: Vec::new(),
+        last_check_acted: false,
+        layer_cache: Default::default(),
         turn: TurnState {
             turn_number: 0,
             active: PlayerId(0),
@@ -124,6 +130,9 @@ pub fn new_game(
                     tapped: false,
                     damage_marked: 0,
                     summoning_sick: false,
+                    counters: Default::default(),
+                    is_token: false,
+                    deathtouch_damage: false,
                 },
             );
             // CR 401.1: each player's deck becomes their library.
@@ -177,7 +186,7 @@ fn run(st: &mut GameState, mut input: Option<Input>) -> StepOutput {
         match frame.run(st, input.take()) {
             crate::frames::Flow::Continue(frames) => st.frames.extend(frames),
             crate::frames::Flow::Suspend(frame, decision) => {
-                st.frames.push(frame);
+                st.frames.push(*frame);
                 st.pending = Some(decision);
                 break;
             }

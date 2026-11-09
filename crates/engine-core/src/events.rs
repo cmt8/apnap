@@ -10,6 +10,7 @@ use crate::stack::Target;
 use crate::turn::Step;
 use crate::zones::Zone;
 use alloc::vec::Vec;
+use card_model::CounterKind;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +113,47 @@ pub enum Event {
     /// CR 800.4a
     PlayerLeftGame {
         player: PlayerId,
+    },
+    /// CR 111.1
+    TokenCreated {
+        object: ObjectId,
+        card: card_model::CardDefId,
+        controller: PlayerId,
+    },
+    /// CR 122
+    CountersPut {
+        object: ObjectId,
+        kind: CounterKind,
+        n: u32,
+    },
+    CountersRemoved {
+        object: ObjectId,
+        kind: CounterKind,
+        n: u32,
+    },
+    /// CR 704.5d
+    CeasedToExist {
+        object: ObjectId,
+    },
+    /// CR 611.2
+    ContinuousEffectBegan {
+        id: u32,
+        source: ObjectId,
+    },
+    /// CR 615: `amount` damage that would have been dealt to `target` was prevented.
+    DamagePrevented {
+        target: DamageTarget,
+        amount: u32,
+    },
+    /// CR 614: a replacement effect from `source` modified an event.
+    Replaced {
+        source: ObjectId,
+    },
+    /// CR 603.2: a triggered ability of `source` triggered.
+    Triggered {
+        source: ObjectId,
+        controller: PlayerId,
+        index: u16,
     },
     LandPlayed {
         player: PlayerId,

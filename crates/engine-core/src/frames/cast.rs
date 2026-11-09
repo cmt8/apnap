@@ -12,23 +12,28 @@ use crate::actions::{GameAction, execute, move_object};
 use crate::decision::{ChoiceKind, OptionDesc, Primitive, Response};
 use crate::events::Event;
 use crate::ids::{ObjectId, PlayerId};
-use crate::layers::chars;
+use crate::layers::{abilities, chars};
 use crate::mana::{ManaMask, ManaRequirement, ManaType, mask_of, types_in};
 use crate::stack::Target;
 use crate::state::GameState;
 use crate::targeting::candidates;
+use crate::triggers::{self, PendingTrigger};
 use crate::zones::{LibraryPosition, Zone};
+use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use card_model::{AbilityDef, Body, CardType, Keyword, ManaCost, Timing};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CastSource {
     /// Cast this card (from hand in M1).
     Card(ObjectId),
     /// Activate printed ability `index` of this permanent.
     Ability { source: ObjectId, index: u16 },
+    /// Put a triggered ability on the stack (CR 603.3): modes and targets as in 601.2b–c,
+    /// no costs; with no legal choice it's removed instead (603.3c–d).
+    Trigger(Box<PendingTrigger>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,25 +66,33 @@ struct Proposal {
     tap: Option<ObjectId>,
 }
 
-fn proposal(st: &GameState, source: CastSource) -> Proposal {
+fn proposal(st: &GameState, source: &CastSource) -> Proposal {
     match source {
-        CastSource::Card(card) => {
-            let c = chars(st, card);
-            Proposal {
-                body: st.card_def(card).spell_ability().cloned(),
-                cost: c.mana_cost.cloned(),
-                tap: None,
+        CastSource::Card(card) => Proposal {
+            body: st.card_def(*card).spell_ability().cloned(),
+            cost: chars(st, *card).mana_cost,
+            tap: None,
+        },
+        CastSource::Ability { source, index } => {
+            match &st.card_def(*source).abilities[*index as usize] {
+                AbilityDef::Activated { cost, body, .. } => Proposal {
+                    body: Some(body.clone()),
+                    cost: cost.mana.clone(),
+                    tap: cost.tap.then_some(*source),
+                },
+                other => unreachable!("not an activated ability: {other:?}"),
             }
         }
-        CastSource::Ability { source, index } => match &chars(st, source).abilities[index as usize]
-        {
-            AbilityDef::Activated { cost, body, .. } => Proposal {
-                body: Some(body.clone()),
-                cost: cost.mana.clone(),
-                tap: cost.tap.then_some(source),
-            },
-            other => unreachable!("not an activated ability: {other:?}"),
-        },
+        CastSource::Trigger(t) => {
+            match &st.catalog.get(t.source_card).abilities[t.index as usize] {
+                AbilityDef::Triggered { body, .. } => Proposal {
+                    body: Some(body.clone()),
+                    cost: None,
+                    tap: None,
+                },
+                other => unreachable!("not a triggered ability: {other:?}"),
+            }
+        }
     }
 }
 
@@ -113,11 +126,11 @@ pub(crate) fn mana_sources(
             let mut mask: ManaMask = 0;
             if c.is(CardType::Land) {
                 // CR 305.6: each basic land type grants "{T}: Add [mana]".
-                for t in c.land_types {
+                for t in &c.land_types {
                     mask |= 1 << ManaType::from_color(t.produces()).index();
                 }
             }
-            for a in c.abilities {
+            for (_, a) in abilities(st, id) {
                 if let AbilityDef::Mana { produce, .. } = a {
                     mask |= mask_of(&produce.options());
                 }
@@ -161,9 +174,9 @@ pub(crate) fn sorcery_timing(st: &GameState, p: PlayerId) -> bool {
 
 /// Whether `p` may begin casting/activating `source` now and could complete it (D-019).
 pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool {
-    match source {
+    match &source {
         CastSource::Card(card) => {
-            let c = chars(st, card);
+            let c = chars(st, *card);
             if c.is(CardType::Land) {
                 return false;
             }
@@ -173,13 +186,16 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
                 return false;
             }
         }
+        CastSource::Trigger(_) => return false,
         CastSource::Ability { source, index } => {
+            let (source, index) = (*source, *index);
             let o = st.object(source);
             if o.controller != p || o.zone != Zone::Battlefield {
                 return false;
             }
-            let AbilityDef::Activated { cost, timing, .. } =
-                &chars(st, source).abilities[index as usize]
+            // CLAUDE.md invariant 4: only abilities the permanent currently has.
+            let Some((_, AbilityDef::Activated { cost, timing, .. })) =
+                abilities(st, source).into_iter().find(|(i, _)| *i == index)
             else {
                 return false;
             };
@@ -191,7 +207,7 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
             }
         }
     }
-    let prop = proposal(st, source);
+    let prop = proposal(st, &source);
     if let Some(b) = &prop.body
         && !body_possible(st, b, p)
     {
@@ -213,12 +229,31 @@ impl CastFrame {
         }
     }
 
+    pub(crate) fn trigger(t: PendingTrigger) -> Self {
+        CastFrame::new(t.controller, CastSource::Trigger(Box::new(t)))
+    }
+
     /// The proposal's body/cost, read through the *current* source object.
     fn proposal(&self, st: &GameState) -> Proposal {
-        match self.source {
-            CastSource::Card(_) => proposal(st, CastSource::Card(self.object.expect("announced"))),
+        match &self.source {
+            CastSource::Card(_) => proposal(st, &CastSource::Card(self.object.expect("announced"))),
             s => proposal(st, s),
         }
+    }
+
+    fn is_trigger(&self) -> bool {
+        matches!(self.source, CastSource::Trigger(_))
+    }
+
+    /// CR 603.3c–d: a triggered ability with no legal mode/target is removed from the stack.
+    fn remove_trigger(self, st: &mut GameState) -> Flow {
+        execute(
+            st,
+            GameAction::RemoveAbility {
+                ability: self.object.expect("announced"),
+            },
+        );
+        Flow::done()
     }
 
     fn ask(self, kind: ChoiceKind, prim: Primitive, options: Vec<OptionDesc>) -> Flow {
@@ -231,27 +266,42 @@ impl CastFrame {
         loop {
             match self.stage {
                 CastStage::Announce => {
-                    self.object = Some(match self.source {
+                    let put = |st: &mut GameState, a: GameAction| match execute(st, a) {
+                        crate::actions::ActionResult::Moved(id) => id,
+                        r => unreachable!("{r:?}"),
+                    };
+                    self.object = Some(match &self.source {
                         // CR 601.2a: move the card to the stack; the caster controls it.
                         CastSource::Card(card) => {
-                            move_object(st, card, Zone::Stack, LibraryPosition::Top, Some(p))
+                            move_object(st, *card, Zone::Stack, LibraryPosition::Top, Some(p))
                         }
                         // CR 602.2a: the ability is created on the stack.
                         CastSource::Ability { source, index } => {
-                            let source_card = st.object(source).card;
-                            match execute(
+                            let source_card = st.object(*source).card;
+                            put(
                                 st,
                                 GameAction::PutAbilityOnStack {
                                     controller: p,
-                                    source,
+                                    source: *source,
                                     source_card,
-                                    index,
+                                    index: *index,
+                                    triggered: false,
+                                    source_lki: None,
                                 },
-                            ) {
-                                crate::actions::ActionResult::Moved(id) => id,
-                                r => unreachable!("{r:?}"),
-                            }
+                            )
                         }
+                        // CR 603.3: the triggered ability becomes the topmost object.
+                        CastSource::Trigger(t) => put(
+                            st,
+                            GameAction::PutAbilityOnStack {
+                                controller: t.controller,
+                                source: t.source,
+                                source_card: t.source_card,
+                                index: t.index,
+                                triggered: true,
+                                source_lki: t.source_lki.clone(),
+                            },
+                        ),
                     });
                     self.stage = CastStage::Modes;
                 }
@@ -278,6 +328,11 @@ impl CastFrame {
                                 self.modes = modes;
                             } else {
                                 let legal = legal_modes(st, &body, p, self.object);
+                                if legal.len() < min as usize {
+                                    // CR 603.3c (only triggers can get here, D-019).
+                                    debug_assert!(self.is_trigger());
+                                    return self.remove_trigger(st);
+                                }
                                 let max = (max as usize).min(legal.len());
                                 let options = legal
                                     .into_iter()
@@ -347,10 +402,15 @@ impl CastFrame {
                         continue;
                     }
                     if let Some(&(_, filter)) = slots.get(filled) {
-                        let options = candidates(st, filter, p, self.object)
+                        let options: Vec<OptionDesc> = candidates(st, filter, p, self.object)
                             .into_iter()
                             .map(|target| OptionDesc::Target { target })
                             .collect();
+                        if options.is_empty() {
+                            // CR 603.3d (only triggers can get here, D-019).
+                            debug_assert!(self.is_trigger());
+                            return self.remove_trigger(st);
+                        }
                         return self.ask(
                             ChoiceKind::ChooseTargets { slot: filled as u8 },
                             Primitive::PickN { min: 1, max: 1 },
@@ -477,10 +537,10 @@ impl CastFrame {
             execute(st, GameAction::Tap { object: source });
         }
         if let CastSource::Card(_) = self.source {
-            st.emit(Event::SpellCast {
-                player: p,
-                spell: self.object.unwrap(),
-            });
+            let spell = self.object.unwrap();
+            st.emit(Event::SpellCast { player: p, spell });
+            // CR 601.2i: "whenever ... casts" abilities trigger now.
+            triggers::detect_cast(st, p, spell);
         }
         Flow::done()
     }

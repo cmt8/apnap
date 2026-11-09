@@ -8,12 +8,19 @@
 //! - All game mutation goes through `actions::execute`.
 //! - Nothing that is needed after a suspension may live in a Rust local; put it in the frame.
 
+mod apply;
 mod cast;
+mod check;
 mod combat;
 mod priority;
+mod put_triggers;
 mod resolve;
 mod setup;
 mod turn;
+
+pub use apply::ApplyFrame;
+pub use check::{CheckStage, StateCheckFrame};
+pub use put_triggers::PutTriggersFrame;
 
 pub use cast::{CastFrame, CastSource, CastStage};
 pub use combat::{CombatDamageFrame, DeclareAttackersFrame, DeclareBlockersFrame};
@@ -25,6 +32,7 @@ pub use turn::StepStage;
 use crate::decision::{ChoiceKind, OptionDesc, PendingDecision, Primitive, Response};
 use crate::ids::PlayerId;
 use crate::state::GameState;
+use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
@@ -51,6 +59,12 @@ pub enum Frame {
     CombatDamage(CombatDamageFrame),
     /// CR 514.1
     CleanupDiscard { player: PlayerId },
+    /// CR 614–616: a batch of events through the replacement pipeline, then performed.
+    Apply(ApplyFrame),
+    /// CR 117.5 / 704.3: SBAs and triggers until neither happens.
+    StateCheck(StateCheckFrame),
+    /// CR 603.3: put waiting triggered abilities on the stack.
+    PutTriggers(PutTriggersFrame),
 }
 
 /// The validated answer to the decision a frame suspended on.
@@ -93,7 +107,7 @@ pub(crate) enum Flow {
     /// Frame finished; push these (last = new top). Empty = just pop.
     Continue(Vec<Frame>),
     /// Re-push `Frame` and stop with this decision.
-    Suspend(Frame, PendingDecision),
+    Suspend(Box<Frame>, PendingDecision),
 }
 
 impl Flow {
@@ -113,7 +127,7 @@ impl Flow {
         options: Vec<OptionDesc>,
     ) -> Flow {
         Flow::Suspend(
-            frame,
+            Box::new(frame),
             PendingDecision {
                 player,
                 kind,
@@ -153,6 +167,9 @@ impl Frame {
             Frame::DeclareBlockers(f) => f.run(st, input),
             Frame::CombatDamage(f) => f.run(st, input),
             Frame::CleanupDiscard { player } => turn::cleanup_discard(st, player, input),
+            Frame::Apply(f) => f.run(st, input),
+            Frame::StateCheck(f) => f.run(st, input),
+            Frame::PutTriggers(f) => f.run(st, input),
         }
     }
 }

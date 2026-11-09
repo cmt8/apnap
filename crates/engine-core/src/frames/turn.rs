@@ -1,17 +1,18 @@
 //! The turn driver (CR 500–514 (2026-11-06)).
 
 use super::{
-    CombatDamageFrame, DeclareAttackersFrame, DeclareBlockersFrame, Flow, Frame, Input,
-    PriorityFrame,
+    ApplyFrame, CombatDamageFrame, DeclareAttackersFrame, DeclareBlockersFrame, Flow, Frame, Input,
+    PriorityFrame, StateCheckFrame,
 };
-use crate::actions::{GameAction, execute, move_object};
+use crate::actions::{GameAction, execute};
 use crate::decision::{ChoiceKind, OptionDesc, Primitive};
 use crate::events::Event;
 use crate::ids::PlayerId;
-use crate::sba;
+use crate::replacement::{MoveCause, Proposed};
 use crate::state::GameState;
+use crate::triggers;
 use crate::turn::Step;
-use crate::zones::{LibraryPosition, Zone};
+use crate::zones::Zone;
 use alloc::vec;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,8 @@ pub enum StepStage {
     Priority,
     /// CR 514.2–514.3a, after the cleanup discard.
     AfterCleanupDiscard,
+    /// CR 514.3a, after the state check.
+    CleanupChecked,
     /// The step ends. `repeat_cleanup`: CR 514.3a "another cleanup step begins".
     End { repeat_cleanup: bool },
 }
@@ -58,6 +61,9 @@ impl StepStage {
         match self {
             StepStage::Begin => {
                 st.emit(Event::StepBegan { step });
+                // CR 603.2b / 500.6: "at the beginning of" triggers trigger now; they go on
+                // the stack the next time a player would receive priority (502.4 for untap).
+                triggers::detect_step(st, step);
                 match step {
                     Step::Untap => {
                         // CR 502.3: untap all permanents the active player controls.
@@ -80,11 +86,12 @@ impl StepStage {
                             && st.num_players() == 2
                             && Some(ap) == st.turn.starting_player)
                             || !st.in_game(ap);
-                        if !skip {
-                            // CR 504.1
-                            execute(st, GameAction::Draw { player: ap });
+                        if skip {
+                            return Flow::then(Frame::Step(StepStage::Priority));
                         }
-                        Flow::then(Frame::Step(StepStage::Priority))
+                        // CR 504.1 (a draw is replaceable, CR 614.11).
+                        let draw = ApplyFrame::new(st, vec![Proposed::Draw { player: ap }]);
+                        Flow::Continue(vec![Frame::Step(StepStage::Priority), Frame::Apply(draw)])
                     }
                     Step::DeclareAttackers => Flow::Continue(vec![
                         Frame::Step(StepStage::Priority),
@@ -117,33 +124,35 @@ impl StepStage {
                 Frame::Step(StepStage::End {
                     repeat_cleanup: false,
                 }),
-                Frame::Priority(PriorityFrame {
-                    player: st.first_priority_player(),
-                    passes: 0,
-                }),
+                Frame::Priority(PriorityFrame::new(st.first_priority_player(), 0)),
             ]),
             StepStage::AfterCleanupDiscard => {
-                // CR 514.2: remove all marked damage (and end "until end of turn" effects).
+                // CR 514.2: simultaneously, all marked damage is removed and "until end of
+                // turn" / "this turn" effects end.
                 for id in st.zones.battlefield.clone() {
                     if st.object(id).damage_marked > 0 {
                         execute(st, GameAction::RemoveDamage { object: id });
                     }
                 }
-                // CR 514.3a / 704.3: check SBAs (and triggers, M2). If any were performed,
-                // the active player gets priority and another cleanup step follows.
-                let performed = sba::check_once(st);
+                execute(st, GameAction::ExpireEndOfTurn);
+                // CR 514.3a / 704.3: check SBAs and triggers.
+                Flow::Continue(vec![
+                    Frame::Step(StepStage::CleanupChecked),
+                    Frame::StateCheck(StateCheckFrame::new()),
+                ])
+            }
+            StepStage::CleanupChecked => {
                 if st.is_over() {
                     return Flow::done();
                 }
-                if performed {
+                // CR 514.3a: if SBAs were performed or triggers put on the stack, the active
+                // player gets priority, and then another cleanup step begins.
+                if st.last_check_acted {
                     Flow::Continue(vec![
                         Frame::Step(StepStage::End {
                             repeat_cleanup: true,
                         }),
-                        Frame::Priority(PriorityFrame {
-                            player: st.first_priority_player(),
-                            passes: 0,
-                        }),
+                        Frame::Priority(PriorityFrame::new(st.first_priority_player(), 0)),
                     ])
                 } else {
                     Flow::then(Frame::Step(StepStage::End {
@@ -195,14 +204,18 @@ pub(crate) fn cleanup_discard(st: &mut GameState, player: PlayerId, input: Optio
     let hand: Vec<_> = st.zones.hands[player.index()].clone();
     let excess = hand.len().saturating_sub(st.config.max_hand_size as usize);
     if let Some(inp) = input {
-        for o in inp.picked() {
-            let OptionDesc::Card { card } = *o else {
-                unreachable!()
-            };
-            let new = move_object(st, card, Zone::Graveyard, LibraryPosition::Top, None);
-            st.emit(Event::Discarded { player, card: new });
-        }
-        return Flow::done();
+        // CR 701.9a: discarded cards go to the graveyard (replaceable, e.g. "exile instead").
+        let moves = inp
+            .picked()
+            .into_iter()
+            .map(|o| match o {
+                OptionDesc::Card { card } => {
+                    Proposed::moving(*card, Zone::Graveyard, MoveCause::Discard)
+                }
+                _ => unreachable!(),
+            })
+            .collect();
+        return Flow::then(Frame::Apply(ApplyFrame::new(st, moves)));
     }
     if excess == 0 {
         return Flow::done();

@@ -1,16 +1,17 @@
 //! Combat (CR 506–511 (2026-11-06)). Declarations are decomposed into one decision per
 //! creature (spec §8.5) so option lists never enumerate whole attack configurations.
 
-use super::{Flow, Frame, Input};
+use super::{ApplyFrame, Flow, Frame, Input};
 use crate::actions::{GameAction, execute};
 use crate::decision::{ChoiceKind, OptionDesc, Primitive};
 use crate::events::{DamageTarget, Event};
 use crate::ids::{ObjectId, PlayerId};
 use crate::layers::chars;
+use crate::replacement::Proposed;
 use crate::state::{AttackInfo, CombatState, GameState};
 use alloc::vec;
 use alloc::vec::Vec;
-use card_model::CardType;
+use card_model::{CardType, Keyword};
 use serde::{Deserialize, Serialize};
 
 fn creatures_controlled_by(st: &GameState, p: PlayerId) -> Vec<ObjectId> {
@@ -137,19 +138,27 @@ impl DeclareBlockersFrame {
         }
         while let Some(&defender) = self.defenders.get(self.defender_idx) {
             if let Some(&blocker) = self.candidates.get(self.next) {
-                // CR 509.1a: block one creature attacking that player.
-                let options = st
+                // CR 509.1a: block one creature attacking that player. CR 509.1b / 702.9b:
+                // a creature with flying can't be blocked except by flying and/or reach.
+                let bc = chars(st, blocker);
+                let can_block_flyer = bc.has(Keyword::Flying) || bc.has(Keyword::Reach);
+                let options: Vec<OptionDesc> = st
                     .combat
                     .as_ref()
                     .expect("combat")
                     .attackers
                     .iter()
                     .filter(|a| a.defender == defender)
+                    .filter(|a| can_block_flyer || !chars(st, a.attacker).has(Keyword::Flying))
                     .map(|a| OptionDesc::Block {
                         blocker,
                         attacker: a.attacker,
                     })
                     .collect();
+                if options.is_empty() {
+                    self.next += 1;
+                    continue;
+                }
                 return Flow::ask(
                     Frame::DeclareBlockers(self),
                     defender,
@@ -274,18 +283,21 @@ impl CombatDamageFrame {
                 }
             }
         }
-        // CR 510.2: all assigned combat damage is dealt simultaneously.
-        for (source, target, amount) in core::mem::take(&mut self.assignments) {
-            execute(
-                st,
-                GameAction::Damage {
-                    source,
-                    target,
-                    amount,
-                    combat: true,
-                },
-            );
+        // CR 510.2: all assigned combat damage is dealt simultaneously (as one batch through
+        // the prevention/replacement pipeline).
+        let events: Vec<Proposed> = core::mem::take(&mut self.assignments)
+            .into_iter()
+            .map(|(source, target, amount)| Proposed::Damage {
+                source,
+                deathtouch: chars(st, source).has(Keyword::Deathtouch),
+                target,
+                amount,
+                combat: true,
+            })
+            .collect();
+        if events.is_empty() {
+            return Flow::done();
         }
-        Flow::done()
+        Flow::then(Frame::Apply(ApplyFrame::new(st, events)))
     }
 }

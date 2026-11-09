@@ -3,6 +3,7 @@
 //! only here. `GameState::stack` is the single source of truth for stack order (last = top).
 
 use crate::ids::{ObjectId, PlayerId};
+use crate::layers::Characteristics;
 use alloc::vec::Vec;
 use card_model::CardDefId;
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,8 @@ pub enum StackKind {
         source: ObjectId,
         source_card: CardDefId,
         index: u16,
+        /// A triggered ability (CR 603) rather than an activated one (CR 602).
+        triggered: bool,
     },
 }
 
@@ -32,6 +35,9 @@ pub struct StackObject {
     pub id: ObjectId,
     pub controller: PlayerId,
     pub kind: StackKind,
+    /// For abilities: the source as it last existed on the battlefield, once it has left
+    /// (CR 113.7a, 608.2h). `None` while the source is still there.
+    pub source_lki: Option<Characteristics>,
     /// Chosen mode indices, ascending (non-modal bodies: `[0]`). Empty for permanent spells.
     pub modes: Vec<u8>,
     /// Announced X (CR 107.3a); 0 if none.

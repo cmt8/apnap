@@ -1,0 +1,443 @@
+//! Replacement and prevention effects (CR 614–616 (2026-11-06)).
+//! Text: docs/rules-notes/614-616-replacement-prevention.md.
+//!
+//! Every replaceable game event is first built as a [`Proposed`] event and run through
+//! `frames::ApplyFrame` (D-024): the applicable effects are found here, the affected
+//! player chooses among them when there is more than one (CR 616.1, `ChooseReplacement`),
+//! each effect applies at most once per event (CR 614.5), applicability is re-evaluated after
+//! every application (CR 616.1f, 616.2), and only then is the (modified) event performed.
+
+use crate::events::{DamageTarget, LossReason};
+use crate::ids::{ObjectId, PlayerId};
+use crate::layers::abilities;
+use crate::stack::Target;
+use crate::state::GameState;
+use crate::zones::{LibraryPosition, Zone};
+use alloc::vec::Vec;
+use card_model::{AbilityDef, CardDefId, CounterKind, ReplaceWith, Replaces};
+use serde::{Deserialize, Serialize};
+
+/// Why an object is moving (for events and for "destroy" vs other moves, CR 701.8b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MoveCause {
+    /// A rule moved it (e.g. SBA 704.5f, legend rule).
+    Rule,
+    /// CR 701.8
+    Destroy,
+    /// CR 701.21
+    Sacrifice,
+    /// CR 701.9
+    Discard,
+    /// A spell finishing resolution (CR 608.2n) or a permanent spell resolving (608.3a).
+    Resolve,
+    /// CR 701.6a
+    Countered,
+    /// CR 608.2b
+    Fizzled,
+    /// CR 305.1
+    PlayLand,
+}
+
+/// A game event that hasn't happened yet (CR 614.1: replacement effects watch for events
+/// that *would* happen).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Proposed {
+    Move {
+        object: ObjectId,
+        to: Zone,
+        position: LibraryPosition,
+        controller: Option<PlayerId>,
+        cause: MoveCause,
+        /// Enters the battlefield tapped / with counters (CR 614.1c–d, 122.6).
+        tapped: bool,
+        counters: Vec<(CounterKind, u32)>,
+        /// Shuffle its new library afterwards ("shuffle it into its owner's library").
+        shuffle: bool,
+    },
+    Damage {
+        source: ObjectId,
+        deathtouch: bool,
+        target: DamageTarget,
+        amount: u32,
+        combat: bool,
+    },
+    Draw {
+        player: PlayerId,
+    },
+    CreateTokens {
+        token: CardDefId,
+        count: u32,
+        controller: PlayerId,
+    },
+    PutCounters {
+        object: ObjectId,
+        kind: CounterKind,
+        count: u32,
+    },
+    GainLife {
+        player: PlayerId,
+        amount: u32,
+    },
+    LoseLife {
+        player: PlayerId,
+        amount: u32,
+    },
+    /// Not replaceable in M2 (no "can't lose" cards yet; CR 704.7 noted).
+    LoseGame {
+        player: PlayerId,
+        reason: LossReason,
+    },
+    /// CR 704.5q (not replaceable).
+    RemoveCounters {
+        object: ObjectId,
+        kind: CounterKind,
+        n: u32,
+    },
+    /// CR 704.5d (not replaceable).
+    CeaseToExist {
+        object: ObjectId,
+    },
+}
+
+impl Proposed {
+    /// A plain move with no entering modifications.
+    pub fn moving(object: ObjectId, to: Zone, cause: MoveCause) -> Self {
+        Proposed::Move {
+            object,
+            to,
+            position: LibraryPosition::Top,
+            controller: None,
+            cause,
+            tapped: false,
+            counters: Vec::new(),
+            shuffle: false,
+        }
+    }
+}
+
+/// Identifies one replacement/prevention effect, so it applies at most once per event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum RepKey {
+    /// Replacement ability `index` of `source` (a permanent, or the entering object itself).
+    Static { source: ObjectId, index: u16 },
+    /// A prevention shield (CR 615.7).
+    Shield(u32),
+}
+
+/// A proposed event plus the effects already applied to it (CR 614.5).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pending {
+    pub event: Proposed,
+    pub applied: Vec<RepKey>,
+}
+
+/// CR 616.1: the player who chooses among effects modifying this event — the affected
+/// object's controller (its owner if it has no controller), or the affected player.
+pub fn affected_player(st: &GameState, ev: &Proposed) -> PlayerId {
+    let of = |o: ObjectId| {
+        st.objects
+            .get(&o)
+            .map(|x| match x.zone {
+                Zone::Battlefield | Zone::Stack => x.controller,
+                _ => x.owner,
+            })
+            .unwrap_or(st.turn.active)
+    };
+    match ev {
+        Proposed::Move { object, .. }
+        | Proposed::PutCounters { object, .. }
+        | Proposed::RemoveCounters { object, .. }
+        | Proposed::CeaseToExist { object } => of(*object),
+        Proposed::Damage { target, .. } => match target {
+            DamageTarget::Player(p) => *p,
+            DamageTarget::Object(o) => of(*o),
+        },
+        Proposed::Draw { player }
+        | Proposed::GainLife { player, .. }
+        | Proposed::LoseLife { player, .. }
+        | Proposed::LoseGame { player, .. } => *player,
+        Proposed::CreateTokens { controller, .. } => *controller,
+    }
+}
+
+/// Effects that would modify this event now, in stable order (sources by battlefield
+/// order, then the entering object, then shields), minus those already applied.
+pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
+    let mut out = Vec::new();
+    for &source in &st.zones.battlefield {
+        // CLAUDE.md invariant 4: only abilities the source currently has.
+        for (index, a) in abilities(st, source) {
+            if let AbilityDef::Replacement { replaces, .. } = a
+                && applies(st, source, *replaces, &p.event)
+            {
+                out.push(RepKey::Static { source, index });
+            }
+        }
+    }
+    // CR 614.12: an entering permanent's own "enters …" replacement effects apply too,
+    // checked against the permanent as it would exist on the battlefield.
+    if let Proposed::Move {
+        object,
+        to: Zone::Battlefield,
+        ..
+    } = &p.event
+        && st
+            .objects
+            .get(object)
+            .is_some_and(|o| o.zone != Zone::Battlefield)
+    {
+        for (i, a) in st.card_def(*object).abilities.iter().enumerate() {
+            if let AbilityDef::Replacement {
+                replaces: Replaces::ThisEnters,
+                ..
+            } = a
+            {
+                out.push(RepKey::Static {
+                    source: *object,
+                    index: i as u16,
+                });
+            }
+        }
+    }
+    if let Proposed::Damage { target, amount, .. } = &p.event
+        && *amount > 0
+    {
+        let t = match target {
+            DamageTarget::Player(q) => Target::Player(*q),
+            DamageTarget::Object(o) => Target::Object(*o),
+        };
+        for sh in &st.shields {
+            if sh.target == t && sh.remaining > 0 {
+                out.push(RepKey::Shield(sh.id));
+            }
+        }
+    }
+    out.retain(|k| !p.applied.contains(k));
+    out
+}
+
+fn applies(st: &GameState, source: ObjectId, replaces: Replaces, ev: &Proposed) -> bool {
+    let you = st.object(source).controller;
+    match (replaces, ev) {
+        (
+            Replaces::CreateTokens,
+            Proposed::CreateTokens {
+                controller, count, ..
+            },
+        ) => *controller == you && *count > 0,
+        (Replaces::PutCountersOnYourPermanents, Proposed::PutCounters { object, count, .. }) => {
+            *count > 0
+                && st
+                    .objects
+                    .get(object)
+                    .is_some_and(|o| o.zone == Zone::Battlefield && o.controller == you)
+        }
+        // CR 614.16 / 122.6: counters it enters with count too.
+        (
+            Replaces::PutCountersOnYourPermanents,
+            Proposed::Move {
+                object,
+                to: Zone::Battlefield,
+                controller,
+                counters,
+                ..
+            },
+        ) => !counters.is_empty() && controller.unwrap_or_else(|| st.object(*object).owner) == you,
+        (
+            Replaces::CardToGraveyard,
+            Proposed::Move {
+                object,
+                to: Zone::Graveyard,
+                ..
+            },
+        ) => st.objects.get(object).is_some_and(|o| !o.is_token),
+        (
+            Replaces::ThisDies,
+            Proposed::Move {
+                object,
+                to: Zone::Graveyard,
+                ..
+            },
+        ) => *object == source && st.object(source).zone == Zone::Battlefield,
+        _ => false,
+    }
+}
+
+/// Apply `key` to `ev`. `None` = the event no longer happens (e.g. all damage prevented,
+/// CR 614.7a). Shield use is recorded through the action chokepoint.
+pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> {
+    match key {
+        RepKey::Shield(id) => {
+            let Proposed::Damage {
+                source,
+                deathtouch,
+                target,
+                amount,
+                combat,
+            } = ev
+            else {
+                unreachable!("shields only apply to damage")
+            };
+            let remaining = st
+                .shields
+                .iter()
+                .find(|s| s.id == id)
+                .map_or(0, |s| s.remaining);
+            let n = remaining.min(amount);
+            crate::actions::execute(st, crate::actions::GameAction::ConsumeShield { id, n });
+            st.emit(crate::events::Event::DamagePrevented { target, amount: n });
+            (amount > n).then_some(Proposed::Damage {
+                source,
+                deathtouch,
+                target,
+                amount: amount - n,
+                combat,
+            })
+        }
+        RepKey::Static { source, index } => {
+            let AbilityDef::Replacement { with, .. } =
+                &st.card_def(source).abilities[index as usize]
+            else {
+                unreachable!()
+            };
+            let with = *with;
+            st.emit(crate::events::Event::Replaced { source });
+            Some(modify(ev, with))
+        }
+    }
+}
+
+fn modify(ev: Proposed, with: ReplaceWith) -> Proposed {
+    match (with, ev) {
+        (
+            ReplaceWith::Twice,
+            Proposed::CreateTokens {
+                token,
+                count,
+                controller,
+            },
+        ) => Proposed::CreateTokens {
+            token,
+            count: count * 2,
+            controller,
+        },
+        (
+            ReplaceWith::Twice,
+            Proposed::PutCounters {
+                object,
+                kind,
+                count,
+            },
+        ) => Proposed::PutCounters {
+            object,
+            kind,
+            count: count * 2,
+        },
+        (
+            ReplaceWith::Twice,
+            Proposed::Move {
+                object,
+                to,
+                position,
+                controller,
+                cause,
+                tapped,
+                counters,
+                shuffle,
+            },
+        ) => Proposed::Move {
+            object,
+            to,
+            position,
+            controller,
+            cause,
+            tapped,
+            counters: counters.into_iter().map(|(k, n)| (k, n * 2)).collect(),
+            shuffle,
+        },
+        (
+            ReplaceWith::Exile,
+            Proposed::Move {
+                object,
+                controller,
+                cause,
+                ..
+            },
+        ) => Proposed::Move {
+            object,
+            to: Zone::Exile,
+            position: LibraryPosition::Top,
+            controller,
+            cause,
+            tapped: false,
+            counters: Vec::new(),
+            shuffle: false,
+        },
+        (
+            ReplaceWith::ShuffleIntoLibrary,
+            Proposed::Move {
+                object,
+                controller,
+                cause,
+                ..
+            },
+        ) => Proposed::Move {
+            object,
+            to: Zone::Library,
+            position: LibraryPosition::Top,
+            controller,
+            cause,
+            tapped: false,
+            counters: Vec::new(),
+            shuffle: true,
+        },
+        (
+            ReplaceWith::EntersTapped,
+            Proposed::Move {
+                object,
+                to,
+                position,
+                controller,
+                cause,
+                counters,
+                shuffle,
+                ..
+            },
+        ) => Proposed::Move {
+            object,
+            to,
+            position,
+            controller,
+            cause,
+            tapped: true,
+            counters,
+            shuffle,
+        },
+        (
+            ReplaceWith::EntersWithCounters { kind, n },
+            Proposed::Move {
+                object,
+                to,
+                position,
+                controller,
+                cause,
+                tapped,
+                mut counters,
+                shuffle,
+            },
+        ) => {
+            counters.push((kind, n));
+            Proposed::Move {
+                object,
+                to,
+                position,
+                controller,
+                cause,
+                tapped,
+                counters,
+                shuffle,
+            }
+        }
+        (w, e) => unreachable!("{w:?} can't modify {e:?} (applicability checked)"),
+    }
+}

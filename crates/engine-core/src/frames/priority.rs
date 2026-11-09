@@ -2,16 +2,15 @@
 
 use super::cast::{CastFrame, CastSource, can_begin, mana_sources, sorcery_timing, tap_for_mana};
 use super::resolve::ResolveFrame;
-use super::{Flow, Frame, Input};
-use crate::actions::move_object;
+use super::{ApplyFrame, Flow, Frame, Input, StateCheckFrame};
 use crate::decision::{ChoiceKind, OptionDesc};
 use crate::events::Event;
 use crate::ids::PlayerId;
-use crate::layers::chars;
+use crate::layers::{abilities, chars};
 use crate::mana::types_in;
-use crate::sba;
+use crate::replacement::{MoveCause, Proposed};
 use crate::state::GameState;
-use crate::zones::{LibraryPosition, Zone};
+use crate::zones::Zone;
 use alloc::vec;
 use alloc::vec::Vec;
 use card_model::{AbilityDef, CardType};
@@ -23,17 +22,32 @@ pub struct PriorityFrame {
     pub player: PlayerId,
     /// Consecutive passes so far (CR 117.4 "pass in succession").
     pub passes: u32,
+    /// The CR 117.5 state check has been done for this priority.
+    pub checked: bool,
 }
 
 impl PriorityFrame {
+    pub(crate) fn new(player: PlayerId, passes: u32) -> Self {
+        PriorityFrame {
+            player,
+            passes,
+            checked: false,
+        }
+    }
+
     pub(crate) fn run(mut self, st: &mut GameState, input: Option<Input>) -> Flow {
         let Some(inp) = input else {
-            // CR 117.5 / 704.3: before a player would receive priority, perform SBAs
-            // repeatedly until none are performed (then put triggers on the stack: M2).
-            while sba::check_once(st) {
-                if st.is_over() {
-                    return Flow::done();
-                }
+            // CR 117.5 / 704.3: before a player would receive priority, perform SBAs until
+            // none are performed, put triggers on the stack, and repeat (StateCheckFrame).
+            if !self.checked {
+                self.checked = true;
+                return Flow::Continue(vec![
+                    Frame::Priority(self),
+                    Frame::StateCheck(StateCheckFrame::new()),
+                ]);
+            }
+            if st.is_over() {
+                return Flow::done();
             }
             // CR 800.4a: if that player left the game, priority passes to the next player
             // in turn order who's still in the game.
@@ -45,10 +59,7 @@ impl PriorityFrame {
             return Flow::ask_one(Frame::Priority(self), p, ChoiceKind::Priority, options);
         };
         let p = self.player;
-        let again = Frame::Priority(PriorityFrame {
-            player: p,
-            passes: 0,
-        });
+        let again = Frame::Priority(PriorityFrame::new(p, 0));
         match inp.picked_one().cloned().expect("priority pick") {
             OptionDesc::Pass => {
                 // CR 117.3d
@@ -63,26 +74,26 @@ impl PriorityFrame {
                         // CR 117.4: the top object resolves; CR 117.3b: then the active
                         // player (CR 800.4j: or the next player) receives priority.
                         Flow::Continue(vec![
-                            Frame::Priority(PriorityFrame {
-                                player: st.first_priority_player(),
-                                passes: 0,
-                            }),
+                            Frame::Priority(PriorityFrame::new(st.first_priority_player(), 0)),
                             Frame::Resolve(ResolveFrame::new()),
                         ])
                     }
                 } else {
-                    Flow::then(Frame::Priority(PriorityFrame {
-                        player: st.next_in_turn_order(p),
+                    Flow::then(Frame::Priority(PriorityFrame::new(
+                        st.next_in_turn_order(p),
                         passes,
-                    }))
+                    )))
                 }
             }
             OptionDesc::PlayLand { card } => {
-                // CR 116.2a / 305.1: a special action; the player receives priority again (117.3c).
-                let land = move_object(st, card, Zone::Battlefield, LibraryPosition::Top, Some(p));
+                // CR 116.2a / 305.1: a special action; the player receives priority again
+                // (117.3c). Entering the battlefield is replaceable ("enters tapped").
                 st.player_mut(p).lands_played_this_turn += 1;
-                st.emit(Event::LandPlayed { player: p, land });
-                Flow::then(again)
+                let mut mv = Proposed::moving(card, Zone::Battlefield, MoveCause::PlayLand);
+                if let Proposed::Move { controller, .. } = &mut mv {
+                    *controller = Some(p);
+                }
+                Flow::Continue(vec![again, Frame::Apply(ApplyFrame::new(st, vec![mv]))])
             }
             // CR 117.3c: the caster/activator receives priority afterward.
             OptionDesc::CastSpell { card } => Flow::Continue(vec![
@@ -125,8 +136,7 @@ fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
         if st.object(source).controller != p {
             continue;
         }
-        for (i, a) in chars(st, source).abilities.iter().enumerate() {
-            let index = i as u16;
+        for (index, a) in abilities(st, source) {
             if matches!(a, AbilityDef::Activated { .. })
                 && can_begin(st, p, CastSource::Ability { source, index })
             {

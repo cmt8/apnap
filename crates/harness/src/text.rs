@@ -13,9 +13,10 @@ fn p(p: PlayerId) -> String {
 
 /// Tracks object names through zone changes (CR 400.7 gives every move a new id), so log
 /// lines can name objects that have since moved.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Narrator {
     names: std::collections::BTreeMap<ObjectId, String>,
+    catalog: std::sync::Arc<card_model::CardCatalog>,
 }
 
 impl Narrator {
@@ -30,7 +31,10 @@ impl Narrator {
                 )
             })
             .collect();
-        Narrator { names }
+        Narrator {
+            names,
+            catalog: st.catalog.clone(),
+        }
     }
 
     pub fn name(&self, id: ObjectId) -> String {
@@ -75,6 +79,18 @@ impl Narrator {
             Event::ZoneChange { old, new, .. } => {
                 let n = self.name(*old);
                 self.names.insert(*new, n);
+            }
+            Event::TokenCreated {
+                object,
+                card,
+                controller,
+            } => {
+                let n = format!(
+                    "{} token ({})",
+                    self.catalog.get(*card).name,
+                    p(*controller)
+                );
+                self.names.insert(*object, n);
             }
             Event::AbilityActivated {
                 ability, source, ..
@@ -185,6 +201,19 @@ fn event_line(st: &Narrator, e: &Event, viewer: Option<PlayerId>) -> Option<Stri
             format!("{} sacrifices {}", p(*player), st.name(*object))
         }
         Event::PlayerLeftGame { player } => format!("{} leaves the game", p(*player)),
+        Event::TokenCreated {
+            object, controller, ..
+        } => {
+            format!("{} creates {}", p(*controller), st.name(*object))
+        }
+        Event::CountersPut { object, kind, n } => {
+            format!("  {n} {kind:?} counter(s) on {}", st.name(*object))
+        }
+        Event::Triggered { source, .. } => format!("  {}'s ability triggers", st.name(*source)),
+        Event::DamagePrevented { amount, .. } => format!("  {amount} damage prevented"),
+        Event::Replaced { source } => {
+            format!("  ({}'s replacement effect applies)", st.name(*source))
+        }
         Event::PlayerLost { player, reason } => format!("{} LOSES ({reason:?})", p(*player)),
         Event::GameOver { winner } => match winner {
             Some(w) => format!("== game over: {} wins ==", p(*w)),
@@ -315,6 +344,16 @@ pub fn option_line(v: &PlayerView, o: &OptionDesc) -> String {
         OptionDesc::Mode { index } => format!("mode {index}"),
         OptionDesc::Target { target } => format!("target {}", target_name(v, target)),
         OptionDesc::Mana { mana } => mana.symbol().into(),
+        OptionDesc::Replacement { source, index } => {
+            format!(
+                "apply {}'s replacement effect ({index})",
+                view_name(v, *source)
+            )
+        }
+        OptionDesc::Shield { id } => format!("prevention shield #{id}"),
+        OptionDesc::Trigger { source, index } => {
+            format!("{}'s triggered ability ({index})", view_name(v, *source))
+        }
     }
 }
 

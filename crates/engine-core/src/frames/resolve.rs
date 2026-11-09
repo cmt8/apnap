@@ -1,24 +1,29 @@
 //! Resolving the top object of the stack (CR 608). Text: docs/rules-notes/608-resolution.md.
 //!
 //! An effect resolves as an explicit **work list** inside the frame (D-020): each item is
-//! one instruction (CR 608.2c "in the order written"). Any item can suspend for a choice —
-//! today the APNAP "each player" choices (CR 101.4); in M2, a replacement-effect choice
-//! inside a single action — and resolution resumes exactly where it stopped.
+//! one instruction (CR 608.2c "in the order written"). An instruction that changes the game
+//! produces proposed events, which go through the replacement pipeline in an `ApplyFrame`
+//! pushed on top of this frame (D-024). Resolution then resumes with the next item. Any
+//! item can suspend for a choice (APNAP each-player choices, CR 101.4; replacement choices
+//! inside an action, CR 616.1) and resume exactly where it stopped.
 
-use super::{Flow, Frame, Input};
-use crate::actions::{GameAction, execute, move_object};
+use super::{ApplyFrame, Flow, Frame, Input};
+use crate::actions::{GameAction, execute};
 use crate::decision::{ChoiceKind, OptionDesc, Primitive};
 use crate::events::{DamageTarget, Event};
 use crate::ids::{ObjectId, PlayerId};
-use crate::layers::chars;
+use crate::layers::{Characteristics, chars};
+use crate::replacement::{MoveCause, Proposed};
 use crate::stack::{StackKind, Target};
 use crate::state::GameState;
 use crate::targeting::is_legal;
-use crate::zones::{LibraryPosition, Zone};
+use crate::triggers::condition_holds;
+use crate::zones::Zone;
+use alloc::vec;
 use alloc::vec::Vec;
 use card_model::{
-    AbilityDef, Amount, Body, CardType, EachPlayerAction, Effect, PlayerRef, TargetFilter,
-    TargetRef,
+    AbilityDef, Amount, Body, CardType, EachPlayerAction, Effect, Keyword, ObjRef, PlayerRef,
+    TargetFilter, TargetRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +48,8 @@ pub struct ResolveFrame {
     pub controller: PlayerId,
     /// What deals damage etc.: the spell itself, or the ability's source (CR 113.7a).
     pub source: ObjectId,
+    /// The ability's source as it last existed, if it has left the battlefield.
+    pub source_lki: Option<Characteristics>,
     pub x: u32,
     pub targets: Vec<Vec<Target>>,
     pub filters: Vec<Vec<TargetFilter>>,
@@ -56,6 +63,7 @@ impl ResolveFrame {
             object: None,
             controller: PlayerId(0),
             source: ObjectId(0),
+            source_lki: None,
             x: 0,
             targets: Vec::new(),
             filters: Vec::new(),
@@ -87,10 +95,51 @@ impl ResolveFrame {
         }
     }
 
-    fn amount(&self, a: Amount) -> u32 {
+    /// An object the effect refers to, if it's still where the effect expects it.
+    fn obj(&self, st: &GameState, k: usize, r: ObjRef) -> Option<ObjectId> {
+        match r {
+            ObjRef::Target(i) => match self.target(st, k, TargetRef::Target(i))? {
+                Target::Object(o) => Some(o),
+                Target::Player(_) => None,
+            },
+            ObjRef::This => st
+                .objects
+                .get(&self.source)
+                .is_some_and(|o| o.zone == Zone::Battlefield)
+                .then_some(self.source),
+        }
+    }
+
+    /// The source's current characteristics, or its last known ones (CR 608.2h, 113.7a).
+    fn source_chars(&self, st: &GameState) -> Option<Characteristics> {
+        if st.objects.contains_key(&self.source) {
+            Some(chars(st, self.source))
+        } else {
+            self.source_lki.clone()
+        }
+    }
+
+    fn amount(&self, st: &GameState, a: Amount) -> u32 {
         match a {
             Amount::Fixed(n) => n,
             Amount::X => self.x,
+            Amount::SourcePower => self
+                .source_chars(st)
+                .and_then(|c| c.power)
+                .unwrap_or(0)
+                .max(0) as u32,
+        }
+    }
+
+    fn damage(&self, st: &GameState, target: DamageTarget, amount: u32) -> Proposed {
+        Proposed::Damage {
+            source: self.source,
+            deathtouch: self
+                .source_chars(st)
+                .is_some_and(|c| c.has(Keyword::Deathtouch)),
+            target,
+            amount,
+            combat: false,
         }
     }
 
@@ -102,7 +151,13 @@ impl ResolveFrame {
         }
         while let Some(item) = self.work.pop() {
             match item {
-                Work::Eval { k, effect } => self.eval(st, k, effect),
+                Work::Eval { k, effect } => {
+                    let events = self.eval(st, k, effect);
+                    if !events.is_empty() {
+                        let apply = ApplyFrame::new(st, events);
+                        return Flow::Continue(vec![Frame::Resolve(self), Frame::Apply(apply)]);
+                    }
+                }
                 Work::EachPlayerChoose {
                     action,
                     order,
@@ -148,27 +203,23 @@ impl ResolveFrame {
                         );
                     }
                     // All players have chosen: the actions happen simultaneously.
-                    for (p, objs) in chosen {
-                        for o in objs {
-                            let new =
-                                move_object(st, o, Zone::Graveyard, LibraryPosition::Top, None);
-                            st.emit(match action {
-                                EachPlayerAction::Discard(_) => Event::Discarded {
-                                    player: p,
-                                    card: new,
-                                },
-                                _ => Event::Sacrificed {
-                                    player: p,
-                                    object: new,
-                                },
-                            });
-                        }
+                    let cause = match action {
+                        EachPlayerAction::Discard(_) => MoveCause::Discard,
+                        _ => MoveCause::Sacrifice,
+                    };
+                    let events: Vec<Proposed> = chosen
+                        .into_iter()
+                        .flat_map(|(_, objs)| objs)
+                        .map(|o| Proposed::moving(o, Zone::Graveyard, cause))
+                        .collect();
+                    if !events.is_empty() {
+                        let apply = ApplyFrame::new(st, events);
+                        return Flow::Continue(vec![Frame::Resolve(self), Frame::Apply(apply)]);
                     }
                 }
             }
         }
-        self.finish(st);
-        Flow::done()
+        self.finish(st)
     }
 
     /// CR 608.2a–b and 608.3. Returns `Some` if resolution ends here.
@@ -178,37 +229,49 @@ impl ResolveFrame {
         self.controller = top.controller;
         self.x = top.x;
         self.targets = top.targets.clone();
-        let body: Option<Body> = match &top.kind {
+        self.source_lki = top.source_lki.clone();
+        let body: Body = match &top.kind {
             StackKind::Spell => {
                 self.source = top.id;
-                let c = chars(st, top.id);
-                if c.is_permanent_type() {
+                if chars(st, top.id).is_permanent_type() {
                     // CR 608.3a: it becomes a permanent under its controller's control.
                     st.emit(Event::Resolved { spell: top.id });
-                    move_object(
-                        st,
-                        top.id,
-                        Zone::Battlefield,
-                        LibraryPosition::Top,
-                        Some(top.controller),
-                    );
-                    return Some(Flow::done());
+                    let mut mv = Proposed::moving(top.id, Zone::Battlefield, MoveCause::Resolve);
+                    if let Proposed::Move { controller, .. } = &mut mv {
+                        *controller = Some(top.controller);
+                    }
+                    return Some(Flow::then(Frame::Apply(ApplyFrame::new(st, vec![mv]))));
                 }
-                st.card_def(top.id).spell_ability().cloned()
+                st.card_def(top.id)
+                    .spell_ability()
+                    .cloned()
+                    .expect("instants and sorceries have a spell ability")
             }
             StackKind::Ability {
                 source,
                 source_card,
                 index,
+                ..
             } => {
                 self.source = *source;
                 match &st.catalog.get(*source_card).abilities[*index as usize] {
-                    AbilityDef::Activated { body, .. } => Some(body.clone()),
-                    _ => unreachable!(),
+                    AbilityDef::Activated { body, .. } => body.clone(),
+                    AbilityDef::Triggered {
+                        body,
+                        intervening_if,
+                        ..
+                    } => {
+                        // CR 603.4 / 608.2a: re-check an intervening "if" on resolution.
+                        if !condition_holds(st, *intervening_if, top.controller) {
+                            execute(st, GameAction::RemoveAbility { ability: top.id });
+                            return Some(Flow::done());
+                        }
+                        body.clone()
+                    }
+                    other => unreachable!("not a stack ability: {other:?}"),
                 }
             }
         };
-        let body = body.expect("non-permanent spells and abilities have a body");
         self.filters = top
             .modes
             .iter()
@@ -225,8 +288,7 @@ impl ResolveFrame {
         }
         if any && !any_legal {
             st.emit(Event::Fizzled { object: top.id });
-            self.remove(st);
-            return Some(Flow::done());
+            return Some(self.leave_stack(st, MoveCause::Fizzled));
         }
         // CR 700.2: chosen modes are performed in printed order (modes are stored sorted).
         for (k, &m) in top.modes.iter().enumerate().rev() {
@@ -238,94 +300,158 @@ impl ResolveFrame {
         None
     }
 
-    fn eval(&mut self, st: &mut GameState, k: usize, effect: Effect) {
+    /// One instruction. Returns the events it would cause (empty if none or done directly).
+    fn eval(&mut self, st: &mut GameState, k: usize, effect: Effect) -> Vec<Proposed> {
         match effect {
             Effect::Seq(v) => {
                 for e in v.into_iter().rev() {
                     self.work.push(Work::Eval { k, effect: e });
                 }
+                Vec::new()
             }
             Effect::DealDamage { to, amount } => {
-                let amount = self.amount(amount);
-                if let Some(t) = self.target(st, k, to) {
-                    let target = match t {
-                        Target::Player(p) => DamageTarget::Player(p),
-                        Target::Object(o) => DamageTarget::Object(o),
-                    };
+                let amount = self.amount(st, amount);
+                match self.target(st, k, to) {
+                    Some(Target::Player(p)) => {
+                        vec![self.damage(st, DamageTarget::Player(p), amount)]
+                    }
+                    Some(Target::Object(o)) => {
+                        vec![self.damage(st, DamageTarget::Object(o), amount)]
+                    }
+                    None => Vec::new(),
+                }
+            }
+            Effect::DamageEachPlayer { amount } => {
+                let amount = self.amount(st, amount);
+                st.apnap_order()
+                    .into_iter()
+                    .map(|p| self.damage(st, DamageTarget::Player(p), amount))
+                    .collect()
+            }
+            Effect::Draw { who, amount } => match self.player(st, k, who) {
+                Some(player) => (0..self.amount(st, amount))
+                    .map(|_| Proposed::Draw { player })
+                    .collect(),
+                None => Vec::new(),
+            },
+            Effect::GainLife { who, amount } => match self.player(st, k, who) {
+                Some(player) => vec![Proposed::GainLife {
+                    player,
+                    amount: self.amount(st, amount),
+                }],
+                None => Vec::new(),
+            },
+            Effect::LoseLife { who, amount } => match self.player(st, k, who) {
+                Some(player) => vec![Proposed::LoseLife {
+                    player,
+                    amount: self.amount(st, amount),
+                }],
+                None => Vec::new(),
+            },
+            Effect::Counter { what } => match self.target(st, k, what) {
+                // CR 701.6a: a countered spell is put into its owner's graveyard.
+                Some(Target::Object(spell)) => {
+                    st.emit(Event::Countered { object: spell });
+                    vec![Proposed::moving(
+                        spell,
+                        Zone::Graveyard,
+                        MoveCause::Countered,
+                    )]
+                }
+                _ => Vec::new(),
+            },
+            Effect::Destroy { what } => match self.obj(st, k, what) {
+                // CR 701.8a
+                Some(o) => vec![Proposed::moving(o, Zone::Graveyard, MoveCause::Destroy)],
+                None => Vec::new(),
+            },
+            Effect::CreateToken { token, count, who } => {
+                let token = st.catalog.find(&token).expect("validated by card-db");
+                match self.player(st, k, who) {
+                    Some(controller) => vec![Proposed::CreateTokens {
+                        token,
+                        count: self.amount(st, count),
+                        controller,
+                    }],
+                    None => Vec::new(),
+                }
+            }
+            Effect::PutCounters { what, kind, count } => match self.obj(st, k, what) {
+                Some(object) => vec![Proposed::PutCounters {
+                    object,
+                    kind,
+                    count: self.amount(st, count),
+                }],
+                None => Vec::new(),
+            },
+            Effect::Apply {
+                what,
+                effects,
+                until_end_of_turn,
+            } => {
+                // CR 611.2c: the affected set is locked in now.
+                if let Some(o) = self.obj(st, k, what) {
                     execute(
                         st,
-                        GameAction::Damage {
+                        GameAction::AddContinuous {
                             source: self.source,
-                            target,
-                            amount,
-                            combat: false,
+                            controller: self.controller,
+                            affected: vec![o],
+                            effects,
+                            until_end_of_turn,
                         },
                     );
                 }
+                Vec::new()
             }
-            Effect::Draw { who, amount } => {
-                if let Some(player) = self.player(st, k, who) {
-                    for _ in 0..self.amount(amount) {
-                        execute(st, GameAction::Draw { player });
-                    }
+            Effect::PreventNext { to, amount } => {
+                if let Some(target) = self.target(st, k, to) {
+                    execute(st, GameAction::AddShield { target, amount });
                 }
+                Vec::new()
             }
-            Effect::GainLife { who, amount } => {
-                if let Some(player) = self.player(st, k, who) {
-                    let amount = self.amount(amount);
-                    execute(st, GameAction::GainLife { player, amount });
-                }
+            Effect::EachPlayer(EachPlayerAction::Draw(n)) => st
+                .apnap_order()
+                .into_iter()
+                .flat_map(|player| (0..n).map(move |_| Proposed::Draw { player }))
+                .collect(),
+            Effect::EachPlayer(action) => {
+                self.work.push(Work::EachPlayerChoose {
+                    action,
+                    order: st.apnap_order(),
+                    next: 0,
+                    chosen: Vec::new(),
+                });
+                Vec::new()
             }
-            Effect::LoseLife { who, amount } => {
-                if let Some(player) = self.player(st, k, who) {
-                    let amount = self.amount(amount);
-                    execute(st, GameAction::LoseLife { player, amount });
-                }
-            }
-            Effect::Counter { what } => {
-                if let Some(Target::Object(spell)) = self.target(st, k, what) {
-                    // CR 701.6a: a countered spell is put into its owner's graveyard.
-                    st.emit(Event::Countered { object: spell });
-                    move_object(st, spell, Zone::Graveyard, LibraryPosition::Top, None);
-                }
-            }
-            Effect::EachPlayer(EachPlayerAction::Draw(n)) => {
-                for player in st.apnap_order() {
-                    for _ in 0..n {
-                        execute(st, GameAction::Draw { player });
-                    }
-                }
-            }
-            Effect::EachPlayer(action) => self.work.push(Work::EachPlayerChoose {
-                action,
-                order: st.apnap_order(),
-                next: 0,
-                chosen: Vec::new(),
-            }),
         }
     }
 
-    /// CR 608.2n: the spell goes to the graveyard; an ability ceases to exist.
-    /// CR 608.2m: if it already left the stack, there's nothing to do.
-    fn finish(&mut self, st: &mut GameState) {
+    /// CR 608.2n: as the final part of resolution, the spell goes to its owner's graveyard;
+    /// an ability ceases to exist. CR 608.2m: if it already left the stack, nothing to do.
+    fn finish(self, st: &mut GameState) -> Flow {
         let id = self.object.expect("started");
-        if st.stack_object(id).is_some() {
-            st.emit(Event::Resolved { spell: id });
-            self.remove(st);
+        if st.stack_object(id).is_none() {
+            return Flow::done();
         }
+        st.emit(Event::Resolved { spell: id });
+        self.leave_stack(st, MoveCause::Resolve)
     }
 
-    /// Take the object off the stack (CR 608.2n; also CR 608.2b when it fizzles).
-    fn remove(&mut self, st: &mut GameState) {
+    /// Take the object off the stack (CR 608.2n, or 608.2b when it fizzles). A spell card
+    /// moving to the graveyard is a replaceable event.
+    fn leave_stack(&self, st: &mut GameState, cause: MoveCause) -> Flow {
         let id = self.object.expect("started");
         match st.stack_object(id).map(|s| s.kind.clone()) {
             Some(StackKind::Spell) => {
-                move_object(st, id, Zone::Graveyard, LibraryPosition::Top, None);
+                let mv = Proposed::moving(id, Zone::Graveyard, cause);
+                Flow::then(Frame::Apply(ApplyFrame::new(st, vec![mv])))
             }
             Some(StackKind::Ability { .. }) => {
                 execute(st, GameAction::RemoveAbility { ability: id });
+                Flow::done()
             }
-            None => {}
+            None => Flow::done(),
         }
     }
 }

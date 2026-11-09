@@ -79,7 +79,11 @@ pub enum ChoiceKind {
     DeclareBlockers,
     /// CR 510.1c: divide a blocked creature's damage among its blockers.
     AssignCombatDamage,
+    /// CR 603.3b: order your triggered abilities (Order; first listed goes on the stack
+    /// first, so it resolves last).
     OrderTriggers,
+    /// CR 704.5j: choose the legendary permanent to keep.
+    LegendRule,
     ChooseReplacement,
     CommanderToCommandZone,
     SearchLibrary,
@@ -126,6 +130,20 @@ pub enum OptionDesc {
     /// A mana type: a recipient of an `Allocate` of generic payment (CR 601.2h).
     Mana {
         mana: ManaType,
+    },
+    /// A replacement effect: ability `index` of `source` (CR 616.1).
+    Replacement {
+        source: ObjectId,
+        index: u16,
+    },
+    /// A prevention shield (CR 615.7, 616.1).
+    Shield {
+        id: u32,
+    },
+    /// A triggered ability waiting to go on the stack (CR 603.3b).
+    Trigger {
+        source: ObjectId,
+        index: u16,
     },
     Player {
         player: PlayerId,

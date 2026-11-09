@@ -3,6 +3,7 @@
 
 use crate::config::GameConfig;
 use crate::decision::PendingDecision;
+use crate::effects::{ContinuousInstance, Shield};
 use crate::events::Event;
 use crate::frames::Frame;
 use crate::hash::{StableHasher, stable_hash};
@@ -11,6 +12,7 @@ use crate::mana::ManaPool;
 use crate::objects::GameObject;
 use crate::rng::GameRng;
 use crate::stack::{StackKind, StackObject};
+use crate::triggers::PendingTrigger;
 use crate::turn::TurnState;
 use crate::zones::{Zone, ZoneIndex};
 use alloc::collections::BTreeMap;
@@ -69,6 +71,19 @@ pub struct GameState {
     pub zones: ZoneIndex,
     /// The stack (CR 405); last = top. See `stack.rs`.
     pub stack: Vec<StackObject>,
+    /// Continuous effects from resolved spells/abilities (CR 611.2).
+    pub continuous: Vec<ContinuousInstance>,
+    /// Prevention shields (CR 615.7).
+    pub shields: Vec<Shield>,
+    pub next_effect_id: u32,
+    /// Triggered abilities waiting to be put on the stack (CR 603.3).
+    pub pending_triggers: Vec<PendingTrigger>,
+    /// Whether the last state check (CR 704.3) performed any SBA or put any trigger on the
+    /// stack. Read by the cleanup step (CR 514.3a).
+    pub last_check_acted: bool,
+    /// Memoized layer view (CR 613), keyed by `generation`. Derived; never serialized.
+    #[serde(skip)]
+    pub(crate) layer_cache: crate::layers::LayerCache,
     pub turn: TurnState,
     pub combat: Option<CombatState>,
     /// Explicit continuation stack (spec's `ResolutionFrame`s); last = top. Everything that

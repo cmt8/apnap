@@ -253,9 +253,30 @@ pub struct CardDef {
     pub toughness: Option<i32>,
     pub keywords: Vec<Keyword>,
     pub abilities: Vec<AbilityDef>,
+    /// Color indicator / token colors. `None` = derived from the mana cost (CR 202.2).
+    pub colors: Option<Vec<Color>>,
+    /// A token definition (CR 111): only created by effects, never in decks.
+    pub token: bool,
 }
 
 impl CardDef {
+    /// Printed colors (CR 105.2, 202.2).
+    pub fn printed_colors(&self) -> Vec<Color> {
+        if let Some(c) = &self.colors {
+            return c.clone();
+        }
+        let mut out: Vec<Color> = Vec::new();
+        for s in self.mana_cost.iter().flat_map(|m| &m.symbols) {
+            if let ManaSymbol::Colored(c) = s
+                && !out.contains(c)
+            {
+                out.push(*c);
+            }
+        }
+        out.sort();
+        out
+    }
+
     pub fn has_type(&self, t: CardType) -> bool {
         self.card_types.contains(&t)
     }
@@ -276,10 +297,16 @@ impl CardDef {
 /// Keyword abilities (CR 702). M1: the two that change timing rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Keyword {
+    /// CR 702.2: lethal from any damage (SBA 704.5h).
+    Deathtouch,
     /// CR 702.8
     Flash,
+    /// CR 702.9: can't be blocked except by creatures with flying and/or reach.
+    Flying,
     /// CR 702.10
     Haste,
+    /// CR 702.17: can block creatures with flying.
+    Reach,
 }
 
 /// One ability printed on a card (CR 113).
@@ -296,6 +323,164 @@ pub enum AbilityDef {
     },
     /// An activated mana ability (CR 605.1a). M1: the cost must be exactly `{T}`.
     Mana { cost: Cost, produce: ManaProduce },
+    /// A triggered ability (CR 603): "[When/Whenever/At] `when`, [if `intervening_if`,] `body`."
+    Triggered {
+        when: Trigger,
+        #[serde(default)]
+        intervening_if: Option<Condition>,
+        body: Body,
+    },
+    /// A static ability generating a continuous effect (CR 604, 611.3): `effects` apply to
+    /// `affected`. One ability = one effect that may have parts in several layers (CR 613.6).
+    Static {
+        affected: Affected,
+        effects: Vec<ContinuousEffect>,
+    },
+    /// A static ability generating a replacement effect (CR 614).
+    Replacement {
+        replaces: Replaces,
+        with: ReplaceWith,
+    },
+}
+
+/// Whose / which player, relative to the ability's controller.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Who {
+    #[default]
+    Any,
+    You,
+    Opponent,
+}
+
+/// Matches permanents (or, for "dies", the object as it last existed on the battlefield).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Selector {
+    /// Must have at least one of these card types (empty = any).
+    pub types: Vec<CardType>,
+    /// Must have none of these card types ("noncreature").
+    pub not_types: Vec<CardType>,
+    pub supertypes: Vec<Supertype>,
+    pub controller: Who,
+    /// "another" / "other": excludes the ability's own source.
+    pub other: bool,
+    /// `Some(false)` = nontoken.
+    pub token: Option<bool>,
+}
+
+/// What a trigger condition or replacement watches: the source itself, or matching objects.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ObjFilter {
+    This,
+    Matching(Selector),
+}
+
+/// Trigger conditions (CR 603.1). M2 vocabulary.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Trigger {
+    /// CR 603.6a: "When/Whenever [filter] enters".
+    Enters(ObjFilter),
+    /// "When/Whenever [filter] dies" — leaves the battlefield for a graveyard; looks back in
+    /// time (CR 603.10a).
+    Dies(ObjFilter),
+    /// CR 603.2b: "At the beginning of [whose] [step]".
+    BeginningOf { step: TriggerStep, whose: Who },
+    /// "Whenever [who] casts a spell [of these types]" (empty = any spell).
+    Cast {
+        by: Who,
+        #[serde(default)]
+        types: Vec<CardType>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TriggerStep {
+    Upkeep,
+    DrawStep,
+    EndStep,
+}
+
+/// An intervening "if" clause (CR 603.4), evaluated for the ability's controller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Condition {
+    LifeAtMost(i32),
+    LifeAtLeast(i32),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Affected {
+    /// The source permanent itself.
+    This,
+    /// Every permanent matching the selector (re-evaluated continuously, CR 611.3a).
+    All(Selector),
+}
+
+/// The parts of a continuous effect, each applied in its own layer (CR 613.1, 613.6).
+/// Layers 1a/1b/2/3 have no vocabulary yet (D-023); the layer walk has their slots.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ContinuousEffect {
+    /// Layer 4: add card types and/or subtypes ("is also a creature").
+    AddTypes {
+        #[serde(default)]
+        card_types: Vec<CardType>,
+        #[serde(default)]
+        subtypes: Vec<String>,
+        #[serde(default)]
+        land_types: Vec<BasicLandType>,
+    },
+    /// Layer 5
+    SetColors(Vec<Color>),
+    /// Layer 6
+    AddKeywords(Vec<Keyword>),
+    /// Layer 6
+    LoseKeywords(Vec<Keyword>),
+    /// Layer 6: "loses all abilities".
+    LoseAllAbilities,
+    /// Layer 7b: "has base power and toughness P/T" / "becomes P/T".
+    SetPT(i32, i32),
+    /// Layer 7c: "+P/+T".
+    ModifyPT(i32, i32),
+    /// Layer 7d: switch power and toughness.
+    SwitchPT,
+}
+
+/// Events a static replacement effect watches for (CR 614). M2 vocabulary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Replaces {
+    /// "If an effect would create one or more tokens under your control" (CR 614.16).
+    CreateTokens,
+    /// "If an effect would put one or more counters on a permanent you control" (CR 614.16;
+    /// includes counters a permanent enters with, CR 122.6).
+    PutCountersOnYourPermanents,
+    /// "If a card would be put into a graveyard from anywhere".
+    CardToGraveyard,
+    /// "If this creature would die" (battlefield → graveyard).
+    ThisDies,
+    /// "This permanent enters …" (CR 614.1c–d): a self ETB replacement.
+    ThisEnters,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReplaceWith {
+    /// "… twice that many … instead" (tokens or counters).
+    Twice,
+    /// "… exile it instead".
+    Exile,
+    /// "… shuffle it into its owner's library instead".
+    ShuffleIntoLibrary,
+    /// "enters tapped".
+    EntersTapped,
+    /// "enters with N [kind] counters".
+    EntersWithCounters { kind: CounterKind, n: u32 },
+}
+
+/// Counter kinds (CR 122). M2: the two P/T counters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum CounterKind {
+    /// +1/+1 (CR 122.1a)
+    PlusOne,
+    /// -1/-1
+    MinusOne,
 }
 
 /// What a spell or ability does: either a single effect or a modal choice (CR 700.2).
@@ -418,6 +603,47 @@ pub enum Effect {
     },
     /// Each player, in APNAP order, makes the choice; then all actions happen at once (CR 101.4).
     EachPlayer(EachPlayerAction),
+    /// The source deals `amount` damage to each player, simultaneously.
+    DamageEachPlayer {
+        amount: Amount,
+    },
+    /// CR 701.8: destroy.
+    Destroy {
+        what: ObjRef,
+    },
+    /// CR 111: create `count` tokens (a token card in the catalog) under `who`'s control.
+    CreateToken {
+        token: String,
+        count: Amount,
+        who: PlayerRef,
+    },
+    /// CR 122: put counters on a permanent.
+    PutCounters {
+        what: ObjRef,
+        kind: CounterKind,
+        count: Amount,
+    },
+    /// A continuous effect from a resolving spell/ability (CR 611.2): its affected object is
+    /// locked in when it begins (611.2c).
+    Apply {
+        what: ObjRef,
+        effects: Vec<ContinuousEffect>,
+        #[serde(default)]
+        until_end_of_turn: bool,
+    },
+    /// CR 615.7: "Prevent the next N damage that would be dealt to [target] this turn."
+    PreventNext {
+        to: TargetRef,
+        amount: u32,
+    },
+}
+
+/// An object an effect refers to: a target slot, or the source itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ObjRef {
+    Target(u8),
+    /// The ability's source ("this creature").
+    This,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -449,6 +675,9 @@ pub enum Amount {
     Fixed(u32),
     /// The announced value of X (CR 107.3a).
     X,
+    /// The source's power: current if it's still on the battlefield, otherwise as it last
+    /// existed there (CR 608.2h, 113.7a).
+    SourcePower,
 }
 
 /// A card file: the definition plus authoring metadata (spec §7.1). Parsed by `card-db`.

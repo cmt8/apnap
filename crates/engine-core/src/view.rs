@@ -76,7 +76,7 @@ fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
     let c = chars(st, id);
     ObjectView {
         id,
-        name: c.name.into(),
+        name: c.name,
         owner: o.owner,
         controller: o.controller,
         card_types: c.card_types.to_vec(),
