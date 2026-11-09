@@ -38,6 +38,15 @@ pub struct ObjectView {
     pub attached_to: Option<ObjectId>,
 }
 
+/// A commander designation (CR 903.3): public for the whole game, wherever the card is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommanderInfo {
+    pub owner: PlayerId,
+    pub card_instance: CardInstanceId,
+    pub card: card_model::CardDefId,
+    pub name: String,
+}
+
 /// A spell or ability on the stack.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackView {
@@ -86,6 +95,8 @@ pub struct PlayerView {
     pub exile: Vec<ObjectView>,
     /// The command zone (public).
     pub command: Vec<ObjectView>,
+    /// CR 903.3: every commander in the game (public): owner, card, name.
+    pub commanders: Vec<CommanderInfo>,
     pub combat: Option<CombatState>,
     /// The pending decision, if it is the viewer's.
     pub decision: Option<PendingDecision>,
@@ -173,6 +184,23 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
             .collect(),
         exile: views(st, &st.zones.exile),
         command: views(st, &st.zones.command),
+        commanders: st
+            .commanders
+            .iter()
+            .map(|&(owner, card_instance)| {
+                let card = st
+                    .commander_cards
+                    .get(&card_instance)
+                    .copied()
+                    .unwrap_or(card_model::CardDefId(0));
+                CommanderInfo {
+                    owner,
+                    card_instance,
+                    card,
+                    name: st.catalog.get(card).name.clone(),
+                }
+            })
+            .collect(),
         combat: st.combat.clone(),
         decision: st.pending.clone().filter(|d| d.player == viewer),
     }

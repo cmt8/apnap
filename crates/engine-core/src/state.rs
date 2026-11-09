@@ -88,6 +88,8 @@ pub struct GameState {
     pub next_effect_id: u32,
     /// CR 903.3: the commander cards (owner, card), in seat order.
     pub commanders: Vec<(PlayerId, CardInstanceId)>,
+    /// The card definition of each commander (it stays known after the card leaves the game).
+    pub commander_cards: BTreeMap<CardInstanceId, card_model::CardDefId>,
     /// CR 903.9a: commanders put into a graveyard or exile since SBAs were last checked.
     pub commander_moved: Vec<ObjectId>,
     /// Triggered abilities waiting to be put on the stack (CR 603.3).

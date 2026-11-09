@@ -339,6 +339,34 @@ M4 order (user decision): groundwork → egui app → cards deck by deck.
   hand-maintained list.
 - `harness coverage` is the spec §10.6 report.
 
+## D-036 The desktop app (M4): session layer + egui view, tested headlessly
+- `crates/app` is a library plus a thin binary. `session.rs` owns the `GameState`, the AI
+  seats, the response log and the *stops*; it has no graphics. `ui.rs` is one function
+  `ui(&mut App, &mut egui::Ui)` drawing from the human's `PlayerView` (spec §11). The AI
+  runs synchronously in the session for now (the heuristic agent is instant); worker
+  threads come with search AIs in M5.
+- **Stops are a session/UI concern** (spec §6): the engine always asks; the session answers
+  for the human when a decision has only one possible answer, when priority offers nothing
+  but passing or mana, when the stack is empty outside the configured stop steps, or (with
+  auto-pay on) for mana payment. "Pass until end of turn" is a session flag.
+- **Every decision is mouse-only**: each option is a button in the decision panel (single
+  pick, multi-select + Confirm, number with -/+, Allocate with per-recipient -/+, Order with
+  Up/Down), and options attached to a card or player can be chosen by clicking it on the
+  board (an object with several options focuses the panel on them). `prompt(ChoiceKind)` is
+  an exhaustive match, so a new choice kind can't be forgotten.
+- **Save = replay file** (setup, seed, every response). Loading replays it, asking each AI
+  agent its recorded decisions again so agent state matches; "Watch replay" steps through
+  the same file. Saves live in the platform data dir (`~/.local/share/apnap/saves`).
+- **Card text is generated** from ability definitions (`card_model::describe`), so the text
+  a player reads is what the engine does. Cards are text frames; images come with the real
+  cards (lazy Scryfall download into the cache).
+- **Tested without a window** via `egui_kittest`: a robot plays whole games by clicking
+  widgets only (`tests/robot.rs`), targeted widget tests cover Allocate/Order/multi-select
+  and board clicks (`tests/widgets.rs`), and an ignored test renders PNG screenshots. The
+  harness's accessibility and missing-glyph checks stay on.
+- `app` depends on `harness` (setups, agents, narrator, replay format): added to the allowed
+  crate edges. The spec's layout had no such edge; the alternative was duplicating them.
+
 ---
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)

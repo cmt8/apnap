@@ -1,6 +1,6 @@
 [package]
 name = "app"
-description = "Desktop app (eframe/egui). Stub until M4."
+description = "apnap desktop app (eframe/egui): play Commander and 1v1 games against the AI."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,16 @@ publish.workspace = true
 
 [dependencies]
 engine-core.workspace = true
+card-model.workspace = true
+ai.workspace = true
+harness = { path = "../harness" }
+serde_json.workspace = true
+dirs = "7.0.0"
+eframe = "0.37.0"
+
+[dev-dependencies]
+egui_kittest = { version = "0.37.0", features = ["wgpu", "snapshot"] }
+engine-core = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

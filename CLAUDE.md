@@ -58,6 +58,8 @@ cargo run -p harness -- play [--setup cmd-4p] [--seed N]  # you (P0) vs random a
 cargo run --release -p harness -- fuzz --setup cmd-4p --agents h-vs-r --games 200   # AI strength
 cargo run -p harness -- run --seed 42 --save-replay r.json && cargo run -p harness -- replay r.json
 cargo run -p harness -- bless                             # ONLY when a hash change is intended; review why
+cargo run --release -p app                                # the desktop app (you are P0)
+APNAP_SHOT_DIR=/tmp/shots cargo test -p app --test screenshot -- --ignored   # render the UI to PNGs
 cargo run -p harness -- fetch-cards                       # printed data for the precons -> ~/.cache/apnap
 cargo run -p harness -- coverage [--verbose]              # which precon cards are scripted/verified
 ```
@@ -82,7 +84,9 @@ cargo run -p harness -- coverage [--verbose]              # which precon cards a
 - `crates/ai` — agents: RandomAgent, HeuristicAgent (D-033). `crates/harness` — CLI, `Setup`
   (m0 / m1-Np / m2-Np / cmd-Np), `--agents random|heuristic|h-vs-r`,
   `script::Script` test driver, determinism/golden/property/rules tests.
-- `crates/app` — stub until M4. `crates/xtask` — check-deps.
+- `crates/app` — the desktop app: `session.rs` (game + AI seats + stops + save/replay, no
+  graphics), `ui.rs` (egui view), tests driven headlessly with egui_kittest (D-036).
+- `crates/xtask` — check-deps.
 - Engine extras: `stack.rs` (StackObject), `targeting.rs` (choose + 608.2b legality in one
   place), `frames/cast.rs` (601.2/602.2, and putting triggers on the stack), `frames/resolve.rs`
   (work list), `replacement.rs` + `frames/apply.rs` (614–616 pipeline), `triggers.rs` +
@@ -93,7 +97,10 @@ cargo run -p harness -- coverage [--verbose]              # which precon cards a
 Decisions: D-034 (precons: Calling All Angels, Wretched Ranks, Reign of Dragons,
 Tramplesaurus Rex), D-035 (real-card pipeline; Scryfall data only in the user's cache).
 Order: groundwork (DONE: frozen decklists, `harness fetch-cards`, `harness coverage`,
-real-card script format) → egui app → cards deck by deck until `harness coverage` is 100%.
+real-card script format) → egui app (DONE, first version: D-036; playable with the test
+decks, mouse-only, save/load/replay) → cards deck by deck until `harness coverage` is 100%
+(NEXT: start with Wretched Ranks; each card needs a script, a test, and often new
+vocabulary) → card images, precon setups in the app menu, 10,000-game soak.
 Real-card work needs `cargo run -p harness -- fetch-cards` once (network).
 Acceptance (spec §13 M4): coverage 100% verified, each card >= 1 test, 10,000 AI 4-player
 games clean, the app playable by mouse with a widget per ChoiceKind, save/load/replay in app.

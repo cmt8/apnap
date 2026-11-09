@@ -18,6 +18,8 @@ jobs:
       - run: rustup toolchain install   # reads rust-toolchain.toml
       - run: rustup target add thumbv7em-none-eabihf
       - uses: Swatinem/rust-cache@v2
+      - name: system libraries for the desktop app (eframe)
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
       # Printed card data for the precons is fetched from Scryfall into the runner's cache
       # directory (never the repository); cached across runs, keyed by the decklists.
       - uses: actions/cache@v4

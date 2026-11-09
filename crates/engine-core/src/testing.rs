@@ -101,6 +101,7 @@ impl Scenario {
         let id = self.card(owner, zone, name);
         let ci = self.st.object(id).card_instance;
         self.st.commanders.push((owner, ci));
+        self.st.commander_cards.insert(ci, self.st.object(id).card);
         id
     }
 

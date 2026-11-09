@@ -105,6 +105,7 @@ pub fn new_game_with_commanders(
         shields: Vec::new(),
         next_effect_id: 0,
         commanders: Vec::new(),
+        commander_cards: BTreeMap::new(),
         commander_moved: Vec::new(),
         pending_triggers: Vec::new(),
         last_check_acted: false,
@@ -169,6 +170,7 @@ pub fn new_game_with_commanders(
                     return Err(SetupError::InvalidCommander(card));
                 }
                 st.commanders.push((owner, card_instance));
+                st.commander_cards.insert(card_instance, card);
                 st.zones.command.push(id);
             } else {
                 // CR 401.1: each player's deck becomes their library.
