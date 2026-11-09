@@ -1,0 +1,11 @@
+// Destroy target creature.
+CardScript(
+    verified: true,
+    tests: ["cr_616_1_affected_controller_chooses_between_replacements"],
+    card: (
+        name: "Test Doom",
+        mana_cost: Some("{1}{R}"),
+        card_types: [Instant],
+        abilities: [Spell(Effect((targets: [Creature], effect: Destroy(what: Target(0)))))],
+    ),
+)

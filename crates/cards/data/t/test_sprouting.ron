@@ -1,0 +1,14 @@
+// This creature enters with two +1/+1 counters on it.
+CardScript(
+    verified: true,
+    tests: ["cr_614_16_doubler_doubles_tokens_and_counters"],
+    card: (
+        name: "Test Sprouting",
+        mana_cost: Some("{2}{G}"),
+        card_types: [Creature],
+        creature_types: ["Plant"],
+        power: Some(0),
+        toughness: Some(0),
+        abilities: [Replacement(replaces: ThisEnters, with: EntersWithCounters(kind: PlusOne, n: 2))],
+    ),
+)

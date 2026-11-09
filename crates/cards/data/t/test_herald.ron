@@ -1,0 +1,17 @@
+// When this creature enters, create a 1/1 white Test Soldier creature token.
+CardScript(
+    verified: true,
+    tests: ["cr_614_16_doubler_doubles_tokens_and_counters"],
+    card: (
+        name: "Test Herald",
+        mana_cost: Some("{2}{G}"),
+        card_types: [Creature],
+        creature_types: ["Elf"],
+        power: Some(2),
+        toughness: Some(2),
+        abilities: [Triggered(
+            when: Enters(This),
+            body: Effect((effect: CreateToken(token: "Test Soldier", count: Fixed(1), who: You))),
+        )],
+    ),
+)

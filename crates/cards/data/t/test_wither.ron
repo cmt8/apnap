@@ -1,0 +1,14 @@
+// Put two -1/-1 counters on target creature.
+CardScript(
+    verified: true,
+    tests: ["cr_613_anthem_counters_and_becomes_0_1", "cr_704_5q_counters_annihilate"],
+    card: (
+        name: "Test Wither",
+        mana_cost: Some("{1}{R}"),
+        card_types: [Instant],
+        abilities: [Spell(Effect((
+            targets: [Creature],
+            effect: PutCounters(what: Target(0), kind: MinusOne, count: Fixed(2)),
+        )))],
+    ),
+)

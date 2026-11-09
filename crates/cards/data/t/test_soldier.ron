@@ -1,0 +1,14 @@
+// Token definition: a 1/1 white Soldier creature token (CR 111.4).
+CardScript(
+    verified: true,
+    tests: ["cr_614_16_doubler_doubles_tokens_and_counters"],
+    card: (
+        name: "Test Soldier",
+        token: true,
+        colors: Some([White]),
+        card_types: [Creature],
+        creature_types: ["Soldier"],
+        power: Some(1),
+        toughness: Some(1),
+    ),
+)

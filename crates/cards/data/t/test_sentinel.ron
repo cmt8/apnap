@@ -1,0 +1,15 @@
+// At the beginning of your upkeep, if you have 10 or less life, you gain 2 life.
+CardScript(
+    verified: true,
+    tests: ["cr_603_4_intervening_if_checked_twice"],
+    card: (
+        name: "Test Sentinel",
+        mana_cost: Some("{1}{G}"),
+        card_types: [Enchantment],
+        abilities: [Triggered(
+            when: BeginningOf(step: Upkeep, whose: You),
+            intervening_if: Some(LifeAtMost(10)),
+            body: Effect((effect: GainLife(who: You, amount: Fixed(2)))),
+        )],
+    ),
+)

@@ -12,8 +12,9 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
    to GameState from frame/effect code (bookkeeping fields of frames excepted).
 3. Never read CardDef printed characteristics for objects on battlefield/stack — use
    `layers::chars(state, id)`.
-4. A static ability's effect exists only if its source currently has that ability
-   (re-check during the layer walk).
+4. A static ability's effect exists only if its source currently has that ability when the
+   effect would begin to apply (checked during the layer walk); once it has applied in one
+   layer it keeps applying to the same objects in later layers (CR 613.6, D-023).
 5. Option lists are emitted in stable order (timestamp, then seat order). Never iterate
    HashMap. IDs are monotonic u32.
 6. The AI never sees GameState — only PlayerView (+ Determinizer for search).
@@ -24,8 +25,12 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
    the spec. Mandatory for 603, 613, 614–616, 704, 800.4, 903.9 (spec paraphrases unverified).
 10. Externally tagged serde enums only (RON limitation).
 11. The engine never calls out. Anything that needs a player choice SUSPENDS: return
-    `Flow::Suspend(frame, PendingDecision)` from a `Frame`. State needed after a suspension
-    lives in the frame, never in a Rust local (D-002; rules in `frames/mod.rs`).
+    `Flow::ask(...)` from a `Frame`. State needed after a suspension lives in the frame,
+    never in a Rust local (D-002; rules in `frames/mod.rs`).
+14. Replaceable events (zone moves incl. dying/destroy/discard/ETB, damage, draws, tokens,
+    counters, life) are `replacement::Proposed` events pushed as `Frame::Apply` — never
+    `execute`d directly from frame code (D-024). Triggers are detected only from what an
+    Apply batch performed (D-025).
 12. Illegal responses are rejected before any mutation (state hash unchanged).
 13. No Wizards/Scryfall assets in the repo (card data/images are fetched at runtime into the
     XDG cache). Test cards are invented ("Test …"). Prior-art engines (Forge, XMage,
@@ -46,7 +51,7 @@ cargo test --workspace
 cargo xtask check-deps                                    # dependency direction + purity
 cargo build -p engine-core -p card-model --target thumbv7em-none-eabihf   # no_std proof
 cargo run -p harness -- run --seed 42 --games 10          # random-agent games (--setup m0 | m1-Np)
-cargo run --release -p harness -- fuzz --setup m1-4p --games 1000 --threads 8   # soak
+cargo run --release -p harness -- fuzz --setup m2-4p --games 1000 --threads 8   # soak (m0 | m1-Np | m2-Np)
 cargo run -p harness -- determinism --seed 42 --runs 3    # identical hashes
 cargo run -p harness -- watch --seed 42                   # narrated random-agent game
 cargo run -p harness -- play [--setup m1-4p] [--seed N]   # you (P0) vs random agents in the terminal
@@ -74,20 +79,24 @@ cargo run -p harness -- bless                             # ONLY when a hash cha
   `script::Script` test driver, determinism/golden/property/rules tests.
 - `crates/app` — stub until M4. `crates/xtask` — check-deps.
 - Engine extras: `stack.rs` (StackObject), `targeting.rs` (choose + 608.2b legality in one
-  place), `frames/cast.rs` (601.2/602.2), `frames/resolve.rs` (work list),
-  `testing.rs` (feature `test-support`: scenario builder, D-022).
+  place), `frames/cast.rs` (601.2/602.2, and putting triggers on the stack), `frames/resolve.rs`
+  (work list), `replacement.rs` + `frames/apply.rs` (614–616 pipeline), `triggers.rs` +
+  `frames/put_triggers.rs` (603), `frames/check.rs` (117.5/704.3), `effects.rs` (resolved
+  continuous effects, shields), `testing.rs` (feature `test-support`: scenario builder, D-022).
 
-## Current milestone: M1 — DONE (2026-11-08). Next: M2 (do not start without the user's OK).
-M1 delivered (spec §13 as amended): CR 117 priority (instants, flash, floating mana), 601.2 /
-602.2 casting + activation (modes, X, targets, exact mana feasibility, generic-payment
-choice), 605 mana abilities, 608 resolution as a work list (fizzle, counter), 101.4 APNAP
-each-player choices, 2–8 players with CR 800.4a/800.4j/800.4k, RON cards loaded/validated by
-card-db, scenario builder (`engine-core` feature `test-support`) + `harness::script::Script`.
-Acceptance: `crates/harness/tests/rules_m1.rs` (atomic, CR-cited), `m1_acceptance.rs`
-(card→test coverage, 4-player games), CI soak `harness fuzz --setup m1-4p --games 1000`.
-Known M1 limits: D-021. Decisions this milestone: D-018–D-022.
-M2 starts with: rules-notes for 603, 613, 614–616 (verbatim), then chokepoint →
-replacement pipeline (a "pending action" Work item, D-020) → triggers + LKI → full SBAs → layers.
+## Current milestone: M2 — DONE (2026-11-08). Next: M3 (do not start without the user's OK).
+M2 delivered: layers (CR 613: every slot, timestamps, 613.8 dependency, 613.6 locking;
+effects for layers 4–7), replacement/prevention pipeline (614–616, `frames/apply.rs`,
+D-024), triggers + LKI (603, D-025/D-026), state check (117.5/704.3) with 704.5d/h/j/q,
+tokens, counters, flying/reach blocking (D-027). Tests: `rules_m2.rs` (spec's 7 golden
+cases + CR 613.4d/613.5/613.6 examples; mutation-checked), determinism/save-load/clone over
+M2 setups incl. mid-pipeline suspensions; CI soak m2-4p x1000. Limits: D-028.
+M3 starts with: rules-notes for 506–511 (combat keywords), 903 (Commander), the rest of 800.4
+(control-change cases), then combat keywords, Commander, Auras/control effects (layer 2).
+
+### M1 summary
+M1 delivered priority/casting/abilities/resolution, 2–8 players with CR 800.4a/j/k, RON
+cards via card-db, the scenario builder; decisions D-018–D-022, limits D-021.
 
 ### M0 summary
 M0 delivered: workspace, CI, ids/zones/GameState, move_object, seeded RNG, step() with

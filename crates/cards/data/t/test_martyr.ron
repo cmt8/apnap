@@ -1,0 +1,17 @@
+// When this creature dies, you gain life equal to its power.
+CardScript(
+    verified: true,
+    tests: ["cr_603_10a_dies_trigger_reads_lki_power"],
+    card: (
+        name: "Test Martyr",
+        mana_cost: Some("{1}{G}"),
+        card_types: [Creature],
+        creature_types: ["Cleric"],
+        power: Some(2),
+        toughness: Some(2),
+        abilities: [Triggered(
+            when: Dies(This),
+            body: Effect((effect: GainLife(who: You, amount: SourcePower))),
+        )],
+    ),
+)

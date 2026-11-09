@@ -1,0 +1,17 @@
+// Whenever you cast an instant or sorcery spell, put a +1/+1 counter on this creature.
+CardScript(
+    verified: true,
+    tests: ["cr_603_2_cast_trigger"],
+    card: (
+        name: "Test Prodigy",
+        mana_cost: Some("{1}{R}"),
+        card_types: [Creature],
+        creature_types: ["Wizard"],
+        power: Some(1),
+        toughness: Some(1),
+        abilities: [Triggered(
+            when: Cast(by: You, types: [Instant, Sorcery]),
+            body: Effect((effect: PutCounters(what: This, kind: PlusOne, count: Fixed(1)))),
+        )],
+    ),
+)

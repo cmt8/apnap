@@ -1,0 +1,14 @@
+// Switch target creature's power and toughness until end of turn. (Layer 7d.)
+CardScript(
+    verified: true,
+    tests: ["cr_613_4d_switch_applies_last"],
+    card: (
+        name: "Test Twist",
+        mana_cost: Some("{R}"),
+        card_types: [Instant],
+        abilities: [Spell(Effect((
+            targets: [Creature],
+            effect: Apply(what: Target(0), effects: [SwitchPT], until_end_of_turn: true),
+        )))],
+    ),
+)

@@ -44,6 +44,16 @@ pub const M1_LABELS: &[&str] = &[
     "DeclareBlockers/PickN",
 ];
 
+/// M2 adds suspensions inside the replacement pipeline and while putting triggers on the
+/// stack (both happen in the middle of other actions or resolution).
+pub const M2_LABELS: &[&str] = &[
+    "ChooseReplacement/PickN",
+    "OrderTriggers/Order",
+    "LegendRule/PickN",
+    "ChooseTargets { slot: 0 }/PickN",
+    "Priority/PickN",
+];
+
 /// Indices worth suspending at: the first occurrence of each label, a mid-payment point
 /// (PayMana right after another PayMana: mana already in pool), and every `stride`-th.
 pub fn interesting_points(rec: &GameRecord, stride: usize) -> Vec<usize> {

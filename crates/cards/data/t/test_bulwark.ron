@@ -1,0 +1,14 @@
+// Creatures you control get +0/+2. (The enchantment in the CR 613.5 example.)
+CardScript(
+    verified: true,
+    tests: ["cr_613_5_worked_example_is_5_8"],
+    card: (
+        name: "Test Bulwark",
+        mana_cost: Some("{1}{G}"),
+        card_types: [Enchantment],
+        abilities: [Static(
+            affected: All((types: [Creature], controller: You)),
+            effects: [ModifyPT(0, 2)],
+        )],
+    ),
+)

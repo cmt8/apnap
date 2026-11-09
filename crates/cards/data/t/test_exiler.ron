@@ -1,0 +1,11 @@
+// If a card would be put into a graveyard from anywhere, exile it instead.
+CardScript(
+    verified: true,
+    tests: ["cr_616_1_affected_controller_chooses_between_replacements"],
+    card: (
+        name: "Test Exiler",
+        mana_cost: Some("{2}{R}"),
+        card_types: [Enchantment],
+        abilities: [Replacement(replaces: CardToGraveyard, with: Exile)],
+    ),
+)

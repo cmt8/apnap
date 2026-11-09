@@ -1,0 +1,17 @@
+// When this creature enters, it deals 1 damage to any target.
+CardScript(
+    verified: true,
+    tests: ["cr_603_3d_trigger_targets_chosen_when_put_on_stack"],
+    card: (
+        name: "Test Pyre",
+        mana_cost: Some("{2}{R}"),
+        card_types: [Creature],
+        creature_types: ["Elemental"],
+        power: Some(2),
+        toughness: Some(2),
+        abilities: [Triggered(
+            when: Enters(This),
+            body: Effect((targets: [AnyTarget], effect: DealDamage(to: Target(0), amount: Fixed(1)))),
+        )],
+    ),
+)

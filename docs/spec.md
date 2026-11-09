@@ -59,7 +59,7 @@ Build it as a Rust workspace with a pure, deterministic engine crate. Every muta
 
 **Hard-won invariants from MTG-Ichor to copy into our CLAUDE.md:**
 1. Never read printed characteristics for objects on the battlefield or stack. Always query the layer-computed view.\[2\]
-2. A static ability's effect exists only while its source *currently has* that ability, so re-check existence during the layer walk.\[2\]
+2. A static ability's effect exists only while its source *currently has* that ability, so re-check existence during the layer walk.\[2\] *(Qualified by CR 613.6, verified 2026-11-08: once an effect has begun to apply in one layer it keeps applying to the same objects in later layers even if the ability is removed meanwhile — decisions.md D-023.)*
 3. Determinism at the decision boundary: option lists iterate in a stable order (timestamp order), never `HashMap` order, and never random UUIDs (MTG-Ichor notes its `ObjectId` "is a v4 UUID," which is why ordering by it is forbidden).\[2\] **We go further: `ObjectId` is a monotonically increasing `u32`.**
 
 ---
@@ -485,6 +485,8 @@ UI architecture:
 **M2: Chokepoint, replacement, triggers, SBAs, layers (4–6 wks; the core)**
 - In order: action chokepoint → replacement/prevention pipeline → triggers + LKI + APNAP stacking → SBAs → layers 1–7 with dependency ordering.
 - ✅ Golden tests: Doubling Season + token creation; two competing replacement effects with player choice; dies-trigger reading LKI power; Glorious Anthem + −1/−1 counters + "becomes 0/1"; a dependency case; legend rule; simultaneous lethal damage to multiple players.
+
+*M2 status: done 2026-11-08 (decisions.md D-023–D-028). Scope per user decisions: all layer slots, effect vocabulary for layers 4–7; attachment/planeswalker SBAs with their card types; flying/reach blocking pulled forward.*
 
 **M3: Combat + Commander + multiplayer exits; heuristic AI v1 (3–4 wks)**
 - Multi-defender attacks, per-defender blocks in APNAP, damage assignment per current CR, first/double strike, trample, deathtouch, lifelink, menace, vigilance, flying/reach; CR 903 (command zone, tax, 21 damage, color identity validation, 40 life); CR 800.4 player leaving (core implemented in M1; M3 adds the control-change and aura cases).

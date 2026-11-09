@@ -1,0 +1,14 @@
+// All artifacts are Forest lands in addition to their other types. (Layer 4.)
+CardScript(
+    verified: true,
+    tests: ["cr_613_8_dependency_overrides_timestamp"],
+    card: (
+        name: "Test Overgrowth",
+        mana_cost: Some("{2}{G}"),
+        card_types: [Enchantment],
+        abilities: [Static(
+            affected: All((types: [Artifact])),
+            effects: [AddTypes(card_types: [Land], land_types: [Forest])],
+        )],
+    ),
+)

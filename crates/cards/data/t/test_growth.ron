@@ -1,0 +1,14 @@
+// Target creature gets +4/+4 until end of turn. (Layer 7c.)
+CardScript(
+    verified: true,
+    tests: ["cr_613_5_worked_example_is_5_8"],
+    card: (
+        name: "Test Growth",
+        mana_cost: Some("{G}"),
+        card_types: [Instant],
+        abilities: [Spell(Effect((
+            targets: [Creature],
+            effect: Apply(what: Target(0), effects: [ModifyPT(4, 4)], until_end_of_turn: true),
+        )))],
+    ),
+)

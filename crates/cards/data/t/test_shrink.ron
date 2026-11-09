@@ -1,0 +1,14 @@
+// Target creature has base power and toughness 0/1 until end of turn. (Layer 7b.)
+CardScript(
+    verified: true,
+    tests: ["cr_613_5_worked_example_is_5_8", "cr_613_anthem_counters_and_becomes_0_1"],
+    card: (
+        name: "Test Shrink",
+        mana_cost: Some("{G}"),
+        card_types: [Instant],
+        abilities: [Spell(Effect((
+            targets: [Creature],
+            effect: Apply(what: Target(0), effects: [SetPT(0, 1)], until_end_of_turn: true),
+        )))],
+    ),
+)

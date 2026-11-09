@@ -187,6 +187,68 @@ writes `GameState` without `actions::execute`: the one sanctioned exception to i
 because it constructs a position rather than playing to it. The feature is enabled only by
 harness dev-dependencies; CI still builds engine-core `no_std` with and without it.
 
+## D-023 M2 scope: the layer walk has every slot; effect vocabulary for layers 4–7 (user decision 2026-11-08)
+`layers.rs` walks 1a, 1b, 2, 3, 4, 5, 6, 7a, 7b, 7c, 7d with timestamps (613.7), the 613.8
+dependency algorithm and 613.6 locking. Effect kinds exist for layers 4 (add types), 5 (set
+colors), 6 (add/lose keywords, lose all abilities), 7b (set P/T), 7c (modify P/T + counters)
+and 7d (switch). Copy (1a), face-down (1b), text-changing (3) and control-changing (2) effects
+are added to the same walk when a card needs them (control with Auras in M3). Likewise SBAs:
+M2 adds 704.5d, h, j, q; 704.5i (planeswalkers) and 704.5m–p (attachments) come with those
+card types (user decision). No characteristic-defining abilities exist yet, so 613.3 / 613.8a(c)
+have nothing to order.
+
+## D-024 Replaceable events are proposals run through an `Apply` frame (M2)
+Every replaceable game event — zone moves (destroy, sacrifice, discard, dying, resolving,
+countering, land plays, entering the battlefield), damage, draws, token creation, counters,
+life gain/loss, and SBA batches — is built as a `replacement::Proposed` and pushed as
+`Frame::Apply(ApplyFrame)` above the frame that caused it. The frame finds applicable
+replacement/prevention effects (static abilities the source *currently* has, the entering
+object's own "enters …" effects, prevention shields), applies a single one directly, asks
+the affected player (`ChooseReplacement`) when several apply, records each applied effect
+so it can't apply twice (614.5), re-checks after every application (616.1f/616.2), and then
+performs the whole batch simultaneously. Events are grouped by affected player in APNAP
+order (616.1). The caller resumes afterwards (D-020), so choices inside an action need no
+callbacks. Not replaceable (direct `execute`): casting's move to the stack, mulligan/library
+manipulation, untapping, mana, leaving the game.
+
+## D-025 Triggers: detected from performed events; put on the stack by the state check (M2)
+`triggers.rs` detects triggers only from events the `Apply` batch actually performed
+(603.2g): enters-the-battlefield after the whole batch, against every permanent including
+newcomers (603.6a); "dies" looking back in time with last-known information for the dying
+object *and* any other object that left in the same batch (603.10a); "at the beginning of"
+when a step begins (603.2b); "whenever you cast" at 601.2i. Intervening-if is checked on
+detection and again on resolution (603.4). `StateCheckFrame` implements 117.5/704.3: SBAs as
+one batch, repeat; then `PutTriggersFrame` (603.3b: each player in APNAP order orders their
+own with `OrderTriggers`; each trigger then goes through `CastFrame`'s modes/targets steps
+and is removed if it has no legal choice, 603.3c–d); then check again. The 603.3b second part
+(triggers on abilities triggering) has no card yet. The trigger queue is engine bookkeeping;
+each queued trigger emits `Event::Triggered`, so it is part of the hashed log.
+
+## D-026 Last known information is captured per batch and stored where it's needed (M2)
+Before an `Apply` batch performs, it snapshots (`triggers::Lki`) every object about to leave
+the battlefield, from the pre-batch state (704.8). Those snapshots feed look-back trigger
+detection, are copied into any pending trigger whose source left, and are recorded on any
+ability on the stack whose source is leaving (`StackObject::source_lki`, 113.7a). There is no
+global LKI cache to prune. "Its power" (`Amount::SourcePower`) reads the source's current
+characteristics if it's still on the battlefield, otherwise its LKI (608.2h).
+
+## D-027 Flying and reach blocking pulled into M2 (2026-11-08)
+M2's layer-6 tests need a real keyword, and a test card with flying that ignored blocking
+would be an approximated card (invariant 8). 702.9b/702.17 blocking restrictions are in
+`DeclareBlockersFrame`. The rest of combat keywords (first/double strike, trample, lifelink,
+menace, vigilance, and 702.2c deathtouch-as-lethal in assignment) stay in M3.
+
+## D-028 M2 vocabulary limits (to lift when a card needs them)
+- Replacement effects are mandatory; no optional ("you may … instead") ones, no 614.15
+  self-replacement effects, no 614.17 "can't" effects, so the 616.1a–d tiers are trivially
+  satisfied. Regeneration (614.8) and redirection (614.9) aren't in the vocabulary.
+- 614.12 "as it would exist on the battlefield" uses the entering object's *own* printed
+  replacement abilities plus permanents' current abilities; continuous effects that would
+  start applying to the entering object (e.g. "creatures you control enter tapped" defined
+  by type) aren't consulted yet.
+- Selectors match card types, supertypes, controller, "other" and token status (no colors,
+  names or subtypes yet).
+
 ---
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
@@ -208,3 +270,10 @@ harness dev-dependencies; CI still builds engine-core `no_std` with and without 
 7. **CR 800.4j** (found in M1): if a player leaves during their own turn, the turn continues
    without an active player, and priority that would go to them goes to the next player.
    Spec §8.7 doesn't mention it (D-018). Fixed in the spec 2026-11-08.
+8. **M2 (CR 613/614–616/603 verified, 2026-11-08):** the spec omits 616.1b–d (more
+   must-choose-first tiers) and 616.1g (contained events); 613.3/613.8a(c) (CDAs first;
+   dependency only between CDA/CDA or non-CDA/non-CDA); **613.6** (an effect keeps applying to
+   the same objects in later layers even if its source ability is removed meanwhile — this
+   qualifies the spec's MTG-Ichor invariant 2 / CLAUDE.md invariant 4: existence is checked
+   when an effect would *begin* to apply); 613.8a(b) (text changes count as dependency);
+   613.7a/c timestamps. Details in docs/rules-notes/613-layers.md and 614-616-*.md.

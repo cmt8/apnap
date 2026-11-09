@@ -1,0 +1,14 @@
+// If this creature would die, shuffle it into its owner's library instead.
+CardScript(
+    verified: true,
+    tests: ["cr_616_1_affected_controller_chooses_between_replacements"],
+    card: (
+        name: "Test Phoenix",
+        mana_cost: Some("{3}{R}"),
+        card_types: [Creature],
+        creature_types: ["Phoenix"],
+        power: Some(3),
+        toughness: Some(3),
+        abilities: [Replacement(replaces: ThisDies, with: ShuffleIntoLibrary)],
+    ),
+)

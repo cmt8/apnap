@@ -34,8 +34,11 @@ jobs:
         run: |
           cargo run -p harness --locked -- determinism --setup m0 --seed 42 --runs 3
           cargo run -p harness --locked -- determinism --setup m1-4p --seed 42 --runs 3
-      - name: M1 soak — 1,000 four-player random-agent games, 0 panics / stuck games
-        run: cargo run --release -p harness --locked -- fuzz --setup m1-4p --games 1000 --threads 4
+          cargo run -p harness --locked -- determinism --setup m2-4p --seed 42 --runs 3
+      - name: Soak — 1,000 four-player random-agent games each (M1 and M2 decks), 0 panics / stuck games
+        run: |
+          cargo run --release -p harness --locked -- fuzz --setup m1-4p --games 1000 --threads 4
+          cargo run --release -p harness --locked -- fuzz --setup m2-4p --games 1000 --threads 4
 
   cross-platform:
     name: tests + golden hashes (${{ matrix.os }})

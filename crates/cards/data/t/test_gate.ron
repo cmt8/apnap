@@ -1,0 +1,11 @@
+// (Mountain Forest.) This land enters tapped.
+CardScript(
+    verified: true,
+    tests: ["cr_614_1c_enters_tapped"],
+    card: (
+        name: "Test Gate",
+        card_types: [Land],
+        land_types: [Mountain, Forest],
+        abilities: [Replacement(replaces: ThisEnters, with: EntersTapped)],
+    ),
+)

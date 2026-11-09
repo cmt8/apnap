@@ -1,0 +1,17 @@
+// Other creatures you control get +1/+1. (An anthem on a creature, for ability removal.)
+CardScript(
+    verified: true,
+    tests: ["cr_613_removing_the_source_ability_ends_its_effect"],
+    card: (
+        name: "Test Captain",
+        mana_cost: Some("{2}{R}"),
+        card_types: [Creature],
+        creature_types: ["Soldier"],
+        power: Some(2),
+        toughness: Some(2),
+        abilities: [Static(
+            affected: All((types: [Creature], controller: You, other: true)),
+            effects: [ModifyPT(1, 1)],
+        )],
+    ),
+)

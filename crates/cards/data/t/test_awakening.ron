@@ -1,0 +1,14 @@
+// All lands are 1/1 creatures in addition to their other types. (Layers 4 and 7b.)
+CardScript(
+    verified: true,
+    tests: ["cr_613_8_dependency_overrides_timestamp"],
+    card: (
+        name: "Test Awakening",
+        mana_cost: Some("{2}{G}"),
+        card_types: [Enchantment],
+        abilities: [Static(
+            affected: All((types: [Land])),
+            effects: [AddTypes(card_types: [Creature]), SetPT(1, 1)],
+        )],
+    ),
+)

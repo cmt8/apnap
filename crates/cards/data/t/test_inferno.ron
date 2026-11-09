@@ -1,0 +1,11 @@
+// Test Inferno deals 3 damage to each player.
+CardScript(
+    verified: true,
+    tests: ["cr_704_5a_simultaneous_lethal_damage_to_several_players"],
+    card: (
+        name: "Test Inferno",
+        mana_cost: Some("{2}{R}"),
+        card_types: [Sorcery],
+        abilities: [Spell(Effect((effect: DamageEachPlayer(amount: Fixed(3)))))],
+    ),
+)

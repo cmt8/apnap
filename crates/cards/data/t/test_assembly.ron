@@ -1,0 +1,14 @@
+// Noncreature artifacts are 2/2 artifact creatures. (The CR 613.6 example, as a static.)
+CardScript(
+    verified: true,
+    tests: ["cr_613_6_effect_keeps_its_set_across_layers"],
+    card: (
+        name: "Test Assembly",
+        mana_cost: Some("{3}"),
+        card_types: [Enchantment],
+        abilities: [Static(
+            affected: All((types: [Artifact], not_types: [Creature])),
+            effects: [AddTypes(card_types: [Creature]), SetPT(2, 2)],
+        )],
+    ),
+)

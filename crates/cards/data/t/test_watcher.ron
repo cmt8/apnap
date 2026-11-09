@@ -1,0 +1,17 @@
+// Whenever another creature dies, you gain 1 life.
+CardScript(
+    verified: true,
+    tests: ["cr_603_3b_triggers_stack_in_apnap_order"],
+    card: (
+        name: "Test Watcher",
+        mana_cost: Some("{1}{R}"),
+        card_types: [Creature],
+        creature_types: ["Spirit"],
+        power: Some(1),
+        toughness: Some(1),
+        abilities: [Triggered(
+            when: Dies(Matching((types: [Creature], other: true))),
+            body: Effect((effect: GainLife(who: You, amount: Fixed(1)))),
+        )],
+    ),
+)

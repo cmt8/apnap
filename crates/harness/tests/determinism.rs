@@ -9,13 +9,15 @@
 
 mod common;
 
-use common::{M0_LABELS, M1_LABELS, interesting_points, label};
+use common::{M0_LABELS, M1_LABELS, M2_LABELS, interesting_points, label};
 use engine_core::state::GameState;
 use harness::{GameRecord, PlayOptions, Setup, feed, load_json, play_random, save_json};
 use std::collections::BTreeSet;
 
 const M1_2P: Setup = Setup::M1 { players: 2 };
 const M1_4P: Setup = Setup::M1 { players: 4 };
+const M2_2P: Setup = Setup::M2 { players: 2 };
+const M2_4P: Setup = Setup::M2 { players: 4 };
 
 /// (setup, seed). M0 seed 4 exercises every M0 decision kind (incl. cleanup discard).
 const CASES: &[(Setup, u64)] = &[
@@ -28,6 +30,12 @@ const CASES: &[(Setup, u64)] = &[
     (M1_2P, 3),
     (M1_4P, 1),
     (M1_4P, 2),
+    // M2 2p seeds chosen to cover the rare decisions: 13 OrderTriggers, 45 LegendRule,
+    // 28 ChooseReplacement (mid-action suspensions).
+    (M2_2P, 13),
+    (M2_2P, 45),
+    (M2_2P, 28),
+    (M2_4P, 1),
 ];
 
 /// Number of sample points per game (besides first-of-each-kind points).
@@ -49,14 +57,22 @@ fn points(rec: &GameRecord) -> Vec<usize> {
     interesting_points(rec, (rec.decisions.len() / SAMPLES).max(1))
 }
 
-/// The labels a set of cases must cover, keyed by whether they're M0 or M1 cases.
-fn assert_covered(covered: &BTreeSet<(bool, String)>, what: &str) {
-    for (m1, labels) in [(false, M0_LABELS), (true, M1_LABELS)] {
+/// Which milestone's label list a setup must cover.
+fn tier(setup: Setup) -> u8 {
+    match setup {
+        Setup::M0Vanilla => 0,
+        Setup::M1 { .. } => 1,
+        Setup::M2 { .. } => 2,
+    }
+}
+
+/// The labels each tier's cases must cover between them.
+fn assert_covered(covered: &BTreeSet<(u8, String)>, what: &str) {
+    for (t, labels) in [(0, M0_LABELS), (1, M1_LABELS), (2, M2_LABELS)] {
         for l in labels {
             assert!(
-                covered.contains(&(m1, l.to_string())),
-                "{what} never suspended at {l} in {} cases; add a seed",
-                if m1 { "M1" } else { "M0" }
+                covered.contains(&(t, l.to_string())),
+                "{what} never suspended at {l} in M{t} cases; add a seed"
             );
         }
     }
@@ -127,7 +143,7 @@ fn criterion_2c_save_load_mid_game_replays_identically() {
     let mut covered = BTreeSet::new();
     for &(setup, seed) in CASES {
         let rec = record(setup, seed);
-        let m1 = setup != Setup::M0Vanilla;
+        let m1 = tier(setup);
         for k in points(&rec) {
             let st = state_at(&rec, k);
             if k < rec.decisions.len() {
@@ -167,7 +183,7 @@ fn criterion_3_clone_mid_game_replays_identically() {
     let mut covered = BTreeSet::new();
     for &(setup, seed) in CASES {
         let rec = record(setup, seed);
-        let m1 = setup != Setup::M0Vanilla;
+        let m1 = tier(setup);
         for k in points(&rec) {
             let mut original = state_at(&rec, k);
             let mut cloned = original.clone();

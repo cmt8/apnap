@@ -1,0 +1,11 @@
+// All creatures lose all abilities. (Layer 6.)
+CardScript(
+    verified: true,
+    tests: ["cr_613_removing_the_source_ability_ends_its_effect"],
+    card: (
+        name: "Test Silence",
+        mana_cost: Some("{2}{R}"),
+        card_types: [Enchantment],
+        abilities: [Static(affected: All((types: [Creature])), effects: [LoseAllAbilities])],
+    ),
+)

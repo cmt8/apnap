@@ -1,0 +1,14 @@
+// Legendary creature.
+CardScript(
+    verified: true,
+    tests: ["cr_704_5j_legend_rule"],
+    card: (
+        name: "Test Legend",
+        mana_cost: Some("{1}{G}"),
+        supertypes: [Legendary],
+        card_types: [Creature],
+        creature_types: ["Elf"],
+        power: Some(2),
+        toughness: Some(2),
+    ),
+)

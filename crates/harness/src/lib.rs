@@ -24,13 +24,15 @@ pub enum Setup {
     /// M1: `players` players with the M1 deck (`decks/m1_red_green.ron`); 1v1 constructed
     /// rules for 2, free-for-all (CR 806, attack multiple players) otherwise.
     M1 { players: u8 },
+    /// M2: `players` players with the M2 deck (`decks/m2_mixed.ron`).
+    M2 { players: u8 },
 }
 
 impl Setup {
     pub fn players(self) -> u8 {
         match self {
             Setup::M0Vanilla => 2,
-            Setup::M1 { players } => players,
+            Setup::M1 { players } | Setup::M2 { players } => players,
         }
     }
 
@@ -39,12 +41,17 @@ impl Setup {
         match self {
             Setup::M0Vanilla => "m0".into(),
             Setup::M1 { players } => format!("m1-{players}p"),
+            Setup::M2 { players } => format!("m2-{players}p"),
         }
     }
 
     pub fn parse(label: &str) -> Option<Setup> {
         if label == "m0" {
             return Some(Setup::M0Vanilla);
+        }
+        if let Some(rest) = label.strip_prefix("m2-") {
+            let n = rest.strip_suffix('p')?.parse().ok()?;
+            return Some(Setup::M2 { players: n });
         }
         let n = label.strip_prefix("m1-")?.strip_suffix('p')?.parse().ok()?;
         Some(Setup::M1 { players: n })
@@ -55,6 +62,8 @@ impl Setup {
             Setup::M0Vanilla => (GameConfig::constructed_1v1(), "m0_vanilla.ron"),
             Setup::M1 { players: 2 } => (GameConfig::constructed_1v1(), "m1_red_green.ron"),
             Setup::M1 { players } => (GameConfig::free_for_all(players), "m1_red_green.ron"),
+            Setup::M2 { players: 2 } => (GameConfig::constructed_1v1(), "m2_mixed.ron"),
+            Setup::M2 { players } => (GameConfig::free_for_all(players), "m2_mixed.ron"),
         };
         let d = deck(deck_file);
         let decks = vec![d; config.num_players as usize];
@@ -277,6 +286,10 @@ pub const GOLDEN: &[(Setup, u64)] = &[
     (Setup::M1 { players: 4 }, 1),
     (Setup::M1 { players: 4 }, 42),
     (Setup::M1 { players: 4 }, 1337),
+    (Setup::M2 { players: 2 }, 1),
+    (Setup::M2 { players: 2 }, 42),
+    (Setup::M2 { players: 4 }, 1),
+    (Setup::M2 { players: 4 }, 42),
 ];
 
 pub fn golden_line(rec: &GameRecord) -> String {

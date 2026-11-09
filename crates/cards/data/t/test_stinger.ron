@@ -1,0 +1,18 @@
+// Deathtouch. {T}: This creature deals 1 damage to any target.
+CardScript(
+    verified: true,
+    tests: ["cr_704_5h_deathtouch_destroys"],
+    card: (
+        name: "Test Stinger",
+        mana_cost: Some("{1}{G}"),
+        card_types: [Creature],
+        creature_types: ["Insect"],
+        power: Some(1),
+        toughness: Some(1),
+        keywords: [Deathtouch],
+        abilities: [Activated(
+            cost: (tap: true),
+            body: Effect((targets: [AnyTarget], effect: DealDamage(to: Target(0), amount: Fixed(1)))),
+        )],
+    ),
+)

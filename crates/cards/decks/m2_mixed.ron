@@ -1,0 +1,16 @@
+// The M2 deck: static/triggered/replacement abilities, tokens, counters, prevention, the
+// legend rule, deathtouch, flying/reach, and layer interactions. 60 cards.
+DeckFile(
+    name: "M2 mixed red-green",
+    cards: [
+        (8, "Forest"), (8, "Mountain"), (3, "Test Dual"), (3, "Test Gate"),
+        (2, "Test Elf"), (1, "Test Prism"),
+        (2, "Test Martyr"), (2, "Test Herald"), (2, "Test Watcher"), (2, "Test Prodigy"),
+        (2, "Test Pyre"), (1, "Test Phoenix"), (2, "Test Sprouting"), (2, "Test Stinger"),
+        (2, "Test Legend"), (1, "Test Hawk"), (1, "Test Spider"), (1, "Test Captain"),
+        (1, "Test Anthem"), (1, "Test Doubler"), (1, "Test Exiler"), (1, "Test Silence"),
+        (1, "Test Sentinel"), (1, "Test Awakening"), (1, "Test Overgrowth"),
+        (1, "Test Shock"), (1, "Test Doom"), (1, "Test Wither"), (1, "Test Bolster"),
+        (1, "Test Growth"), (1, "Test Shrink"), (1, "Test Ward"), (1, "Test Inferno"),
+    ],
+)

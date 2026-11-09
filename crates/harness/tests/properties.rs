@@ -7,6 +7,7 @@ fn setup_strategy() -> impl Strategy<Value = Setup> {
     prop_oneof![
         Just(Setup::M0Vanilla),
         (2u8..=4).prop_map(|players| Setup::M1 { players }),
+        (2u8..=4).prop_map(|players| Setup::M2 { players }),
     ]
 }
 

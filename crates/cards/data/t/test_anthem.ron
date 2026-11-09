@@ -1,0 +1,14 @@
+// Creatures you control get +1/+1. (Layer 7c.)
+CardScript(
+    verified: true,
+    tests: ["cr_613_anthem_counters_and_becomes_0_1", "cr_603_10a_dies_trigger_reads_lki_power"],
+    card: (
+        name: "Test Anthem",
+        mana_cost: Some("{2}{G}"),
+        card_types: [Enchantment],
+        abilities: [Static(
+            affected: All((types: [Creature], controller: You)),
+            effects: [ModifyPT(1, 1)],
+        )],
+    ),
+)

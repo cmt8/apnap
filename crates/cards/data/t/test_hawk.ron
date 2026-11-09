@@ -1,0 +1,14 @@
+// Flying.
+CardScript(
+    verified: true,
+    tests: ["cr_702_9b_flying_and_reach"],
+    card: (
+        name: "Test Hawk",
+        mana_cost: Some("{1}{G}"),
+        card_types: [Creature],
+        creature_types: ["Bird"],
+        power: Some(1),
+        toughness: Some(1),
+        keywords: [Flying],
+    ),
+)

@@ -1,0 +1,14 @@
+// Put a +1/+1 counter on target creature.
+CardScript(
+    verified: true,
+    tests: ["cr_613_5_worked_example_is_5_8", "cr_704_5q_counters_annihilate"],
+    card: (
+        name: "Test Bolster",
+        mana_cost: Some("{G}"),
+        card_types: [Sorcery],
+        abilities: [Spell(Effect((
+            targets: [Creature],
+            effect: PutCounters(what: Target(0), kind: PlusOne, count: Fixed(1)),
+        )))],
+    ),
+)
