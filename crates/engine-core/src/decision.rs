@@ -104,9 +104,27 @@ pub enum OptionDesc {
     CastSpell {
         card: ObjectId,
     },
-    /// Activate a basic land's intrinsic mana ability (CR 305.6).
+    /// Activate non-mana activated ability `index` of `source` (CR 602).
+    ActivateAbility {
+        source: ObjectId,
+        index: u16,
+    },
+    /// Activate a `{T}` mana ability of `source` for one `mana` (CR 605; includes the
+    /// intrinsic abilities of basic land types, CR 305.6).
     TapForMana {
         source: ObjectId,
+        mana: ManaType,
+    },
+    /// A mode of a modal spell or ability (CR 700.2), by printed index.
+    Mode {
+        index: u8,
+    },
+    /// A legal target (CR 601.2c).
+    Target {
+        target: Target,
+    },
+    /// A mana type: a recipient of an `Allocate` of generic payment (CR 601.2h).
+    Mana {
         mana: ManaType,
     },
     Player {

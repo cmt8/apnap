@@ -71,7 +71,8 @@ fn proposal(st: &GameState, source: CastSource) -> Proposal {
                 tap: None,
             }
         }
-        CastSource::Ability { source, index } => match &chars(st, source).abilities[index as usize] {
+        CastSource::Ability { source, index } => match &chars(st, source).abilities[index as usize]
+        {
             AbilityDef::Activated { cost, body, .. } => Proposal {
                 body: Some(body.clone()),
                 cost: cost.mana.clone(),
@@ -278,8 +279,10 @@ impl CastFrame {
                             } else {
                                 let legal = legal_modes(st, &body, p, self.object);
                                 let max = (max as usize).min(legal.len());
-                                let options =
-                                    legal.into_iter().map(|index| OptionDesc::Mode { index }).collect();
+                                let options = legal
+                                    .into_iter()
+                                    .map(|index| OptionDesc::Mode { index })
+                                    .collect();
                                 return self.ask(
                                     ChoiceKind::ChooseModes,
                                     Primitive::PickN {
@@ -378,7 +381,8 @@ impl CastFrame {
                     let prop = self.proposal(st);
                     let req = requirement(&prop.cost, self.x);
                     if let Some(inp) = input.take() {
-                        let Some(OptionDesc::TapForMana { source, mana }) = inp.picked_one().cloned()
+                        let Some(OptionDesc::TapForMana { source, mana }) =
+                            inp.picked_one().cloned()
                         else {
                             unreachable!()
                         };
@@ -392,10 +396,14 @@ impl CastFrame {
                                 // CR 601.2h: the player picks which floating mana pays generic.
                                 self.stage = CastStage::PayGeneric;
                                 let left = req.generic_candidates(&pool);
-                                let types: Vec<ManaType> =
-                                    ManaType::ALL.into_iter().filter(|t| left[t.index()] > 0).collect();
-                                let options =
-                                    types.iter().map(|&mana| OptionDesc::Mana { mana }).collect();
+                                let types: Vec<ManaType> = ManaType::ALL
+                                    .into_iter()
+                                    .filter(|t| left[t.index()] > 0)
+                                    .collect();
+                                let options = types
+                                    .iter()
+                                    .map(|&mana| OptionDesc::Mana { mana })
+                                    .collect();
                                 return self.ask(
                                     ChoiceKind::PayMana,
                                     Primitive::Allocate {
@@ -423,7 +431,11 @@ impl CastFrame {
                         }
                     }
                     assert!(!options.is_empty(), "payment dead-ended: D-019 violated");
-                    return self.ask(ChoiceKind::PayMana, Primitive::PickN { min: 1, max: 1 }, options);
+                    return self.ask(
+                        ChoiceKind::PayMana,
+                        Primitive::PickN { min: 1, max: 1 },
+                        options,
+                    );
                 }
                 CastStage::PayGeneric => {
                     let inp = input.take().expect("generic allocation");

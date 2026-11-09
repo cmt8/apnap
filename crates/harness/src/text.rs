@@ -3,7 +3,8 @@
 //! a human player's prompt is built from their `PlayerView` only.
 
 use engine_core::events::{DamageTarget, Event};
-use engine_core::view::ObjectView;
+use engine_core::stack::Target;
+use engine_core::view::{ObjectView, StackView};
 use engine_core::{GameState, ObjectId, OptionDesc, PendingDecision, PlayerId, PlayerView};
 
 fn p(p: PlayerId) -> String {
@@ -40,7 +41,7 @@ impl Narrator {
     }
 
     /// Narrate a batch of events, merging consecutive draws by the same player.
-    pub fn lines(&mut self, events: &[Event], hide_draws_of: Option<PlayerId>) -> Vec<String> {
+    pub fn lines(&mut self, events: &[Event], viewer: Option<PlayerId>) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut last_drawer: Option<PlayerId> = None;
         for e in events {
@@ -48,7 +49,7 @@ impl Narrator {
                 Event::Drew { player, .. } => Some(*player),
                 _ => None,
             };
-            let Some(line) = self.line(e, hide_draws_of) else {
+            let Some(line) = self.line(e, viewer) else {
                 continue;
             };
             match (drawer, last_drawer, out.last_mut()) {
@@ -69,17 +70,26 @@ impl Narrator {
     }
 
     /// Feed every event in order; returns its log line, if any.
-    pub fn line(&mut self, e: &Event, hide_draws_of: Option<PlayerId>) -> Option<String> {
-        if let Event::ZoneChange { old, new, .. } = e {
-            let n = self.name(*old);
-            self.names.insert(*new, n);
+    pub fn line(&mut self, e: &Event, viewer: Option<PlayerId>) -> Option<String> {
+        match e {
+            Event::ZoneChange { old, new, .. } => {
+                let n = self.name(*old);
+                self.names.insert(*new, n);
+            }
+            Event::AbilityActivated {
+                ability, source, ..
+            } => {
+                let n = format!("ability of {}", self.name(*source));
+                self.names.insert(*ability, n);
+            }
+            _ => {}
         }
-        event_line(self, e, hide_draws_of)
+        event_line(self, e, viewer)
     }
 }
 
 /// One line per interesting event; `None` for noise (priority passes, step markers, etc).
-/// `hide_draws_of`: render that player's draws as "draws a card" (opponent view).
+/// `viewer`: if set, everyone else's draws render as "draws a card" (a player's own log).
 /// "P1 draws a card" → "P1 draws 2 cards" → "P1 draws 3 cards" ...
 fn merge_count(prev: &str) -> String {
     let (who, what) = prev.split_once(" draws ").unwrap_or((prev, ""));
@@ -94,7 +104,7 @@ fn merge_count(prev: &str) -> String {
     format!("{who} draws {} cards", n + 1)
 }
 
-fn event_line(st: &Narrator, e: &Event, hide_draws_of: Option<PlayerId>) -> Option<String> {
+fn event_line(st: &Narrator, e: &Event, viewer: Option<PlayerId>) -> Option<String> {
     Some(match e {
         Event::GameStarted { seed, num_players } => {
             format!("== game start: seed {seed}, {num_players} players ==")
@@ -109,7 +119,7 @@ fn event_line(st: &Narrator, e: &Event, hide_draws_of: Option<PlayerId>) -> Opti
         ),
         Event::TurnBegan { turn, active } => format!("\n--- turn {turn}: {} ---", p(*active)),
         Event::Drew { player, card } => {
-            if hide_draws_of == Some(*player) {
+            if viewer.is_some_and(|v| v != *player) {
                 format!("{} draws a card", p(*player))
             } else {
                 format!("{} draws {}", p(*player), st.name(*card))
@@ -147,6 +157,34 @@ fn event_line(st: &Narrator, e: &Event, hide_draws_of: Option<PlayerId>) -> Opti
             to: engine_core::zones::Zone::Graveyard,
             ..
         } => format!("  {} dies", st.name(*new)),
+        Event::AbilityActivated {
+            player, ability, ..
+        } => {
+            format!("{} activates {}", p(*player), st.name(*ability))
+        }
+        Event::ModesChosen { modes, .. } => format!("  choosing mode {modes:?}"),
+        Event::XChosen { x, .. } => format!("  with X = {x}"),
+        Event::TargetsChosen { targets, .. } => {
+            let ts: Vec<String> = targets
+                .iter()
+                .map(|t| match t {
+                    Target::Player(q) => p(*q),
+                    Target::Object(o) => st.name(*o),
+                })
+                .collect();
+            format!("  targeting {}", ts.join(", "))
+        }
+        Event::Fizzled { object } => {
+            format!(
+                "  {} fizzles: all its targets are illegal",
+                st.name(*object)
+            )
+        }
+        Event::Countered { object } => format!("  {} is countered", st.name(*object)),
+        Event::Sacrificed { player, object } => {
+            format!("{} sacrifices {}", p(*player), st.name(*object))
+        }
+        Event::PlayerLeftGame { player } => format!("{} leaves the game", p(*player)),
         Event::PlayerLost { player, reason } => format!("{} LOSES ({reason:?})", p(*player)),
         Event::GameOver { winner } => match winner {
             Some(w) => format!("== game over: {} wins ==", p(*w)),
@@ -202,19 +240,49 @@ pub fn board(v: &PlayerView) -> String {
             out.push_str(&format!("    battlefield: {}\n", perms.join(", ")));
         }
     }
+    if !v.stack.is_empty() {
+        let stack: Vec<String> = v
+            .stack
+            .iter()
+            .rev()
+            .map(|s| {
+                let mut line = stack_name(s);
+                if !s.targets.is_empty() {
+                    let ts: Vec<String> = s.targets.iter().map(|t| target_name(v, t)).collect();
+                    line.push_str(&format!(" → {}", ts.join(", ")));
+                }
+                line
+            })
+            .collect();
+        out.push_str(&format!("  stack (top first): {}\n", stack.join(" | ")));
+    }
     let hand: Vec<String> = v.hand.iter().map(obj).collect();
     out.push_str(&format!("  your hand: {}\n", hand.join(", ")));
     out
 }
 
 fn view_name(v: &PlayerView, id: ObjectId) -> String {
-    v.hand
-        .iter()
-        .chain(&v.battlefield)
-        .chain(&v.stack)
-        .find(|o| o.id == id)
-        .map(obj)
-        .unwrap_or_else(|| format!("#{}", id.0))
+    if let Some(o) = v.hand.iter().chain(&v.battlefield).find(|o| o.id == id) {
+        return obj(o);
+    }
+    if let Some(s) = v.stack.iter().find(|s| s.id == id) {
+        return stack_name(s);
+    }
+    format!("#{}", id.0)
+}
+
+fn stack_name(s: &StackView) -> String {
+    match s.ability_of {
+        Some(_) => format!("ability of {} ({})", s.name, p(s.controller)),
+        None => format!("{} ({})", s.name, p(s.controller)),
+    }
+}
+
+fn target_name(v: &PlayerView, t: &Target) -> String {
+    match t {
+        Target::Player(q) => p(*q),
+        Target::Object(id) => view_name(v, *id),
+    }
 }
 
 /// Describe one option using only what the viewer can see.
@@ -241,6 +309,12 @@ pub fn option_line(v: &PlayerView, o: &OptionDesc) -> String {
             )
         }
         OptionDesc::DamageRecipient { object } => view_name(v, *object),
+        OptionDesc::ActivateAbility { source, index } => {
+            format!("activate {} (ability {index})", view_name(v, *source))
+        }
+        OptionDesc::Mode { index } => format!("mode {index}"),
+        OptionDesc::Target { target } => format!("target {}", target_name(v, target)),
+        OptionDesc::Mana { mana } => mana.symbol().into(),
     }
 }
 

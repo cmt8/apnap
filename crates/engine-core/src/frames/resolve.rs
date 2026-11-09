@@ -17,7 +17,7 @@ use crate::targeting::is_legal;
 use crate::zones::{LibraryPosition, Zone};
 use alloc::vec::Vec;
 use card_model::{
-    AbilityDef, Amount, Body, CardType, Effect, EachPlayerAction, PlayerRef, TargetFilter,
+    AbilityDef, Amount, Body, CardType, EachPlayerAction, Effect, PlayerRef, TargetFilter,
     TargetRef,
 };
 use serde::{Deserialize, Serialize};
@@ -67,7 +67,14 @@ impl ResolveFrame {
         let TargetRef::Target(i) = r;
         let t = *self.targets.get(k)?.get(i as usize)?;
         // CR 608.2b: illegal targets aren't affected.
-        is_legal(st, self.filters[k][i as usize], t, self.controller, self.object).then_some(t)
+        is_legal(
+            st,
+            self.filters[k][i as usize],
+            t,
+            self.controller,
+            self.object,
+        )
+        .then_some(t)
     }
 
     fn player(&self, st: &GameState, k: usize, r: PlayerRef) -> Option<PlayerId> {
@@ -88,10 +95,10 @@ impl ResolveFrame {
     }
 
     pub(crate) fn run(mut self, st: &mut GameState, mut input: Option<Input>) -> Flow {
-        if self.object.is_none() {
-            if let Some(flow) = self.start(st) {
-                return flow;
-            }
+        if self.object.is_none()
+            && let Some(flow) = self.start(st)
+        {
+            return flow;
         }
         while let Some(item) = self.work.pop() {
             match item {
@@ -128,7 +135,10 @@ impl ResolveFrame {
                             next,
                             chosen,
                         });
-                        let options = pool.into_iter().map(|card| OptionDesc::Card { card }).collect();
+                        let options = pool
+                            .into_iter()
+                            .map(|card| OptionDesc::Card { card })
+                            .collect();
                         return Flow::ask(
                             Frame::Resolve(self),
                             p,
@@ -140,10 +150,17 @@ impl ResolveFrame {
                     // All players have chosen: the actions happen simultaneously.
                     for (p, objs) in chosen {
                         for o in objs {
-                            let new = move_object(st, o, Zone::Graveyard, LibraryPosition::Top, None);
+                            let new =
+                                move_object(st, o, Zone::Graveyard, LibraryPosition::Top, None);
                             st.emit(match action {
-                                EachPlayerAction::Discard(_) => Event::Discarded { player: p, card: new },
-                                _ => Event::Sacrificed { player: p, object: new },
+                                EachPlayerAction::Discard(_) => Event::Discarded {
+                                    player: p,
+                                    card: new,
+                                },
+                                _ => Event::Sacrificed {
+                                    player: p,
+                                    object: new,
+                                },
                             });
                         }
                     }
@@ -168,7 +185,13 @@ impl ResolveFrame {
                 if c.is_permanent_type() {
                     // CR 608.3a: it becomes a permanent under its controller's control.
                     st.emit(Event::Resolved { spell: top.id });
-                    move_object(st, top.id, Zone::Battlefield, LibraryPosition::Top, Some(top.controller));
+                    move_object(
+                        st,
+                        top.id,
+                        Zone::Battlefield,
+                        LibraryPosition::Top,
+                        Some(top.controller),
+                    );
                     return Some(Flow::done());
                 }
                 st.card_def(top.id).spell_ability().cloned()
@@ -202,7 +225,7 @@ impl ResolveFrame {
         }
         if any && !any_legal {
             st.emit(Event::Fizzled { object: top.id });
-            self.remove(st, true);
+            self.remove(st);
             return Some(Flow::done());
         }
         // CR 700.2: chosen modes are performed in printed order (modes are stored sorted).
@@ -282,17 +305,18 @@ impl ResolveFrame {
         }
     }
 
-    /// CR 608.2n (or 608.2b when `fizzled`): the spell goes to the graveyard; an ability
-    /// ceases to exist. CR 608.2m: if it already left the stack, there's nothing to do.
+    /// CR 608.2n: the spell goes to the graveyard; an ability ceases to exist.
+    /// CR 608.2m: if it already left the stack, there's nothing to do.
     fn finish(&mut self, st: &mut GameState) {
         let id = self.object.expect("started");
         if st.stack_object(id).is_some() {
             st.emit(Event::Resolved { spell: id });
-            self.remove(st, false);
+            self.remove(st);
         }
     }
 
-    fn remove(&mut self, st: &mut GameState, _fizzled: bool) {
+    /// Take the object off the stack (CR 608.2n; also CR 608.2b when it fizzles).
+    fn remove(&mut self, st: &mut GameState) {
         let id = self.object.expect("started");
         match st.stack_object(id).map(|s| s.kind.clone()) {
             Some(StackKind::Spell) => {

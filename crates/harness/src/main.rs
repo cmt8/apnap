@@ -1,16 +1,18 @@
-//! `harness` CLI. Commands:
-//!   run [--seed N] [--games G] [--save-replay PATH]
-//!   determinism [--seed N] [--runs R]
+//! `harness` CLI. `--setup` is `m0` (vanilla, 2 players) or `m1-Np` (M1 deck, N players);
+//! the default is `m1-2p` for `play` and `m0` elsewhere.
+//!   run [--setup S] [--seed N] [--games G] [--save-replay PATH]
+//!   determinism [--setup S] [--seed N] [--runs R]
+//!   fuzz [--setup S] [--seed N] [--games G] [--threads T]   panics/stuck games → exit 1
 //!   replay PATH
-//!   watch [--seed N]            narrate a random-agent game
-//!   play [--seed N] [--save-replay PATH]   you (P0) vs a random agent, in the terminal
-//!   bless                       (rewrite crates/harness/tests/golden/m0.txt)
+//!   watch [--setup S] [--seed N]       narrate a random-agent game
+//!   play [--setup S] [--seed N] [--save-replay PATH]   you (P0) vs random agents
+//!   bless                              rewrite crates/harness/tests/golden/games.txt
 
 use ai::RandomAgent;
 use engine_core::{Agent, ChoiceKind, OptionDesc, PendingDecision, PlayerId, Primitive, Response};
 use harness::text::{Narrator, board, decision_prompt};
 use harness::{
-    GOLDEN_SEEDS, PlayOptions, Replay, agent_seed, golden_line, m0_game, play_random, run_replay,
+    GOLDEN, PlayOptions, Replay, Setup, agent_seed, fuzz, golden_line, play_random, run_replay,
 };
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
@@ -27,15 +29,25 @@ fn num(args: &[String], name: &str, default: u64) -> u64 {
     })
 }
 
+fn setup(args: &[String], default: Setup) -> Setup {
+    flag(args, "--setup").map_or(default, |v| {
+        Setup::parse(&v).unwrap_or_else(|| panic!("bad --setup {v} (use m0 or m1-Np)"))
+    })
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("run");
+    let opts = PlayOptions {
+        setup: setup(&args, Setup::M0Vanilla),
+        ..Default::default()
+    };
     match cmd {
         "run" => {
             let seed = num(&args, "--seed", 42);
             let games = num(&args, "--games", 1);
             for s in seed..seed + games {
-                match play_random(s, PlayOptions::default()) {
+                match play_random(s, opts) {
                     Ok(rec) => {
                         println!(
                             "seed={s} winner={:?} turns={} decisions={} events={} log_hash={:016x} state_hash={:016x}",
@@ -65,10 +77,11 @@ fn main() -> ExitCode {
             let runs = num(&args, "--runs", 3);
             let mut hashes = Vec::new();
             for i in 0..runs {
-                let rec = play_random(seed, PlayOptions::default()).expect("game");
+                let rec = play_random(seed, opts).expect("game");
                 println!(
-                    "run {}: seed={seed} decisions={} events={} log_hash={:016x} state_hash={:016x}",
+                    "run {}: setup={} seed={seed} decisions={} events={} log_hash={:016x} state_hash={:016x}",
                     i + 1,
+                    opts.setup.label(),
                     rec.responses.len(),
                     rec.events.len(),
                     rec.log_hash,
@@ -99,10 +112,44 @@ fn main() -> ExitCode {
             );
             ExitCode::SUCCESS
         }
+        "fuzz" => {
+            let seed = num(&args, "--seed", 1);
+            let games = num(&args, "--games", 100);
+            let threads = num(&args, "--threads", 4) as usize;
+            let results = fuzz(opts.setup, seed, games, threads);
+            let mut failed = 0;
+            let (mut turns, mut decisions, mut draws) = (0u64, 0u64, 0u64);
+            for (s, r) in &results {
+                match r {
+                    Ok(rec) => {
+                        turns += u64::from(rec.turns);
+                        decisions += rec.responses.len() as u64;
+                        draws += u64::from(rec.result.as_ref().is_some_and(|r| r.winner.is_none()));
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        eprintln!("seed={s} FAILED: {e}");
+                    }
+                }
+            }
+            let ok = results.len() as u64 - failed;
+            println!(
+                "fuzz {}: {} games, {ok} ok, {failed} failed, {draws} draws, avg turns {:.1}, avg decisions {:.0}",
+                opts.setup.label(),
+                results.len(),
+                turns as f64 / ok.max(1) as f64,
+                decisions as f64 / ok.max(1) as f64
+            );
+            if failed == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
         "watch" => {
             let seed = num(&args, "--seed", 42);
-            let rec = play_random(seed, PlayOptions::default()).expect("game");
-            let mut n = Narrator::new(&m0_game(seed));
+            let rec = play_random(seed, opts).expect("game");
+            let mut n = Narrator::new(&opts.setup.game(seed));
             for line in n.lines(&rec.events, None) {
                 println!("{line}");
             }
@@ -110,12 +157,16 @@ fn main() -> ExitCode {
         }
         "play" => play(&args),
         "bless" => {
-            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/m0.txt");
+            let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/games.txt");
             let mut out = String::from(
-                "# seed log_hash state_hash — regenerate ONLY with `cargo run -p harness -- bless`\n",
+                "# setup seed log_hash state_hash — regenerate ONLY with `cargo run -p harness -- bless`\n",
             );
-            for &s in GOLDEN_SEEDS {
-                let rec = play_random(s, PlayOptions::default()).expect("game");
+            for &(setup, s) in GOLDEN {
+                let opts = PlayOptions {
+                    setup,
+                    ..Default::default()
+                };
+                let rec = play_random(s, opts).expect("game");
                 out.push_str(&golden_line(&rec));
                 out.push('\n');
             }
@@ -136,7 +187,12 @@ fn forced(d: &PendingDecision) -> Option<Response> {
     match d.prim {
         Primitive::PickN { min, max } => {
             let n = d.options.len();
-            if d.kind == ChoiceKind::Priority && n == 1 {
+            let only_pass_or_mana = d
+                .options
+                .iter()
+                .all(|o| matches!(o, OptionDesc::Pass | OptionDesc::TapForMana { .. }));
+            if d.kind == ChoiceKind::Priority && only_pass_or_mana {
+                // Floating mana with nothing to spend it on: a UI stop, not a rules choice.
                 Some(Response::Pick(vec![0]))
             } else if min == n && max == n {
                 Some(Response::Pick((0..n).collect()))
@@ -176,23 +232,28 @@ fn play(args: &[String]) -> ExitCode {
         |v| v.parse().expect("bad --seed"),
     );
     let me = PlayerId(0);
-    let mut st = m0_game(seed);
+    let setup = setup(args, Setup::M1 { players: 2 });
+    let mut st = setup.game(seed);
     let mut narrator = Narrator::new(&st);
-    let mut bot = RandomAgent::new(agent_seed(seed, 1));
+    let mut bots: Vec<RandomAgent> = (0..setup.players())
+        .map(|s| RandomAgent::new(agent_seed(seed, s)))
+        .collect();
     let mut responses = Vec::new();
     println!(
-        "apnap M0 terminal play — you are P0, seed {seed}. 'q' quits. Cards are vanilla test cards."
+        "apnap terminal play ({}) — you are P0 vs {} random agent(s), seed {seed}. 'q' quits.",
+        setup.label(),
+        setup.players() - 1
     );
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
     let mut out = engine_core::start(&mut st);
     loop {
-        for l in narrator.lines(&out.events, Some(PlayerId(1))) {
+        for l in narrator.lines(&out.events, Some(me)) {
             println!("{l}");
         }
         let Some(d) = out.next.clone() else { break };
         let r = if d.player != me {
-            bot.decide(&engine_core::player_view(&st, d.player), &d)
+            bots[d.player.index()].decide(&engine_core::player_view(&st, d.player), &d)
         } else if let Some(r) = forced(&d) {
             r
         } else {
@@ -205,10 +266,10 @@ fn play(args: &[String]) -> ExitCode {
                 print!("{}> ", decision_prompt(&v, &d));
                 std::io::stdout().flush().ok();
                 let Some(Ok(line)) = lines.next() else {
-                    return save_and_exit(args, seed, responses);
+                    return save_and_exit(args, setup, seed, responses);
                 };
                 if line.trim() == "q" {
-                    return save_and_exit(args, seed, responses);
+                    return save_and_exit(args, setup, seed, responses);
                 }
                 match parse_response(&d, &line) {
                     Ok(r) => break r,
@@ -219,13 +280,14 @@ fn play(args: &[String]) -> ExitCode {
         responses.push(r.clone());
         out = engine_core::step(&mut st, r).expect("validated response");
     }
-    save_and_exit(args, seed, responses)
+    save_and_exit(args, setup, seed, responses)
 }
 
-fn save_and_exit(args: &[String], seed: u64, responses: Vec<Response>) -> ExitCode {
+fn save_and_exit(args: &[String], setup: Setup, seed: u64, responses: Vec<Response>) -> ExitCode {
     if let Some(path) = flag(args, "--save-replay") {
         let replay = Replay {
             cr_version: engine_core::CR_VERSION.into(),
+            setup,
             seed,
             responses,
         };

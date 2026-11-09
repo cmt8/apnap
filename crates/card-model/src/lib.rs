@@ -303,7 +303,11 @@ pub enum AbilityDef {
 pub enum Body {
     Effect(Mode),
     /// "Choose `min`..=`max` —" followed by modes (CR 700.2). Modes are distinct (700.2d).
-    Modal { min: u8, max: u8, modes: Vec<Mode> },
+    Modal {
+        min: u8,
+        max: u8,
+        modes: Vec<Mode>,
+    },
 }
 
 impl Body {
@@ -342,7 +346,10 @@ pub enum TargetFilter {
 
 impl TargetFilter {
     pub fn allows_players(self) -> bool {
-        matches!(self, TargetFilter::AnyTarget | TargetFilter::Player | TargetFilter::Opponent)
+        matches!(
+            self,
+            TargetFilter::AnyTarget | TargetFilter::Player | TargetFilter::Opponent
+        )
     }
 }
 
@@ -375,7 +382,10 @@ impl ManaProduce {
     pub fn options(&self) -> Vec<ManaType> {
         match self {
             ManaProduce::One(t) => alloc::vec![*t],
-            ManaProduce::AnyColor => Color::ALL.iter().map(|c| ManaType::from_color(*c)).collect(),
+            ManaProduce::AnyColor => Color::ALL
+                .iter()
+                .map(|c| ManaType::from_color(*c))
+                .collect(),
         }
     }
 }
@@ -386,12 +396,26 @@ pub enum Effect {
     /// Instructions in the order written (CR 608.2c).
     Seq(Vec<Effect>),
     /// The spell or the ability's source deals damage (CR 120).
-    DealDamage { to: TargetRef, amount: Amount },
-    Draw { who: PlayerRef, amount: Amount },
-    GainLife { who: PlayerRef, amount: Amount },
-    LoseLife { who: PlayerRef, amount: Amount },
+    DealDamage {
+        to: TargetRef,
+        amount: Amount,
+    },
+    Draw {
+        who: PlayerRef,
+        amount: Amount,
+    },
+    GainLife {
+        who: PlayerRef,
+        amount: Amount,
+    },
+    LoseLife {
+        who: PlayerRef,
+        amount: Amount,
+    },
     /// CR 701.6
-    Counter { what: TargetRef },
+    Counter {
+        what: TargetRef,
+    },
     /// Each player, in APNAP order, makes the choice; then all actions happen at once (CR 101.4).
     EachPlayer(EachPlayerAction),
 }

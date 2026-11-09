@@ -29,7 +29,7 @@ pub struct StepOutput {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SetupError {
-    /// M0 supports exactly two players (multiplayer elimination needs CR 800.4, M3).
+    /// Supported: 2 to 8 players.
     UnsupportedPlayerCount(u8),
     DeckCountMismatch {
         decks: usize,
@@ -54,7 +54,7 @@ pub fn new_game(
     decks: &[Vec<CardDefId>],
     seed: u64,
 ) -> Result<GameState, SetupError> {
-    if config.num_players != 2 {
+    if !(2..=8).contains(&config.num_players) {
         return Err(SetupError::UnsupportedPlayerCount(config.num_players));
     }
     if decks.len() != config.num_players as usize {
@@ -84,6 +84,7 @@ pub fn new_game(
         next_timestamp: 0,
         objects: BTreeMap::new(),
         zones: ZoneIndex::new(n),
+        stack: Vec::new(),
         turn: TurnState {
             turn_number: 0,
             active: PlayerId(0),

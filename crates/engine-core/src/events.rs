@@ -7,9 +7,9 @@
 use crate::ids::{CardInstanceId, ObjectId, PlayerId};
 use crate::mana::ManaType;
 use crate::stack::Target;
-use alloc::vec::Vec;
 use crate::turn::Step;
 use crate::zones::Zone;
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +65,52 @@ pub enum Event {
         player: PlayerId,
     },
     PriorityPassed {
+        player: PlayerId,
+    },
+    /// CR 602.2a: an ability object was created on the stack.
+    AbilityActivated {
+        player: PlayerId,
+        ability: ObjectId,
+        source: ObjectId,
+    },
+    /// CR 601.2b / 700.2a
+    ModesChosen {
+        object: ObjectId,
+        modes: Vec<u8>,
+    },
+    /// CR 107.3a
+    XChosen {
+        object: ObjectId,
+        x: u32,
+    },
+    /// CR 601.2c
+    TargetsChosen {
+        object: ObjectId,
+        targets: Vec<Target>,
+    },
+    /// CR 608.2b: every target illegal; the spell or ability doesn't resolve.
+    Fizzled {
+        object: ObjectId,
+    },
+    /// CR 701.6a
+    Countered {
+        object: ObjectId,
+    },
+    /// An ability left the stack (CR 608.2n) or ceased to exist (CR 800.4a).
+    AbilityRemoved {
+        ability: ObjectId,
+    },
+    /// CR 701.21a
+    Sacrificed {
+        player: PlayerId,
+        object: ObjectId,
+    },
+    /// CR 800.4a: an object left the game with its owner.
+    ObjectLeftGame {
+        object: ObjectId,
+    },
+    /// CR 800.4a
+    PlayerLeftGame {
         player: PlayerId,
     },
     LandPlayed {

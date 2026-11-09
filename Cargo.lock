@@ -195,6 +195,7 @@ name = "harness"
 version = "0.0.1"
 dependencies = [
  "ai",
+ "card-db",
  "card-model",
  "cards",
  "engine-core",

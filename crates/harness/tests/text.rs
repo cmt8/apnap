@@ -14,7 +14,7 @@ fn narrator_names_everything() {
             assert!(!l.contains('#'), "seed {seed}: unnamed object in {l:?}");
         }
         let hidden =
-            Narrator::new(&m0_game(seed)).lines(&rec.events, Some(engine_core::PlayerId(1)));
+            Narrator::new(&m0_game(seed)).lines(&rec.events, Some(engine_core::PlayerId(0)));
         assert!(!hidden.iter().any(|l| l.starts_with("P1 draws Test")
             || l.starts_with("P1 draws Forest")
             || l.starts_with("P1 draws Mountain")));

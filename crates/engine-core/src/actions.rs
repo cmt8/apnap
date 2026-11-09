@@ -26,11 +26,22 @@ pub enum GameAction {
         controller: Option<PlayerId>,
     },
     /// CR 121.1. Drawing from an empty library sets the CR 704.5b flag.
-    Draw { player: PlayerId },
-    Shuffle { player: PlayerId },
-    Tap { object: ObjectId },
-    Untap { object: ObjectId },
-    AddMana { player: PlayerId, mana: ManaType },
+    Draw {
+        player: PlayerId,
+    },
+    Shuffle {
+        player: PlayerId,
+    },
+    Tap {
+        object: ObjectId,
+    },
+    Untap {
+        object: ObjectId,
+    },
+    AddMana {
+        player: PlayerId,
+        mana: ManaType,
+    },
     /// CR 601.2h: pay specific symbols plus the chosen generic allocation.
     PayMana {
         player: PlayerId,
@@ -38,7 +49,9 @@ pub enum GameAction {
         generic: [u32; 6],
     },
     /// CR 500.5: unspent mana empties as a step ends.
-    EmptyManaPool { player: PlayerId },
+    EmptyManaPool {
+        player: PlayerId,
+    },
     /// CR 120.3: damage to a player causes life loss; to a creature, it is marked.
     Damage {
         source: ObjectId,
@@ -46,11 +59,22 @@ pub enum GameAction {
         amount: u32,
         combat: bool,
     },
-    GainLife { player: PlayerId, amount: u32 },
-    LoseLife { player: PlayerId, amount: u32 },
+    GainLife {
+        player: PlayerId,
+        amount: u32,
+    },
+    LoseLife {
+        player: PlayerId,
+        amount: u32,
+    },
     /// CR 514.2.
-    RemoveDamage { object: ObjectId },
-    LoseGame { player: PlayerId, reason: LossReason },
+    RemoveDamage {
+        object: ObjectId,
+    },
+    LoseGame {
+        player: PlayerId,
+        reason: LossReason,
+    },
     /// CR 602.2a: create an activated ability object on top of the stack.
     PutAbilityOnStack {
         controller: PlayerId,
@@ -66,9 +90,13 @@ pub enum GameAction {
         targets: Vec<Vec<Target>>,
     },
     /// CR 608.2n / 608.2b / 701.6a: an ability leaves the stack and ceases to exist.
-    RemoveAbility { ability: ObjectId },
+    RemoveAbility {
+        ability: ObjectId,
+    },
     /// CR 800.4a: a player leaves a multiplayer game.
-    LeaveGame { player: PlayerId },
+    LeaveGame {
+        player: PlayerId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

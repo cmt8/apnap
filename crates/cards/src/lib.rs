@@ -5,13 +5,19 @@
 
 macro_rules! card {
     ($p:literal) => {
-        (concat!("crates/cards/data/", $p), include_str!(concat!("../data/", $p)))
+        (
+            concat!("crates/cards/data/", $p),
+            include_str!(concat!("../data/", $p)),
+        )
     };
 }
 
 macro_rules! deck {
     ($p:literal) => {
-        (concat!("crates/cards/decks/", $p), include_str!(concat!("../decks/", $p)))
+        (
+            concat!("crates/cards/decks/", $p),
+            include_str!(concat!("../decks/", $p)),
+        )
     };
 }
 
@@ -44,10 +50,7 @@ pub const CARDS: &[(&str, &str)] = &[
 ];
 
 /// `(path, contents)` of every deck list.
-pub const DECKS: &[(&str, &str)] = &[
-    deck!("m0_vanilla.ron"),
-    deck!("m1_red_green.ron"),
-];
+pub const DECKS: &[(&str, &str)] = &[deck!("m0_vanilla.ron"), deck!("m1_red_green.ron")];
 
 /// Contents of the deck file named `file` (e.g. `"m1_red_green.ron"`).
 pub fn deck(file: &str) -> Option<&'static str> {
@@ -87,8 +90,16 @@ mod tests {
     #[test]
     fn embedded_lists_match_files_on_disk() {
         let cards: Vec<String> = CARDS.iter().map(|(p, _)| p.to_string()).collect();
-        assert_eq!(cards, ron_files("data"), "update CARDS in crates/cards/src/lib.rs");
+        assert_eq!(
+            cards,
+            ron_files("data"),
+            "update CARDS in crates/cards/src/lib.rs"
+        );
         let decks: Vec<String> = DECKS.iter().map(|(p, _)| p.to_string()).collect();
-        assert_eq!(decks, ron_files("decks"), "update DECKS in crates/cards/src/lib.rs");
+        assert_eq!(
+            decks,
+            ron_files("decks"),
+            "update DECKS in crates/cards/src/lib.rs"
+        );
     }
 }

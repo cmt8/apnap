@@ -3,26 +3,105 @@
 pub mod text;
 
 use ai::RandomAgent;
+use card_model::{CardCatalog, CardDefId};
 use engine_core::rng::splitmix64;
 use engine_core::state::GameResult;
 use engine_core::{Agent, Event, GameConfig, GameState, Response, StepOutput, player_view};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Default cap on decisions per game (stuck-loop detection).
 pub const MAX_DECISIONS: usize = 200_000;
+
+/// Which game to set up. Recorded in replays so they can be rebuilt.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Setup {
+    /// M0: two players, vanilla creatures and basic lands (`decks/m0_vanilla.ron`).
+    #[default]
+    M0Vanilla,
+    /// M1: `players` players with the M1 deck (`decks/m1_red_green.ron`); 1v1 constructed
+    /// rules for 2, free-for-all (CR 806, attack multiple players) otherwise.
+    M1 { players: u8 },
+}
+
+impl Setup {
+    pub fn players(self) -> u8 {
+        match self {
+            Setup::M0Vanilla => 2,
+            Setup::M1 { players } => players,
+        }
+    }
+
+    /// Short label used in golden files and CLI output: `m0`, `m1-4p`, …
+    pub fn label(self) -> String {
+        match self {
+            Setup::M0Vanilla => "m0".into(),
+            Setup::M1 { players } => format!("m1-{players}p"),
+        }
+    }
+
+    pub fn parse(label: &str) -> Option<Setup> {
+        if label == "m0" {
+            return Some(Setup::M0Vanilla);
+        }
+        let n = label.strip_prefix("m1-")?.strip_suffix('p')?.parse().ok()?;
+        Some(Setup::M1 { players: n })
+    }
+
+    pub fn game(self, seed: u64) -> GameState {
+        let (config, deck_file) = match self {
+            Setup::M0Vanilla => (GameConfig::constructed_1v1(), "m0_vanilla.ron"),
+            Setup::M1 { players: 2 } => (GameConfig::constructed_1v1(), "m1_red_green.ron"),
+            Setup::M1 { players } => (GameConfig::free_for_all(players), "m1_red_green.ron"),
+        };
+        let d = deck(deck_file);
+        let decks = vec![d; config.num_players as usize];
+        engine_core::new_game(config, catalog(), &decks, seed).expect("valid setup")
+    }
+}
+
+/// Every card in `crates/cards`, loaded and validated in strict mode, once.
+pub fn catalog() -> Arc<CardCatalog> {
+    static CATALOG: OnceLock<Arc<CardCatalog>> = OnceLock::new();
+    CATALOG
+        .get_or_init(|| {
+            let sources: Vec<card_db::Source<'_>> = cards::CARDS
+                .iter()
+                .map(|&(path, text)| card_db::Source { path, text })
+                .collect();
+            match card_db::load_catalog(&sources, card_db::Strictness::Strict) {
+                Ok(c) => Arc::new(c),
+                Err(errs) => {
+                    let msg: Vec<String> = errs.iter().map(ToString::to_string).collect();
+                    panic!("card data failed to load:\n{}", msg.join("\n"))
+                }
+            }
+        })
+        .clone()
+}
+
+/// A deck from `crates/cards/decks/<file>`, resolved against [`catalog`].
+pub fn deck(file: &str) -> Vec<CardDefId> {
+    let text = cards::deck(file).unwrap_or_else(|| panic!("no deck {file}"));
+    let path = format!("crates/cards/decks/{file}");
+    card_db::load_deck(card_db::Source { path: &path, text }, &catalog())
+        .unwrap_or_else(|e| panic!("{e}"))
+}
 
 /// A recorded game: everything needed to replay it bit-for-bit.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Replay {
     pub cr_version: String,
+    #[serde(default)]
+    pub setup: Setup,
     pub seed: u64,
     pub responses: Vec<Response>,
 }
 
 #[derive(Clone, Debug)]
 pub struct GameRecord {
+    pub setup: Setup,
     pub seed: u64,
     pub responses: Vec<Response>,
     /// Every event, in order.
@@ -41,6 +120,7 @@ impl GameRecord {
     pub fn replay(&self) -> Replay {
         Replay {
             cr_version: engine_core::CR_VERSION.into(),
+            setup: self.setup,
             seed: self.seed,
             responses: self.responses.clone(),
         }
@@ -64,6 +144,10 @@ pub enum HarnessError {
     ReplayEndedEarly {
         at: usize,
     },
+    Panic {
+        seed: u64,
+        msg: String,
+    },
 }
 
 impl fmt::Display for HarnessError {
@@ -76,15 +160,7 @@ impl std::error::Error for HarnessError {}
 
 /// The M0 setup: two players, 60-card vanilla decks, constructed rules.
 pub fn m0_game(seed: u64) -> GameState {
-    let catalog = cards::m0_catalog();
-    let deck = cards::m0_deck(&catalog);
-    engine_core::new_game(
-        GameConfig::constructed_1v1(),
-        Arc::new(catalog),
-        &[deck.clone(), deck],
-        seed,
-    )
-    .expect("valid M0 setup")
+    Setup::M0Vanilla.game(seed)
 }
 
 /// Per-seat agent seed, independent of the game RNG stream.
@@ -95,19 +171,21 @@ pub fn agent_seed(game_seed: u64, seat: u8) -> u64 {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PlayOptions {
+    pub setup: Setup,
     pub max_decisions: Option<usize>,
     /// Run `GameState::check_invariants` after every step (slow; tests).
     pub check_invariants: bool,
 }
 
-/// Play a full M0 game with random agents.
+/// Play a full game with random agents.
 pub fn play_random(seed: u64, opts: PlayOptions) -> Result<GameRecord, HarnessError> {
-    let mut st = m0_game(seed);
+    let mut st = opts.setup.game(seed);
     let mut agents: Vec<RandomAgent> = (0..st.num_players() as u8)
         .map(|s| RandomAgent::new(agent_seed(seed, s)))
         .collect();
     let max = opts.max_decisions.unwrap_or(MAX_DECISIONS);
     let mut rec = GameRecord {
+        setup: opts.setup,
         seed,
         responses: Vec::new(),
         events: Vec::new(),
@@ -175,7 +253,7 @@ pub fn feed(st: &mut GameState, responses: &[Response]) -> Result<Vec<Event>, Ha
 
 /// Replay a recorded game from scratch.
 pub fn run_replay(replay: &Replay) -> Result<(GameState, Vec<Event>), HarnessError> {
-    let mut st = m0_game(replay.seed);
+    let mut st = replay.setup.game(replay.seed);
     let events = feed(&mut st, &replay.responses)?;
     Ok((st, events))
 }
@@ -188,9 +266,73 @@ pub fn load_json(s: &str) -> Result<GameState, serde_json::Error> {
     serde_json::from_str(s)
 }
 
-/// Golden hashes: `seed log_hash state_hash` per line.
-pub const GOLDEN_SEEDS: &[u64] = &[1, 2, 3, 42, 1337, 0xC0FFEE];
+/// Golden games: `setup seed log_hash state_hash` per line in `tests/golden/games.txt`.
+pub const GOLDEN: &[(Setup, u64)] = &[
+    (Setup::M0Vanilla, 1),
+    (Setup::M0Vanilla, 42),
+    (Setup::M0Vanilla, 0xC0FFEE),
+    (Setup::M1 { players: 2 }, 1),
+    (Setup::M1 { players: 2 }, 42),
+    (Setup::M1 { players: 4 }, 1),
+    (Setup::M1 { players: 4 }, 42),
+    (Setup::M1 { players: 4 }, 1337),
+];
 
 pub fn golden_line(rec: &GameRecord) -> String {
-    format!("{} {:016x} {:016x}", rec.seed, rec.log_hash, rec.state_hash)
+    format!(
+        "{} {} {:016x} {:016x}",
+        rec.setup.label(),
+        rec.seed,
+        rec.log_hash,
+        rec.state_hash
+    )
+}
+
+/// Play `games` random games (seeds `seed..seed+games`) on `threads` OS threads. Each game is
+/// independent and deterministic, so the results don't depend on the thread count.
+pub fn fuzz(
+    setup: Setup,
+    seed: u64,
+    games: u64,
+    threads: usize,
+) -> Vec<(u64, Result<GameRecord, HarnessError>)> {
+    let threads = threads.max(1);
+    let mut out: Vec<(u64, Result<GameRecord, HarnessError>)> = std::thread::scope(|sc| {
+        let handles: Vec<_> = (0..threads)
+            .map(|t| {
+                sc.spawn(move || {
+                    (seed + t as u64..seed + games)
+                        .step_by(threads)
+                        .map(|s| {
+                            let opts = PlayOptions {
+                                setup,
+                                ..Default::default()
+                            };
+                            let r = std::panic::catch_unwind(|| play_random(s, opts))
+                                .unwrap_or_else(|p| {
+                                    Err(HarnessError::Panic {
+                                        seed: s,
+                                        msg: panic_message(&p),
+                                    })
+                                });
+                            (s, r)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("fuzz thread"))
+            .collect()
+    });
+    out.sort_by_key(|(s, _)| *s);
+    out
+}
+
+fn panic_message(p: &Box<dyn std::any::Any + Send>) -> String {
+    p.downcast_ref::<String>()
+        .cloned()
+        .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_else(|| "panic".into())
 }

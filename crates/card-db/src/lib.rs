@@ -73,7 +73,10 @@ pub fn load_catalog(
         };
         let problems = validate(&script, strictness);
         if !names.insert(script.card.name.clone()) {
-            errors.push(err(src.path, format!("duplicate card name {:?}", script.card.name)));
+            errors.push(err(
+                src.path,
+                format!("duplicate card name {:?}", script.card.name),
+            ));
         }
         if problems.is_empty() {
             catalog.add(script.card);
@@ -161,11 +164,16 @@ fn check_body(body: &Body, has_x: bool, p: &mut dyn FnMut(String)) {
             p("a modal body needs at least two modes (CR 700.2)".into());
         }
         if *min < 1 || min > max || *max as usize > modes.len() {
-            p(format!("bad mode count {min}..={max} for {} modes", modes.len()));
+            p(format!(
+                "bad mode count {min}..={max} for {} modes",
+                modes.len()
+            ));
         }
     }
     for (mi, mode) in body.modes().iter().enumerate() {
-        check_effect(&mode.effect, mode, has_x, &mut |m| p(format!("mode {mi}: {m}")));
+        check_effect(&mode.effect, mode, has_x, &mut |m| {
+            p(format!("mode {mi}: {m}"))
+        });
     }
 }
 

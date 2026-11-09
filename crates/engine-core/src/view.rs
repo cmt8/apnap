@@ -6,6 +6,7 @@ use crate::decision::PendingDecision;
 use crate::ids::{ObjectId, PlayerId};
 use crate::layers::chars;
 use crate::mana::ManaPool;
+use crate::stack::{StackKind, Target};
 use crate::state::{CombatState, GameState};
 use crate::turn::Step;
 use alloc::string::String;
@@ -25,6 +26,20 @@ pub struct ObjectView {
     pub tapped: bool,
     pub damage_marked: u32,
     pub summoning_sick: bool,
+}
+
+/// A spell or ability on the stack.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackView {
+    pub id: ObjectId,
+    pub controller: PlayerId,
+    /// `Some(source)` for an activated ability; `None` for a spell.
+    pub ability_of: Option<ObjectId>,
+    /// The spell's name, or the name of the ability's source card.
+    pub name: String,
+    pub modes: Vec<u8>,
+    pub x: u32,
+    pub targets: Vec<Target>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,7 +63,8 @@ pub struct PlayerView {
     /// The viewer's own hand.
     pub hand: Vec<ObjectView>,
     pub battlefield: Vec<ObjectView>,
-    pub stack: Vec<ObjectView>,
+    /// Bottom to top. Everything on the stack is public.
+    pub stack: Vec<StackView>,
     pub exile: Vec<ObjectView>,
     pub combat: Option<CombatState>,
     /// The pending decision, if it is the viewer's.
@@ -60,10 +76,10 @@ fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
     let c = chars(st, id);
     ObjectView {
         id,
-        name: c.name,
+        name: c.name.into(),
         owner: o.owner,
         controller: o.controller,
-        card_types: c.card_types,
+        card_types: c.card_types.to_vec(),
         power: c.power,
         toughness: c.toughness,
         tapped: o.tapped,
@@ -97,7 +113,27 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
             .collect(),
         hand: views(st, &st.zones.hands[viewer.index()]),
         battlefield: views(st, &st.zones.battlefield),
-        stack: views(st, &st.zones.stack),
+        stack: st
+            .stack
+            .iter()
+            .map(|so| StackView {
+                id: so.id,
+                controller: so.controller,
+                ability_of: match so.kind {
+                    StackKind::Spell => None,
+                    StackKind::Ability { source, .. } => Some(source),
+                },
+                name: match &so.kind {
+                    StackKind::Spell => st.card_def(so.id).name.clone(),
+                    StackKind::Ability { source_card, .. } => {
+                        st.catalog.get(*source_card).name.clone()
+                    }
+                },
+                modes: so.modes.clone(),
+                x: so.x,
+                targets: so.all_targets().copied().collect(),
+            })
+            .collect(),
         exile: views(st, &st.zones.exile),
         combat: st.combat.clone(),
         decision: st.pending.clone().filter(|d| d.player == viewer),

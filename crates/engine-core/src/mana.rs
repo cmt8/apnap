@@ -138,8 +138,8 @@ impl ManaRequirement {
     /// Remove the specific symbols plus `generic_alloc` from `pool`.
     pub fn pay(&self, pool: &mut ManaPool, generic_alloc: &[u32; 6]) {
         debug_assert_eq!(generic_alloc.iter().sum::<u32>(), self.generic);
-        for t in 0..6 {
-            pool.amounts[t] -= self.specific[t] + generic_alloc[t];
+        for (t, g) in generic_alloc.iter().enumerate() {
+            pool.amounts[t] -= self.specific[t] + g;
         }
     }
 }

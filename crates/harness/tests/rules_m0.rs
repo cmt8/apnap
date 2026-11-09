@@ -154,9 +154,13 @@ fn cr_117_4_steps_end_after_all_pass() {
             match e {
                 Event::PriorityPassed { .. } => passes += 1,
                 Event::StepBegan { .. } | Event::GameOver { .. } => passes = 0,
-                Event::LandPlayed { .. } | Event::SpellCast { .. } | Event::Resolved { .. } => {
-                    passes = 0
-                }
+                // Any action resets "pass in succession" — including activating a mana
+                // ability with priority (ManaAdded) and activating abilities.
+                Event::LandPlayed { .. }
+                | Event::SpellCast { .. }
+                | Event::Resolved { .. }
+                | Event::ManaAdded { .. }
+                | Event::AbilityActivated { .. } => passes = 0,
                 _ => {}
             }
             assert!(passes <= 2, "seed {}: more passes than players", rec.seed);
@@ -183,10 +187,10 @@ fn player_view_redacts_hidden_zones() {
             .hand
             .iter()
             .chain(&v.battlefield)
-            .chain(&v.stack)
             .chain(&v.exile)
             .chain(v.players.iter().flat_map(|pl| &pl.graveyard))
             .map(|o| o.id)
+            .chain(v.stack.iter().map(|s| s.id))
             .collect();
         if let Some(d) = &v.decision {
             for o in &d.options {
