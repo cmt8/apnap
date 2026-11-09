@@ -222,16 +222,55 @@ pub fn agent_seed(game_seed: u64, seat: u8) -> u64 {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PlayOptions {
     pub setup: Setup,
+    pub agents: Agents,
     pub max_decisions: Option<usize>,
     /// Run `GameState::check_invariants` after every step (slow; tests).
     pub check_invariants: bool,
 }
 
-/// Play a full game with random agents.
+/// Which agents sit at the table.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Agents {
+    /// Every seat plays uniformly random legal responses.
+    #[default]
+    Random,
+    /// Every seat is the heuristic agent (spec §9 Phase A).
+    Heuristic,
+    /// Seat 0 is the heuristic agent; the rest are random.
+    HeuristicVsRandom,
+}
+
+impl Agents {
+    pub fn parse(s: &str) -> Option<Agents> {
+        match s {
+            "random" => Some(Agents::Random),
+            "heuristic" => Some(Agents::Heuristic),
+            "h-vs-r" => Some(Agents::HeuristicVsRandom),
+            _ => None,
+        }
+    }
+
+    /// The agent for `seat` (each seeded independently of the game RNG).
+    pub fn make(self, seed: u64, seat: u8) -> Box<dyn Agent> {
+        let s = agent_seed(seed, seat);
+        let heuristic = match self {
+            Agents::Random => false,
+            Agents::Heuristic => true,
+            Agents::HeuristicVsRandom => seat == 0,
+        };
+        if heuristic {
+            Box::new(ai::HeuristicAgent::new(s, catalog()))
+        } else {
+            Box::new(RandomAgent::new(s))
+        }
+    }
+}
+
+/// Play a full game with the configured agents (random by default).
 pub fn play_random(seed: u64, opts: PlayOptions) -> Result<GameRecord, HarnessError> {
     let mut st = opts.setup.game(seed);
-    let mut agents: Vec<RandomAgent> = (0..st.num_players() as u8)
-        .map(|s| RandomAgent::new(agent_seed(seed, s)))
+    let mut agents: Vec<Box<dyn Agent>> = (0..st.num_players() as u8)
+        .map(|s| opts.agents.make(seed, s))
         .collect();
     let max = opts.max_decisions.unwrap_or(MAX_DECISIONS);
     let mut rec = GameRecord {
@@ -330,6 +369,9 @@ pub const GOLDEN: &[(Setup, u64)] = &[
     (Setup::M2 { players: 2 }, 42),
     (Setup::M2 { players: 4 }, 1),
     (Setup::M2 { players: 4 }, 42),
+    (Setup::Commander { players: 2 }, 1),
+    (Setup::Commander { players: 4 }, 1),
+    (Setup::Commander { players: 4 }, 42),
 ];
 
 pub fn golden_line(rec: &GameRecord) -> String {
@@ -350,6 +392,20 @@ pub fn fuzz(
     games: u64,
     threads: usize,
 ) -> Vec<(u64, Result<GameRecord, HarnessError>)> {
+    let base = PlayOptions {
+        setup,
+        ..Default::default()
+    };
+    fuzz_with(base, seed, games, threads)
+}
+
+/// [`fuzz`] with full options (setup, agents, invariant checks).
+pub fn fuzz_with(
+    base: PlayOptions,
+    seed: u64,
+    games: u64,
+    threads: usize,
+) -> Vec<(u64, Result<GameRecord, HarnessError>)> {
     let threads = threads.max(1);
     let mut out: Vec<(u64, Result<GameRecord, HarnessError>)> = std::thread::scope(|sc| {
         let handles: Vec<_> = (0..threads)
@@ -358,10 +414,7 @@ pub fn fuzz(
                     (seed + t as u64..seed + games)
                         .step_by(threads)
                         .map(|s| {
-                            let opts = PlayOptions {
-                                setup,
-                                ..Default::default()
-                            };
+                            let opts = base;
                             let r = std::panic::catch_unwind(|| play_random(s, opts))
                                 .unwrap_or_else(|p| {
                                     Err(HarnessError::Panic {

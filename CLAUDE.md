@@ -54,7 +54,8 @@ cargo run -p harness -- run --seed 42 --games 10          # random-agent games (
 cargo run --release -p harness -- fuzz --setup m2-4p --games 1000 --threads 8   # soak (m0 | m1-Np | m2-Np)
 cargo run -p harness -- determinism --seed 42 --runs 3    # identical hashes
 cargo run -p harness -- watch --seed 42                   # narrated random-agent game
-cargo run -p harness -- play [--setup m1-4p] [--seed N]   # you (P0) vs random agents in the terminal
+cargo run -p harness -- play [--setup cmd-4p] [--seed N]  # you (P0) vs random agents in the terminal
+cargo run --release -p harness -- fuzz --setup cmd-4p --agents h-vs-r --games 200   # AI strength
 cargo run -p harness -- run --seed 42 --save-replay r.json && cargo run -p harness -- replay r.json
 cargo run -p harness -- bless                             # ONLY when a hash change is intended; review why
 ```
@@ -75,7 +76,8 @@ cargo run -p harness -- bless                             # ONLY when a hash cha
   "Test …" cards + basic lands). Adding a file? Add it to `CARDS`/`DECKS` (a test checks).
 - `crates/card-db` — parses + validates RON into a `CardCatalog` (strict mode rejects
   unverified cards; every verified card must name existing tests). Scryfall import: M4.
-- `crates/ai` — agents (RandomAgent). `crates/harness` — CLI, `Setup` (m0 / m1-Np),
+- `crates/ai` — agents: RandomAgent, HeuristicAgent (D-033). `crates/harness` — CLI, `Setup`
+  (m0 / m1-Np / m2-Np / cmd-Np), `--agents random|heuristic|h-vs-r`,
   `script::Script` test driver, determinism/golden/property/rules tests.
 - `crates/app` — stub until M4. `crates/xtask` — check-deps.
 - Engine extras: `stack.rs` (StackObject), `targeting.rs` (choose + 608.2b legality in one
@@ -84,15 +86,20 @@ cargo run -p harness -- bless                             # ONLY when a hash cha
   `frames/put_triggers.rs` (603), `frames/check.rs` (117.5/704.3), `effects.rs` (resolved
   continuous effects, shields), `testing.rs` (feature `test-support`: scenario builder, D-022).
 
-## Current milestone: M2 — DONE (2026-11-08). Next: M3 (do not start without the user's OK).
-M2 delivered: layers (CR 613: every slot, timestamps, 613.8 dependency, 613.6 locking;
-effects for layers 4–7), replacement/prevention pipeline (614–616, `frames/apply.rs`,
-D-024), triggers + LKI (603, D-025/D-026), state check (117.5/704.3) with 704.5d/h/j/q,
-tokens, counters, flying/reach blocking (D-027). Tests: `rules_m2.rs` (spec's 7 golden
-cases + CR 613.4d/613.5/613.6 examples; mutation-checked), determinism/save-load/clone over
-M2 setups incl. mid-pipeline suspensions; CI soak m2-4p x1000. Limits: D-028.
-M3 starts with: rules-notes for 506–511 (combat keywords), 903 (Commander), the rest of 800.4
-(control-change cases), then combat keywords, Commander, Auras/control effects (layer 2).
+## Current milestone: M3 — DONE (2026-11-09). Next: M4 (do not start without the user's OK).
+M3 delivered: combat keywords (first/double strike, trample + deathtouch, lifelink, vigilance,
+menace; D-031), Auras + layer-2 control with summoning-sickness tracking (D-029/D-030),
+Commander (903: command zone, tax, commander damage, 903.9a SBA choice, 903.9b optional
+replacement, color identity + deck validation; D-032), heuristic AI v1 (D-033).
+Tests: `rules_m3.rs` (spec's three Commander/800.4 golden cases + keyword/Aura/903 tests),
+`ai_m3.rs` (AI never takes avoidable lethal commander damage — property test, mutation-checked;
+AI beats random agents), determinism over Commander setups; CI soaks cmd-4p.
+M4 starts with: pick four real precons, Scryfall import (card-db, XDG cache), RON scripts for
+every card in them, the egui app.
+
+### M2 summary
+Layers (613), replacement/prevention (614–616), triggers + LKI (603), state check (704);
+decisions D-023–D-028.
 
 ### M1 summary
 M1 delivered priority/casting/abilities/resolution, 2–8 players with CR 800.4a/j/k, RON

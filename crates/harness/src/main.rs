@@ -8,12 +8,9 @@
 //!   play [--setup S] [--seed N] [--save-replay PATH]   you (P0) vs random agents
 //!   bless                              rewrite crates/harness/tests/golden/games.txt
 
-use ai::RandomAgent;
 use engine_core::{Agent, ChoiceKind, OptionDesc, PendingDecision, PlayerId, Primitive, Response};
 use harness::text::{Narrator, board, decision_prompt};
-use harness::{
-    GOLDEN, PlayOptions, Replay, Setup, agent_seed, fuzz, golden_line, play_random, run_replay,
-};
+use harness::{GOLDEN, PlayOptions, Replay, Setup, golden_line, play_random, run_replay};
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
@@ -40,6 +37,10 @@ fn main() -> ExitCode {
     let cmd = args.first().map(String::as_str).unwrap_or("run");
     let opts = PlayOptions {
         setup: setup(&args, Setup::M0Vanilla),
+        agents: flag(&args, "--agents").map_or(harness::Agents::Random, |a| {
+            harness::Agents::parse(&a)
+                .unwrap_or_else(|| panic!("bad --agents {a} (random | heuristic | h-vs-r)"))
+        }),
         ..Default::default()
     };
     match cmd {
@@ -116,7 +117,8 @@ fn main() -> ExitCode {
             let seed = num(&args, "--seed", 1);
             let games = num(&args, "--games", 100);
             let threads = num(&args, "--threads", 4) as usize;
-            let results = fuzz(opts.setup, seed, games, threads);
+            let results = harness::fuzz_with(opts, seed, games, threads);
+            let mut wins = vec![0u64; usize::from(opts.setup.players())];
             let mut failed = 0;
             let (mut turns, mut decisions, mut draws) = (0u64, 0u64, 0u64);
             for (s, r) in &results {
@@ -125,6 +127,9 @@ fn main() -> ExitCode {
                         turns += u64::from(rec.turns);
                         decisions += rec.responses.len() as u64;
                         draws += u64::from(rec.result.as_ref().is_some_and(|r| r.winner.is_none()));
+                        if let Some(w) = rec.result.as_ref().and_then(|r| r.winner) {
+                            wins[w.index()] += 1;
+                        }
                     }
                     Err(e) => {
                         failed += 1;
@@ -140,6 +145,7 @@ fn main() -> ExitCode {
                 turns as f64 / ok.max(1) as f64,
                 decisions as f64 / ok.max(1) as f64
             );
+            println!("wins by seat: {wins:?}");
             if failed == 0 {
                 ExitCode::SUCCESS
             } else {
@@ -235,12 +241,14 @@ fn play(args: &[String]) -> ExitCode {
     let setup = setup(args, Setup::M1 { players: 2 });
     let mut st = setup.game(seed);
     let mut narrator = Narrator::new(&st);
-    let mut bots: Vec<RandomAgent> = (0..setup.players())
-        .map(|s| RandomAgent::new(agent_seed(seed, s)))
-        .collect();
+    // Opponents: the heuristic AI by default (`--agents random` for random opponents).
+    let kind = flag(args, "--agents").map_or(harness::Agents::Heuristic, |a| {
+        harness::Agents::parse(&a).expect("bad --agents")
+    });
+    let mut bots: Vec<Box<dyn Agent>> = (0..setup.players()).map(|s| kind.make(seed, s)).collect();
     let mut responses = Vec::new();
     println!(
-        "apnap terminal play ({}) — you are P0 vs {} random agent(s), seed {seed}. 'q' quits.",
+        "apnap terminal play ({}) — you are P0 vs {} AI opponent(s), seed {seed}. 'q' quits.",
         setup.label(),
         setup.players() - 1
     );

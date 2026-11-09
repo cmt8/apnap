@@ -36,6 +36,9 @@ const CASES: &[(Setup, u64)] = &[
     (M2_2P, 45),
     (M2_2P, 28),
     (M2_4P, 1),
+    // Commander (M3): seed 0 covers the 903.9a return and trample's damage split.
+    (Setup::Commander { players: 2 }, 0),
+    (Setup::Commander { players: 4 }, 1),
 ];
 
 /// Number of sample points per game (besides first-of-each-kind points).

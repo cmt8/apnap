@@ -249,6 +249,66 @@ menace, vigilance, and 702.2c deathtouch-as-lethal in assignment) stay in M3.
 - Selectors match card types, supertypes, controller, "other" and token status (no colors,
   names or subtypes yet).
 
+## D-029 Auras (M3): "Enchant creature" only
+An Aura card is an Enchantment with subtype "Aura" and an `Enchant(filter)` ability (CR 702.5);
+card-db accepts only `Enchant(Creature)` for now. Casting targets per the enchant ability
+(303.4a); on resolution an illegal target means it goes to the graveyard (608.3b), otherwise
+it enters attached (`Proposed::Move::attach_to`). `Affected::Enchanted` (303.4m) scopes its
+static abilities. SBA 704.5m removes Auras attached to nothing or to an illegal object.
+Equipment, Auras entering other than by resolving (303.4f), "enchant player" and 704.5n–p
+wait for cards that need them.
+
+## D-030 Layer 2 control and summoning sickness (M3)
+Control is computed in the layer walk (`Characteristics::controller`, `ContinuousEffect::
+GainControl`); `GameObject::controller` is the *base* controller (who it entered/was cast
+under). All rules reads use `layers::controller_of`. The driver calls `layers::sync_control`
+after every frame step: when a permanent's layered controller differs from the last one seen,
+a `ControlChanged` action records it and marks it summoning sick (CR 302.6). So control
+effects end automatically when their source leaves (800.4a), and leaving players are
+evaluated after their objects' control effects end.
+
+## D-031 Combat keywords (M3)
+- First/double strike: `CombatState` records whether a second damage step is needed and which
+  creatures had first/double strike as the first step began (CR 510.4).
+- Trample: two decisions — `PickNumber` for the damage to the player (0..=power − Σ lethal),
+  then `Allocate` among blockers with per-blocker minimum = lethal when anything goes to the
+  player. "Lethal" counts marked damage, damage assigned earlier in the step, and deathtouch
+  (702.19b, 702.2c). The decomposition is exact and keeps D-019 (no dead ends).
+- Menace: an illegal declaration is detected after a defender's last block decision and that
+  defender declares again (CR 734 return-to-before; nothing has happened yet). A
+  deterministic agent that repeats an illegal declaration would loop; the heuristic agent's
+  plan is always menace-legal and the harness caps decisions.
+- Lifelink: the life gain is performed in the same damage event (702.15b).
+
+## D-032 Commander (M3)
+- Commanders are designated per card instance (903.3) at `new_game_with_commanders` and start
+  in the command zone (903.6). Commander tax is locked in when the cast is announced (601.2f),
+  so it's included in every feasibility check (D-019). Casts from the command zone are
+  counted per card.
+- Commander damage is tallied in the `Damage` action (post-replacement), keyed by card;
+  704.6c is an SBA.
+- 903.9a: commanders that moved to graveyard/exile are remembered until the next SBA check;
+  the owner gets an Accept/Decline `CommanderToCommandZone` choice inside the state check.
+- 903.9b: a rule-based *optional* replacement (`RepKey::CommanderReturn`): the affected player
+  is always asked (Accept/Decline, `ChooseReplacement`), even when it's the only applicable
+  effect; declining records it so it isn't asked again for that event. (Accepting moves the
+  card to the command zone, so the "may apply more than once" clause never needs a repeat.)
+- Deck rules (903.4 color identity, 903.5a–d) are validated in card-db, not the engine.
+  The four M3 commander decks were generated from the card pool once and committed; the two
+  mono-colored decks are land-heavy because the pool has few mono-colored cards.
+
+## D-033 Heuristic AI v1 (M3, spec §9 Phase A)
+`ai::HeuristicAgent` sees only its `PlayerView` plus the card catalog (card text is public
+information, not `GameState`). Integer scoring only. Plans blocks once per combat: first
+prevent lethal commander damage, then lethal life loss (trample-aware chumps), then value
+blocks; plans are menace- and flying-legal. Attacks are "safe" attacks toward the
+highest-threat opponent, with big bonuses for lethal life or commander damage; keeps a blocker
+home under crackback threat. Spells are classified harmful/helpful from their effects and
+targeted accordingly (killable creatures first; face when lethal). Not yet: politics/grudges,
+combat tricks, holding up counters, mana planning. It wins 199/200 four-player Commander
+games against three random agents; the property test over generated boards shows it never
+takes avoidable lethal commander damage.
+
 ---
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)

@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectView {
     pub id: ObjectId,
+    /// The card's definition (public card text; the AI reads it from the catalog).
+    pub card: card_model::CardDefId,
     pub name: String,
     pub owner: PlayerId,
     pub controller: PlayerId,
@@ -45,6 +47,10 @@ pub struct StackView {
     pub ability_of: Option<ObjectId>,
     /// The spell's name, or the name of the ability's source card.
     pub name: String,
+    /// The spell's card, or the ability's source card.
+    pub card: card_model::CardDefId,
+    /// For abilities: the ability's index on `card`.
+    pub ability: Option<u16>,
     pub modes: Vec<u8>,
     pub x: u32,
     pub targets: Vec<Target>,
@@ -90,6 +96,7 @@ fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
     let c = chars(st, id);
     ObjectView {
         id,
+        card: o.card,
         name: c.name,
         owner: o.owner,
         controller: crate::layers::controller_of(st, id),
@@ -144,6 +151,14 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
                 ability_of: match so.kind {
                     StackKind::Spell => None,
                     StackKind::Ability { source, .. } => Some(source),
+                },
+                card: match &so.kind {
+                    StackKind::Spell => st.object(so.id).card,
+                    StackKind::Ability { source_card, .. } => *source_card,
+                },
+                ability: match &so.kind {
+                    StackKind::Spell => None,
+                    StackKind::Ability { index, .. } => Some(*index),
                 },
                 name: match &so.kind {
                     StackKind::Spell => st.card_def(so.id).name.clone(),

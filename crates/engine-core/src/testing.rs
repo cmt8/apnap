@@ -96,6 +96,25 @@ impl Scenario {
         }
     }
 
+    /// Put `name` into `zone` as `owner`'s commander (CR 903.3).
+    pub fn commander(&mut self, owner: PlayerId, zone: Zone, name: &str) -> ObjectId {
+        let id = self.card(owner, zone, name);
+        let ci = self.st.object(id).card_instance;
+        self.st.commanders.push((owner, ci));
+        id
+    }
+
+    /// Attach Aura `aura` to `target` (CR 303.4).
+    pub fn attach(&mut self, aura: ObjectId, target: ObjectId) {
+        self.st.object_mut(aura).attached_to = Some(target);
+    }
+
+    /// Set the combat damage `victim` has taken from commander object `commander`.
+    pub fn commander_damage(&mut self, victim: PlayerId, commander: ObjectId, n: u32) {
+        let ci = self.st.object(commander).card_instance;
+        self.st.player_mut(victim).commander_damage.insert(ci, n);
+    }
+
     pub fn sick(&mut self, id: ObjectId) {
         self.st.object_mut(id).summoning_sick = true;
     }

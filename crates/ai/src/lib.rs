@@ -2,6 +2,11 @@
 //! (CLAUDE.md invariant 6). Randomness comes from the agent's own seeded `GameRng`, never
 //! from the game's RNG and never from `thread_rng` (invariants 1, 7).
 
+extern crate alloc;
+
+mod heuristic;
+pub use heuristic::HeuristicAgent;
+
 use engine_core::decision::{PendingDecision, Primitive, Response};
 use engine_core::rng::GameRng;
 use engine_core::{Agent, PlayerView};

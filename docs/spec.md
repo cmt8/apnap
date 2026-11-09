@@ -492,6 +492,8 @@ UI architecture:
 - Multi-defender attacks, per-defender blocks in APNAP, damage assignment per current CR, first/double strike, trample, deathtouch, lifelink, menace, vigilance, flying/reach; CR 903 (command zone, tax, 21 damage, color identity validation, 40 life); CR 800.4 player leaving (core implemented in M1; M3 adds the control-change and aura cases).
 - ✅ Commander tax test across 3 casts. ✅ 21 commander damage across a death and recast. ✅ Player leaves with their aura on another player's creature and their trigger on the stack. ✅ Heuristic AI never takes lethal commander damage when a legal non-losing block exists (property test over generated boards).
 
+*M3 status: done 2026-11-09 (decisions.md D-029–D-033).*
+
 **M4: Four precons fully playable + egui app (4–6 wks)**
 - Pick four precons. Freeze the decklists in `decks/`. Choose ones whose mechanics are mostly evergreen keywords, ETB/dies triggers, anthems, removal and ramp, and avoid MDFCs, phasing, copy-heavy or face-down themes for v1.
 - ✅ `harness coverage` shows 100% verified for all ~400 cards. ✅ Each card has ≥1 test. ✅ 10,000 AI-vs-AI 4-player games with 0 panics and 0 stuck games (max-turn cap ≤ 1%). ✅ The human can complete a game in the app using only the mouse: every `ChoiceKind` has a widget. ✅ Save/load and replay a game from file in the app.
