@@ -76,11 +76,21 @@ Spec's `Allocate { recipients, .. }` and `Order { n }` duplicate `options.len()`
 `Allocate` per-recipient bounds are indexed like `options`. `Response::Pick` is a set
 (order ignored); ordered answers always use `Order`.
 
-## D-009 The stack zone is a list of object ids in M0
-`zones.stack: Vec<ObjectId>` (top = last). Spec's `StackItem` (targets, modes, X, ability
-source/LKI) arrives with M1, when abilities on the stack need representation.
+## D-009 The stack is `GameState::stack: Vec<StackObject>` (M0, revised M1)
+M0 kept `zones.stack: Vec<ObjectId>`. **M1:** the stack is `GameState::stack` (top = last),
+the single source of truth for stack order. A `StackObject` records controller, kind
+(`Spell` = the card object with the same id, or `Ability { source, source_card, index }`),
+chosen modes, X and targets. Activated abilities on the stack are objects that are *not
+cards* (CR 602.2a), so they live only here, not in `GameState::objects`, which is exactly
+the distinction CR 800.4a needs. The spec's `source_lki`/`trigger_event` arrive with M2.
 
-## D-010 Temporary M0 simplifications (each must be removed by the milestone noted)
+## D-010 Temporary M0 simplifications — **all removed in M1** except where noted
+*M1 status:* mana is now exact for multi-type sources and the player chooses which floating
+mana pays generic (D-021); 2–8 players are supported with CR 800.4a (D-018); instants,
+flash, activated and mana abilities exist. "Blockers block exactly one attacker" remains
+true because no card yet lets a creature block more.
+
+Original M0 list:
 - **Mana:** only lands with exactly one basic land type are sources; the engine pays generic
   from the pool in a fixed order (C, W, U, B, R, G). PayMana only offers sources that keep the
   cost payable (exact for single-type sources). → M1 casting pipeline.
@@ -130,6 +140,53 @@ on the compiler (D-006, D-007, and the golden test would catch it if it did), so
 only protecting against new clippy lints failing `-D warnings`. Accepted cost: an occasional
 small lint-fix commit when a new stable comes out. `rust-version = "1.99"` remains as the MSRV.
 
+## D-018 CR 800.4 (leaving the game) pulled forward from M3 into M1 (user decision 2026-11-08)
+M1's acceptance needs 1,000 four-player games, which eliminate players. Implemented as the
+`GameAction::LeaveGame` action in the order 800.4a gives: owned objects leave the game, then
+abilities the player controls on the stack cease to exist, then anything still controlled
+is exiled. A multiplayer loss triggers it right after the SBA batch; a two-player loss just
+ends the game (104.2a). **800.4j** (missed by the spec): a turn whose active player left
+continues without one; "the active player would receive priority" goes to the next player
+(`GameState::first_priority_player`, and the priority frame redirects any departed player).
+800.4k: turn order skips them. Control-change cases (800.4a "control effects end", 800.4b–c)
+have no M1 cards; M3 adds the spec's aura/control golden tests.
+
+## D-019 No rewinds: the engine only offers completable choices (M1)
+CR 601.2 / 602.2 say an uncompletable cast "returns to the moment before" (CR 734). apnap
+never needs that: `can_begin` offers a cast/activation only if a full legal sequence
+exists; each later step offers only choices that keep completion possible (legal modes,
+X bounded by what's payable, existing targets, mana abilities that keep the cost payable).
+So every shape-valid response completes the cast, and there is no snapshot/rollback
+machinery in the engine. A UI "cancel" is a UI concern (the app can clone the state before a
+cast). Revisit if a future card makes completability expensive to decide.
+
+## D-020 Resolution is a resumable work list (M1; user decision 2026-11-08)
+`ResolveFrame` holds the remaining instructions as `Vec<Work>` (CR 608.2c "in the order
+written"). Each item performs one action or suspends (today: APNAP each-player choices,
+CR 101.4, which collect every player's choice first and then act simultaneously). M2's
+replacement pipeline will add a "pending action" item so a choice *inside* one action (e.g.
+two replacement effects on a draw) suspends and resumes the same way — no callbacks.
+
+## D-021 M1 mana-ability and casting limits
+- Every mana ability costs exactly `{T}` and makes one mana (card-db rejects others), so one
+  untapped source = one mana and payment feasibility is an exact bipartite matching
+  (`mana.rs`). Abilities like Sol Ring ({T}: add {C}{C}) or filters need a generalized check.
+- The engine asks which floating mana pays generic (`Allocate` over mana types) only when
+  that is ambiguous; payment completes automatically as soon as the pool covers the cost
+  (players can still float extra mana with priority).
+- Targets: exactly one object or player per target slot; no "up to N", no divided effects
+  (601.2d), no targeted permanent spells (Auras). X appears only in mana costs.
+- No LKI cache yet: an ability whose source left the battlefield uses the source's id as
+  the damage source (enough for M1, where nothing reads the source's characteristics).
+  M2 adds LKI with triggers (spec §8.2).
+
+## D-022 Test-only scenario builder (`engine-core` feature `test-support`) (M1)
+Atomic rules tests (spec §10.1) build positions directly with `testing::Scenario` (place
+named cards in zones, set life/turn/step) and then play normally through `step`. Building
+writes `GameState` without `actions::execute`: the one sanctioned exception to invariant 2,
+because it constructs a position rather than playing to it. The feature is enabled only by
+harness dev-dependencies; CI still builds engine-core `no_std` with and without it.
+
 ---
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
@@ -148,3 +205,6 @@ small lint-fix commit when a new stable comes out. `rust-version = "1.99"` remai
    sees only `PlayerView` + Determinizer). The app should send `PlayerView` (and, for search
    AIs, a Determinizer-produced sample), not the real state.
 6. Rand / hash stability (D-006, D-007) are additions the spec doesn't mention.
+7. **CR 800.4j** (found in M1): if a player leaves during their own turn, the turn continues
+   without an active player, and priority that would go to them goes to the next player.
+   Spec §8.7 doesn't mention it (D-018). Fixed in the spec 2026-11-08.

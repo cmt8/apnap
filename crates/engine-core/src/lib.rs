@@ -28,6 +28,8 @@ mod sba;
 pub mod stack;
 pub mod state;
 pub mod targeting;
+#[cfg(feature = "test-support")]
+pub mod testing;
 pub mod turn;
 pub mod view;
 pub mod zones;

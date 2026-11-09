@@ -396,7 +396,7 @@ fn compute_characteristics(state: &GameState) -> LayeredView {
 - 21 combat damage from the same commander → loss (104.3j/903.10a), checked as an SBA.\[41\]
 
 ### 8.7 Player leaving the game (CR 800.4; verify exact text)
-When a player loses in multiplayer: all objects they own leave the game, effects giving them control of others' objects end, spells/abilities they control on the stack cease to exist, and turn order skips them. **Correction (verified against the 2026-11-06 text of 800.4a), in this order:** all objects *owned* by that player leave the game, and any effects giving that player control of any objects or players end. Then objects on the stack they controlled that are *not represented by cards* cease to exist. Then any objects *still controlled* by that player are **exiled**. This is not a state-based action; it happens as soon as the player leaves. If they had priority, priority passes to the next player in turn order who is still in the game. **Scheduled for M1** (pulled forward from M3, because M1's 4-player soak eliminates players). Golden tests: "player loses while their Control Magic-style aura is on another player's creature," "player loses with their trigger on the stack," "player loses during their own turn."
+When a player loses in multiplayer: all objects they own leave the game, effects giving them control of others' objects end, spells/abilities they control on the stack cease to exist, and turn order skips them. **Correction (verified against the 2026-11-06 text of 800.4a), in this order:** all objects *owned* by that player leave the game, and any effects giving that player control of any objects or players end. Then objects on the stack they controlled that are *not represented by cards* cease to exist. Then any objects *still controlled* by that player are **exiled**. This is not a state-based action; it happens as soon as the player leaves. If they had priority, priority passes to the next player in turn order who is still in the game. **Scheduled for M1** (pulled forward from M3, because M1's 4-player soak eliminates players). **Also 800.4j (missed by the original spec):** if a player leaves during their own turn, that turn continues to completion without an active player; whenever the active player would receive priority, the next player in turn order does instead. 800.4k: their next turn doesn't begin. Golden tests: "player loses while their Control Magic-style aura is on another player's creature," "player loses with their trigger on the stack," "player loses during their own turn."
 
 ---
 
@@ -479,6 +479,8 @@ UI architecture:
 - CR 117 priority with passes-in-succession, 601.2 casting pipeline (modes, targets, X, cost totals, mana payment), activated and mana abilities, resolution, 4-player turn order.
 - **Added for M1:** CR 800.4a player leaving the game (pulled forward from M3); the card vocabulary in `card-model` with RON test cards loaded and validated by `card-db`; resolution built as resumable effect steps so M2's replacement choices can suspend mid-action; removal of the M0 simplifications (D-010).
 - ✅ Atomic tests for 117.3–117.5, APNAP choice order (101.4), fizzling on illegal targets, 800.4a. ✅ 4 random agents complete 1,000 games without panic.
+
+*M1 status: done 2026-11-08 (decisions.md D-018–D-022).*
 
 **M2: Chokepoint, replacement, triggers, SBAs, layers (4–6 wks; the core)**
 - In order: action chokepoint → replacement/prevention pipeline → triggers + LKI + APNAP stacking → SBAs → layers 1–7 with dependency ordering.

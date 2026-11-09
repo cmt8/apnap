@@ -45,10 +45,11 @@ cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo xtask check-deps                                    # dependency direction + purity
 cargo build -p engine-core -p card-model --target thumbv7em-none-eabihf   # no_std proof
-cargo run -p harness -- run --seed 42 --games 10          # random-agent games
+cargo run -p harness -- run --seed 42 --games 10          # random-agent games (--setup m0 | m1-Np)
+cargo run --release -p harness -- fuzz --setup m1-4p --games 1000 --threads 8   # soak
 cargo run -p harness -- determinism --seed 42 --runs 3    # identical hashes
 cargo run -p harness -- watch --seed 42                   # narrated random-agent game
-cargo run -p harness -- play [--seed N]                   # you (P0) vs a random agent in the terminal
+cargo run -p harness -- play [--setup m1-4p] [--seed N]   # you (P0) vs random agents in the terminal
 cargo run -p harness -- run --seed 42 --save-replay r.json && cargo run -p harness -- replay r.json
 cargo run -p harness -- bless                             # ONLY when a hash change is intended; review why
 ```
@@ -61,46 +62,32 @@ cargo run -p harness -- bless                             # ONLY when a hash cha
 
 ## Layout
 - `crates/engine-core` — pure engine. `engine.rs` (new_game/start/step), `frames/`
-  (continuation stack: setup, turn, priority/cast/resolve, combat), `actions.rs`
-  (chokepoint, move_object), `sba.rs`, `layers.rs` (chars; printed-only until M2),
+  (continuation stack: setup, turn, priority, cast, resolve, combat), `actions.rs`
+  (chokepoint, move_object, LeaveGame = 800.4a), `sba.rs`, `layers.rs` (chars; printed-only until M2),
   `decision.rs`, `events.rs`, `state.rs`, `view.rs`, `rng.rs`, `hash.rs`.
-- `crates/card-model` — card vocabulary types (no_std). `crates/cards` — card data (M0: test pool).
-- `crates/ai` — agents (M0: RandomAgent). `crates/harness` — CLI + determinism/golden/property tests.
-- `crates/card-db`, `crates/app` — stubs until M1/M4. `crates/xtask` — check-deps.
+- `crates/card-model` — card vocabulary types (no_std; externally tagged; ManaCost as text).
+- `crates/cards` — RON card scripts `data/<letter>/<slug>.ron` and `decks/*.ron` (invented
+  "Test …" cards + basic lands). Adding a file? Add it to `CARDS`/`DECKS` (a test checks).
+- `crates/card-db` — parses + validates RON into a `CardCatalog` (strict mode rejects
+  unverified cards; every verified card must name existing tests). Scryfall import: M4.
+- `crates/ai` — agents (RandomAgent). `crates/harness` — CLI, `Setup` (m0 / m1-Np),
+  `script::Script` test driver, determinism/golden/property/rules tests.
+- `crates/app` — stub until M4. `crates/xtask` — check-deps.
+- Engine extras: `stack.rs` (StackObject), `targeting.rs` (choose + 608.2b legality in one
+  place), `frames/cast.rs` (601.2/602.2), `frames/resolve.rs` (work list),
+  `testing.rs` (feature `test-support`: scenario builder, D-022).
 
-## Current milestone: M1 — IN PROGRESS (started 2026-11-08). M0 done 2026-11-08.
-M1 scope (spec §13 as amended): CR 117/601.2/602/605/608 casting + abilities, 4-player turn
-order, CR 800.4a (pulled forward), RON test cards via card-db, resumable resolution steps,
-remove D-010 simplifications. Acceptance: atomic tests 117.3–117.5, 101.4, 608.2b fizzle,
-800.4a; 4 random agents x 1,000 games, 0 panics.
-
-### M1 WIP handoff (branch `m1-wip`, 2026-11-08) — DOES NOT COMPILE YET; `main` is green
-Done on the branch: rules-notes for 101.4/117/601/602/605/608/800.4 (also on main);
-card-model vocabulary (Keyword, AbilityDef, Body/Mode, TargetFilter, Cost, Effect, ManaType,
-`{X}`, ManaCost as text, CardScript); card-db RON loader + validation (+tests); RON card files
-and decks in crates/cards (M0 vanilla pool + M1 test cards); engine: mana.rs (bipartite
-feasibility, generic-allocation choice), stack.rs, targeting.rs, actions.rs (stack-aware
-moves, PutAbilityOnStack, SetStackChoices, RemoveAbility, GainLife/LoseLife, LeaveGame =
-CR 800.4a), sba.rs (multiplayer losers leave), frames/cast.rs (601.2/602.2 pipeline),
-frames/resolve.rs (work list, fizzle, counter, APNAP each-player choices),
-frames/priority.rs (abilities, flash, floating mana), first_priority_player (800.4j).
-Next steps, in order:
-1. Re-apply the new `Event` variants (AbilityActivated, ModesChosen, XChosen, TargetsChosen,
-   Fizzled, Countered, AbilityRemoved, Sacrificed, ObjectLeftGame, PlayerLeftGame; events.rs
-   needs `use crate::stack::Target; use alloc::vec::Vec;`) and `OptionDesc` variants
-   (ActivateAbility{source,index}, Mode{index}, Target{target}, Mana{mana}; decision.rs needs
-   `use crate::stack::Target;`) — the scripted edit didn't apply because rustfmt had
-   reflowed those enums.
-2. Fix the remaining compile errors: engine.rs (`stack: Vec::new()`, drop the 2-player limit),
-   view.rs (stack view from `st.stack`), `remove(_fizzled)` param in resolve.rs.
-3. harness: load cards via card-db (`cards::CARDS`/`DECKS`), m0_game = m0_vanilla deck,
-   m1_game(seed, players) = m1_red_green; text.rs option_line for new variants; scenario
-   builder + driver for atomic tests; `fuzz --games --players --threads`.
-4. Tests: rules_m1.rs (the test names cited in the card files + rules-notes), every verified
-   card's tests exist, 4-player determinism/save-load/clone, 1,000 4p random games.
-5. Re-bless golden hashes (catalog/state shape changed; explain in the commit). Log D-018
-   (800.4 pulled into M1), D-019 (no rewinds: only completable choices), D-020 (resolution
-   work list), D-021 (M1 mana abilities cost exactly {T}) in docs/decisions.md.
+## Current milestone: M1 — DONE (2026-11-08). Next: M2 (do not start without the user's OK).
+M1 delivered (spec §13 as amended): CR 117 priority (instants, flash, floating mana), 601.2 /
+602.2 casting + activation (modes, X, targets, exact mana feasibility, generic-payment
+choice), 605 mana abilities, 608 resolution as a work list (fizzle, counter), 101.4 APNAP
+each-player choices, 2–8 players with CR 800.4a/800.4j/800.4k, RON cards loaded/validated by
+card-db, scenario builder (`engine-core` feature `test-support`) + `harness::script::Script`.
+Acceptance: `crates/harness/tests/rules_m1.rs` (atomic, CR-cited), `m1_acceptance.rs`
+(card→test coverage, 4-player games), CI soak `harness fuzz --setup m1-4p --games 1000`.
+Known M1 limits: D-021. Decisions this milestone: D-018–D-022.
+M2 starts with: rules-notes for 603, 613, 614–616 (verbatim), then chokepoint →
+replacement pipeline (a "pending action" Work item, D-020) → triggers + LKI → full SBAs → layers.
 
 ### M0 summary
 M0 delivered: workspace, CI, ids/zones/GameState, move_object, seeded RNG, step() with

@@ -29,6 +29,21 @@ pub const M0_LABELS: &[&str] = &[
     "Discard/PickN",
 ];
 
+/// M1 adds these (on top of the M0 labels). `Sacrifice/PickN` is a suspension in the
+/// middle of resolution (APNAP each-player choice).
+pub const M1_LABELS: &[&str] = &[
+    "Priority/PickN",
+    "PayMana/PickN",
+    "PayMana/Allocate",
+    "ChooseModes/PickN",
+    "ChooseX/Number",
+    "ChooseTargets { slot: 0 }/PickN",
+    "Sacrifice/PickN",
+    "Discard/PickN",
+    "DeclareAttackers/PickN",
+    "DeclareBlockers/PickN",
+];
+
 /// Indices worth suspending at: the first occurrence of each label, a mid-payment point
 /// (PayMana right after another PayMana: mana already in pool), and every `stride`-th.
 pub fn interesting_points(rec: &GameRecord, stride: usize) -> Vec<usize> {

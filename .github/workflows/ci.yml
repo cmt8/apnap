@@ -27,9 +27,15 @@ jobs:
       - name: crate dependency direction + pure-crate allowlist
         run: cargo xtask check-deps
       - name: engine-core / card-model build without std
-        run: cargo build -p engine-core -p card-model --target thumbv7em-none-eabihf --locked
+        run: |
+          cargo build -p engine-core -p card-model --target thumbv7em-none-eabihf --locked
+          cargo build -p engine-core --features test-support --target thumbv7em-none-eabihf --locked
       - name: same seed, 3 runs, identical hashes
-        run: cargo run -p harness --locked -- determinism --seed 42 --runs 3
+        run: |
+          cargo run -p harness --locked -- determinism --setup m0 --seed 42 --runs 3
+          cargo run -p harness --locked -- determinism --setup m1-4p --seed 42 --runs 3
+      - name: M1 soak — 1,000 four-player random-agent games, 0 panics / stuck games
+        run: cargo run --release -p harness --locked -- fuzz --setup m1-4p --games 1000 --threads 4
 
   cross-platform:
     name: tests + golden hashes (${{ matrix.os }})

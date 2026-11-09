@@ -1,23 +1,43 @@
-//! M0 acceptance criteria (spec §13):
-//!  1. two players with vanilla creatures and basic lands play a full game via random agents;
+//! Determinism acceptance criteria (spec §13 M0, re-checked for every M1 setup):
+//!  1. random agents play full games (M0: two players, vanilla; M1: 2 and 4 players);
 //!  2. same seed + responses → identical event hash across 3 runs and across a mid-game
 //!     save/load;
 //!  3. `clone()` of a mid-game state, then the same responses → identical events.
+//!
+//! Save/load and clone are exercised at the first occurrence of every decision kind
+//! (including mid-cast payment and mid-resolution APNAP choices) plus regular samples.
 
 mod common;
 
-use common::{M0_LABELS, interesting_points, label};
+use common::{M0_LABELS, M1_LABELS, interesting_points, label};
 use engine_core::state::GameState;
-use harness::{PlayOptions, feed, load_json, m0_game, play_random, save_json};
+use harness::{GameRecord, PlayOptions, Setup, feed, load_json, play_random, save_json};
 use std::collections::BTreeSet;
 
-// Seed 4 exercises every M0 decision kind (incl. cleanup discard) in one game.
-const SEEDS: &[u64] = &[1, 2, 3, 4, 42, 1337];
+const M1_2P: Setup = Setup::M1 { players: 2 };
+const M1_4P: Setup = Setup::M1 { players: 4 };
 
-fn record(seed: u64) -> harness::GameRecord {
+/// (setup, seed). M0 seed 4 exercises every M0 decision kind (incl. cleanup discard).
+const CASES: &[(Setup, u64)] = &[
+    (Setup::M0Vanilla, 1),
+    (Setup::M0Vanilla, 2),
+    (Setup::M0Vanilla, 4),
+    (Setup::M0Vanilla, 42),
+    (M1_2P, 1),
+    (M1_2P, 2),
+    (M1_2P, 3),
+    (M1_4P, 1),
+    (M1_4P, 2),
+];
+
+/// Number of sample points per game (besides first-of-each-kind points).
+const SAMPLES: usize = 25;
+
+fn record(setup: Setup, seed: u64) -> GameRecord {
     play_random(
         seed,
         PlayOptions {
+            setup,
             check_invariants: true,
             ..Default::default()
         },
@@ -25,9 +45,26 @@ fn record(seed: u64) -> harness::GameRecord {
     .unwrap()
 }
 
+fn points(rec: &GameRecord) -> Vec<usize> {
+    interesting_points(rec, (rec.decisions.len() / SAMPLES).max(1))
+}
+
+/// The labels a set of cases must cover, keyed by whether they're M0 or M1 cases.
+fn assert_covered(covered: &BTreeSet<(bool, String)>, what: &str) {
+    for (m1, labels) in [(false, M0_LABELS), (true, M1_LABELS)] {
+        for l in labels {
+            assert!(
+                covered.contains(&(m1, l.to_string())),
+                "{what} never suspended at {l} in {} cases; add a seed",
+                if m1 { "M1" } else { "M0" }
+            );
+        }
+    }
+}
+
 /// Rebuild the state as it was just before response `k` was submitted.
-fn state_at(rec: &harness::GameRecord, k: usize) -> GameState {
-    let mut st = m0_game(rec.seed);
+fn state_at(rec: &GameRecord, k: usize) -> GameState {
+    let mut st = rec.setup.game(rec.seed);
     let events = feed(&mut st, &rec.responses[..k]).unwrap();
     assert_eq!(
         events,
@@ -37,7 +74,7 @@ fn state_at(rec: &harness::GameRecord, k: usize) -> GameState {
     st
 }
 
-fn prefix_len(rec: &harness::GameRecord, k: usize) -> usize {
+fn prefix_len(rec: &GameRecord, k: usize) -> usize {
     rec.events_before
         .get(k)
         .copied()
@@ -46,8 +83,8 @@ fn prefix_len(rec: &harness::GameRecord, k: usize) -> usize {
 
 #[test]
 fn criterion_1_full_game_completes() {
-    for &seed in SEEDS {
-        let rec = record(seed);
+    for &(setup, seed) in CASES {
+        let rec = record(setup, seed);
         let result = rec.result.as_ref().expect("game finished");
         assert!(result.winner.is_some() || rec.turns > 0);
         assert!(rec.turns >= 2, "seed {seed}: suspiciously short game");
@@ -56,8 +93,8 @@ fn criterion_1_full_game_completes() {
 
 #[test]
 fn criterion_2a_three_runs_identical() {
-    for &seed in SEEDS {
-        let runs: Vec<_> = (0..3).map(|_| record(seed)).collect();
+    for &(setup, seed) in CASES {
+        let runs: Vec<_> = (0..3).map(|_| record(setup, seed)).collect();
         for r in &runs[1..] {
             assert_eq!(
                 r.log_hash, runs[0].log_hash,
@@ -75,8 +112,8 @@ fn criterion_2a_three_runs_identical() {
 
 #[test]
 fn criterion_2b_replay_from_responses_is_identical() {
-    for &seed in SEEDS {
-        let rec = record(seed);
+    for &(setup, seed) in CASES {
+        let rec = record(setup, seed);
         let (st, events) = harness::run_replay(&rec.replay()).unwrap();
         assert_eq!(events, rec.events);
         assert_eq!(st.log_hash, rec.log_hash);
@@ -88,12 +125,13 @@ fn criterion_2b_replay_from_responses_is_identical() {
 #[test]
 fn criterion_2c_save_load_mid_game_replays_identically() {
     let mut covered = BTreeSet::new();
-    for &seed in SEEDS {
-        let rec = record(seed);
-        for k in interesting_points(&rec, 37) {
+    for &(setup, seed) in CASES {
+        let rec = record(setup, seed);
+        let m1 = setup != Setup::M0Vanilla;
+        for k in points(&rec) {
             let st = state_at(&rec, k);
             if k < rec.decisions.len() {
-                covered.insert(label(&rec, k));
+                covered.insert((m1, label(&rec, k)));
                 assert_eq!(st.pending.as_ref(), Some(&rec.decisions[k]));
             }
             let json = save_json(&st);
@@ -121,24 +159,20 @@ fn criterion_2c_save_load_mid_game_replays_identically() {
             assert_eq!(loaded.state_hash(), rec.state_hash);
         }
     }
-    for l in M0_LABELS {
-        assert!(
-            covered.contains(*l),
-            "save/load never suspended at {l}; add a seed"
-        );
-    }
+    assert_covered(&covered, "save/load");
 }
 
 #[test]
 fn criterion_3_clone_mid_game_replays_identically() {
     let mut covered = BTreeSet::new();
-    for &seed in SEEDS {
-        let rec = record(seed);
-        for k in interesting_points(&rec, 41) {
+    for &(setup, seed) in CASES {
+        let rec = record(setup, seed);
+        let m1 = setup != Setup::M0Vanilla;
+        for k in points(&rec) {
             let mut original = state_at(&rec, k);
             let mut cloned = original.clone();
             if k < rec.decisions.len() {
-                covered.insert(label(&rec, k));
+                covered.insert((m1, label(&rec, k)));
             }
             let a = feed(&mut cloned, &rec.responses[k..]).unwrap();
             let b = feed(&mut original, &rec.responses[k..]).unwrap();
@@ -148,52 +182,49 @@ fn criterion_3_clone_mid_game_replays_identically() {
             assert_eq!(cloned.state_hash(), original.state_hash());
         }
     }
-    for l in M0_LABELS {
-        assert!(
-            covered.contains(*l),
-            "clone test never suspended at {l}; add a seed"
-        );
-    }
+    assert_covered(&covered, "clone");
 }
 
 #[test]
 fn illegal_responses_leave_state_unchanged() {
     use engine_core::{IllegalResponse, Response};
-    let rec = record(42);
-    for k in interesting_points(&rec, 53) {
-        if k >= rec.decisions.len() {
-            let mut st = state_at(&rec, k);
-            assert_eq!(
-                engine_core::step(&mut st, Response::Pick(vec![0])),
-                Err(IllegalResponse::NoPendingDecision)
-            );
-            continue;
-        }
-        let mut st = state_at(&rec, k);
-        let before = st.state_hash();
-        let n = rec.decisions[k].options.len();
-        let bad = [
-            Response::Number(u32::MAX),
-            Response::Pick(vec![n]),
-            Response::Pick(vec![0; n + 2]),
-            Response::Order(vec![0; n + 1]),
-            Response::Allocate(vec![u32::MAX; n.max(1)]),
-        ];
-        for r in bad {
-            if rec.decisions[k].validate(&r).is_ok() {
+    for &(setup, seed) in &[(Setup::M0Vanilla, 42), (M1_4P, 1)] {
+        let rec = record(setup, seed);
+        for k in points(&rec) {
+            if k >= rec.decisions.len() {
+                let mut st = state_at(&rec, k);
+                assert_eq!(
+                    engine_core::step(&mut st, Response::Pick(vec![0])),
+                    Err(IllegalResponse::NoPendingDecision)
+                );
                 continue;
             }
-            assert!(
-                engine_core::step(&mut st, r.clone()).is_err(),
-                "k={k} accepted {r:?}"
-            );
-            assert_eq!(
-                st.state_hash(),
-                before,
-                "k={k}: rejected {r:?} mutated state"
-            );
+            let mut st = state_at(&rec, k);
+            let before = st.state_hash();
+            let n = rec.decisions[k].options.len();
+            let bad = [
+                Response::Number(u32::MAX),
+                Response::Pick(vec![n]),
+                Response::Pick(vec![0; n + 2]),
+                Response::Order(vec![0; n + 1]),
+                Response::Allocate(vec![u32::MAX; n.max(1)]),
+            ];
+            for r in bad {
+                if rec.decisions[k].validate(&r).is_ok() {
+                    continue;
+                }
+                assert!(
+                    engine_core::step(&mut st, r.clone()).is_err(),
+                    "k={k} accepted {r:?}"
+                );
+                assert_eq!(
+                    st.state_hash(),
+                    before,
+                    "k={k}: rejected {r:?} mutated state"
+                );
+            }
+            let rest = feed(&mut st, &rec.responses[k..]).unwrap();
+            assert_eq!(rest, rec.events[prefix_len(&rec, k)..]);
         }
-        let rest = feed(&mut st, &rec.responses[k..]).unwrap();
-        assert_eq!(rest, rec.events[prefix_len(&rec, k)..]);
     }
 }
