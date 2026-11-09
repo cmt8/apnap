@@ -18,7 +18,9 @@ One file per rules area, written **before** that area is implemented (CLAUDE.md 
 | 613 Layers (+604, 611) | [613-layers.md](613-layers.md) | M2 |
 | 614–616 Replacement/prevention | [614-616-replacement-prevention.md](614-616-replacement-prevention.md) | M2 |
 | 800.4 Leaving the game | [800.4-leaving-the-game.md](800.4-leaving-the-game.md) | M1 (pulled forward) |
-| 903 Commander (incl. 903.9) | — | M3 |
+| 903 Commander (incl. 903.9) | [903-commander.md](903-commander.md) | M3 |
+| 506–511 Combat + combat keywords | [506-511-combat-keywords.md](506-511-combat-keywords.md) | M3 |
+| 303.4 Auras, layer 2 control | [303-auras-613-control.md](303-auras-613-control.md) | M3 |
 
 Excerpts are committed verbatim by explicit decision (D-012). If the repo is ever
 published, revisit that decision first (Fan Content Policy, spec §12).
