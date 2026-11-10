@@ -39,6 +39,9 @@ const CASES: &[(Setup, u64)] = &[
     // Commander (M3): seed 0 covers the 903.9a return and trample's damage split.
     (Setup::Commander { players: 2 }, 0),
     (Setup::Commander { players: 4 }, 1),
+    // Real cards (M4; needs the Scryfall cache — `harness fetch-cards`).
+    (Setup::Real { players: 2 }, 1),
+    (Setup::Real { players: 4 }, 2),
 ];
 
 /// Number of sample points per game (besides first-of-each-kind points).
@@ -67,6 +70,8 @@ fn tier(setup: Setup) -> u8 {
         Setup::M1 { .. } => 1,
         Setup::M2 { .. } => 2,
         Setup::Commander { .. } => 3,
+        // No label list of its own: the real-card decks reuse M1–M3 decisions.
+        Setup::Real { .. } => 4,
     }
 }
 

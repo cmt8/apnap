@@ -1,0 +1,13 @@
+// A 60-card deck built only from verified real cards (decisions.md D-038): white Angels
+// with black card draw. Needs the Scryfall cache (`harness fetch-cards`).
+DeckFile(
+    name: "Angels (real cards)",
+    cards: [
+        (13, "Plains"), (9, "Swamp"), (2, "Radiant Fountain"),
+        (2, "Marble Diamond"), (2, "Charcoal Diamond"),
+        (4, "Segovian Angel"), (4, "Youthful Valkyrie"), (4, "Inspiring Overseer"),
+        (4, "Dazzling Angel"), (4, "Thraben Watcher"), (3, "Always Watching"),
+        (3, "Night's Whisper"), (2, "Sign in Blood"), (2, "Phyrexian Arena"),
+        (2, "Fleshbag Marauder"),
+    ],
+)

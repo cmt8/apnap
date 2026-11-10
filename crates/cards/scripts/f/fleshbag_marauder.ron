@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "4b1bf05e-753e-4350-a913-894cf3cecc0c",
+    name: "Fleshbag Marauder",
+    verified: true,
+    tests: ["fleshbag_marauder_makes_each_player_sacrifice"],
+    abilities: [
+        Triggered(
+            when: Enters(This),
+            body: Effect((effect: EachPlayer(SacrificeCreature(1)))),
+        ),
+    ],
+)

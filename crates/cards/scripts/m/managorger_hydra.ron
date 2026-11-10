@@ -1,0 +1,13 @@
+RealCard(
+    oracle_id: "b3f2265b-dd65-4b74-8b74-35ee0b147617",
+    name: "Managorger Hydra",
+    verified: true,
+    tests: ["managorger_hydra_grows_with_every_spell"],
+    keywords: [Trample],
+    abilities: [
+        Triggered(
+            when: Cast(by: Any),
+            body: Effect((effect: PutCounters(what: This, kind: PlusOne, count: Fixed(1)))),
+        ),
+    ],
+)

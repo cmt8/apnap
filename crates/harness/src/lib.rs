@@ -29,7 +29,13 @@ pub enum Setup {
     /// M3: a Commander game (CR 903) with `players` players, using the four commander decks
     /// in seat order (`decks/commander_*.ron`).
     Commander { players: u8 },
+    /// M4: 60-card decks built only from verified real cards (`decks/real_*.ron`, D-038),
+    /// alternating by seat. Needs the Scryfall cache.
+    Real { players: u8 },
 }
+
+/// The real-card decks, in seat order.
+pub const REAL_DECKS: &[&str] = &["real_stompy.ron", "real_angels.ron"];
 
 /// The Commander decks, in seat order.
 pub const COMMANDER_DECKS: &[&str] = &[
@@ -43,7 +49,10 @@ impl Setup {
     pub fn players(self) -> u8 {
         match self {
             Setup::M0Vanilla => 2,
-            Setup::M1 { players } | Setup::M2 { players } | Setup::Commander { players } => players,
+            Setup::M1 { players }
+            | Setup::M2 { players }
+            | Setup::Commander { players }
+            | Setup::Real { players } => players,
         }
     }
 
@@ -54,6 +63,7 @@ impl Setup {
             Setup::M1 { players } => format!("m1-{players}p"),
             Setup::M2 { players } => format!("m2-{players}p"),
             Setup::Commander { players } => format!("cmd-{players}p"),
+            Setup::Real { players } => format!("real-{players}p"),
         }
     }
 
@@ -64,6 +74,10 @@ impl Setup {
         if let Some(rest) = label.strip_prefix("cmd-") {
             let n = rest.strip_suffix('p')?.parse().ok()?;
             return Some(Setup::Commander { players: n });
+        }
+        if let Some(rest) = label.strip_prefix("real-") {
+            let n = rest.strip_suffix('p')?.parse().ok()?;
+            return Some(Setup::Real { players: n });
         }
         if let Some(rest) = label.strip_prefix("m2-") {
             let n = rest.strip_suffix('p')?.parse().ok()?;
@@ -89,13 +103,31 @@ impl Setup {
             )
             .expect("valid commander setup");
         }
+        if let Setup::Real { players } = self {
+            let catalog = full_catalog();
+            let config = if players == 2 {
+                GameConfig::constructed_1v1()
+            } else {
+                GameConfig::free_for_all(players)
+            };
+            let decks: Vec<Vec<CardDefId>> = (0..players as usize)
+                .map(|i| {
+                    let file = REAL_DECKS[i % REAL_DECKS.len()];
+                    let text = cards::deck(file).unwrap_or_else(|| panic!("no deck {file}"));
+                    let path = format!("crates/cards/decks/{file}");
+                    card_db::load_deck(card_db::Source { path: &path, text }, &catalog)
+                        .unwrap_or_else(|e| panic!("{e}"))
+                })
+                .collect();
+            return engine_core::new_game(config, catalog, &decks, seed).expect("valid setup");
+        }
         let (config, deck_file) = match self {
             Setup::M0Vanilla => (GameConfig::constructed_1v1(), "m0_vanilla.ron"),
             Setup::M1 { players: 2 } => (GameConfig::constructed_1v1(), "m1_red_green.ron"),
             Setup::M1 { players } => (GameConfig::free_for_all(players), "m1_red_green.ron"),
             Setup::M2 { players: 2 } => (GameConfig::constructed_1v1(), "m2_mixed.ron"),
             Setup::M2 { players } => (GameConfig::free_for_all(players), "m2_mixed.ron"),
-            Setup::Commander { .. } => unreachable!("handled above"),
+            Setup::Commander { .. } | Setup::Real { .. } => unreachable!("handled above"),
         };
         let d = deck(deck_file);
         let decks = vec![d; config.num_players as usize];
@@ -151,6 +183,22 @@ pub fn precon_card_names() -> Vec<String> {
         })
         .filter(|n| have.find(n).is_none())
         .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Every card name whose printed data the app and tools want cached: the precon pool plus
+/// the basic lands (self-contained cards, but they have real printings to show).
+pub fn scryfall_card_names() -> Vec<String> {
+    let have = catalog();
+    let mut names = precon_card_names();
+    names.extend(
+        have.defs
+            .iter()
+            .filter(|d| d.supertypes.contains(&card_model::Supertype::Basic))
+            .map(|d| d.name.clone()),
+    );
     names.sort();
     names.dedup();
     names
@@ -226,6 +274,14 @@ pub fn deck_file(file: &str) -> card_db::Deck {
     let path = format!("crates/cards/decks/{file}");
     card_db::load_deck_file(card_db::Source { path: &path, text }, &catalog())
         .unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// Is the printed data the real cards need in the local cache? `Err` carries the hint
+/// (which command downloads it).
+pub fn real_cards_ready() -> Result<(), String> {
+    card_db::scryfall::cached(&precon_card_names())
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// The self-contained cards plus every verified real-card script, compiled against the
@@ -383,8 +439,9 @@ impl Agents {
         }
     }
 
-    /// The agent for `seat` (each seeded independently of the game RNG).
-    pub fn make(self, seed: u64, seat: u8) -> Box<dyn Agent> {
+    /// The agent for `seat` (each seeded independently of the game RNG). `catalog` is the
+    /// game's card catalog (public card text, which the heuristic agent reads).
+    pub fn make(self, seed: u64, seat: u8, catalog: &Arc<CardCatalog>) -> Box<dyn Agent> {
         let s = agent_seed(seed, seat);
         let heuristic = match self {
             Agents::Random => false,
@@ -392,7 +449,7 @@ impl Agents {
             Agents::HeuristicVsRandom => seat == 0,
         };
         if heuristic {
-            Box::new(ai::HeuristicAgent::new(s, catalog()))
+            Box::new(ai::HeuristicAgent::new(s, catalog.clone()))
         } else {
             Box::new(RandomAgent::new(s))
         }
@@ -403,7 +460,7 @@ impl Agents {
 pub fn play_random(seed: u64, opts: PlayOptions) -> Result<GameRecord, HarnessError> {
     let mut st = opts.setup.game(seed);
     let mut agents: Vec<Box<dyn Agent>> = (0..st.num_players() as u8)
-        .map(|s| opts.agents.make(seed, s))
+        .map(|s| opts.agents.make(seed, s, &st.catalog))
         .collect();
     let max = opts.max_decisions.unwrap_or(MAX_DECISIONS);
     let mut rec = GameRecord {

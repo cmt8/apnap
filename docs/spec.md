@@ -445,6 +445,7 @@ UI architecture:
 - Layout: four player areas, stack panel, event log (rendered from `Event`s), command zone with tax shown, commander-damage matrix (4×4), phase bar with configurable stops.
 - Every `ChoiceKind` gets a widget. Targeting is click-to-select among highlighted `options` indices, which the engine already validates.
 - Images: lazy-download Scryfall `normal` images into `~/.cache/<app>/cards/` on first view. Text-only fallback rendering for offline use.
+  *(As built, D-037: `~/.cache/apnap/scryfall/images/normal/<printing id>.jpg`, mana symbol SVGs alongside; downloaded by worker threads; the fallback is a card-shaped "proxy" drawn from the `CardDef`; AI actions are paced so opponents' turns are visible.)*
 
 ---
 

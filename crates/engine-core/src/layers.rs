@@ -195,6 +195,7 @@ pub fn matches_parts(
     (sel.types.is_empty() || sel.types.iter().any(|t| c.is(*t)))
         && !sel.not_types.iter().any(|t| c.is(*t))
         && sel.supertypes.iter().all(|s| c.supertypes.contains(s))
+        && (sel.subtypes.is_empty() || sel.subtypes.iter().any(|s| c.subtypes.contains(s)))
         && match sel.controller {
             Who::Any => true,
             Who::You => object_controller == controller,

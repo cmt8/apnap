@@ -1,0 +1,13 @@
+RealCard(
+    oracle_id: "6db442e5-fbcc-4456-a4c5-bea1aee3fc8e",
+    name: "Radiant Fountain",
+    verified: true,
+    tests: ["radiant_fountain_gains_two_and_taps_for_colorless"],
+    abilities: [
+        Triggered(
+            when: Enters(This),
+            body: Effect((effect: GainLife(who: You, amount: Fixed(2)))),
+        ),
+        Mana(cost: (tap: true), produce: One(Colorless)),
+    ],
+)

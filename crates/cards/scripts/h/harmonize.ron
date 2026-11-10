@@ -1,0 +1,9 @@
+RealCard(
+    oracle_id: "7eff84f1-f772-497a-b350-bbc93d0230f7",
+    name: "Harmonize",
+    verified: true,
+    tests: ["harmonize_draws_three"],
+    abilities: [
+        Spell(Effect((effect: Draw(who: You, amount: Fixed(3))))),
+    ],
+)

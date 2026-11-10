@@ -106,7 +106,15 @@ fn answer_by_clicking(h: &mut Harness<'_, App>, d: &PendingDecision, r: &Respons
 
 /// Play the current game to the end through the UI. Returns the decision kinds answered.
 fn play_out(h: &mut Harness<'_, App>, seed: u64, max_decisions: usize) -> BTreeSet<String> {
-    let mut brain = ai::HeuristicAgent::new(seed, harness::catalog());
+    let catalog = h
+        .state()
+        .session
+        .as_ref()
+        .expect("in a game")
+        .st
+        .catalog
+        .clone();
+    let mut brain = ai::HeuristicAgent::new(seed, catalog);
     let mut kinds = BTreeSet::new();
     for _ in 0..max_decisions {
         h.run_ok();
@@ -156,6 +164,9 @@ fn a_game_can_be_played_to_the_end_with_the_mouse_alone() {
         ("Commander — 4 players (test decks)", 5, true),
         ("60-card duel (M2 test deck)", 13, false),
         ("60-card duel (M2 test deck)", 45, true),
+        // Real cards (needs the Scryfall cache: `cargo run -p harness -- fetch-cards`).
+        ("60-card duel — real cards (Stompy vs Angels)", 2, true),
+        ("60-card free-for-all — 4 players, real cards", 3, false),
     ] {
         let mut h = harness(temp_dir("play"));
         start(&mut h, setup, seed);

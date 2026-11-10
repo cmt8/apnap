@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "84de4fec-2f38-4293-93d3-b3882c5aac14",
+    name: "Ambition's Cost",
+    verified: true,
+    tests: ["ambitions_cost_draws_three_and_costs_three_life"],
+    abilities: [
+        Spell(Effect((effect: Seq([
+            Draw(who: You, amount: Fixed(3)),
+            LoseLife(who: You, amount: Fixed(3)),
+        ])))),
+    ],
+)

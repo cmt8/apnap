@@ -369,6 +369,62 @@ M4 order (user decision): groundwork → egui app → cards deck by deck.
 
 ---
 
+## D-037 Card images, mana symbols and pacing in the app (user request 2026-11-09)
+The user found the text-only board "very hard to read" and asked for real card art, mana
+symbols and the normal Scryfall card image.
+- **Where the files come from.** The printed-data cache (`cards.json`, D-035) now also
+  stores each printing's Scryfall id, `normal` and `art_crop` image addresses, artist, set
+  and collector number; entries cached before that are fetched again automatically. Images
+  are downloaded on demand from `cards.scryfall.io` into
+  `<cache>/scryfall/images/normal/<printing id>.jpg`, symbols from `svgs.scryfall.io` into
+  `<cache>/scryfall/symbols/<CODE>.svg` (`card_db::images`). Nothing is committed
+  (invariant 13); each file is downloaded once; only those two hosts are ever contacted for
+  files (the addresses come out of the cache file, so they are checked, not trusted).
+- **Who downloads.** The app (`app::art`), on three worker threads, never the UI thread and
+  never the engine. It also fetches the printed data itself if the cache is missing, so
+  `harness fetch-cards` is no longer a prerequisite for *running the app* (it still is for
+  tests). The menu has a checkbox to turn images (and with them all network use) off.
+  Tests construct the app with `Art::disabled()`: no threads, no cache, no network.
+- **What is drawn.** A real card is its whole Scryfall image, scaled, never cropped or
+  recoloured, turned a quarter when tapped (Scryfall's image guidelines); the enlarged view
+  in the side panel names the artist. What the printed card can't show — current
+  power/toughness, damage, counters, attacking/blocking, summoning sickness, commander,
+  attachment, piles of identical lands — is drawn as small corner badges that stay clear of
+  the artist/copyright line. A card without an image (the invented test cards, tokens,
+  anything still loading, offline) is drawn from its `CardDef` as a plain "proxy" in the
+  same shape, with rules text from `card_model::describe` — so the fallback is still what
+  the engine does. Board-size textures are 320 px wide (decoded and scaled on the worker);
+  full-size textures are kept only for the last dozen cards looked at.
+- **New dependencies (app only):** `image` (JPEG/PNG decode) and `resvg` (SVG symbols).
+- **Pacing.** The session used to run every AI decision in one frame, so a human with
+  nothing to do saw their own turns back to back with no sign of the opponents' turns in
+  between (reported as "it let me play three lands on turn 1" — the engine did enforce one
+  land per turn, CR 305.2; the turns were just invisible). `Session::pump_visible` now stops
+  after each AI decision that adds to the log, and the UI waits (Instant / Fast / Normal /
+  Slow, default Normal = 450 ms) before continuing. This is presentation only: the same
+  responses are applied in the same order (`tests/pacing.rs` checks paced and unpaced games
+  are identical). The wall clock lives in `ui.rs`, not in the session or the engine.
+
+## D-038 Subtype selectors, and interim decks of verified real cards (M4)
+- `Selector.subtypes` ("Dinosaurs", "Dragon creatures", "another Angel you control"): the
+  object must have at least one of the listed subtypes, read from its current
+  characteristics (so type-changing effects in layer 4 are seen by layer 7 effects and by
+  triggers through last known information). Non-land subtypes only for now.
+- 24 more precon cards are scripted and verified — the ones today's vocabulary expresses
+  **exactly** (invariant 8). Cards that would need an approximation were left out, e.g.
+  Secret Rendezvous ("you and target opponent each draw": CR 121.2 orders those draws by
+  turn order, which `Seq` can't say) and Vengeful Dead ("this creature or another Zombie").
+- `Setup::Real { players }` (`real-Np`): two 60-card decks built only from verified real
+  cards (`decks/real_stompy.ron`, `decks/real_angels.ron`), alternating by seat. They exist
+  so the app can be played with real cards and art before a precon reaches 100% coverage;
+  they are not a format and will be dropped from the menu's top spot when the precons are
+  playable. They need the Scryfall cache, so they are not in the golden-hash file (printed
+  data can change); determinism, save/load/clone, property tests and CI soaks cover them.
+- `Agents::make` takes the game's catalog (the heuristic agent reads card text from it; the
+  real-card catalog is larger than the self-contained one).
+- Golden re-bless: only `state_hash` changed (the catalog is part of the state: `Selector`
+  gained a field and `Test Wyrmling` was added); every `log_hash` is unchanged.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

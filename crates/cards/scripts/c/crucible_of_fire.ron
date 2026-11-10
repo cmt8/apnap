@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "0c572396-4e53-4c86-9b04-f41341dcea05",
+    name: "Crucible of Fire",
+    verified: true,
+    tests: ["crucible_of_fire_pumps_your_dragon_creatures"],
+    abilities: [
+        Static(
+            affected: All((types: [Creature], subtypes: ["Dragon"], controller: You)),
+            effects: [ModifyPT(3, 3)],
+        ),
+    ],
+)

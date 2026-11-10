@@ -386,6 +386,9 @@ pub struct Selector {
     /// Must have none of these card types ("noncreature").
     pub not_types: Vec<CardType>,
     pub supertypes: Vec<Supertype>,
+    /// Must have at least one of these subtypes (empty = any): "Dinosaurs", "Dragon
+    /// creatures". Subtypes are compared as the object currently has them (CR 205.3).
+    pub subtypes: Vec<String>,
     pub controller: Who,
     /// "another" / "other": excludes the ability's own source.
     pub other: bool,

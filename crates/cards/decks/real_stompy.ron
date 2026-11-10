@@ -1,0 +1,12 @@
+// A 60-card deck built only from verified real cards (decisions.md D-038): green ramp into
+// big Dinosaurs, with a little red. Needs the Scryfall cache (`harness fetch-cards`).
+DeckFile(
+    name: "Stompy (real cards)",
+    cards: [
+        (17, "Forest"), (5, "Mountain"), (2, "Fire Diamond"),
+        (4, "Llanowar Elves"), (4, "Elvish Mystic"), (3, "Fyndhorn Elves"),
+        (4, "Managorger Hydra"), (4, "Beast Whisperer"), (4, "Regal Imperiosaur"),
+        (3, "Gigantosaurus"), (2, "Terrian, World Tyrant"),
+        (4, "Harmonize"), (4, "Lightning Bolt"),
+    ],
+)

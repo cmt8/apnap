@@ -1,0 +1,507 @@
+//! Drawing cards and mana symbols.
+//!
+//! A real card is shown as its Scryfall image (whole card, never cropped or recoloured;
+//! turned sideways when tapped). A card without an image — the invented test cards, tokens,
+//! anything still downloading — is drawn from its definition as a plain "proxy" in the same
+//! shape. Game state that the printed card can't show (current power/toughness, damage,
+//! counters, combat) is drawn as small badges in the corners.
+
+use crate::art::{Art, Seg, segments};
+use card_model::{CardDef, CardType, Color, describe};
+use eframe::egui::{
+    self, Align2, Color32, FontId, Pos2, Rect, Response, Sense, Stroke, StrokeKind, TextureHandle,
+    Vec2, pos2, vec2,
+};
+use std::sync::Arc;
+
+/// Width / height of a Magic card.
+pub const CARD_ASPECT: f32 = 488.0 / 680.0;
+
+pub fn card_size(height: f32) -> Vec2 {
+    vec2((height * CARD_ASPECT).round(), height.round())
+}
+
+// ---------------------------------------------------------------------------------------
+// Text with mana symbols
+// ---------------------------------------------------------------------------------------
+
+enum Piece {
+    Text(Arc<egui::Galley>),
+    Sym(TextureHandle, f32),
+}
+
+/// A single line of text in which `{G}`-style symbols are drawn as Scryfall's symbols
+/// (or left as text until the symbol has loaded).
+pub struct Rich {
+    pieces: Vec<Piece>,
+    pub size: Vec2,
+}
+
+impl std::fmt::Debug for Rich {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Rich({} pieces, {:?})", self.pieces.len(), self.size)
+    }
+}
+
+impl Rich {
+    pub fn new(ui: &egui::Ui, art: &mut Art, text: &str, font: FontId) -> Rich {
+        let side = (font.size * 1.1).round();
+        let mut pieces = Vec::new();
+        let mut plain = String::new();
+        let flush = |plain: &mut String, pieces: &mut Vec<Piece>| {
+            if !plain.is_empty() {
+                let g = ui.painter().layout_no_wrap(
+                    std::mem::take(plain),
+                    font.clone(),
+                    Color32::PLACEHOLDER,
+                );
+                pieces.push(Piece::Text(g));
+            }
+        };
+        for seg in segments(text) {
+            match seg {
+                Seg::Text(t) => plain.push_str(t),
+                Seg::Symbol(s) => match art.symbol(ui.ctx(), s) {
+                    Some(tex) => {
+                        flush(&mut plain, &mut pieces);
+                        pieces.push(Piece::Sym(tex, side));
+                    }
+                    None => plain.push_str(s),
+                },
+            }
+        }
+        flush(&mut plain, &mut pieces);
+        let mut size = vec2(0.0, font.size);
+        for p in &pieces {
+            let s = match p {
+                Piece::Text(g) => g.size(),
+                Piece::Sym(_, side) => vec2(*side + 1.0, *side),
+            };
+            size.x += s.x;
+            size.y = size.y.max(s.y);
+        }
+        Rich { pieces, size }
+    }
+
+    /// Paint with the left-top corner at `pos`.
+    pub fn paint(&self, painter: &egui::Painter, pos: Pos2, color: Color32) {
+        let mut x = pos.x;
+        for p in &self.pieces {
+            match p {
+                Piece::Text(g) => {
+                    let y = pos.y + (self.size.y - g.size().y) / 2.0;
+                    painter.galley(pos2(x, y), g.clone(), color);
+                    x += g.size().x;
+                }
+                Piece::Sym(tex, side) => {
+                    let y = pos.y + (self.size.y - side) / 2.0;
+                    let rect = Rect::from_min_size(pos2(x, y), Vec2::splat(*side));
+                    painter.image(tex.id(), rect, full_uv(), Color32::WHITE);
+                    x += side + 1.0;
+                }
+            }
+        }
+    }
+}
+
+fn full_uv() -> Rect {
+    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))
+}
+
+/// A label that draws mana symbols.
+pub fn rich_label(
+    ui: &mut egui::Ui,
+    art: &mut Art,
+    text: &str,
+    size: f32,
+    color: Color32,
+) -> Response {
+    let rich = Rich::new(ui, art, text, FontId::proportional(size));
+    let (rect, resp) = ui.allocate_exact_size(rich.size, Sense::hover());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, text));
+    if ui.is_rect_visible(rect) {
+        rich.paint(ui.painter(), rect.min, color);
+    }
+    resp
+}
+
+/// A button whose label may contain mana symbols. Its accessible name is the plain text.
+pub fn rich_button(ui: &mut egui::Ui, art: &mut Art, label: &str, selected: bool) -> Response {
+    if !art.enabled() || !label.contains('{') {
+        return ui.add(egui::Button::new(label).selected(selected));
+    }
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let rich = Rich::new(ui, art, label, font);
+    let pad = ui.spacing().button_padding;
+    let mut size = rich.size + 2.0 * pad;
+    size.y = size.y.max(ui.spacing().interact_size.y);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, label));
+    if ui.is_rect_visible(rect) {
+        let vis = ui.style().interact_selectable(&resp, selected);
+        ui.painter().rect(
+            rect.expand(vis.expansion),
+            vis.corner_radius,
+            vis.weak_bg_fill,
+            vis.bg_stroke,
+            StrokeKind::Inside,
+        );
+        let pos = pos2(rect.min.x + pad.x, rect.center().y - rich.size.y / 2.0);
+        rich.paint(ui.painter(), pos, vis.text_color());
+    }
+    resp
+}
+
+// ---------------------------------------------------------------------------------------
+// Cards
+// ---------------------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+/// A small label in a corner of a card: state the printed card can't show.
+#[derive(Clone, Debug)]
+pub struct Badge {
+    pub corner: Corner,
+    pub text: String,
+    pub bg: Color32,
+    pub fg: Color32,
+}
+
+impl Badge {
+    pub fn new(corner: Corner, text: impl Into<String>, bg: Color32, fg: Color32) -> Badge {
+        Badge {
+            corner,
+            text: text.into(),
+            bg,
+            fg,
+        }
+    }
+}
+
+/// How one card is to be drawn.
+#[derive(Debug)]
+pub struct CardLook<'a> {
+    pub def: &'a CardDef,
+    /// The accessible name of the widget (what a screen reader, or a test, sees).
+    pub label: &'a str,
+    /// Height of the upright card.
+    pub height: f32,
+    pub tapped: bool,
+    /// Identical cards shown as one pile (1 = a single card).
+    pub pile: u32,
+    pub outline: Option<Stroke>,
+    pub badges: &'a [Badge],
+}
+
+fn frame_color(def: &CardDef) -> Color32 {
+    if def.card_types.contains(&CardType::Land) {
+        return Color32::from_rgb(132, 108, 84);
+    }
+    match def.printed_colors().as_slice() {
+        [] => Color32::from_rgb(140, 144, 152),
+        [Color::White] => Color32::from_rgb(222, 214, 184),
+        [Color::Blue] => Color32::from_rgb(66, 118, 176),
+        [Color::Black] => Color32::from_rgb(74, 68, 76),
+        [Color::Red] => Color32::from_rgb(180, 78, 60),
+        [Color::Green] => Color32::from_rgb(70, 128, 84),
+        _ => Color32::from_rgb(196, 166, 84),
+    }
+}
+
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let f = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t) as u8;
+    Color32::from_rgb(f(a.r(), b.r()), f(a.g(), b.g()), f(a.b(), b.b()))
+}
+
+/// Draw a card from its definition (no image): name, cost, type line, rules text where it
+/// fits, power/toughness. `rect` may be upright or sideways.
+pub fn paint_proxy(ui: &egui::Ui, art: &mut Art, rect: Rect, def: &CardDef) {
+    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    let sideways = rect.width() > rect.height();
+    // One unit = 1% of the card's width.
+    let s = if sideways {
+        rect.height() / 100.0
+    } else {
+        rect.width() / 100.0
+    };
+    let frame = frame_color(def);
+    let ink = Color32::from_rgb(20, 20, 24);
+    let paper = mix(frame, Color32::WHITE, 0.72);
+    painter.rect_filled(rect, 4.8 * s, ink);
+    let inner = rect.shrink(3.5 * s);
+    painter.rect_filled(inner, 2.0 * s, frame);
+
+    // Title bar: name on the left, mana cost on the right.
+    let title = Rect::from_min_size(
+        inner.min + vec2(2.0 * s, 2.0 * s),
+        vec2(inner.width() - 4.0 * s, 12.5 * s),
+    );
+    painter.rect_filled(title, 2.0 * s, paper);
+    let font = FontId::proportional((7.6 * s).max(7.0));
+    let cost = def
+        .mana_cost
+        .as_ref()
+        .map_or(String::new(), |m| m.to_text());
+    let cost = Rich::new(ui, art, &cost, FontId::proportional((7.4 * s).max(7.0)));
+    let cost_pos = pos2(
+        title.max.x - cost.size.x - 1.5 * s,
+        title.center().y - cost.size.y / 2.0,
+    );
+    cost.paint(&painter, cost_pos, ink);
+    let name_clip = Rect::from_min_max(
+        title.min,
+        pos2((cost_pos.x - s).max(title.min.x), title.max.y),
+    );
+    painter.with_clip_rect(name_clip).text(
+        pos2(title.min.x + 2.0 * s, title.center().y),
+        Align2::LEFT_CENTER,
+        &def.name,
+        font,
+        ink,
+    );
+
+    let type_line = describe::type_line(def);
+    let small = FontId::proportional((6.4 * s).max(7.0));
+    let pt = match (def.power, def.toughness) {
+        (Some(p), Some(t)) => Some(format!("{p}/{t}")),
+        _ => None,
+    };
+    let type_bar_h = 11.0 * s;
+    let (type_bar, text_box) = if sideways {
+        let bar = Rect::from_min_size(
+            pos2(title.min.x, title.max.y + 2.0 * s),
+            vec2(title.width(), type_bar_h),
+        );
+        (bar, None)
+    } else {
+        // "Art" box, type bar, text box.
+        let art_box = Rect::from_min_max(
+            pos2(title.min.x + s, title.max.y + 1.5 * s),
+            pos2(title.max.x - s, inner.min.y + 74.0 * s),
+        );
+        painter.rect_filled(art_box, s, mix(frame, Color32::BLACK, 0.45));
+        let initial: String = def
+            .name
+            .trim_start_matches("Test ")
+            .chars()
+            .take(1)
+            .collect();
+        painter.text(
+            art_box.center(),
+            Align2::CENTER_CENTER,
+            initial,
+            FontId::proportional(34.0 * s),
+            mix(frame, Color32::WHITE, 0.25),
+        );
+        let bar = Rect::from_min_size(
+            pos2(title.min.x, art_box.max.y + 1.5 * s),
+            vec2(title.width(), type_bar_h),
+        );
+        let text = Rect::from_min_max(
+            pos2(title.min.x + s, bar.max.y + 1.5 * s),
+            pos2(title.max.x - s, inner.max.y - 2.0 * s),
+        );
+        (bar, Some(text))
+    };
+    painter.rect_filled(type_bar, 2.0 * s, paper);
+    painter.with_clip_rect(type_bar).text(
+        pos2(type_bar.min.x + 2.0 * s, type_bar.center().y),
+        Align2::LEFT_CENTER,
+        type_line,
+        small.clone(),
+        ink,
+    );
+    if let Some(text_box) = text_box {
+        painter.rect_filled(text_box, s, paper);
+        // Rules text only where it would be legible.
+        let rules_font = FontId::proportional(6.3 * s);
+        if rules_font.size >= 9.0 {
+            let text = describe::rules_text(def).join("\n");
+            let galley = painter.layout(text, rules_font, ink, text_box.width() - 4.0 * s);
+            painter.with_clip_rect(text_box).galley(
+                text_box.min + vec2(2.0 * s, 1.5 * s),
+                galley,
+                ink,
+            );
+        }
+    }
+    if let Some(pt) = pt {
+        let size = vec2(24.0 * s, 12.0 * s);
+        let r = Rect::from_min_size(inner.max - size - vec2(1.0 * s, 1.0 * s), size);
+        painter.rect_filled(r, 3.0 * s, paper);
+        painter.rect_stroke(r, 3.0 * s, Stroke::new(s.max(1.0), ink), StrokeKind::Inside);
+        painter.text(
+            r.center(),
+            Align2::CENTER_CENTER,
+            pt,
+            FontId::proportional((8.5 * s).max(8.0)),
+            ink,
+        );
+    }
+}
+
+/// Paint the card image into `rect`, turned a quarter clockwise if `sideways`.
+fn paint_image(painter: &egui::Painter, tex: &TextureHandle, rect: Rect, sideways: bool) {
+    if !sideways {
+        painter.image(tex.id(), rect, full_uv(), Color32::WHITE);
+        return;
+    }
+    // The card's top edge ends up on the right.
+    let mut mesh = egui::Mesh::with_texture(tex.id());
+    let corners = [
+        (rect.left_top(), pos2(0.0, 1.0)),
+        (rect.right_top(), pos2(0.0, 0.0)),
+        (rect.right_bottom(), pos2(1.0, 0.0)),
+        (rect.left_bottom(), pos2(1.0, 1.0)),
+    ];
+    for (pos, uv) in corners {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos,
+            uv,
+            color: Color32::WHITE,
+        });
+    }
+    mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// The strip along a card's bottom edge with the artist and copyright line, as a fraction
+/// of the card's height. Badges stay clear of it (Scryfall's image guidelines).
+const CREDIT_STRIP: f32 = 0.075;
+
+/// Paint `badges` in the corners of `rect`, a card that is upright or `sideways` (turned a
+/// quarter clockwise, so its bottom edge is on the left).
+fn paint_badges(
+    painter: &egui::Painter,
+    rect: Rect,
+    sideways: bool,
+    badges: &[Badge],
+    font_size: f32,
+) {
+    let font = FontId::proportional(font_size);
+    let pad = vec2(3.0, 1.0);
+    let inset = (rect.width().min(rect.height()) * 0.045).max(2.0);
+    let (clear_left, clear_bottom) = if sideways {
+        (rect.width() * CREDIT_STRIP, 0.0)
+    } else {
+        (0.0, rect.height() * CREDIT_STRIP)
+    };
+    for corner in [
+        Corner::TopLeft,
+        Corner::TopRight,
+        Corner::BottomLeft,
+        Corner::BottomRight,
+    ] {
+        let mut offset = 0.0;
+        for b in badges.iter().filter(|b| b.corner == corner) {
+            let galley = painter.layout_no_wrap(b.text.clone(), font.clone(), b.fg);
+            let size = galley.size() + 2.0 * pad;
+            let x = match corner {
+                Corner::TopLeft | Corner::BottomLeft => rect.min.x + inset + clear_left,
+                Corner::TopRight | Corner::BottomRight => rect.max.x - inset - size.x,
+            };
+            let y = match corner {
+                Corner::TopLeft | Corner::TopRight => rect.min.y + inset + offset,
+                Corner::BottomLeft | Corner::BottomRight => {
+                    rect.max.y - inset - clear_bottom - size.y - offset
+                }
+            };
+            let r = Rect::from_min_size(pos2(x, y), size);
+            painter.rect_filled(r, 4.0, b.bg);
+            painter.rect_stroke(
+                r,
+                4.0,
+                Stroke::new(1.0, Color32::from_black_alpha(160)),
+                StrokeKind::Outside,
+            );
+            painter.galley(r.min + pad, galley, b.fg);
+            offset += size.y + 2.0;
+        }
+    }
+}
+
+/// Draw a card as a clickable widget.
+pub fn card_widget(ui: &mut egui::Ui, art: &mut Art, look: &CardLook<'_>) -> Response {
+    let upright = card_size(look.height);
+    let one = if look.tapped {
+        vec2(upright.y, upright.x)
+    } else {
+        upright
+    };
+    let extra = look.pile.saturating_sub(1).min(4);
+    let step = (upright.x * 0.11).round();
+    let size = one + vec2(extra as f32 * step, 0.0);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, look.label));
+    if !ui.is_rect_visible(rect) {
+        return resp;
+    }
+    let tex = if look.def.token {
+        None
+    } else {
+        art.card(ui.ctx(), &look.def.name)
+    };
+    let front = Rect::from_min_size(rect.min, one);
+    // The rest of a pile peeks out to the right, underneath.
+    for i in (0..=extra).rev() {
+        let r = front.translate(vec2(i as f32 * step, 0.0));
+        match &tex {
+            Some(tex) => paint_image(ui.painter(), tex, r, look.tapped),
+            None => paint_proxy(ui, art, r, look.def),
+        }
+    }
+    let radius = upright.x * 0.048;
+    let outline = look.outline.or_else(|| {
+        resp.hovered()
+            .then_some(Stroke::new(1.5, Color32::from_gray(235)))
+    });
+    if let Some(stroke) = outline {
+        ui.painter()
+            .rect_stroke(front, radius, stroke, StrokeKind::Outside);
+    }
+    let font_size = (look.height * 0.1).clamp(9.5, 14.0);
+    paint_badges(ui.painter(), front, look.tapped, look.badges, font_size);
+    if look.pile > 1 {
+        let b = [Badge::new(
+            Corner::BottomRight,
+            format!("x{}", look.pile),
+            Color32::from_rgb(30, 30, 36),
+            Color32::WHITE,
+        )];
+        paint_badges(
+            ui.painter(),
+            Rect::from_min_max(pos2(rect.max.x - one.x, rect.min.y), rect.max),
+            look.tapped,
+            &b,
+            font_size,
+        );
+    }
+    resp
+}
+
+/// The enlarged view of a card: its full-size image, or a full-size proxy.
+pub fn card_large(ui: &mut egui::Ui, art: &mut Art, def: &CardDef, width: f32) -> Response {
+    let size = vec2(width, (width / CARD_ASPECT).round());
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::Role::Image, true, format!("{} (enlarged)", def.name))
+    });
+    if ui.is_rect_visible(rect) {
+        let tex = if def.token {
+            None
+        } else {
+            art.full(ui.ctx(), &def.name)
+        };
+        match tex {
+            Some(tex) => paint_image(ui.painter(), &tex, rect, false),
+            None => paint_proxy(ui, art, rect, def),
+        }
+    }
+    resp
+}

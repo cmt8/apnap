@@ -58,9 +58,10 @@ cargo run -p harness -- play [--setup cmd-4p] [--seed N]  # you (P0) vs random a
 cargo run --release -p harness -- fuzz --setup cmd-4p --agents h-vs-r --games 200   # AI strength
 cargo run -p harness -- run --seed 42 --save-replay r.json && cargo run -p harness -- replay r.json
 cargo run -p harness -- bless                             # ONLY when a hash change is intended; review why
-cargo run --release -p app                                # the desktop app (you are P0)
-APNAP_SHOT_DIR=/tmp/shots cargo test -p app --test screenshot -- --ignored   # render the UI to PNGs
-cargo run -p harness -- fetch-cards                       # printed data for the precons -> ~/.cache/apnap
+cargo run --release -p app                                # the desktop app (you are P0); downloads card images into ~/.cache/apnap
+APNAP_SHOT_DIR=/tmp/shots cargo test -p app --test screenshot -- --ignored   # render the UI to PNGs (APNAP_SHOT_SETUP="<menu label>")
+cargo run --release -p harness -- fuzz --setup real-4p --games 1000 --threads 8      # real-card decks
+cargo run -p harness -- fetch-cards                       # printed data for the precons + basics -> ~/.cache/apnap (tests need it)
 cargo run -p harness -- coverage [--verbose]              # which precon cards are scripted/verified
 ```
 
@@ -82,10 +83,14 @@ cargo run -p harness -- coverage [--verbose]              # which precon cards a
   unverified cards; every verified card must name existing tests); `scryfall.rs` (runtime
   fetch + cache), `real.rs` (script + printed data -> CardDef).
 - `crates/ai` — agents: RandomAgent, HeuristicAgent (D-033). `crates/harness` — CLI, `Setup`
-  (m0 / m1-Np / m2-Np / cmd-Np), `--agents random|heuristic|h-vs-r`,
+  (m0 / m1-Np / m2-Np / cmd-Np / real-Np = decks of verified real cards, D-038),
+  `--agents random|heuristic|h-vs-r`,
   `script::Script` test driver, determinism/golden/property/rules tests.
 - `crates/app` — the desktop app: `session.rs` (game + AI seats + stops + save/replay, no
-  graphics), `ui.rs` (egui view), tests driven headlessly with egui_kittest (D-036).
+  graphics), `ui.rs` (egui view: layout, decisions, pacing), `cardview.rs` (card widget:
+  image or drawn proxy, badges, mana-symbol text), `art.rs` (Scryfall images/symbols:
+  worker threads + cache; `Art::disabled()` in tests), tests driven headlessly with
+  egui_kittest (D-036, D-037). `card-db/src/images.rs` = image/symbol paths + download.
 - `crates/xtask` — check-deps.
 - Engine extras: `stack.rs` (StackObject), `targeting.rs` (choose + 608.2b legality in one
   place), `frames/cast.rs` (601.2/602.2, and putting triggers on the stack), `frames/resolve.rs`
@@ -95,12 +100,18 @@ cargo run -p harness -- coverage [--verbose]              # which precon cards a
 
 ## Current milestone: M4 — IN PROGRESS (started 2026-11-09), branch `m4-wip`
 Decisions: D-034 (precons: Calling All Angels, Wretched Ranks, Reign of Dragons,
-Tramplesaurus Rex), D-035 (real-card pipeline; Scryfall data only in the user's cache).
+Tramplesaurus Rex), D-035 (real-card pipeline; Scryfall data only in the user's cache),
+D-037 (card images, mana symbols, proxies, AI pacing), D-038 (subtype selectors; `real-Np`
+interim decks).
 Order: groundwork (DONE: frozen decklists, `harness fetch-cards`, `harness coverage`,
-real-card script format) → egui app (DONE, first version: D-036; playable with the test
-decks, mouse-only, save/load/replay) → cards deck by deck until `harness coverage` is 100%
-(NEXT: start with Wretched Ranks; each card needs a script, a test, and often new
-vocabulary) → card images, precon setups in the app menu, 10,000-game soak.
+real-card script format) → egui app (DONE: D-036; mouse-only, save/load/replay; card
+images + mana symbols + paced AI turns: D-037) → cards deck by deck until `harness
+coverage` is 100% (IN PROGRESS: 27 real cards verified = 31/275 deck slots; playable now
+as the `real-Np` decks. NEXT: the vocabulary most cards wait on — tokens for real cards,
+attack/damage triggers, sacrifice/discard costs, mass destroy/damage, exile, "may",
+cost reduction, multi-mana abilities — then Wretched Ranks; each card needs a script, a
+test, and never an approximation) → precon setups in the app menu, 10,000-game soak.
+Real-card scripts hold behaviour only: no Oracle text in them, not even in comments.
 Real-card work needs `cargo run -p harness -- fetch-cards` once (network).
 Acceptance (spec §13 M4): coverage 100% verified, each card >= 1 test, 10,000 AI 4-player
 games clean, the app playable by mouse with a widget per ChoiceKind, save/load/replay in app.

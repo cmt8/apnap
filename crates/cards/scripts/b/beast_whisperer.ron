@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "5da7eea8-bb9e-47ce-a554-8a1ee058bd7a",
+    name: "Beast Whisperer",
+    verified: true,
+    tests: ["beast_whisperer_draws_on_creature_spells_only"],
+    abilities: [
+        Triggered(
+            when: Cast(by: You, types: [Creature]),
+            body: Effect((effect: Draw(who: You, amount: Fixed(1)))),
+        ),
+    ],
+)

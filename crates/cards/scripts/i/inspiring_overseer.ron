@@ -1,0 +1,16 @@
+RealCard(
+    oracle_id: "d646e42b-5635-4798-b633-29c093b66a55",
+    name: "Inspiring Overseer",
+    verified: true,
+    tests: ["inspiring_overseer_gains_a_life_and_draws"],
+    keywords: [Flying],
+    abilities: [
+        Triggered(
+            when: Enters(This),
+            body: Effect((effect: Seq([
+                GainLife(who: You, amount: Fixed(1)),
+                Draw(who: You, amount: Fixed(1)),
+            ]))),
+        ),
+    ],
+)

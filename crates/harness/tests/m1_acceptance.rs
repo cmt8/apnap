@@ -14,6 +14,7 @@ fn every_verified_card_names_existing_tests() {
         include_str!("rules_m2.rs"),
         include_str!("rules_m3.rs"),
         include_str!("determinism.rs"),
+        include_str!("cards_precon.rs"),
     ];
     let sources: Vec<card_db::Source<'_>> = cards::CARDS
         .iter()

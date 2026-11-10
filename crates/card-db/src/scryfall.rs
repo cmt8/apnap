@@ -37,6 +37,35 @@ pub struct ScryfallCard {
     pub color_identity: Vec<String>,
     #[serde(default)]
     pub keywords: Vec<String>,
+    /// The Scryfall id of the printing (names the cached image files).
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub image_uris: Option<ImageUris>,
+    #[serde(default)]
+    pub artist: Option<String>,
+    #[serde(default)]
+    pub set: Option<String>,
+    #[serde(default)]
+    pub collector_number: Option<String>,
+}
+
+/// Where Scryfall serves this printing's images (we use two of the sizes).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageUris {
+    /// The full card, 488 x 680 JPG.
+    #[serde(default)]
+    pub normal: Option<String>,
+    /// Just the illustration.
+    #[serde(default)]
+    pub art_crop: Option<String>,
+}
+
+impl ScryfallCard {
+    /// Cached before the image fields were stored: fetch it again.
+    fn is_stale(&self) -> bool {
+        self.id.is_none() || self.image_uris.is_none()
+    }
 }
 
 /// The on-disk cache: cards by name.
@@ -56,6 +85,8 @@ impl ScryfallData {
             .find(|c| c.oracle_id.as_deref() == Some(id))
     }
 }
+
+pub(crate) const USER_AGENT: &str = concat!("apnap/", env!("CARGO_PKG_VERSION"));
 
 /// How to get the data, shown whenever it is missing.
 pub const FETCH_HINT: &str = "card data is not in the local cache; run `cargo run -p harness -- fetch-cards` (needs network)";
@@ -98,6 +129,13 @@ pub fn cache_dir() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from(".cache"))
         .join("apnap")
+}
+
+/// True if every one of `names` is cached with everything [`fetch`] would store.
+pub fn is_complete(data: &ScryfallData, names: &[String]) -> bool {
+    names
+        .iter()
+        .all(|n| data.get(n).is_some_and(|c| !c.is_stale()))
 }
 
 fn cache_file() -> PathBuf {
@@ -151,7 +189,10 @@ struct Collection {
 /// full cache and how many cards were downloaded.
 pub fn fetch(names: &[String]) -> Result<(ScryfallData, usize), ScryfallError> {
     let mut data = load_cache()?;
-    let missing: Vec<&String> = names.iter().filter(|n| data.get(n).is_none()).collect();
+    let missing: Vec<&String> = names
+        .iter()
+        .filter(|n| data.get(n).is_none_or(ScryfallCard::is_stale))
+        .collect();
     let mut fetched = 0;
     for (i, chunk) in missing.chunks(75).enumerate() {
         if i > 0 {
@@ -161,7 +202,7 @@ pub fn fetch(names: &[String]) -> Result<(ScryfallData, usize), ScryfallError> {
             "identifiers": chunk.iter().map(|n| serde_json::json!({ "name": n })).collect::<Vec<_>>()
         });
         let mut resp = ureq::post("https://api.scryfall.com/cards/collection")
-            .header("User-Agent", concat!("apnap/", env!("CARGO_PKG_VERSION")))
+            .header("User-Agent", USER_AGENT)
             .header("Accept", "application/json")
             .send_json(&body)
             .map_err(|e| ScryfallError::Http(e.to_string()))?;

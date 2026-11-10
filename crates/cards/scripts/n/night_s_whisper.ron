@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "7ffae8f8-3006-4969-a339-6d30678f87ea",
+    name: "Night's Whisper",
+    verified: true,
+    tests: ["nights_whisper_draws_two_and_costs_two_life"],
+    abilities: [
+        Spell(Effect((effect: Seq([
+            Draw(who: You, amount: Fixed(2)),
+            LoseLife(who: You, amount: Fixed(2)),
+        ])))),
+    ],
+)

@@ -1,0 +1,13 @@
+RealCard(
+    oracle_id: "6d37ba4b-ff56-4eec-9dc2-2d7f357dc9c9",
+    name: "Youthful Valkyrie",
+    verified: true,
+    tests: ["youthful_valkyrie_grows_when_another_angel_enters"],
+    keywords: [Flying],
+    abilities: [
+        Triggered(
+            when: Enters(Matching((subtypes: ["Angel"], controller: You, other: true))),
+            body: Effect((effect: PutCounters(what: This, kind: PlusOne, count: Fixed(1)))),
+        ),
+    ],
+)

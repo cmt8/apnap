@@ -157,7 +157,7 @@ fn main() -> ExitCode {
         "fetch-cards" => {
             // Downloads printed card data for the precon pool into the user's cache
             // (never into the repository).
-            let names = harness::precon_card_names();
+            let names = harness::scryfall_card_names();
             match card_db::scryfall::fetch(&names) {
                 Ok((data, fetched)) => {
                     println!(
@@ -335,7 +335,9 @@ fn play(args: &[String]) -> ExitCode {
     let kind = flag(args, "--agents").map_or(harness::Agents::Heuristic, |a| {
         harness::Agents::parse(&a).expect("bad --agents")
     });
-    let mut bots: Vec<Box<dyn Agent>> = (0..setup.players()).map(|s| kind.make(seed, s)).collect();
+    let mut bots: Vec<Box<dyn Agent>> = (0..setup.players())
+        .map(|s| kind.make(seed, s, &st.catalog))
+        .collect();
     let mut responses = Vec::new();
     println!(
         "apnap terminal play ({}) — you are P0 vs {} AI opponent(s), seed {seed}. 'q' quits.",

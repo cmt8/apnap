@@ -128,10 +128,13 @@ fn selector(s: &Selector, plural: bool) -> String {
     for t in &s.not_types {
         out.push_str(&format!("non{} ", card_type(*t)));
     }
-    let noun = if s.types.is_empty() {
-        "permanent".to_string()
-    } else {
-        types(&s.types, "or")
+    // "Dinosaurs", "Dragon creatures", "creatures", "permanents".
+    let subtypes = s.subtypes.join(" or ");
+    let noun = match (s.types.is_empty(), subtypes.is_empty()) {
+        (true, true) => "permanent".to_string(),
+        (true, false) => subtypes,
+        (false, true) => types(&s.types, "or"),
+        (false, false) => format!("{subtypes} {}", types(&s.types, "or")),
     };
     out.push_str(&noun);
     if plural {

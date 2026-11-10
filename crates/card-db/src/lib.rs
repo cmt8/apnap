@@ -6,6 +6,7 @@
 //! token definitions, basic lands) and real-card scripts ([`real::RealCardScript`]: behaviour
 //! only; printed data comes from the Scryfall cache, [`scryfall`]).
 
+pub mod images;
 pub mod real;
 pub mod scryfall;
 

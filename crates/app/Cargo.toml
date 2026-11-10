@@ -12,6 +12,9 @@ engine-core.workspace = true
 card-model.workspace = true
 ai.workspace = true
 harness = { path = "../harness" }
+card-db = { path = "../card-db" }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+resvg = { version = "0.48.1", default-features = false }
 serde_json.workspace = true
 dirs = "7.0.0"
 eframe = "0.37.0"

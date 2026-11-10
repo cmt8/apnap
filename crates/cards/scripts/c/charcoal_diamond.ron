@@ -1,0 +1,10 @@
+RealCard(
+    oracle_id: "1386d111-a2a7-4df1-91d7-947664126989",
+    name: "Charcoal Diamond",
+    verified: true,
+    tests: ["diamonds_enter_tapped_and_tap_for_their_color"],
+    abilities: [
+        Replacement(replaces: ThisEnters, with: EntersTapped),
+        Mana(cost: (tap: true), produce: One(Black)),
+    ],
+)

@@ -64,7 +64,7 @@ impl Session {
         let mut st = setup.game(seed);
         let narrator = Narrator::new(&st);
         let agents = (0..setup.players())
-            .map(|s| opponents.make(seed, s))
+            .map(|s| opponents.make(seed, s, &st.catalog))
             .collect();
         let out = engine_core::start(&mut st);
         let mut s = Session {
@@ -90,7 +90,7 @@ impl Session {
     pub fn from_state(mut st: GameState, human: Option<PlayerId>, opponents: Agents) -> Self {
         let narrator = Narrator::new(&st);
         let agents = (0..st.num_players() as u8)
-            .map(|s| opponents.make(st.seed, s))
+            .map(|s| opponents.make(st.seed, s, &st.catalog))
             .collect();
         // Runs to the first decision if the position hasn't been started yet.
         let out = engine_core::start(&mut st);
@@ -227,6 +227,17 @@ impl Session {
     /// Run AI decisions and automatic human responses until the human must decide, the
     /// game ends, or `budget` decisions have been made. Returns how many were made.
     pub fn pump(&mut self, budget: usize) -> usize {
+        self.pump_inner(budget, false).0
+    }
+
+    /// Like [`Session::pump`], but also stops as soon as an AI seat has done something the
+    /// log shows (played a land, cast a spell, attacked…), so the UI can let the human see
+    /// it before the game moves on. Returns true if it stopped for that reason.
+    pub fn pump_visible(&mut self, budget: usize) -> bool {
+        self.pump_inner(budget, true).1
+    }
+
+    fn pump_inner(&mut self, budget: usize, stop_when_visible: bool) -> (usize, bool) {
         let mut done = 0;
         while done < budget {
             if self
@@ -252,6 +263,8 @@ impl Session {
                 let view = player_view(&self.st, d.player);
                 self.agents[d.player.index()].decide(&view, &d)
             };
+            let by_ai = self.replay_queue.is_none() && Some(d.player) != self.human;
+            let logged = self.log.len();
             if self.apply(r).is_err() {
                 self.log
                     .push("(a recorded response no longer applies; stopping)".into());
@@ -259,8 +272,11 @@ impl Session {
                 break;
             }
             done += 1;
+            if stop_when_visible && by_ai && self.log.len() > logged {
+                return (done, true);
+            }
         }
-        done
+        (done, false)
     }
 
     /// Everything needed to rebuild this game (spec §10.3).

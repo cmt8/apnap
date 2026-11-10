@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "f3654fbd-16a5-4953-84ac-534e8421032f",
+    name: "Champion of the Perished",
+    verified: true,
+    tests: ["champion_of_the_perished_grows_when_another_zombie_enters"],
+    abilities: [
+        Triggered(
+            when: Enters(Matching((subtypes: ["Zombie"], controller: You, other: true))),
+            body: Effect((effect: PutCounters(what: This, kind: PlusOne, count: Fixed(1)))),
+        ),
+    ],
+)

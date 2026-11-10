@@ -218,6 +218,11 @@ mod tests {
             colors: Some(vec!["W".into()]),
             color_identity: vec!["W".into()],
             keywords: vec!["Flying".into()],
+            id: None,
+            image_uris: None,
+            artist: None,
+            set: None,
+            collector_number: None,
         }
     }
 
