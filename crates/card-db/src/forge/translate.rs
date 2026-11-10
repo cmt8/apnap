@@ -111,6 +111,8 @@ struct Tx<'a> {
     used_svars: BTreeSet<String>,
     tokens: BTreeSet<String>,
     has_x_cost: bool,
+    /// Compiling the body of a triggered ability (where "X" is not the X being paid).
+    in_trigger: bool,
     /// The script variables that hold abilities, parsed.
     records: &'a [(String, Record)],
     known: &'a Known,
@@ -191,6 +193,17 @@ pub fn keyword(name: &str) -> Option<Keyword> {
         "Reach" => Keyword::Reach,
         "Trample" => Keyword::Trample,
         "Vigilance" => Keyword::Vigilance,
+        "Defender" => Keyword::Defender,
+        "Fear" => Keyword::Fear,
+        "Hexproof" => Keyword::Hexproof,
+        "Indestructible" => Keyword::Indestructible,
+        "Intimidate" => Keyword::Intimidate,
+        "Shroud" => Keyword::Shroud,
+        "Landwalk:Plains" => Keyword::Landwalk(BasicLandType::Plains),
+        "Landwalk:Island" => Keyword::Landwalk(BasicLandType::Island),
+        "Landwalk:Swamp" => Keyword::Landwalk(BasicLandType::Swamp),
+        "Landwalk:Mountain" => Keyword::Landwalk(BasicLandType::Mountain),
+        "Landwalk:Forest" => Keyword::Landwalk(BasicLandType::Forest),
         _ => return None,
     })
 }
@@ -217,6 +230,15 @@ pub fn mana_cost(text: &str) -> Result<Option<ManaCost>, String> {
 impl<'a> Tx<'a> {
     fn block(&mut self, what: impl Into<String>) {
         self.blockers.insert(what.into());
+    }
+
+    /// A line that produced nothing must have said why. If no blocker was recorded since
+    /// `before` (a count of blockers), the line would silently vanish from the card: that
+    /// is a hole in the compiler, and the card is blocked for it.
+    fn explained(&mut self, before: usize, what: &str) {
+        if self.blockers.len() == before {
+            self.block(format!("unexplained:{what}"));
+        }
     }
 
     fn svar(&mut self, name: &str) -> Option<&'a str> {
@@ -389,6 +411,13 @@ impl<'a> Tx<'a> {
             return None;
         };
         if v == "Count$xPaid" && self.has_x_cost {
+            // In a spell or an activated ability: the X announced for it (CR 107.3a). In a
+            // permanent's own trigger it is the X the permanent was cast with (CR 107.3m),
+            // which the engine doesn't remember yet.
+            if self.in_trigger {
+                self.block("expr:Count$xPaid in a trigger");
+                return None;
+            }
             return Some(Amount::X);
         }
         if v == "TriggeredCard$CardPower" {
@@ -413,10 +442,13 @@ impl<'a> Tx<'a> {
 
     // ------------------------------------------------------------------ references
 
-    fn player(&mut self, rd: &Rd<'a>, chain: &Chain) -> Option<PlayerRef> {
+    fn player(&mut self, rd: &Rd<'a>, chain: &Chain, triggered: bool) -> Option<PlayerRef> {
         match rd.get("Defined") {
             None | Some("You") => Some(PlayerRef::You),
             Some("Player.Opponent" | "Opponent") => Some(PlayerRef::EachOpponent),
+            Some("Player") => Some(PlayerRef::Each),
+            // The rules' "its controller" is whoever controlled it last (CR 608.2h).
+            Some("TriggeredCardController") if triggered => Some(PlayerRef::TriggeringController),
             Some("Targeted") => match chain.targets.len() {
                 0 => {
                     self.block("defined:Targeted-without-target");
@@ -434,6 +466,29 @@ impl<'a> Tx<'a> {
         }
     }
 
+    /// `Defined$` of an effect done to objects and players alike (damage). Forge's default
+    /// is the card itself.
+    fn recipient(&mut self, rd: &Rd<'a>, chain: &Chain, triggered: bool) -> Option<TargetRef> {
+        match rd.rec.get("Defined") {
+            Some("You" | "Opponent" | "Player.Opponent" | "Player" | "TriggeredCardController") => {
+                self.player(rd, chain, triggered).map(TargetRef::Players)
+            }
+            Some("Targeted") => match chain.targets.len() {
+                0 => {
+                    rd.get("Defined");
+                    self.block("defined:Targeted-without-target");
+                    None
+                }
+                n => {
+                    rd.get("Defined");
+                    chain.refers_to_targets.set(true);
+                    Some(TargetRef::Target(n as u8 - 1))
+                }
+            },
+            _ => self.object(rd, chain, triggered).map(TargetRef::Object),
+        }
+    }
+
     fn object(&mut self, rd: &Rd<'a>, chain: &Chain, triggered: bool) -> Option<ObjRef> {
         match rd.get("Defined") {
             None | Some("Self") => Some(ObjRef::This),
@@ -448,6 +503,18 @@ impl<'a> Tx<'a> {
             }
             Some(other) => {
                 self.block(format!("defined:card {other}"));
+                None
+            }
+        }
+    }
+
+    /// `ValidCards$` of an "all" effect. Forge's default when it is missing differs from
+    /// effect to effect, so it must be there.
+    fn valid_cards(&mut self, rd: &Rd<'a>, api: &str) -> Option<Selector> {
+        match rd.get("ValidCards") {
+            Some(f) => self.selector(f),
+            None => {
+                self.block(format!("{api}:no-ValidCards"));
                 None
             }
         }
@@ -537,13 +604,13 @@ impl<'a> Tx<'a> {
                         return None;
                     }
                 };
-                let slot = self.target(&rd, chain, false).or_else(|| {
-                    self.block("DealDamage:no-target");
-                    None
-                });
+                let to = match self.target(&rd, chain, false) {
+                    Some(slot) => Some(TargetRef::Target(slot)),
+                    None => self.recipient(&rd, chain, triggered),
+                };
                 let amount = rd.get("NumDmg").and_then(|n| self.amount(n, chain));
                 Effect::DealDamage {
-                    to: TargetRef::Target(slot?),
+                    to: to?,
                     amount: amount?,
                     by,
                 }
@@ -566,7 +633,7 @@ impl<'a> Tx<'a> {
                 let slot = self.target(&rd, chain, false);
                 let who = match slot {
                     Some(i) => Some(PlayerRef::Target(i)),
-                    None => self.player(&rd, chain),
+                    None => self.player(&rd, chain, triggered),
                 };
                 let amount = self.amount(rd.get(key).unwrap_or("1"), chain);
                 let (who, amount) = (who?, amount?);
@@ -578,34 +645,121 @@ impl<'a> Tx<'a> {
                 }
             }
             "Destroy" => {
-                let slot = self.target(&rd, chain, false).or_else(|| {
-                    self.block("Destroy:no-target");
-                    None
-                });
-                Effect::Destroy {
-                    what: ObjRef::Target(slot?),
+                let what = match self.target(&rd, chain, false) {
+                    Some(slot) => Some(ObjRef::Target(slot)),
+                    None => self.object(&rd, chain, triggered),
+                };
+                Effect::Destroy { what: what? }
+            }
+            "Tap" | "Untap" => {
+                // `ETB$`: "enters tapped/untapped", which is a replacement, not this effect.
+                if rd.rec.get("ETB").is_some() {
+                    self.block(format!("{api}:ETB"));
+                    return None;
+                }
+                let what = match self.target(&rd, chain, false) {
+                    Some(slot) => Some(ObjRef::Target(slot)),
+                    None => self.object(&rd, chain, triggered),
+                };
+                match api {
+                    "Tap" => Effect::Tap { what: what? },
+                    _ => Effect::Untap { what: what? },
+                }
+            }
+            "TapAll" | "UntapAll" => {
+                let sel = self.valid_cards(&rd, api);
+                match api {
+                    "TapAll" => Effect::TapAll(sel?),
+                    _ => Effect::UntapAll(sel?),
+                }
+            }
+            "Counter" => {
+                // Only spells, and only as a target.
+                if rd.get("TargetType") != Some("Spell") {
+                    self.block("Counter:not-a-spell-target");
+                    return None;
+                }
+                for k in ["Defined", "TargetMin", "TargetMax"] {
+                    if rd.rec.get(k).is_some() {
+                        self.block(format!("param:Counter.{k}"));
+                        return None;
+                    }
+                }
+                let filter = match rd.get("ValidTgts") {
+                    Some("Card") => TargetFilter::Spell,
+                    Some(text) => {
+                        let s = self.selector(text)?;
+                        // What a spell can be asked: its types and colors.
+                        let asked = Selector {
+                            types: s.types.clone(),
+                            not_types: s.not_types.clone(),
+                            subtypes: s.subtypes.clone(),
+                            not_subtypes: s.not_subtypes.clone(),
+                            colors: s.colors.clone(),
+                            ..Selector::default()
+                        };
+                        if asked != s {
+                            self.block("Counter:filter");
+                            return None;
+                        }
+                        TargetFilter::SpellMatching(s)
+                    }
+                    None => {
+                        self.block("Counter:no-target");
+                        return None;
+                    }
+                };
+                chain.targets.push(filter);
+                Effect::Counter {
+                    what: TargetRef::Target(chain.targets.len() as u8 - 1),
                 }
             }
             "DestroyAll" => {
-                let sel = rd.get("ValidCards").and_then(|f| self.selector(f));
+                let sel = self.valid_cards(&rd, api);
                 Effect::DestroyAll(sel?)
             }
             "DamageAll" => {
-                let sel = rd.get("ValidCards").and_then(|f| self.selector(f));
                 let amount = rd.get("NumDmg").and_then(|n| self.amount(n, chain));
-                Effect::DamageEach {
-                    each: sel?,
-                    amount: amount?,
+                match (rd.rec.get("ValidCards"), rd.get("ValidPlayers")) {
+                    (_, None) => {
+                        let sel = self.valid_cards(&rd, api);
+                        Effect::DamageEach {
+                            each: sel?,
+                            amount: amount?,
+                        }
+                    }
+                    // Players only: "deals N damage to each player / each opponent".
+                    (None, Some("Player")) => Effect::DamageEachPlayer { amount: amount? },
+                    (None, Some("Player.Opponent" | "Opponent")) => Effect::DealDamage {
+                        to: TargetRef::Players(PlayerRef::EachOpponent),
+                        amount: amount?,
+                        by: DamageBy::This,
+                    },
+                    (None, Some(other)) => {
+                        self.block(format!("param:DamageAll.ValidPlayers={other}"));
+                        return None;
+                    }
+                    // Creatures and players at once is one event the vocabulary lacks.
+                    (Some(_), Some(_)) => {
+                        self.block("DamageAll:cards+players");
+                        return None;
+                    }
                 }
             }
             "ChangeZone" => {
                 let origin = rd.get("Origin").unwrap_or("Battlefield");
                 let dest = rd.get("Destination");
-                let slot = self.target(&rd, chain, origin == "Graveyard").or_else(|| {
-                    self.block("ChangeZone:no-target");
-                    None
-                });
-                let what = ObjRef::Target(slot?);
+                let what = match self.target(&rd, chain, origin == "Graveyard") {
+                    Some(slot) => ObjRef::Target(slot),
+                    // A permanent named some other way: "return this to its owner's hand".
+                    None if origin == "Battlefield" && rd.rec.get("Defined").is_some() => {
+                        self.object(&rd, chain, triggered)?
+                    }
+                    None => {
+                        self.block("ChangeZone:no-target");
+                        return None;
+                    }
+                };
                 match (origin, dest) {
                     ("Battlefield" | "Graveyard", Some("Exile")) => Effect::Exile { what },
                     ("Battlefield" | "Graveyard", Some("Hand")) => Effect::ReturnToHand { what },
@@ -682,7 +836,7 @@ impl<'a> Tx<'a> {
             "Pump" | "PumpAll" => {
                 let effects = self.pump_effects(&rd, chain)?;
                 if api == "PumpAll" {
-                    let sel = rd.get("ValidCards").and_then(|f| self.selector(f));
+                    let sel = self.valid_cards(&rd, api);
                     Effect::ApplyAll {
                         affected: sel?,
                         effects,
@@ -709,6 +863,35 @@ impl<'a> Tx<'a> {
                     ((Some("Player"), Some("Creature")), Some(n)) => {
                         Effect::EachPlayer(EachPlayerAction::SacrificeCreature(n))
                     }
+                    // "Sacrifice this."
+                    ((None | Some("Self"), None | Some("Self")), _)
+                        if rd.rec.get("ValidTgts").is_none() =>
+                    {
+                        if rd.rec.get("Amount").is_some() {
+                            self.block("Sacrifice:shape");
+                            return None;
+                        }
+                        Effect::SacrificeThis
+                    }
+                    ((_, Some(valid)), _) if valid != "Self" => {
+                        let who = match self.target(&rd, chain, false) {
+                            Some(i) if chain.targets[i as usize].allows_players() => {
+                                Some(PlayerRef::Target(i))
+                            }
+                            Some(_) => {
+                                self.block("Sacrifice:shape");
+                                return None;
+                            }
+                            None => self.player(&rd, chain, triggered),
+                        };
+                        let what = self.selector(valid);
+                        let amount = self.amount(rd.get("Amount").unwrap_or("1"), chain);
+                        Effect::Sacrifice {
+                            who: who?,
+                            what: what?,
+                            amount: amount?,
+                        }
+                    }
                     _ => {
                         self.block("Sacrifice:shape");
                         return None;
@@ -723,8 +906,33 @@ impl<'a> Tx<'a> {
                     ((Some("Player"), Some("TgtChoose")), Some(n)) => {
                         Effect::EachPlayer(EachPlayerAction::Discard(n))
                     }
-                    _ => {
-                        self.block("Discard:shape");
+                    ((_, Some(mode @ ("TgtChoose" | "Hand"))), _) => {
+                        let who = match self.target(&rd, chain, false) {
+                            Some(i) if chain.targets[i as usize].allows_players() => {
+                                Some(PlayerRef::Target(i))
+                            }
+                            Some(_) => {
+                                self.block("Discard:shape");
+                                return None;
+                            }
+                            None => self.player(&rd, chain, triggered),
+                        };
+                        if mode == "Hand" {
+                            if rd.rec.get("NumCards").is_some() {
+                                self.block("Discard:shape");
+                                return None;
+                            }
+                            Effect::DiscardHand { who: who? }
+                        } else {
+                            let amount = self.amount(rd.get("NumCards").unwrap_or("1"), chain);
+                            Effect::Discard {
+                                who: who?,
+                                amount: amount?,
+                            }
+                        }
+                    }
+                    ((_, mode), _) => {
+                        self.block(format!("Discard:mode {}", mode.unwrap_or("?")));
                         return None;
                     }
                 }
@@ -1104,6 +1312,7 @@ impl<'a> Tx<'a> {
         let mut out: Vec<(usize, &str, AbilityDef)> = Vec::new();
         let face = self.face;
         for (line, rec) in face.triggers.iter().enumerate() {
+            let before = self.blockers.len();
             let rd = Rd::new(rec, format!("trig {}", rec.get("Mode").unwrap_or("?")));
             let event = self.trigger_event(&rd);
             // Without `TriggerZones$` a Forge trigger works from every zone, except that
@@ -1168,11 +1377,14 @@ impl<'a> Tx<'a> {
             if secondary {
                 self.block("trig:Secondary-alone");
             }
+            self.in_trigger = true;
             let body = match self.sub(exec) {
                 Some(r) => self.body(r, true, "DB"),
                 None => None,
             };
+            self.in_trigger = false;
             let (Some(when), Some(intervening_if), Some(mut body)) = (event, cond, body) else {
+                self.explained(before, "trigger");
                 continue;
             };
             if optional {
@@ -1413,6 +1625,7 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
         used_svars: BTreeSet::new(),
         tokens: BTreeSet::new(),
         has_x_cost: false,
+        in_trigger: false,
         records: &parsed,
         known,
     };
@@ -1509,8 +1722,10 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
     let mut abilities: Vec<(usize, AbilityDef)> = Vec::new();
     let order = line_order(face);
     for (i, rec) in face.abilities.iter().enumerate() {
-        if let Some(a) = tx.ability(rec) {
-            abilities.push((order.abilities[i], a));
+        let before = tx.blockers.len();
+        match tx.ability(rec) {
+            Some(a) => abilities.push((order.abilities[i], a)),
+            None => tx.explained(before, "ability"),
         }
     }
     // Merged ("Secondary") triggers stay at their first line's place.
@@ -1518,13 +1733,17 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
         abilities.push((order.triggers[line], a));
     }
     for (i, rec) in face.statics.iter().enumerate() {
-        if let Some(a) = tx.static_ability(rec) {
-            abilities.push((order.statics[i], a));
+        let before = tx.blockers.len();
+        match tx.static_ability(rec) {
+            Some(a) => abilities.push((order.statics[i], a)),
+            None => tx.explained(before, "static"),
         }
     }
     for (i, rec) in face.replacements.iter().enumerate() {
-        if let Some(a) = tx.replacement(rec) {
-            abilities.push((order.replacements[i], a));
+        let before = tx.blockers.len();
+        match tx.replacement(rec) {
+            Some(a) => abilities.push((order.replacements[i], a)),
+            None => tx.explained(before, "replacement"),
         }
     }
     abilities.sort_by_key(|(i, _)| *i);
@@ -1662,10 +1881,11 @@ mod tests {
         ));
         assert!(b.iter().any(|x| x.starts_with("expr:")), "{b:?}");
         // A keyword the engine doesn't have, an unknown line, a second face.
-        let b =
-            blockers("Name:Test Card\nManaCost:G\nTypes:Creature Elf\nPT:1/1\nK:Shroud\nMystery:1");
+        let b = blockers(
+            "Name:Test Card\nManaCost:G\nTypes:Creature Elf\nPT:1/1\nK:Banding\nMystery:1",
+        );
         assert!(
-            b.contains("kw:Shroud") && b.contains("line:Mystery"),
+            b.contains("kw:Banding") && b.contains("line:Mystery"),
             "{b:?}"
         );
         let b = blockers(

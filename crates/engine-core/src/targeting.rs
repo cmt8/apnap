@@ -7,7 +7,7 @@ use crate::stack::{StackKind, Target};
 use crate::state::GameState;
 use crate::zones::Zone;
 use alloc::vec::Vec;
-use card_model::{CardType, TargetFilter};
+use card_model::{CardType, Keyword, TargetFilter};
 
 /// Whether `t` satisfies `filter` for a spell/ability controlled by `controller` whose own
 /// stack object is `this` (CR 115.5: it can't target itself).
@@ -26,6 +26,7 @@ pub fn is_legal(
                     TargetFilter::Opponent => p != controller,
                     TargetFilter::Creature
                     | TargetFilter::Spell
+                    | TargetFilter::SpellMatching(_)
                     | TargetFilter::Permanent(_)
                     | TargetFilter::CardInGraveyard { .. } => false,
                 }
@@ -39,6 +40,15 @@ pub fn is_legal(
             let Some(o) = st.objects.get(&id) else {
                 return false;
             };
+            // CR 702.18a (shroud) and 702.11b (hexproof): abilities of permanents.
+            if o.zone == Zone::Battlefield {
+                let c = chars(st, id);
+                if c.has(Keyword::Shroud)
+                    || (c.has(Keyword::Hexproof) && c.controller != controller)
+                {
+                    return false;
+                }
+            }
             match filter {
                 TargetFilter::AnyTarget | TargetFilter::Creature => {
                     o.zone == Zone::Battlefield && chars(st, id).is(CardType::Creature)
@@ -46,6 +56,15 @@ pub fn is_legal(
                 TargetFilter::Spell => st
                     .stack_object(id)
                     .is_some_and(|s| s.kind == StackKind::Spell),
+                TargetFilter::SpellMatching(sel) => {
+                    st.stack_object(id)
+                        .is_some_and(|s| s.kind == StackKind::Spell)
+                        && card_matches(st, id, sel)
+                        && {
+                            let c = chars(st, id);
+                            sel.colors.is_empty() || sel.colors.iter().any(|x| c.colors.contains(x))
+                        }
+                }
                 TargetFilter::Permanent(selectors) => {
                     // "Other" has no meaning for a target (it can't be the spell itself).
                     let none = ObjectId(u32::MAX);
@@ -91,7 +110,9 @@ pub fn candidates(
 ) -> Vec<Target> {
     let mut out: Vec<Target> = Vec::new();
     match filter {
-        TargetFilter::Spell => out.extend(st.stack.iter().map(|s| Target::Object(s.id))),
+        TargetFilter::Spell | TargetFilter::SpellMatching(_) => {
+            out.extend(st.stack.iter().map(|s| Target::Object(s.id)))
+        }
         TargetFilter::AnyTarget | TargetFilter::Creature | TargetFilter::Permanent(_) => {
             out.extend(st.zones.battlefield.iter().map(|&id| Target::Object(id)));
         }

@@ -602,6 +602,43 @@ complete 89%, 500 complete 96%. At parameter level there are about 7,800 distinc
   compiler rather than by hand.
 - Sub-agents may be used for research and parallel work (user, same message).
 
+## D-047 Compiler batch 1: evasion and protection keywords, counterspells, tap/untap, any-player discard and sacrifice (2026-11-09)
+First batch of the D-046 work loop after compiled cards went into games. 3,459 → 4,371 of
+34,463 scripts compile. Rules text: `docs/rules-notes/702-evasion-protection-keywords-701-actions.md`;
+tests: `crates/harness/tests/forge_features.rs`, one per feature, played with invented cards
+written in Forge's format (`harness::forge_test_catalog`).
+
+- **Feature tests replace card tests** (as D-046 said they would): a test card is a Forge
+  script in the test file, compiled by the same code as real cards. Only subtypes that
+  appear on the test scripts' own type lines are known to that compile.
+- **Keywords:** Defender, Fear, Hexproof, Indestructible, Intimidate, Shroud,
+  `Landwalk(BasicLandType)`. Blocking restrictions that look at one blocker live in
+  `combat::can_block`. Indestructible is a "can't" (CR 614.17): a destroy event for such a
+  permanent is dropped when the Apply batch is built, and the lethal-damage check skips it.
+  Not compiled: hexproof from a quality, landwalk for anything but the five basic types,
+  Forge's "hidden keywords" (`HIDDEN CARDNAME can't block.` — an effect on the creature,
+  not an ability, so "loses all abilities" must not remove it; it needs its own vocabulary).
+- **References:** `TargetRef` gained `Players(PlayerRef)` and `Object(ObjRef)` (damage to
+  "you", "each opponent", "itself", "that creature"); `PlayerRef` gained `Each` and
+  `TriggeringController` ("its controller", last-known for a permanent that left).
+- **Effects:** `Tap`, `Untap`, `TapAll`, `UntapAll`, `Discard { who, amount }`,
+  `DiscardHand`, `Sacrifice { who, what, amount }`, `SacrificeThis`;
+  `TargetFilter::SpellMatching` ("counter target creature spell");
+  `ContinuousEffect::ModifyPTBy` (+X/+X with X worked out on resolution, CR 608.2h — never
+  stored: the resolve frame turns it into `ModifyPT`; card-db rejects it in static
+  abilities). `Work::EachPlayerChoose` now carries a `PlayerChoice` and the list of players,
+  so "target player", "each opponent" and "each player" share one path (CR 101.4).
+- **Where Forge and the rules differ, the rules win:** Forge has each player choose *and*
+  sacrifice before the next chooses; here everyone chooses (APNAP), then all sacrifice at
+  once. Forge's `TriggeredCardController` for a card now in a graveyard is whoever Forge
+  finds as its controller there; here it is the last controller on the battlefield.
+- **Still blocked on purpose:** `Destroy | NoRegen$` ("can't be regenerated") until
+  regeneration exists; a spell whose `Cost$` isn't just its mana cost
+  (`spell:additional-cost`); `Defined$ TargetedController` (needs the target's last known
+  controller after the target is gone); `.attacking`/`.blocking` filters.
+- **`forge-Np` soak setup:** random two-colour 60-card decks drawn by seed from every
+  compiled card, so the fuzzers reach cards no hand-made deck contains.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

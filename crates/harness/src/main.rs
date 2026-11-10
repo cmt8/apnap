@@ -251,6 +251,23 @@ fn main() -> ExitCode {
                     );
                 }
             }
+            // `--why <text>`: the blocked cards with a blocker containing <text>, each with
+            // everything that blocks it.
+            if let Some(i) = args.iter().position(|a| a == "--why")
+                && let Some(text) = args.get(i + 1)
+            {
+                let hits: Vec<_> = lib
+                    .blocked
+                    .iter()
+                    .filter(|(_, b)| b.iter().any(|x| x.contains(text.as_str())))
+                    .collect();
+                for (name, b) in hits.iter().take(60) {
+                    let all: Vec<&str> = b.iter().map(String::as_str).collect();
+                    println!("{name}: {}", all.join(" | "));
+                }
+                println!("({} cards)", hits.len());
+                return ExitCode::SUCCESS;
+            }
             let total = lib.cards.len() + lib.blocked.len();
             println!(
                 "{} of {total} Forge card scripts compile ({:.1}%); {} unreadable; tokens: {} of {} compile",

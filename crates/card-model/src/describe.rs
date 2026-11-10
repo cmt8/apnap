@@ -26,6 +26,17 @@ pub fn keyword(k: Keyword) -> &'static str {
         Keyword::Reach => "Reach",
         Keyword::Trample => "Trample",
         Keyword::Vigilance => "Vigilance",
+        Keyword::Defender => "Defender",
+        Keyword::Fear => "Fear",
+        Keyword::Hexproof => "Hexproof",
+        Keyword::Indestructible => "Indestructible",
+        Keyword::Intimidate => "Intimidate",
+        Keyword::Shroud => "Shroud",
+        Keyword::Landwalk(crate::BasicLandType::Plains) => "Plainswalk",
+        Keyword::Landwalk(crate::BasicLandType::Island) => "Islandwalk",
+        Keyword::Landwalk(crate::BasicLandType::Swamp) => "Swampwalk",
+        Keyword::Landwalk(crate::BasicLandType::Mountain) => "Mountainwalk",
+        Keyword::Landwalk(crate::BasicLandType::Forest) => "Forestwalk",
     }
 }
 
@@ -84,6 +95,7 @@ fn target_filter(f: &TargetFilter) -> String {
         TargetFilter::Player => "target player".into(),
         TargetFilter::Opponent => "target opponent".into(),
         TargetFilter::Spell => "target spell".into(),
+        TargetFilter::SpellMatching(s) => format!("target {} spell", spell_kind(s)),
         TargetFilter::Permanent(selectors) => {
             let parts: Vec<String> = selectors.iter().map(|s| selector(s, false)).collect();
             format!("target {}", join(parts, "or"))
@@ -100,11 +112,39 @@ fn target_filter(f: &TargetFilter) -> String {
     }
 }
 
+fn with_article(s: &str) -> String {
+    let vowel = s.starts_with(['a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U']);
+    if s.starts_with("another ") {
+        s.to_string()
+    } else if vowel {
+        format!("an {s}")
+    } else {
+        format!("a {s}")
+    }
+}
+
+/// "creature", "noncreature", "instant or sorcery", "blue Wizard".
+fn spell_kind(s: &Selector) -> String {
+    let mut words: Vec<String> = Vec::new();
+    words.extend(s.colors.iter().map(|c| color(*c).to_string()));
+    words.extend(s.not_types.iter().map(|t| format!("non{}", card_type(*t))));
+    let types: Vec<String> = s.types.iter().map(|t| card_type(*t).to_string()).collect();
+    words.extend(s.subtypes.iter().cloned());
+    if !types.is_empty() {
+        words.push(join(types, "or"));
+    }
+    words.join(" ")
+}
+
 fn target(mode: &Mode, r: TargetRef) -> String {
-    let TargetRef::Target(i) = r;
-    mode.targets
-        .get(i as usize)
-        .map_or("the target".to_string(), target_filter)
+    match r {
+        TargetRef::Target(i) => mode
+            .targets
+            .get(i as usize)
+            .map_or("the target".to_string(), target_filter),
+        TargetRef::Players(p) => player(mode, p),
+        TargetRef::Object(o) => obj(mode, o),
+    }
 }
 
 fn obj(mode: &Mode, r: ObjRef) -> String {
@@ -120,6 +160,8 @@ fn player(mode: &Mode, r: PlayerRef) -> String {
         PlayerRef::You => "you".into(),
         PlayerRef::Target(i) => target(mode, TargetRef::Target(i)),
         PlayerRef::EachOpponent => "each opponent".into(),
+        PlayerRef::Each => "each player".into(),
+        PlayerRef::TriggeringController => "its controller".into(),
     }
 }
 
@@ -381,6 +423,43 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             }
         ),
         Effect::SetX(a) => format!("X is {}", amount(a)),
+        Effect::Tap { what } => format!("tap {}", obj(mode, *what)),
+        Effect::Untap { what } => format!("untap {}", obj(mode, *what)),
+        Effect::TapAll(s) => format!("tap all {}", selector(s, true)),
+        Effect::UntapAll(s) => format!("untap all {}", selector(s, true)),
+        Effect::Discard { who, amount: a } => {
+            let n = amount(a);
+            let cards = if n == "1" {
+                "a card".to_string()
+            } else {
+                format!("{n} cards")
+            };
+            format!(
+                "{} {cards}",
+                verb(&player(mode, *who), "discard", "discards")
+            )
+        }
+        Effect::DiscardHand { who } => match who {
+            PlayerRef::You => "discard your hand".to_string(),
+            other => format!("{} discards their hand", player(mode, *other)),
+        },
+        Effect::Sacrifice {
+            who,
+            what,
+            amount: a,
+        } => {
+            let n = amount(a);
+            let things = if n == "1" {
+                with_article(&selector(what, false))
+            } else {
+                format!("{n} {}", selector(what, true))
+            };
+            format!(
+                "{} {things}",
+                verb(&player(mode, *who), "sacrifice", "sacrifices")
+            )
+        }
+        Effect::SacrificeThis => "sacrifice this permanent".to_string(),
         Effect::May(inner) => format!("you may {}", effect(mode, inner)),
         Effect::ReturnToBattlefield { what } => {
             format!("return {} to the battlefield", obj(mode, *what))

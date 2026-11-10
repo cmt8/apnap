@@ -26,6 +26,44 @@ fn creatures_controlled_by(st: &GameState, p: PlayerId) -> Vec<ObjectId> {
         .collect()
 }
 
+/// CR 509.1b: may `blocker` block `attacker` (which attacks `defender`), as far as evasion
+/// abilities go? (Menace counts blockers and is checked on the whole declaration.)
+pub(crate) fn can_block(
+    st: &GameState,
+    blocker: ObjectId,
+    attacker: ObjectId,
+    defender: PlayerId,
+) -> bool {
+    let (a, b) = (chars(st, attacker), chars(st, blocker));
+    let artifact = b.is(CardType::Artifact);
+    // CR 702.9b: flying — only by flying and/or reach.
+    if a.has(Keyword::Flying) && !(b.has(Keyword::Flying) || b.has(Keyword::Reach)) {
+        return false;
+    }
+    // CR 702.36b: fear — only by artifact and/or black creatures.
+    if a.has(Keyword::Fear) && !(artifact || b.colors.contains(&card_model::Color::Black)) {
+        return false;
+    }
+    // CR 702.13b: intimidate — only by artifact creatures and/or creatures that share a
+    // color with it.
+    if a.has(Keyword::Intimidate) && !(artifact || b.colors.iter().any(|c| a.colors.contains(c))) {
+        return false;
+    }
+    // CR 702.14c: landwalk — not at all while the defending player controls such a land.
+    for k in &a.keywords {
+        if let Keyword::Landwalk(t) = k {
+            let has_land = st.zones.battlefield.iter().any(|&id| {
+                let c = chars(st, id);
+                c.controller == defender && c.is(CardType::Land) && c.land_types.contains(t)
+            });
+            if has_land {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeclareAttackersFrame {
     pub candidates: Vec<ObjectId>,
@@ -41,7 +79,11 @@ impl DeclareAttackersFrame {
             .into_iter()
             .filter(|&id| {
                 let o = st.object(id);
-                !o.tapped && (!o.summoning_sick || chars(st, id).has(card_model::Keyword::Haste))
+                let c = chars(st, id);
+                // CR 702.3b: a creature with defender can't attack.
+                !o.tapped
+                    && (!o.summoning_sick || c.has(Keyword::Haste))
+                    && !c.has(Keyword::Defender)
             })
             .collect();
         DeclareAttackersFrame {
@@ -149,8 +191,6 @@ impl DeclareBlockersFrame {
             if let Some(&blocker) = self.candidates.get(self.next) {
                 // CR 509.1a: block one creature attacking that player. CR 509.1b / 702.9b:
                 // a creature with flying can't be blocked except by flying and/or reach.
-                let bc = chars(st, blocker);
-                let can_block_flyer = bc.has(Keyword::Flying) || bc.has(Keyword::Reach);
                 let options: Vec<OptionDesc> = st
                     .combat
                     .as_ref()
@@ -158,7 +198,7 @@ impl DeclareBlockersFrame {
                     .attackers
                     .iter()
                     .filter(|a| a.defender == defender)
-                    .filter(|a| can_block_flyer || !chars(st, a.attacker).has(Keyword::Flying))
+                    .filter(|a| can_block(st, blocker, a.attacker, defender))
                     .map(|a| OptionDesc::Block {
                         blocker,
                         attacker: a.attacker,

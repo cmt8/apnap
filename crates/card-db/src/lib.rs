@@ -345,9 +345,9 @@ fn check_body(body: &Body, has_x: bool, p: &mut dyn FnMut(String)) {
 fn selector(_s: &card_model::Selector, _p: &mut dyn FnMut(String)) {}
 
 fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String)) {
-    let slot = |t: &TargetRef| {
-        let TargetRef::Target(i) = t;
-        mode.targets.get(*i as usize)
+    let slot = |t: &TargetRef| match t {
+        TargetRef::Target(i) => mode.targets.get(*i as usize),
+        TargetRef::Players(_) | TargetRef::Object(_) => None,
     };
     let amount = |a: &Amount, p: &mut dyn FnMut(String)| match a {
         Amount::X if !has_x => {
@@ -415,13 +415,36 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             }
         }
         Effect::DealDamage { to, amount: a, .. } => {
-            match slot(to) {
-                None => p(format!("{to:?} has no target slot")),
-                Some(TargetFilter::Spell) => p("can't deal damage to a spell".into()),
-                Some(_) => {}
+            match to {
+                TargetRef::Players(r) => player(r, p),
+                TargetRef::Object(r) => obj(r, p),
+                TargetRef::Target(_) => match slot(to) {
+                    None => p(format!("{to:?} has no target slot")),
+                    Some(TargetFilter::Spell | TargetFilter::SpellMatching(_)) => {
+                        p("can't deal damage to a spell".into())
+                    }
+                    Some(_) => {}
+                },
             }
             amount(a, p);
         }
+        Effect::Tap { what } | Effect::Untap { what } => obj(what, p),
+        Effect::TapAll(s) | Effect::UntapAll(s) => selector(s, p),
+        Effect::Discard { who, amount: a } => {
+            player(who, p);
+            amount(a, p);
+        }
+        Effect::DiscardHand { who } => player(who, p),
+        Effect::Sacrifice {
+            who,
+            what,
+            amount: a,
+        } => {
+            player(who, p);
+            selector(what, p);
+            amount(a, p);
+        }
+        Effect::SacrificeThis => {}
         Effect::Draw { who, amount: a }
         | Effect::GainLife { who, amount: a }
         | Effect::LoseLife { who, amount: a } => {
@@ -429,7 +452,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             amount(a, p);
         }
         Effect::Counter { what } => match slot(what) {
-            Some(TargetFilter::Spell) => {}
+            Some(TargetFilter::Spell | TargetFilter::SpellMatching(_)) => {}
             other => p(format!("Counter needs a Spell target slot, got {other:?}")),
         },
         Effect::EachPlayer(_) => {}

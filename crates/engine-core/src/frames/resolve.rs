@@ -38,11 +38,22 @@ pub enum Work {
     /// CR 101.4: players choose in APNAP order (later players know earlier choices,
     /// 101.4b); then all the actions happen simultaneously.
     EachPlayerChoose {
-        action: EachPlayerAction,
+        choice: PlayerChoice,
+        /// How many each player chooses (all they can, if fewer).
+        n: u32,
         order: Vec<PlayerId>,
         next: usize,
         chosen: Vec<(PlayerId, Vec<ObjectId>)>,
     },
+}
+
+/// What each player picks in a [`Work::EachPlayerChoose`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlayerChoice {
+    /// CR 701.9: cards from their hand to discard.
+    Discard,
+    /// CR 701.21: permanents they control that match, to sacrifice.
+    Sacrifice(Box<card_model::Selector>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,8 +93,32 @@ impl ResolveFrame {
         }
     }
 
+    /// Everything `r` stands for right now: objects and players.
+    fn recipients(&self, st: &GameState, k: usize, r: TargetRef) -> Vec<Target> {
+        match r {
+            TargetRef::Target(_) => self.target(st, k, r).into_iter().collect(),
+            TargetRef::Players(p) => self
+                .players(st, k, p)
+                .into_iter()
+                .map(Target::Player)
+                .collect(),
+            TargetRef::Object(o) => self.obj(st, k, o).into_iter().map(Target::Object).collect(),
+        }
+    }
+
+    /// The players `r` stands for, in APNAP order (CR 101.4).
+    fn players_apnap(&self, st: &GameState, k: usize, r: PlayerRef) -> Vec<PlayerId> {
+        let who = self.players(st, k, r);
+        st.apnap_order()
+            .into_iter()
+            .filter(|p| who.contains(p))
+            .collect()
+    }
+
     fn target(&self, st: &GameState, k: usize, r: TargetRef) -> Option<Target> {
-        let TargetRef::Target(i) = r;
+        let TargetRef::Target(i) = r else {
+            return None;
+        };
         let t = *self.targets.get(k)?.get(i as usize)?;
         // CR 608.2b: illegal targets aren't affected.
         is_legal(
@@ -110,6 +145,13 @@ impl ResolveFrame {
             },
             // In turn order from the controller (CR 101.4); the effects are simultaneous.
             PlayerRef::EachOpponent => st.opponents(self.controller),
+            PlayerRef::Each => st.apnap_order(),
+            PlayerRef::TriggeringController => self
+                .subject_chars(st)
+                .map(|c| c.controller)
+                .filter(|p| st.in_game(*p))
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -269,7 +311,8 @@ impl ResolveFrame {
                     }
                 },
                 Work::EachPlayerChoose {
-                    action,
+                    choice,
+                    n,
                     order,
                     mut next,
                     mut chosen,
@@ -287,15 +330,17 @@ impl ResolveFrame {
                         next += 1;
                     }
                     while let Some(&p) = order.get(next) {
-                        let (kind, n, pool) = each_player_options(st, action, p);
-                        let n = n.min(pool.len());
+                        let (kind, pool) =
+                            each_player_options(st, &choice, p, self.source, self.controller);
+                        let n = (n as usize).min(pool.len());
                         if !st.in_game(p) || n == 0 {
                             chosen.push((p, Vec::new()));
                             next += 1;
                             continue;
                         }
                         self.work.push(Work::EachPlayerChoose {
-                            action,
+                            choice,
+                            n: n as u32,
                             order,
                             next,
                             chosen,
@@ -313,9 +358,9 @@ impl ResolveFrame {
                         );
                     }
                     // All players have chosen: the actions happen simultaneously.
-                    let cause = match action {
-                        EachPlayerAction::Discard(_) => MoveCause::Discard,
-                        _ => MoveCause::Sacrifice,
+                    let cause = match choice {
+                        PlayerChoice::Discard => MoveCause::Discard,
+                        PlayerChoice::Sacrifice(_) => MoveCause::Sacrifice,
                     };
                     let events: Vec<Proposed> = chosen
                         .into_iter()
@@ -453,15 +498,17 @@ impl ResolveFrame {
             }
             Effect::DealDamage { to, amount, by } => {
                 let amount = self.amount(st, &amount);
-                match self.target(st, k, to) {
-                    Some(Target::Player(p)) => {
-                        vec![self.damage_by(st, by, DamageTarget::Player(p), amount)]
-                    }
-                    Some(Target::Object(o)) => {
-                        vec![self.damage_by(st, by, DamageTarget::Object(o), amount)]
-                    }
-                    None => Vec::new(),
-                }
+                // Several recipients ("to each opponent") are dealt damage at once.
+                self.recipients(st, k, to)
+                    .into_iter()
+                    .map(|t| {
+                        let t = match t {
+                            Target::Player(p) => DamageTarget::Player(p),
+                            Target::Object(o) => DamageTarget::Object(o),
+                        };
+                        self.damage_by(st, by, t, amount)
+                    })
+                    .collect()
             }
             Effect::DamageEachPlayer { amount } => {
                 let amount = self.amount(st, &amount);
@@ -639,13 +686,103 @@ impl ResolveFrame {
                 .flat_map(|player| (0..n).map(move |_| Proposed::Draw { player }))
                 .collect(),
             Effect::EachPlayer(action) => {
+                let (choice, n) = match action {
+                    EachPlayerAction::Discard(n) => (PlayerChoice::Discard, n),
+                    EachPlayerAction::SacrificeCreature(n) => (
+                        PlayerChoice::Sacrifice(Box::new(card_model::Selector {
+                            types: vec![CardType::Creature],
+                            ..Default::default()
+                        })),
+                        n,
+                    ),
+                    EachPlayerAction::Draw(_) => unreachable!("handled above"),
+                };
                 self.work.push(Work::EachPlayerChoose {
-                    action,
+                    choice,
+                    n,
                     order: st.apnap_order(),
                     next: 0,
                     chosen: Vec::new(),
                 });
                 Vec::new()
+            }
+            // CR 701.26: only an untapped permanent can be tapped, only a tapped one untapped.
+            Effect::Tap { what } => {
+                if let Some(object) = self.obj(st, k, what)
+                    && !st.object(object).tapped
+                {
+                    execute(st, GameAction::Tap { object });
+                }
+                Vec::new()
+            }
+            Effect::Untap { what } => {
+                if let Some(object) = self.obj(st, k, what)
+                    && st.object(object).tapped
+                {
+                    execute(st, GameAction::Untap { object });
+                }
+                Vec::new()
+            }
+            Effect::TapAll(sel) => {
+                for object in crate::layers::matching(st, &sel, self.source, self.controller) {
+                    if !st.object(object).tapped {
+                        execute(st, GameAction::Tap { object });
+                    }
+                }
+                Vec::new()
+            }
+            Effect::UntapAll(sel) => {
+                for object in crate::layers::matching(st, &sel, self.source, self.controller) {
+                    if st.object(object).tapped {
+                        execute(st, GameAction::Untap { object });
+                    }
+                }
+                Vec::new()
+            }
+            Effect::Discard { who, amount } => {
+                let n = self.amount(st, &amount);
+                self.work.push(Work::EachPlayerChoose {
+                    choice: PlayerChoice::Discard,
+                    n,
+                    order: self.players_apnap(st, k, who),
+                    next: 0,
+                    chosen: Vec::new(),
+                });
+                Vec::new()
+            }
+            Effect::DiscardHand { who } => self
+                .players_apnap(st, k, who)
+                .into_iter()
+                .flat_map(|p| st.zones.hands[p.index()].clone())
+                .map(|card| Proposed::moving(card, Zone::Graveyard, MoveCause::Discard))
+                .collect(),
+            Effect::Sacrifice { who, what, amount } => {
+                let n = self.amount(st, &amount);
+                self.work.push(Work::EachPlayerChoose {
+                    choice: PlayerChoice::Sacrifice(Box::new(what)),
+                    n,
+                    order: self.players_apnap(st, k, who),
+                    next: 0,
+                    chosen: Vec::new(),
+                });
+                Vec::new()
+            }
+            // CR 701.21a: a player can sacrifice only a permanent they control.
+            Effect::SacrificeThis => {
+                let mine = st
+                    .objects
+                    .get(&self.source)
+                    .is_some_and(|o| o.zone == Zone::Battlefield)
+                    && crate::layers::controller_of(st, self.source) == self.controller;
+                if mine {
+                    vec![Proposed::moving(
+                        self.source,
+                        Zone::Graveyard,
+                        MoveCause::Sacrifice,
+                    )]
+                } else {
+                    Vec::new()
+                }
             }
         }
     }
@@ -683,18 +820,15 @@ impl ResolveFrame {
 /// each-player choice.
 fn each_player_options(
     st: &GameState,
-    action: EachPlayerAction,
+    choice: &PlayerChoice,
     p: PlayerId,
-) -> (ChoiceKind, usize, Vec<ObjectId>) {
-    match action {
-        EachPlayerAction::Discard(n) => (
-            ChoiceKind::Discard,
-            n as usize,
-            st.zones.hands[p.index()].clone(),
-        ),
-        EachPlayerAction::SacrificeCreature(n) => (
+    source: ObjectId,
+    controller: PlayerId,
+) -> (ChoiceKind, Vec<ObjectId>) {
+    match choice {
+        PlayerChoice::Discard => (ChoiceKind::Discard, st.zones.hands[p.index()].clone()),
+        PlayerChoice::Sacrifice(sel) => (
             ChoiceKind::Sacrifice,
-            n as usize,
             // CR 701.21a: only permanents they control.
             st.zones
                 .battlefield
@@ -702,10 +836,10 @@ fn each_player_options(
                 .copied()
                 .filter(|&id| {
                     let c = chars(st, id);
-                    c.controller == p && c.is(CardType::Creature)
+                    c.controller == p
+                        && crate::layers::matches(sel, &c, st.object(id), source, controller)
                 })
                 .collect(),
         ),
-        EachPlayerAction::Draw(_) => unreachable!("Draw has no choice"),
     }
 }

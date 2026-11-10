@@ -35,6 +35,12 @@ impl ApplyFrame {
         let rank = |p| order.iter().position(|q| *q == p).unwrap_or(order.len());
         let mut queue: Vec<(usize, Pending)> = events
             .into_iter()
+            // CR 702.12b: a permanent with indestructible can't be destroyed — the event
+            // doesn't happen (CR 614.17), so nothing can replace it either.
+            .filter(|event| {
+                !matches!(event, Proposed::Move { object, cause: MoveCause::Destroy, .. }
+                    if crate::layers::chars(st, *object).has(card_model::Keyword::Indestructible))
+            })
             .map(|event| {
                 (
                     rank(affected_player(st, &event)),

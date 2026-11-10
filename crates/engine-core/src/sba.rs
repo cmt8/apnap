@@ -94,8 +94,10 @@ pub(crate) fn gather(st: &mut GameState) -> Gathered {
                 // CR 704.5f
                 g.events
                     .push(Proposed::moving(id, Zone::Graveyard, MoveCause::Rule));
-            } else if o.damage_marked >= toughness as u32
-                || (o.deathtouch_damage && o.damage_marked > 0)
+            } else if (o.damage_marked >= toughness as u32
+                || (o.deathtouch_damage && o.damage_marked > 0))
+                // CR 702.12b: a permanent with indestructible ignores this check.
+                && !c.has(card_model::Keyword::Indestructible)
             {
                 // CR 704.5g lethal damage / 704.5h deathtouch: destroyed.
                 g.events

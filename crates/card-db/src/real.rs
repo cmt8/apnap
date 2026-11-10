@@ -40,6 +40,17 @@ fn keyword_name(k: Keyword) -> &'static str {
         Keyword::Reach => "Reach",
         Keyword::Trample => "Trample",
         Keyword::Vigilance => "Vigilance",
+        Keyword::Defender => "Defender",
+        Keyword::Fear => "Fear",
+        Keyword::Hexproof => "Hexproof",
+        Keyword::Indestructible => "Indestructible",
+        Keyword::Intimidate => "Intimidate",
+        Keyword::Shroud => "Shroud",
+        Keyword::Landwalk(card_model::BasicLandType::Plains) => "Plainswalk",
+        Keyword::Landwalk(card_model::BasicLandType::Island) => "Islandwalk",
+        Keyword::Landwalk(card_model::BasicLandType::Swamp) => "Swampwalk",
+        Keyword::Landwalk(card_model::BasicLandType::Mountain) => "Mountainwalk",
+        Keyword::Landwalk(card_model::BasicLandType::Forest) => "Forestwalk",
     }
 }
 

@@ -71,7 +71,8 @@ cargo run --release -p harness -- fuzz --setup real-4p --games 1000 --threads 8 
 cargo run -p harness -- fetch-cards                       # printed data for the precons + basics -> ~/.cache/apnap (tests need it)
 cargo run -p harness -- coverage [--verbose]              # which precon cards are scripted/verified
 cargo run --release -p harness -- fetch-forge             # Forge's card scripts (pinned commit) -> ~/.cache/apnap/forge (git, network)
-cargo run --release -p harness -- forge-coverage [--top N] [--sample N]   # how many of ALL cards compile; what blocks the rest
+cargo run --release -p harness -- forge-coverage [--top N] [--sample N] [--why TEXT]   # how many of ALL cards compile; what blocks the rest; --why lists the cards behind a blocker
+cargo run --release -p harness -- fuzz --setup forge-4p --games 400 --threads 8      # random decks drawn from EVERY compiled card (finds what precon decks never reach)
 ```
 
 ## Definition of done for any change
@@ -124,16 +125,20 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status: 3,602 of 34,465 scripts compile (10.5%); about 8,500 more are one feature away.
+Status (D-047): 4,368 of 34,463 scripts compile (12.7%); about 8,500 more are one feature
+away. Feature tests live in `crates/harness/tests/forge_features.rs`: invented cards written
+in Forge's format, compiled by `harness::forge_test_catalog` and played (`forge_test_blockers`
+for "this must not compile"). Three guards catch compiler holes — keep them: a line that
+yields nothing without a named blocker is `unexplained:*`; every compiled card goes through
+`card_db::validate` (`invalid:*`); and the `forge-Np` soak plays random decks of all of them.
 References written from Forge's sources: `docs/forge/script-format.md` (file format, costs,
 filters, `Defined$`, expressions), `effects.md` (every effect API), and
 `triggers-statics-replacements-keywords.md`. Read the relevant section before compiling a
 feature: Forge's defaults are often not what the key names suggest (flags are tested for
 presence, `Defined$ Targeted` means every target of the chain, a trigger that runs an
 `AB$` with a cost is "you may pay", triggers without `TriggerZones$` work from any zone).
-Not built yet: loading compiled cards into games (a game's catalog must hold only the
-cards in its decks, not all 30k), the Scryfall cross-check of printed characteristics, the
-generated-text-vs-Oracle round trip, multi-face cards.
+Not built yet: the generated-text-vs-Oracle round trip, multi-face cards, costs that need
+a choice, library search, mana abilities that make more than one mana (see the blocker list).
 
 ## Current milestone: M4 — IN PROGRESS (started 2026-11-09), branch `m4-wip`
 Decisions: D-034 (precons: Calling All Angels, Wretched Ranks, Reign of Dragons,

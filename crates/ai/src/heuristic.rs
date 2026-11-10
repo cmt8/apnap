@@ -44,7 +44,17 @@ fn effect_polarity(e: &Effect) -> Polarity {
         | Effect::ReturnToHand { .. }
         | Effect::Exile { .. }
         | Effect::ExileGraveyard { .. }
+        | Effect::Tap { .. }
         | Effect::DamageEachPlayer { .. } => Polarity::Harm,
+        // Pointed at a player, these are meant for an opponent.
+        Effect::Discard { who, .. }
+        | Effect::DiscardHand { who }
+        | Effect::Sacrifice { who, .. } => match who {
+            card_model::PlayerRef::Target(_) => Polarity::Harm,
+            _ => Polarity::Neutral,
+        },
+        Effect::Untap { .. } => Polarity::Help,
+        Effect::TapAll(_) | Effect::UntapAll(_) | Effect::SacrificeThis => Polarity::Neutral,
         Effect::PutCounters { kind, .. } => match kind {
             CounterKind::PlusOne => Polarity::Help,
             CounterKind::MinusOne => Polarity::Harm,
@@ -107,7 +117,11 @@ fn kw_value(k: Keyword) -> i64 {
         Keyword::DoubleStrike => 4,
         Keyword::Flying | Keyword::Deathtouch => 3,
         Keyword::FirstStrike | Keyword::Trample | Keyword::Lifelink | Keyword::Menace => 2,
+        Keyword::Indestructible => 4,
+        Keyword::Hexproof | Keyword::Shroud => 2,
+        Keyword::Fear | Keyword::Intimidate | Keyword::Landwalk(_) => 2,
         Keyword::Vigilance | Keyword::Haste | Keyword::Reach | Keyword::Flash => 1,
+        Keyword::Defender => -1,
     }
 }
 
@@ -382,7 +396,10 @@ impl HeuristicAgent {
                     )
                     .chain(v.stack.iter().map(|s| Target::Object(s.id)))
                     .collect();
-                if matches!(m.targets[0], card_model::TargetFilter::Spell) {
+                if matches!(
+                    m.targets[0],
+                    card_model::TargetFilter::Spell | card_model::TargetFilter::SpellMatching(_)
+                ) {
                     cands.retain(
                         |t| matches!(t, Target::Object(id) if v.stack.iter().any(|s| s.id == *id)),
                     );

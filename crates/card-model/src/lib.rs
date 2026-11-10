@@ -333,6 +333,23 @@ pub enum Keyword {
     Haste,
     /// CR 702.17: can block creatures with flying.
     Reach,
+    /// CR 702.3: can't attack.
+    Defender,
+    /// CR 702.36: can't be blocked except by artifact and/or black creatures.
+    Fear,
+    /// CR 702.11: can't be the target of spells or abilities its controller's opponents
+    /// control.
+    Hexproof,
+    /// CR 702.12: can't be destroyed.
+    Indestructible,
+    /// CR 702.13: can't be blocked except by artifact creatures and/or creatures that
+    /// share a color with it.
+    Intimidate,
+    /// CR 702.18: can't be the target of spells or abilities.
+    Shroud,
+    /// CR 702.14: "[type]walk" — can't be blocked as long as the defending player controls
+    /// a land of that type.
+    Landwalk(BasicLandType),
 }
 
 /// One ability printed on a card (CR 113).
@@ -645,6 +662,10 @@ pub enum TargetFilter {
         cards: Selector,
         whose: Who,
     },
+    /// A spell on the stack with these qualities: "target creature spell", "target
+    /// noncreature spell", "target instant or sorcery spell". Only the card types,
+    /// subtypes and colors of the selector are looked at.
+    SpellMatching(Selector),
 }
 
 impl TargetFilter {
@@ -813,6 +834,38 @@ pub enum Effect {
     /// "…where X is [amount]": works X out once, now; later `Amount::X` in the same
     /// resolution uses it (CR 608.2h: determined once, when the effect is applied).
     SetX(Amount),
+    /// CR 701.26a: tap the permanent (nothing happens if it is already tapped).
+    Tap {
+        what: ObjRef,
+    },
+    /// CR 701.26b: untap the permanent.
+    Untap {
+        what: ObjRef,
+    },
+    /// "Tap all [selector]."
+    TapAll(Selector),
+    /// "Untap all [selector]."
+    UntapAll(Selector),
+    /// CR 701.9: the players each discard that many cards of their choice (all they have,
+    /// if fewer). They choose in APNAP order, then discard at once (CR 101.4).
+    Discard {
+        who: PlayerRef,
+        amount: Amount,
+    },
+    /// The players each discard their hand.
+    DiscardHand {
+        who: PlayerRef,
+    },
+    /// CR 701.21: the players each sacrifice that many permanents of their choice among
+    /// those they control that match (all of them, if fewer). APNAP order as for discards.
+    Sacrifice {
+        who: PlayerRef,
+        what: Selector,
+        amount: Amount,
+    },
+    /// "Sacrifice this": only if it is still on the battlefield under the control of the
+    /// ability's controller (CR 701.21a).
+    SacrificeThis,
 }
 
 /// An object an effect refers to: a target slot, or the source itself.
@@ -846,10 +899,15 @@ pub enum EachPlayerAction {
     Draw(u32),
 }
 
-/// Refers to target slot `n` of the current mode.
+/// What an effect is done to when that can be an object or a player (damage).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TargetRef {
+    /// Target slot `n` of the current mode.
     Target(u8),
+    /// Players that aren't targets: "to you", "to each opponent".
+    Players(PlayerRef),
+    /// A permanent that isn't a target: "to itself", "to that creature".
+    Object(ObjRef),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -860,6 +918,11 @@ pub enum PlayerRef {
     Target(u8),
     /// "each opponent" (of the controller), all at once.
     EachOpponent,
+    /// "each player", all at once.
+    Each,
+    /// "its controller": who controls the object whose event triggered the ability — or
+    /// controlled it last, if it has left the battlefield (CR 608.2h).
+    TriggeringController,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

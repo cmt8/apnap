@@ -62,6 +62,22 @@ pub fn printed_mismatch(def: &CardDef, card: &ScryfallCard) -> Vec<String> {
     out
 }
 
+/// What the definition checks every hand-written card passes (`crate::validate`) say about
+/// a compiled one, as blockers: an instant without a spell ability, an effect that refers
+/// to a target slot of the wrong kind… The compiler shouldn't produce these; if it does,
+/// the card must not load.
+fn invalid(def: &CardDef) -> Blockers {
+    let script = card_model::CardScript {
+        verified: true,
+        tests: vec!["forge_features".to_string()],
+        card: def.clone(),
+    };
+    crate::validate(&script, crate::Strictness::Strict)
+        .into_iter()
+        .map(|p| format!("invalid:{p}"))
+        .collect()
+}
+
 impl Library {
     /// Compile every script. With `scryfall`, a card whose printed characteristics disagree
     /// with Scryfall's is blocked rather than loaded.
@@ -86,7 +102,12 @@ impl Library {
                     Ok(mut c) => {
                         c.def.token = true;
                         c.def.key = Some(stem.clone());
-                        lib.tokens.insert(stem.clone(), c);
+                        let problems = invalid(&c.def);
+                        if problems.is_empty() {
+                            lib.tokens.insert(stem.clone(), c);
+                        } else {
+                            lib.blocked_tokens.insert(stem.clone(), problems);
+                        }
                     }
                     Err(b) => {
                         lib.blocked_tokens.insert(stem.clone(), b);
@@ -104,7 +125,7 @@ impl Library {
             };
             let name = script.faces[0].name.clone();
             let result = compile(&script, &lib.known).and_then(|c| {
-                let mut blockers = Blockers::new();
+                let mut blockers = invalid(&c.def);
                 if let Some(card) = scryfall.and_then(|d| d.get(&name)) {
                     blockers.extend(printed_mismatch(&c.def, card));
                 }

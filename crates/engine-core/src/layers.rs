@@ -431,11 +431,52 @@ impl Walk<'_> {
         }
     }
 
+    /// Can anything still change whether `a` exists or what it applies to? Not for a
+    /// resolved effect (it exists until it ends and its set was locked in, CR 611.2c), nor
+    /// for a static effect that began applying in an earlier layer (CR 613.6).
+    fn can_depend(&self, a: &Eff<'_>) -> bool {
+        matches!(a.key, Key::Static { .. }) && !self.started.contains_key(&a.key)
+    }
+
+    /// A cheap, conservative pre-check for [`Walk::depends`]: could what `b` does in this
+    /// layer change `a`'s existence or the set `a` applies to? `false` only when it
+    /// certainly can't — then the full comparison (which copies the whole view) is skipped.
+    /// Without this, many effects in one layer cost a copy of the view per pair of them.
+    fn could_matter(a: &Eff<'_>, b: &Eff<'_>, layer: Layer) -> bool {
+        let sel = match a.affected {
+            Aff::Dynamic(Affected::All(sel)) => Some(sel),
+            // "This" and "enchanted": the set doesn't look at characteristics. Only the
+            // ability's existence can change.
+            Aff::Dynamic(Affected::This | Affected::Enchanted) => None,
+            Aff::Locked(_) => return false,
+        };
+        b.parts
+            .iter()
+            .filter(|p| layer_of(p) == layer)
+            .any(|p| match p {
+                // The ability itself can be removed.
+                ContinuousEffect::LoseAllAbilities => true,
+                // Whose it is changes "you" and "you control".
+                ContinuousEffect::GainControl => true,
+                ContinuousEffect::AddTypes { .. } => sel.is_some(),
+                ContinuousEffect::SetColors(_) => sel.is_some_and(|s| !s.colors.is_empty()),
+                ContinuousEffect::AddKeywords(_) | ContinuousEffect::LoseKeywords(_) => {
+                    sel.is_some_and(|s| !s.keywords.is_empty())
+                }
+                ContinuousEffect::SetPT(..)
+                | ContinuousEffect::ModifyPT(..)
+                | ContinuousEffect::ModifyPTBy { .. }
+                | ContinuousEffect::SwitchPT => {
+                    sel.is_some_and(|s| s.power_min.is_some() || s.toughness_min.is_some())
+                }
+            })
+    }
+
     /// CR 613.8a: does `a` depend on `b`? (Same layer is given.) Applying `b` would change
     /// `a`'s existence or what it applies to. What our effects *do* never depends on other
     /// effects, and no CDAs exist yet (613.8a(c)).
     fn depends(&self, a: &Eff<'_>, b: &Eff<'_>, layer: Layer, view: &View) -> bool {
-        if a.key == b.key {
+        if a.key == b.key || !self.can_depend(a) || !Self::could_matter(a, b, layer) {
             return false;
         }
         let before = (self.exists(a, view), self.affected(a, view));
@@ -561,9 +602,12 @@ fn compute(st: &GameState) -> View {
                 live.iter()
                     .copied()
                     .filter(|&a| {
-                        !live
-                            .iter()
-                            .any(|&b| b != a && walk.depends(&effs[a], &effs[b], layer, &view))
+                        // Most effects can't depend on anything (see `can_depend`): only
+                        // the others are compared with every live effect.
+                        !walk.can_depend(&effs[a])
+                            || !live
+                                .iter()
+                                .any(|&b| b != a && walk.depends(&effs[a], &effs[b], layer, &view))
                     })
                     .collect()
             };

@@ -32,6 +32,9 @@ pub enum Setup {
     /// M4: 60-card decks built only from verified real cards (`decks/real_*.ron`, D-038),
     /// alternating by seat. Needs the Scryfall cache.
     Real { players: u8 },
+    /// A soak over every card that compiles from Forge's scripts (D-046): each seat gets a
+    /// 60-card two-colour deck drawn at random (by the game's seed) from all of them.
+    Forge { players: u8 },
 }
 
 /// The real-card decks, in seat order.
@@ -52,7 +55,8 @@ impl Setup {
             Setup::M1 { players }
             | Setup::M2 { players }
             | Setup::Commander { players }
-            | Setup::Real { players } => players,
+            | Setup::Real { players }
+            | Setup::Forge { players } => players,
         }
     }
 
@@ -64,6 +68,7 @@ impl Setup {
             Setup::M2 { players } => format!("m2-{players}p"),
             Setup::Commander { players } => format!("cmd-{players}p"),
             Setup::Real { players } => format!("real-{players}p"),
+            Setup::Forge { players } => format!("forge-{players}p"),
         }
     }
 
@@ -74,6 +79,10 @@ impl Setup {
         if let Some(rest) = label.strip_prefix("cmd-") {
             let n = rest.strip_suffix('p')?.parse().ok()?;
             return Some(Setup::Commander { players: n });
+        }
+        if let Some(rest) = label.strip_prefix("forge-") {
+            let n = rest.strip_suffix('p')?.parse().ok()?;
+            return Some(Setup::Forge { players: n });
         }
         if let Some(rest) = label.strip_prefix("real-") {
             let n = rest.strip_suffix('p')?.parse().ok()?;
@@ -134,13 +143,38 @@ impl Setup {
                 .collect();
             return engine_core::new_game(config, catalog, &decks, seed).expect("valid setup");
         }
+        if let Setup::Forge { players } = self {
+            let config = if players == 2 {
+                GameConfig::constructed_1v1()
+            } else {
+                GameConfig::free_for_all(players)
+            };
+            let lists = forge_random_decks(&forge_library(), players, seed);
+            let names = lists.iter().flatten().map(String::as_str);
+            let catalog = Arc::new(
+                forge_library()
+                    .catalog_for(&catalog(), names)
+                    .unwrap_or_else(|missing| panic!("cards that don't compile: {missing:?}")),
+            );
+            let decks: Vec<Vec<CardDefId>> = lists
+                .iter()
+                .map(|list| {
+                    list.iter()
+                        .map(|n| catalog.find(n).expect("in the catalog"))
+                        .collect()
+                })
+                .collect();
+            return engine_core::new_game(config, catalog, &decks, seed).expect("valid setup");
+        }
         let (config, deck_file) = match self {
             Setup::M0Vanilla => (GameConfig::constructed_1v1(), "m0_vanilla.ron"),
             Setup::M1 { players: 2 } => (GameConfig::constructed_1v1(), "m1_red_green.ron"),
             Setup::M1 { players } => (GameConfig::free_for_all(players), "m1_red_green.ron"),
             Setup::M2 { players: 2 } => (GameConfig::constructed_1v1(), "m2_mixed.ron"),
             Setup::M2 { players } => (GameConfig::free_for_all(players), "m2_mixed.ron"),
-            Setup::Commander { .. } | Setup::Real { .. } => unreachable!("handled above"),
+            Setup::Commander { .. } | Setup::Real { .. } | Setup::Forge { .. } => {
+                unreachable!("handled above")
+            }
         };
         let d = deck(deck_file);
         let decks = vec![d; config.num_players as usize];
@@ -287,6 +321,58 @@ pub fn deck_file(file: &str) -> card_db::Deck {
     let path = format!("crates/cards/decks/{file}");
     card_db::load_deck_file(card_db::Source { path: &path, text }, &catalog())
         .unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// Random decks for [`Setup::Forge`]: per seat two colours, 36 cards that cost only those
+/// colours (any number of copies), and 12 of each of the two basic lands. Determined by
+/// `seed` alone.
+pub fn forge_random_decks(
+    lib: &card_db::forge::Library,
+    players: u8,
+    seed: u64,
+) -> Vec<Vec<String>> {
+    use card_model::{Color, ManaSymbol};
+    // SplitMix64: all that's needed is a reproducible stream.
+    let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
+    let mut next = move |n: usize| -> usize {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((z ^ (z >> 31)) % n as u64) as usize
+    };
+    const BASICS: [(Color, &str); 5] = [
+        (Color::White, "Plains"),
+        (Color::Blue, "Island"),
+        (Color::Black, "Swamp"),
+        (Color::Red, "Mountain"),
+        (Color::Green, "Forest"),
+    ];
+    (0..players)
+        .map(|_| {
+            let a = next(5);
+            let b = (a + 1 + next(4)) % 5;
+            let colors = [BASICS[a].0, BASICS[b].0];
+            let pool: Vec<&String> = lib
+                .cards
+                .iter()
+                .filter(|(_, c)| {
+                    c.def.mana_cost.as_ref().is_none_or(|m| {
+                        m.symbols.iter().all(|s| match s {
+                            ManaSymbol::Colored(c) => colors.contains(c),
+                            _ => true,
+                        })
+                    })
+                })
+                .map(|(name, _)| name)
+                .collect();
+            let mut deck: Vec<String> = (0..36).map(|_| pool[next(pool.len())].clone()).collect();
+            for land in [BASICS[a].1, BASICS[b].1] {
+                deck.extend(std::iter::repeat_n(land.to_string(), 12));
+            }
+            deck
+        })
+        .collect()
 }
 
 /// Every card that compiles from Forge's scripts, cross-checked against Scryfall's bulk
