@@ -14,7 +14,7 @@ RealCard(
                 targets: [CardInGraveyard(cards: (types: [Creature]), whose: Any)],
                 effect: Seq([
                     Exile(what: Target(0)),
-                    CreateToken(token: "Zombie", count: Fixed(1), who: You),
+                    CreateToken(token: "b_2_2_zombie", count: Fixed(1), who: You),
                 ]),
             )),
         ),

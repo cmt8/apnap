@@ -7,7 +7,7 @@ RealCard(
         Triggered(
             when: BeginningOf(step: Upkeep, whose: You),
             intervening_if: Some(Control(what: (types: [Land], controller: You), at_least: 6)),
-            body: Effect((effect: CreateToken(token: "Dragon 5/5 flying", count: Fixed(1), who: You))),
+            body: Effect((effect: CreateToken(token: "r_5_5_dragon_flying", count: Fixed(1), who: You))),
         ),
     ],
 )

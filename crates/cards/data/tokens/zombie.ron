@@ -4,7 +4,7 @@ CardScript(
     tests: ["open_the_graves_makes_a_zombie_for_each_nontoken_creature"],
     card: (
         name: "Zombie Token",
-        key: Some("Zombie"),
+        key: Some("b_2_2_zombie"),
         token: true,
         colors: Some([Black]),
         card_types: [Creature],

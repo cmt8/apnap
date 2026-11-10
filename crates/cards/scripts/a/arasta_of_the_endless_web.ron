@@ -7,7 +7,7 @@ RealCard(
     abilities: [
         Triggered(
             when: Cast(by: Opponent, types: [Instant, Sorcery]),
-            body: Effect((effect: CreateToken(token: "Spider", count: Fixed(1), who: You))),
+            body: Effect((effect: CreateToken(token: "g_1_2_spider_reach", count: Fixed(1), who: You))),
         ),
     ],
 )

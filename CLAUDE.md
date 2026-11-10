@@ -33,8 +33,15 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
     Apply batch performed (D-025).
 12. Illegal responses are rejected before any mutation (state hash unchanged).
 13. No Wizards/Scryfall assets in the repo (card data/images are fetched at runtime into the
-    XDG cache). Test cards are invented ("Test …"). Prior-art engines (Forge, XMage,
-    MTG-Ichor, phase-rs, …) are design references only — never copy their code.
+    XDG cache). Test cards are invented ("Test …"). The project is GPL-3.0-or-later (D-046):
+    Forge's card scripts (GPL v3) are compiled into our cards, and its sources may be read
+    to learn what a script feature means — but the scripts are fetched into the cache, not
+    committed (they contain card names and Oracle text), and engine code is written for
+    this engine, not transplanted. Non-GPL-compatible engines stay design references only.
+15. The Forge compiler (`card_db::forge`) never drops or guesses: a card compiles only if
+    every line, parameter, filter property and expression of its script is understood;
+    anything else is a named blocker. A word in a filter is a subtype only if it is a
+    known subtype. Every script feature the compiler accepts needs a test of its meaning.
 
 ## Conventions
 - Library: index 0 = bottom, last = top. Stack/graveyard: last = top. Battlefield: timestamp order.
@@ -63,6 +70,8 @@ APNAP_SHOT_DIR=/tmp/shots cargo test -p app --test screenshot -- --ignored   # r
 cargo run --release -p harness -- fuzz --setup real-4p --games 1000 --threads 8      # real-card decks
 cargo run -p harness -- fetch-cards                       # printed data for the precons + basics -> ~/.cache/apnap (tests need it)
 cargo run -p harness -- coverage [--verbose]              # which precon cards are scripted/verified
+cargo run --release -p harness -- fetch-forge             # Forge's card scripts (pinned commit) -> ~/.cache/apnap/forge (git, network)
+cargo run --release -p harness -- forge-coverage [--top N] [--sample N]   # how many of ALL cards compile; what blocks the rest
 ```
 
 ## Definition of done for any change
@@ -79,6 +88,8 @@ cargo run -p harness -- coverage [--verbose]              # which precon cards a
 - `crates/card-model` — card vocabulary types (no_std; externally tagged; ManaCost as text).
 - `crates/cards` — `data/` (self-contained: invented "Test …" cards, tokens, basics),
   `scripts/` (real cards: behaviour only, D-035), `decks/*.ron`. Embedded by `build.rs`.
+- `crates/card-db/src/forge/` — `parse.rs` (lossless reader of Forge scripts),
+  `translate.rs` (the compiler; `Blockers`), `mod.rs` (pinned commit, fetch, paths).
 - `crates/card-db` — parses + validates RON into a `CardCatalog` (strict mode rejects
   unverified cards; every verified card must name existing tests); `scryfall.rs` (runtime
   fetch + cache), `real.rs` (script + printed data -> CardDef).
@@ -100,6 +111,23 @@ cargo run -p harness -- coverage [--verbose]              # which precon cards a
   (work list), `replacement.rs` + `frames/apply.rs` (614–616 pipeline), `triggers.rs` +
   `frames/put_triggers.rs` (603), `frames/check.rs` (117.5/704.3), `effects.rs` (resolved
   continuous effects, shields), `testing.rs` (feature `test-support`: scenario builder, D-022).
+
+## Direction (2026-11-09, D-046): every real card, by compiling Forge's scripts
+The user's goal is "every non-silver bordered card ever printed, for the most part,
+eventually". Forge scripts 33,248 of Scryfall's 33,499 real cards with ~760 top-level
+features (184 effect APIs, 131 trigger modes, 105 static modes, 35 replacement events, 243
+keywords, 41 cost kinds, a filter language, an expression language). `card_db::forge`
+compiles those scripts into `CardDef`s. **Work loop:** run `harness forge-coverage`, take
+the blocker that alone stops the most cards, read what it means in `docs/forge/` (and
+Forge's Java under `~/.cache/apnap/forge/repo` — sparse-checkout more of it as needed),
+extend the vocabulary/engine *generally* (not for one card), add its test, re-run. Read a
+`--sample` of compiled cards against their Oracle text after every step: it is how
+mis-compilations were found. The 90 hand-scripted cards are the regression set
+(`tests/forge_compile.rs`: the compiler must reproduce each of them).
+Status: 3,673 of 34,465 scripts compile (10.7%); 8,551 more are one feature away.
+Not built yet: loading compiled cards into games (a game's catalog must hold only the
+cards in its decks, not all 30k), the Scryfall cross-check of printed characteristics, the
+generated-text-vs-Oracle round trip, multi-face cards.
 
 ## Current milestone: M4 — IN PROGRESS (started 2026-11-09), branch `m4-wip`
 Decisions: D-034 (precons: Calling All Angels, Wretched Ranks, Reign of Dragons,

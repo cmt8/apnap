@@ -28,11 +28,15 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/apnap-cache
-          key: scryfall-${{ runner.os }}-${{ hashFiles('crates/cards/decks/precon_*.ron') }}
+          key: cards-${{ runner.os }}-${{ hashFiles('crates/cards/decks/precon_*.ron', 'crates/card-db/src/forge/mod.rs') }}
       - name: fetch printed card data (Scryfall) + coverage report
         run: |
           cargo run -p harness --locked -- fetch-cards
           cargo run -p harness --locked -- coverage
+      - name: fetch Forge's card scripts (pinned commit) + compile coverage over all cards
+        run: |
+          cargo run --release -p harness --locked -- fetch-forge
+          cargo run --release -p harness --locked -- forge-coverage --top 25
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy
@@ -77,9 +81,11 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/apnap-cache
-          key: scryfall-${{ runner.os }}-${{ hashFiles('crates/cards/decks/precon_*.ron') }}
-      - name: fetch printed card data (Scryfall)
-        run: cargo run -p harness --locked -- fetch-cards
+          key: cards-${{ runner.os }}-${{ hashFiles('crates/cards/decks/precon_*.ron', 'crates/card-db/src/forge/mod.rs') }}
+      - name: fetch printed card data (Scryfall) and Forge's card scripts
+        run: |
+          cargo run -p harness --locked -- fetch-cards
+          cargo run -p harness --locked -- fetch-forge
       # The golden test pins event/state hashes generated on Linux: passing here proves
       # bit-for-bit determinism across platforms.
       - run: cargo test --workspace --locked

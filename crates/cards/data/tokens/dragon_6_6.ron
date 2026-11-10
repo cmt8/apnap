@@ -4,7 +4,7 @@ CardScript(
     tests: ["utvara_hellkite_makes_a_dragon_for_each_attacking_dragon"],
     card: (
         name: "Dragon Token",
-        key: Some("Dragon 6/6 flying"),
+        key: Some("r_6_6_dragon_flying"),
         token: true,
         colors: Some([Red]),
         card_types: [Creature],

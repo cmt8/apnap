@@ -7,7 +7,7 @@ RealCard(
     abilities: [
         Triggered(
             when: Any([Enters(This), Attacks(This)]),
-            body: Effect((effect: CreateToken(token: "Zombie", count: Fixed(2), who: You))),
+            body: Effect((effect: CreateToken(token: "b_2_2_zombie", count: Fixed(2), who: You))),
         ),
     ],
 )

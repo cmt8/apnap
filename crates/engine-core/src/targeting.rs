@@ -77,8 +77,8 @@ pub fn card_matches(st: &GameState, id: ObjectId, sel: &card_model::Selector) ->
     let c = chars(st, id);
     (sel.types.is_empty() || sel.types.iter().any(|t| c.is(*t)))
         && !sel.not_types.iter().any(|t| c.is(*t))
-        && (sel.subtypes.is_empty() || sel.subtypes.iter().any(|s| c.subtypes.contains(s)))
-        && !sel.not_subtypes.iter().any(|s| c.subtypes.contains(s))
+        && (sel.subtypes.is_empty() || sel.subtypes.iter().any(|s| c.has_subtype(s)))
+        && !sel.not_subtypes.iter().any(|s| c.has_subtype(s))
 }
 
 /// Every legal choice for `filter`, in stable order: objects by stack/battlefield order

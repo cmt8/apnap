@@ -10,7 +10,7 @@ RealCard(
         ),
         Triggered(
             when: Dies(Matching((subtypes: ["Angel"], controller: You))),
-            body: Effect((effect: CreateToken(token: "Spirit", count: Fixed(1), who: You))),
+            body: Effect((effect: CreateToken(token: "w_1_1_spirit_flying", count: Fixed(1), who: You))),
         ),
     ],
 )

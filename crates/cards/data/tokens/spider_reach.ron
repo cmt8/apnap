@@ -4,7 +4,7 @@ CardScript(
     tests: ["arasta_makes_spiders_when_opponents_cast_instants_and_sorceries"],
     card: (
         name: "Spider Token",
-        key: Some("Spider"),
+        key: Some("g_1_2_spider_reach"),
         token: true,
         colors: Some([Green]),
         card_types: [Creature],

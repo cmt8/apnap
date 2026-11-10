@@ -560,6 +560,48 @@ for this yet; it is recorded so current work doesn't close the door:
   playable deck by deck, not all at once.
 - Not in M4. To be scheduled with the user after the precons (spec §13).
 
+## D-046 Change of course: compile Forge's card scripts instead of scripting by hand (user decision 2026-11-09)
+**Why.** The user wants "every non-silver bordered card ever printed, for the most part,
+eventually". Six hand-scripting batches reached 88 of the 254 precon cards, with yields
+falling from 34 cards a batch to 5. Asked whether there is a better way, I proposed moving
+the per-card work out of our hands; the user agreed, allowed GPL data to be used, and said
+the project will be GPL (the repository is already public).
+
+**Measurement (2026-11-09).** Scryfall's Oracle file lists 33,499 real cards (not tokens,
+not silver-bordered or "funny" sets). Forge (github.com/Card-Forge/forge, GPL v3, commit
+3d5c95bc) has a structured script for 33,248 of them (99.3%). At the top level those
+scripts use 763 distinct features: 184 effect APIs, 131 trigger modes, 105 static modes, 35
+replacement events, 243 keywords, 41 cost kinds, plus a filter language and an expression
+language. Choosing features greedily, 100 complete 64% of all cards, 200 complete 80%, 300
+complete 89%, 500 complete 96%. At parameter level there are about 7,800 distinct details,
+3,051 of them used by exactly one card: the long tail is real.
+(`scratchpad/measure/forge_stats.py`; the numbers are of Forge's vocabulary, not ours.)
+
+**Decisions.**
+- **Licence:** the project is GPL-3.0-or-later (`LICENSE`, workspace `Cargo.toml`). Forge
+  is GPL v3 "or later"; using its card scripts and reading its sources to learn what each
+  script feature means is now allowed. This replaces the earlier rule that prior-art
+  engines are design references only (CLAUDE.md invariant 13, second half) — for
+  GPL-compatible sources. Code is still written for this engine, not transplanted.
+- **Cards come from Forge's scripts**, compiled into our `CardDef` by `card_db::forge`.
+  The scripts are fetched at runtime into the cache, pinned to a Forge commit (they contain
+  card names and Oracle text, so they stay out of the repository like Scryfall's data).
+- **A card loads only if every line of its script is understood** — every API, parameter,
+  filter property and expression. Nothing is dropped or guessed ("never approximate"
+  becomes "never ignore a parameter").
+- **Verification moves from one test per card to:** (1) a test for each script feature
+  the compiler understands (its semantics, written from the rules), (2) the compiled card's
+  printed characteristics agreeing with Scryfall's independent data (name, cost, types,
+  P/T), (3) the 88 hand-scripted, individually tested cards as a regression set — the
+  compiler must produce the same definition for each, (4) fuzzing over games with compiled
+  cards. This replaces spec §13's "each card has at least one test" and CLAUDE.md's rule
+  that every verified card names tests.
+- **Vocabulary is chosen by measurement:** `harness forge-coverage` reports, over all
+  cards, which missing feature blocks the most cards; that one is built next.
+- **M4** keeps its goal (the four precons playable in the app), reached through the
+  compiler rather than by hand.
+- Sub-agents may be used for research and parallel work (user, same message).
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

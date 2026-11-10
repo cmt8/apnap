@@ -7,7 +7,7 @@ RealCard(
     abilities: [
         Triggered(
             when: Enters(Matching((subtypes: ["Dragon"], controller: You, other: true, token: Some(false)))),
-            body: Effect((effect: CreateToken(token: "Dragon 5/5 flying", count: Fixed(1), who: You))),
+            body: Effect((effect: CreateToken(token: "r_5_5_dragon_flying", count: Fixed(1), who: You))),
         ),
         Activated(
             cost: (mana: Some("{1}{R}")),

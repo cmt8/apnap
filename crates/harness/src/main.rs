@@ -8,6 +8,8 @@
 //!   play [--setup S] [--seed N] [--save-replay PATH]   you (P0) vs random agents
 //!   fetch-cards                        download the precons' printed card data into the cache
 //!   coverage [--verbose]               per-precon script/verification status
+//!   fetch-forge                        clone Forge's card scripts (pinned commit) into the cache
+//!   forge-coverage [--top N]           how many Forge scripts compile; what blocks the rest
 //!   bless                              rewrite crates/harness/tests/golden/games.txt
 
 use engine_core::{Agent, ChoiceKind, OptionDesc, PendingDecision, PlayerId, Primitive, Response};
@@ -173,6 +175,95 @@ fn main() -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
+        }
+        "fetch-forge" => match card_db::forge::fetch() {
+            Ok(n) => {
+                println!(
+                    "{n} Forge card scripts at commit {} in {}",
+                    &card_db::forge::FORGE_COMMIT[..8],
+                    card_db::forge::repo_dir().display()
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("fetch failed: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        "forge-coverage" => {
+            // How many of Forge's card scripts compile, and which missing feature blocks
+            // the most cards (decisions.md D-046).
+            let scripts = match card_db::forge::read_scripts(&card_db::forge::cards_dir()) {
+                Ok(s) if !s.is_empty() => s,
+                _ => {
+                    eprintln!("{}", card_db::forge::FETCH_HINT);
+                    return ExitCode::FAILURE;
+                }
+            };
+            let tokens =
+                card_db::forge::read_scripts(&card_db::forge::tokens_dir()).unwrap_or_default();
+            let known = card_db::forge::Known::from_scripts(
+                scripts.iter().chain(&tokens).map(|(_, t)| t.as_str()),
+            );
+            let top = num(&args, "--top", 40) as usize;
+            // `--sample N`: print every N-th compiled card as the engine understands it,
+            // next to its Oracle text, for reading over.
+            let sample = num(&args, "--sample", 0) as usize;
+            let mut ok = 0usize;
+            let mut unreadable = 0usize;
+            // How many cards each blocker stops, and for how many it is the only one.
+            let mut blocks: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+            let mut one_away = 0usize;
+            for (_, text) in &scripts {
+                let Ok(script) = card_db::forge::parse(text) else {
+                    unreadable += 1;
+                    continue;
+                };
+                match card_db::forge::compile(&script, &known) {
+                    Ok(c) => {
+                        ok += 1;
+                        if sample > 0 && ok.is_multiple_of(sample) {
+                            let oracle = script.faces[0].oracle.clone().unwrap_or_default();
+                            println!(
+                                "== {} | {} | {}\n   oracle: {}\n   engine: {}",
+                                c.def.name,
+                                c.def
+                                    .mana_cost
+                                    .as_ref()
+                                    .map_or(String::new(), |m| m.to_text()),
+                                card_model::describe::type_line(&c.def),
+                                oracle.replace("\\n", " / "),
+                                card_model::describe::rules_text(&c.def).join(" / ")
+                            );
+                        }
+                    }
+                    Err(blockers) => {
+                        if blockers.len() == 1 {
+                            one_away += 1;
+                        }
+                        for b in &blockers {
+                            let e = blocks.entry(b.clone()).or_default();
+                            e.0 += 1;
+                            if blockers.len() == 1 {
+                                e.1 += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            let total = scripts.len();
+            println!(
+                "{ok} of {total} Forge card scripts compile ({:.1}%); {one_away} more are one feature away; {unreadable} unreadable",
+                100.0 * ok as f64 / total as f64
+            );
+            let mut rows: Vec<(String, (usize, usize))> = blocks.into_iter().collect();
+            rows.sort_by_key(|a| std::cmp::Reverse((a.1.1, a.1.0)));
+            println!("\nblocker — cards it alone blocks / cards it blocks at all");
+            for (name, (all, alone)) in rows.iter().take(top) {
+                println!("  {alone:6} / {all:6}  {name}");
+            }
+            println!("  ({} distinct blockers)", rows.len());
+            ExitCode::SUCCESS
         }
         "coverage" => {
             let data = match card_db::scryfall::cached(&harness::precon_card_names()) {

@@ -7,7 +7,7 @@ RealCard(
     abilities: [
         Triggered(
             when: Attacks(Matching((subtypes: ["Dragon"], controller: You))),
-            body: Effect((effect: CreateToken(token: "Dragon 6/6 flying", count: Fixed(1), who: You))),
+            body: Effect((effect: CreateToken(token: "r_6_6_dragon_flying", count: Fixed(1), who: You))),
         ),
     ],
 )

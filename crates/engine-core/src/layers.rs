@@ -82,6 +82,21 @@ impl Characteristics {
         self.keywords.contains(&k)
     }
 
+    /// Does it have this subtype (CR 205.3)? Basic land types are subtypes too: "Mountains
+    /// you control" counts every land with the type Mountain.
+    pub fn has_subtype(&self, name: &str) -> bool {
+        self.subtypes.iter().any(|s| s == name)
+            || self.land_types.iter().any(|t| {
+                name == match t {
+                    BasicLandType::Plains => "Plains",
+                    BasicLandType::Island => "Island",
+                    BasicLandType::Swamp => "Swamp",
+                    BasicLandType::Mountain => "Mountain",
+                    BasicLandType::Forest => "Forest",
+                }
+            })
+    }
+
     /// CR 110.4: permanent card types.
     pub fn is_permanent_type(&self) -> bool {
         [
@@ -251,8 +266,8 @@ pub fn matches_parts(
     (sel.types.is_empty() || sel.types.iter().any(|t| c.is(*t)))
         && !sel.not_types.iter().any(|t| c.is(*t))
         && sel.supertypes.iter().all(|s| c.supertypes.contains(s))
-        && (sel.subtypes.is_empty() || sel.subtypes.iter().any(|s| c.subtypes.contains(s)))
-        && !sel.not_subtypes.iter().any(|s| c.subtypes.contains(s))
+        && (sel.subtypes.is_empty() || sel.subtypes.iter().any(|s| c.has_subtype(s)))
+        && !sel.not_subtypes.iter().any(|s| c.has_subtype(s))
         && (sel.colors.is_empty() || sel.colors.iter().any(|x| c.colors.contains(x)))
         && sel
             .power_min
@@ -587,5 +602,62 @@ fn resolved(ci: &ContinuousInstance) -> Eff<'_> {
         controller: ci.controller,
         parts: &ci.effects,
         affected: Aff::Locked(&ci.affected),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CR 205.3i: basic land types are subtypes, so a selector for "Mountains" matches a
+    /// land with the type Mountain (and a creature type is still found the usual way).
+    #[test]
+    fn selectors_treat_basic_land_types_as_subtypes() {
+        let you = PlayerId(0);
+        let land = Characteristics::printed(
+            &CardDef {
+                name: "Test Peak".into(),
+                card_types: alloc::vec![CardType::Land],
+                land_types: alloc::vec![BasicLandType::Mountain, BasicLandType::Forest],
+                ..CardDef::default()
+            },
+            you,
+        );
+        assert!(land.has_subtype("Mountain") && land.has_subtype("Forest"));
+        assert!(!land.has_subtype("Island") && !land.has_subtype("Elf"));
+        let facts = Facts {
+            id: ObjectId(1),
+            controller: you,
+            is_token: false,
+            tapped: false,
+        };
+        let mountains = Selector {
+            subtypes: alloc::vec!["Mountain".into()],
+            controller: card_model::Who::You,
+            ..Selector::default()
+        };
+        assert!(matches_parts(&mountains, &land, facts, ObjectId(9), you));
+        let non_mountain = Selector {
+            not_subtypes: alloc::vec!["Mountain".into()],
+            ..Selector::default()
+        };
+        assert!(!matches_parts(
+            &non_mountain,
+            &land,
+            facts,
+            ObjectId(9),
+            you
+        ));
+        let elf = Characteristics::printed(
+            &CardDef {
+                name: "Test Elf".into(),
+                card_types: alloc::vec![CardType::Creature],
+                creature_types: alloc::vec!["Elf".into()],
+                ..CardDef::default()
+            },
+            you,
+        );
+        assert!(elf.has_subtype("Elf") && !elf.has_subtype("Mountain"));
+        assert!(!matches_parts(&mountains, &elf, facts, ObjectId(9), you));
     }
 }
