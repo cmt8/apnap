@@ -53,7 +53,7 @@ fn effect_polarity(e: &Effect) -> Polarity {
             card_model::PlayerRef::Target(_) => Polarity::Harm,
             _ => Polarity::Neutral,
         },
-        Effect::Untap { .. } => Polarity::Help,
+        Effect::Untap { .. } | Effect::AttachThis { .. } => Polarity::Help,
         Effect::TapAll(_) | Effect::UntapAll(_) | Effect::SacrificeThis => Polarity::Neutral,
         Effect::PutCounters { kind, .. } => match kind {
             CounterKind::PlusOne => Polarity::Help,
@@ -158,6 +158,10 @@ pub struct HeuristicAgent {
     /// The plan for the current combat's blocks: blocker → attacker.
     block_plan: BTreeMap<ObjectId, ObjectId>,
     block_key: Option<(u32, Vec<ObjectId>)>,
+    /// The blockers already asked about in this combat. Being asked about one again means
+    /// the declaration was illegal (a planned block wasn't possible, leaving a creature
+    /// with menace blocked by one) and must be made anew.
+    block_asked: Vec<ObjectId>,
     /// The plan for the current combat's attacks: attacker → defender.
     attack_plan: BTreeMap<ObjectId, PlayerId>,
     attack_key: Option<u32>,
@@ -179,6 +183,7 @@ impl HeuristicAgent {
             fallback: RandomAgent::new(seed),
             block_plan: BTreeMap::new(),
             block_key: None,
+            block_asked: Vec::new(),
             attack_plan: BTreeMap::new(),
             attack_key: None,
             last_modes: Vec::new(),
@@ -695,7 +700,18 @@ impl HeuristicAgent {
             .unwrap_or_default();
         if self.block_key.as_ref() != Some(&(v.turn_number, key.clone())) {
             self.block_key = Some((v.turn_number, key));
+            self.block_asked.clear();
             self.plan_blocks(v);
+        }
+        // The plan doesn't know every restriction on blocking; the engine does. If the
+        // declaration came back as illegal, declare no blocks: that is always legal, and
+        // repeating the plan would never end.
+        if let Some(OptionDesc::Block { blocker, .. }) = d.options.first() {
+            if self.block_asked.contains(blocker) {
+                self.block_plan.clear();
+            } else {
+                self.block_asked.push(*blocker);
+            }
         }
         let pick = d.options.iter().position(|o| {
             matches!(o, OptionDesc::Block { blocker, attacker }

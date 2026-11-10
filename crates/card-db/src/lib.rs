@@ -254,6 +254,14 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                     p.push(at("M1 mana abilities must cost exactly {T} (D-021)".into()));
                 }
             }
+            AbilityDef::CombatRule { affected, .. } => {
+                // "Enchanted creature can't attack": only on an Aura.
+                if matches!(affected, card_model::Affected::Enchanted)
+                    && !c.creature_types.iter().any(|t| t == "Aura")
+                {
+                    p.push(at("only an Aura has an enchanted creature".into()));
+                }
+            }
             AbilityDef::AdditionalCost(cost) => {
                 if cost.mana.is_some() || cost.tap || cost.sacrifice_self {
                     p.push(at(
@@ -286,7 +294,9 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                             let ok = match a {
                                 Amount::Fixed(_) => true,
                                 Amount::Count(s) => {
-                                    s.power_min.is_none() && s.toughness_min.is_none()
+                                    s.power_min.is_none()
+                                        && s.toughness_min.is_none()
+                                        && s.power_max.is_none()
                                 }
                                 _ => false,
                             };
@@ -301,7 +311,7 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 // The affected set is worked out inside the layer walk, before power and
                 // toughness are final (CR 613.4): it can't depend on them.
                 if let card_model::Affected::All(s) = affected
-                    && (s.power_min.is_some() || s.toughness_min.is_some())
+                    && (s.power_min.is_some() || s.toughness_min.is_some() || s.power_max.is_some())
                 {
                     p.push(at(
                         "a static ability can't select by power or toughness (CR 613)".into(),
@@ -326,8 +336,8 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 {
                     p.push(at("only Auras have enchant (CR 702.5a)".into()));
                 }
-                if *f != TargetFilter::Creature {
-                    p.push(at("M3 supports only \"Enchant creature\" (D-029)".into()));
+                if !matches!(f, TargetFilter::Creature | TargetFilter::Permanent(_)) {
+                    p.push(at("an Aura enchants a permanent (players: not yet)".into()));
                 }
             }
             AbilityDef::Replacement { replaces, with } => {
@@ -508,6 +518,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             amount(a, p);
         }
         Effect::SacrificeThis => {}
+        Effect::AttachThis { to } => obj(to, p),
         Effect::Draw { who, amount: a }
         | Effect::GainLife { who, amount: a }
         | Effect::LoseLife { who, amount: a } => {

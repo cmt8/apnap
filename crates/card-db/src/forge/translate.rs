@@ -11,10 +11,11 @@
 
 use super::parse::{Face, Record, Script};
 use card_model::{
-    AbilityDef, Affected, Amount, BasicLandType, Body, CardDef, CardType, Color, Condition,
-    ContinuousEffect, Cost, CostChoice, CounterKind, DamageBy, EachPlayerAction, Effect, Keyword,
-    ManaCost, ManaProduce, ManaType, Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces,
-    Selector, Signed, Supertype, TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
+    AbilityDef, Affected, Amount, BasicLandType, Body, CardDef, CardType, Color, CombatRule,
+    Condition, ContinuousEffect, Cost, CostChoice, CounterKind, DamageBy, EachPlayerAction, Effect,
+    Keyword, ManaCost, ManaProduce, ManaType, Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith,
+    Replaces, Selector, Signed, Supertype, TargetFilter, TargetRef, Timing, Trigger, TriggerStep,
+    Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -87,6 +88,8 @@ impl<'a> Rd<'a> {
 }
 
 /// One alternative of a filter ("Zombie.Other+YouCtrl").
+// Short-lived values while one filter is read: the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Alt {
     /// `Card.Self`
@@ -117,6 +120,8 @@ struct Tx<'a> {
     additional: Vec<AbilityDef>,
     /// The filter of the card's `K:Enchant:<filter>` line, if it is an Aura.
     enchant: Option<&'a str>,
+    /// The card is an Equipment (its statics may speak of the "equipped creature").
+    equipment: bool,
     /// The script variables that hold abilities, parsed.
     records: &'a [(String, Record)],
     known: &'a Known,
@@ -322,6 +327,10 @@ impl<'a> Tx<'a> {
                         p.strip_prefix("toughnessGE").and_then(|n| n.parse().ok())
                     {
                         s.toughness_min = Some(n);
+                    } else if let Some(n) = p.strip_prefix("powerLE").and_then(|n| n.parse().ok()) {
+                        s.power_max = Some(n);
+                    } else if let Some(k) = p.strip_prefix("without").and_then(keyword) {
+                        s.not_keywords.push(k);
                     } else if let Some(k) = p.strip_prefix("with").and_then(keyword) {
                         s.keywords.push(k);
                     } else if let Some(x) = p.strip_prefix("non") {
@@ -1602,6 +1611,10 @@ impl<'a> Tx<'a> {
                     // "Enchanted creature …". Forge filters the enchanted permanent again
                     // with `Affected$`; that says nothing new only when it repeats what the
                     // Aura can enchant at all.
+                    // "Equipped creature …": the same for an Equipment.
+                    (Some("Equipped"), None | Some("Creature")) if self.equipment => {
+                        Some(Affected::Enchanted)
+                    }
                     (Some("Enchanted"), again) => match (self.enchant, again) {
                         (Some(_), None) => Some(Affected::Enchanted),
                         (Some(e), Some(a)) if e == a => Some(Affected::Enchanted),
@@ -1697,6 +1710,63 @@ impl<'a> Tx<'a> {
                     only_if,
                 })
             }
+            // Combat restrictions (CR 508.1c, 509.1b). One Forge line may carry several
+            // modes ("can't attack or block").
+            "CantAttack" | "CantBlock" | "CantAttack,CantBlock" => {
+                let affected = rd.get("ValidCard").and_then(|f| self.affected(f));
+                let affected = affected.or_else(|| {
+                    self.block(format!("static:{mode}-who"));
+                    None
+                })?;
+                let mut rules: Vec<CombatRule> = mode
+                    .split(',')
+                    .map(|m| match m {
+                        "CantAttack" => CombatRule::CantAttack,
+                        _ => CombatRule::CantBlock,
+                    })
+                    .collect();
+                let first = rules.remove(0);
+                for rule in rules {
+                    self.additional.push(AbilityDef::CombatRule {
+                        affected: affected.clone(),
+                        rule,
+                    });
+                }
+                Some(AbilityDef::CombatRule {
+                    affected,
+                    rule: first,
+                })
+            }
+            "CantBlockBy" => {
+                let (attacker, blocker) = (rd.get("ValidAttacker"), rd.get("ValidBlocker"));
+                let is_self = |f: &str| matches!(f, "Card.Self" | "Creature.Self");
+                match (attacker, blocker) {
+                    // "This can't block [those attackers]."
+                    (Some(a), Some(b)) if is_self(b) && !is_self(a) => {
+                        let sel = self.selector(a)?;
+                        Some(AbilityDef::CombatRule {
+                            affected: Affected::This,
+                            rule: CombatRule::CantBlockAttackers(sel),
+                        })
+                    }
+                    // "[It] can't be blocked [by those]."
+                    (Some(a), by) => {
+                        let affected = self.affected(a);
+                        let by = match by {
+                            None => Some(None),
+                            Some(b) => self.selector(b).map(Some),
+                        };
+                        Some(AbilityDef::CombatRule {
+                            affected: affected?,
+                            rule: CombatRule::CantBeBlocked { by: by? },
+                        })
+                    }
+                    (None, _) => {
+                        self.block("static:CantBlockBy-who");
+                        None
+                    }
+                }
+            }
             "ReduceCost" => {
                 if rd.get("Type") != Some("Spell") {
                     self.block("static:ReduceCost-type");
@@ -1739,6 +1809,30 @@ impl<'a> Tx<'a> {
         };
         rd.finish(&mut self.blockers);
         out
+    }
+
+    /// Who a static rule is about: the card itself, what it is attached to, or everything
+    /// matching a filter.
+    fn affected(&mut self, text: &str) -> Option<Affected> {
+        match text {
+            "Card.Self" | "Creature.Self" => Some(Affected::This),
+            "Creature.EquippedBy" | "Card.EquippedBy" if self.equipment => {
+                Some(Affected::Enchanted)
+            }
+            "Creature.EnchantedBy" | "Card.EnchantedBy" | "Permanent.EnchantedBy" => {
+                // Only for an Aura whose enchant filter says no more than this one.
+                match (self.enchant, text.split('.').next()) {
+                    (Some("Creature"), Some("Creature" | "Card" | "Permanent")) => {
+                        Some(Affected::Enchanted)
+                    }
+                    _ => {
+                        self.block("static:EnchantedBy");
+                        None
+                    }
+                }
+            }
+            _ => self.selector(text).map(Affected::All),
+        }
     }
 
     fn replacement(&mut self, rec: &'a Record) -> Option<AbilityDef> {
@@ -1868,6 +1962,7 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
         in_trigger: false,
         additional: Vec::new(),
         enchant: None,
+        equipment: face.types.iter().any(|t| t == "Equipment"),
         records: &parsed,
         known,
     };
@@ -1949,20 +2044,72 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
     // Abilities, in the order the engine's own scripts use: as written, line kind by line
     // kind (the order within a kind is the script's).
     let mut abilities: Vec<(usize, AbilityDef)> = Vec::new();
+    // Equip abilities are printed last.
+    let mut equips: Vec<AbilityDef> = Vec::new();
     for k in &face.keywords {
         // `Enchant:<what>[:<description>]` (CR 702.5): what the Aura targets as a spell and
         // may be attached to. It is printed first.
         if let Some(rest) = k.strip_prefix("Enchant:") {
             let what = rest.split(':').next().unwrap_or(rest).trim();
-            match what {
-                "Creature" if tx.enchant.is_none() => {
-                    tx.enchant = Some(what);
-                    abilities.push((0, AbilityDef::Enchant(TargetFilter::Creature)));
-                }
+            let filter = match what {
+                _ if tx.enchant.is_some() => None,
+                "Creature" => Some(TargetFilter::Creature),
+                // Players can't be enchanted yet.
+                "Player" | "Opponent" | "Player.Opponent" => None,
+                // "Enchant land", "enchant creature you control", "enchant permanent".
                 _ => {
+                    let saved = tx.blockers.clone();
+                    let sels: Option<Vec<Selector>> = tx.alts(what).and_then(|alts| {
+                        alts.into_iter()
+                            .map(|a| match a {
+                                Alt::Sel(s) => Some(s),
+                                Alt::This => None,
+                            })
+                            .collect()
+                    });
+                    // The filter's own blockers say less than "this Aura's enchant".
+                    tx.blockers = saved;
+                    sels.map(|s| TargetFilter::Permanent(merge_bare(s)))
+                }
+            };
+            match filter {
+                Some(f) => {
+                    tx.enchant = Some(what);
+                    abilities.push((0, AbilityDef::Enchant(f)));
+                }
+                None => {
                     tx.block(format!("enchant:{what}"));
                     tx.enchant.get_or_insert(what);
                 }
+            }
+            continue;
+        }
+        // `Equip:<cost>` (CR 702.6a): "[cost]: Attach this permanent to target creature you
+        // control. Activate only as a sorcery." Restricted equips ("equip legendary
+        // creature") and extra parameters are not compiled.
+        if let Some(rest) = k.strip_prefix("Equip:") {
+            let cost = if rest.contains(':') {
+                tx.block("kw:Equip-restricted");
+                None
+            } else {
+                tx.cost(rest)
+            };
+            if let Some(cost) = cost {
+                equips.push(AbilityDef::Activated {
+                    cost,
+                    timing: Timing::Sorcery,
+                    only_if: None,
+                    body: Body::Effect(Mode {
+                        targets: vec![TargetFilter::Permanent(vec![Selector {
+                            types: vec![CardType::Creature],
+                            controller: Who::You,
+                            ..Selector::default()
+                        }])],
+                        effect: Effect::AttachThis {
+                            to: ObjRef::Target(0),
+                        },
+                    }),
+                });
             }
             continue;
         }
@@ -1999,7 +2146,12 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
     for (i, rec) in face.statics.iter().enumerate() {
         let before = tx.blockers.len();
         match tx.static_ability(rec) {
-            Some(a) => abilities.push((order.statics[i], a)),
+            Some(a) => {
+                abilities.push((order.statics[i], a));
+                for extra in tx.additional.drain(..) {
+                    abilities.push((order.statics[i], extra));
+                }
+            }
             None => tx.explained(before, "static"),
         }
     }
@@ -2010,6 +2162,7 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
             None => tx.explained(before, "replacement"),
         }
     }
+    abilities.extend(equips.into_iter().map(|a| (usize::MAX, a)));
     abilities.sort_by_key(|(i, _)| *i);
     def.abilities = abilities.into_iter().map(|(_, a)| a).collect();
     // A variable holding an ability that nothing refers to means part of the card was

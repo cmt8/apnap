@@ -405,6 +405,27 @@ pub enum AbilityDef {
     /// "As an additional cost to cast this spell, [sacrifice a creature / discard a card /
     /// pay N life]" (CR 601.2b, 601.2f). Only the non-mana parts of the cost are used.
     AdditionalCost(Cost),
+    /// A static ability restricting how the `affected` creatures attack or block
+    /// (CR 508.1c, 509.1b): "can't attack", "can't block", "can't be blocked".
+    CombatRule {
+        affected: Affected,
+        rule: CombatRule,
+    },
+}
+
+/// What a [`AbilityDef::CombatRule`] forbids its affected creatures.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CombatRule {
+    /// "can't attack"
+    CantAttack,
+    /// "can't block"
+    CantBlock,
+    /// "can't be blocked" (`by: None`), or "can't be blocked by [creatures matching]". The
+    /// selector is relative to the ability's source and controller.
+    CantBeBlocked { by: Option<Selector> },
+    /// "can't block [attackers matching]" ("can block only creatures with flying" is
+    /// "can't block creatures without flying").
+    CantBlockAttackers(Selector),
 }
 
 /// Whose / which player, relative to the ability's controller.
@@ -451,6 +472,10 @@ pub struct Selector {
     pub attacking: Option<bool>,
     /// "blocking" / not blocking.
     pub blocking: Option<bool>,
+    /// "with power N or less".
+    pub power_max: Option<i32>,
+    /// "without flying": has none of these keywords.
+    pub not_keywords: Vec<Keyword>,
 }
 
 /// What a trigger condition or replacement watches: the source itself, or matching objects.
@@ -531,6 +556,8 @@ pub enum Condition {
     HandAtMost(u32),
 }
 
+// Built once when the catalog loads, then only read (as `AbilityDef`).
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Affected {
     /// The source permanent itself.
@@ -905,6 +932,10 @@ pub enum Effect {
     /// "Sacrifice this": only if it is still on the battlefield under the control of the
     /// ability's controller (CR 701.21a).
     SacrificeThis,
+    /// "Attach this permanent to [it]" (CR 701.3; the body of equip, CR 702.6a).
+    AttachThis {
+        to: ObjRef,
+    },
 }
 
 /// An object an effect refers to: a target slot, or the source itself.

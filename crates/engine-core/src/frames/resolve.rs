@@ -767,6 +767,38 @@ impl ResolveFrame {
                 });
                 Vec::new()
             }
+            // CR 701.3 / 702.6a: attach this permanent (an Equipment) to the object.
+            Effect::AttachThis { to } => {
+                let here = st
+                    .objects
+                    .get(&self.source)
+                    .is_some_and(|o| o.zone == Zone::Battlefield);
+                if here
+                    && let Some(to) = self.obj(st, k, to)
+                    && to != self.source
+                    // CR 301.5c: an Equipment that is also a creature can't equip.
+                    && !chars(st, self.source).is(CardType::Creature)
+                    && chars(st, to).is(CardType::Creature)
+                    // CR 701.3b: attaching it to what it is already on does nothing.
+                    && st.object(self.source).attached_to != Some(to)
+                {
+                    execute(
+                        st,
+                        GameAction::Attach {
+                            aura: self.source,
+                            to,
+                        },
+                    );
+                    // CR 701.3c: a new timestamp.
+                    execute(
+                        st,
+                        GameAction::NewTimestamp {
+                            object: self.source,
+                        },
+                    );
+                }
+                Vec::new()
+            }
             // CR 701.21a: a player can sacrifice only a permanent they control.
             Effect::SacrificeThis => {
                 let mine = st

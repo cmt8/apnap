@@ -25,6 +25,8 @@ use card_model::{CardType, CounterKind, Supertype};
 
 #[derive(Debug, Default)]
 pub(crate) struct Gathered {
+    /// Something was done directly (an Equipment became unattached): check again.
+    pub changed: bool,
     pub events: Vec<Proposed>,
     /// CR 903.9a: commanders whose owner may move them to the command zone.
     pub commander: Vec<ObjectId>,
@@ -82,6 +84,7 @@ pub(crate) fn gather(st: &mut GameState) -> Gathered {
 
     let mut legends: BTreeMap<(PlayerId, String), Vec<ObjectId>> = BTreeMap::new();
     let mut dt_flags: Vec<ObjectId> = Vec::new();
+    let mut unattach: Vec<ObjectId> = Vec::new();
     for &id in &st.zones.battlefield {
         let c = chars(st, id);
         let o = st.object(id);
@@ -130,6 +133,24 @@ pub(crate) fn gather(st: &mut GameState) -> Gathered {
                     .push(Proposed::moving(id, Zone::Graveyard, MoveCause::Rule));
             }
         }
+        // CR 704.5n / 301.5c: an Equipment attached to something that isn't a creature (or
+        // is gone, or is itself), or an Equipment that is a creature, becomes unattached and
+        // stays on the battlefield.
+        if st.card_def(id).enchant().is_none()
+            && let Some(host) = o.attached_to
+        {
+            let legal = c.has_subtype("Equipment")
+                && !c.is(CardType::Creature)
+                && host != id
+                && st
+                    .objects
+                    .get(&host)
+                    .is_some_and(|x| x.zone == Zone::Battlefield)
+                && chars(st, host).is(CardType::Creature);
+            if !legal {
+                unattach.push(id);
+            }
+        }
         // CR 704.5q: +1/+1 and -1/-1 counters annihilate.
         let n = o
             .counters_of(CounterKind::PlusOne)
@@ -146,6 +167,10 @@ pub(crate) fn gather(st: &mut GameState) -> Gathered {
     }
     for id in dt_flags {
         st.object_mut(id).deathtouch_damage = false;
+    }
+    for object in unattach {
+        execute(st, GameAction::Unattach { object });
+        g.changed = true;
     }
     g.legend = legends
         .into_iter()

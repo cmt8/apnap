@@ -11,7 +11,7 @@ use crate::replacement::Proposed;
 use crate::state::{AttackInfo, CombatState, GameState};
 use alloc::vec;
 use alloc::vec::Vec;
-use card_model::{CardType, Keyword};
+use card_model::{AbilityDef, Affected, CardType, CombatRule, Keyword};
 use serde::{Deserialize, Serialize};
 
 fn creatures_controlled_by(st: &GameState, p: PlayerId) -> Vec<ObjectId> {
@@ -24,6 +24,55 @@ fn creatures_controlled_by(st: &GameState, p: PlayerId) -> Vec<ObjectId> {
             c.controller == p && c.is(CardType::Creature)
         })
         .collect()
+}
+
+/// Every combat restriction in force (CR 508.1c, 509.1b): the static abilities permanents
+/// currently have (CLAUDE.md invariant 4), with their source and its controller.
+fn combat_rules(st: &GameState) -> Vec<(ObjectId, PlayerId, &Affected, &CombatRule)> {
+    let mut out = Vec::new();
+    for &id in &st.zones.battlefield {
+        for (_, a) in crate::layers::abilities(st, id) {
+            if let AbilityDef::CombatRule { affected, rule } = a {
+                out.push((id, crate::layers::controller_of(st, id), affected, rule));
+            }
+        }
+    }
+    out
+}
+
+/// Is `obj` one of the permanents a rule of `source` applies to?
+fn rule_affects(
+    st: &GameState,
+    source: ObjectId,
+    controller: PlayerId,
+    affected: &Affected,
+    obj: ObjectId,
+) -> bool {
+    match affected {
+        Affected::This => obj == source,
+        Affected::Enchanted => st.object(source).attached_to == Some(obj),
+        Affected::All(sel) => {
+            crate::layers::matches(st, sel, &chars(st, obj), st.object(obj), source, controller)
+        }
+    }
+}
+
+/// CR 508.1c: is `creature` forbidden to attack ("can't attack")?
+fn cant_attack(st: &GameState, creature: ObjectId) -> bool {
+    combat_rules(st)
+        .into_iter()
+        .any(|(src, ctl, affected, rule)| {
+            matches!(rule, CombatRule::CantAttack) && rule_affects(st, src, ctl, affected, creature)
+        })
+}
+
+/// CR 509.1b: is `creature` forbidden to block at all ("can't block")?
+fn cant_block(st: &GameState, creature: ObjectId) -> bool {
+    combat_rules(st)
+        .into_iter()
+        .any(|(src, ctl, affected, rule)| {
+            matches!(rule, CombatRule::CantBlock) && rule_affects(st, src, ctl, affected, creature)
+        })
 }
 
 /// CR 509.1b: may `blocker` block `attacker` (which attacks `defender`), as far as evasion
@@ -48,6 +97,25 @@ pub(crate) fn can_block(
     // color with it.
     if a.has(Keyword::Intimidate) && !(artifact || b.colors.iter().any(|c| a.colors.contains(c))) {
         return false;
+    }
+    // "Can't be blocked [by …]" and "can't block [creatures …]".
+    for (src, ctl, affected, rule) in combat_rules(st) {
+        let matches = |sel: &card_model::Selector, obj: ObjectId| {
+            crate::layers::matches(st, sel, &chars(st, obj), st.object(obj), src, ctl)
+        };
+        let forbidden = match rule {
+            CombatRule::CantBeBlocked { by } => {
+                rule_affects(st, src, ctl, affected, attacker)
+                    && by.as_ref().is_none_or(|sel| matches(sel, blocker))
+            }
+            CombatRule::CantBlockAttackers(sel) => {
+                rule_affects(st, src, ctl, affected, blocker) && matches(sel, attacker)
+            }
+            CombatRule::CantAttack | CombatRule::CantBlock => false,
+        };
+        if forbidden {
+            return false;
+        }
     }
     // CR 702.14c: landwalk — not at all while the defending player controls such a land.
     for k in &a.keywords {
@@ -84,6 +152,7 @@ impl DeclareAttackersFrame {
                 !o.tapped
                     && (!o.summoning_sick || c.has(Keyword::Haste))
                     && !c.has(Keyword::Defender)
+                    && !cant_attack(st, id)
             })
             .collect();
         DeclareAttackersFrame {
@@ -270,7 +339,7 @@ impl DeclareBlockersFrame {
         self.candidates = match self.defenders.get(self.defender_idx) {
             Some(&d) => creatures_controlled_by(st, d)
                 .into_iter()
-                .filter(|&id| !st.object(id).tapped)
+                .filter(|&id| !st.object(id).tapped && !cant_block(st, id))
                 .collect(),
             None => Vec::new(),
         };

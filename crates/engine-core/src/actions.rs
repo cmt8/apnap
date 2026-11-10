@@ -80,6 +80,14 @@ pub enum GameAction {
         aura: ObjectId,
         to: ObjectId,
     },
+    /// CR 701.3c: a permanent attached to a different object gets a new timestamp.
+    NewTimestamp {
+        object: ObjectId,
+    },
+    /// CR 704.5n: an Equipment becomes unattached (it stays on the battlefield).
+    Unattach {
+        object: ObjectId,
+    },
     /// CR 613.1b / 302.6: a permanent's (layered) controller changed; it is summoning sick
     /// for its new controller.
     ControlChanged {
@@ -319,6 +327,16 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
         GameAction::Attach { aura, to } => {
             st.object_mut(aura).attached_to = Some(to);
             st.emit(Event::Attached { aura, to });
+            ActionResult::Done
+        }
+        GameAction::NewTimestamp { object } => {
+            let t = st.alloc_timestamp();
+            st.object_mut(object).timestamp = t;
+            ActionResult::Done
+        }
+        GameAction::Unattach { object } => {
+            st.object_mut(object).attached_to = None;
+            st.emit(Event::Unattached { object });
             ActionResult::Done
         }
         GameAction::ControlChanged { object, controller } => {

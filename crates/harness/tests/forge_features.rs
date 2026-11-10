@@ -994,7 +994,7 @@ fn an_aura_stays_on_a_creature_with_shroud() {
 }
 
 // Forge: `AffectedDefined$ Self` is "this permanent". What isn't compiled: Auras that
-// enchant something other than a creature, and an `Affected$` that narrows the enchanted
+// enchant a player, and an `Affected$` that narrows the enchanted
 // permanent ("as long as enchanted creature is white").
 #[test]
 fn statics_about_the_card_itself_and_aura_forms_not_compiled() {
@@ -1009,13 +1009,13 @@ fn statics_about_the_card_itself_and_aura_forms_not_compiled() {
     let b = sc.card(P0, Zone::Battlefield, "Test Brawler");
     let s = Script::new(sc.build());
     assert_eq!(pt(&s, b), (3, 3));
-    let land_aura = aura(
-        "Test Wellspring",
-        "G",
-        "Land",
-        "S:Mode$ Continuous | AffectedDefined$ Enchanted | AddKeyword$ Indestructible | Description$ Text.",
+    let player_aura = aura(
+        "Test Hexing",
+        "B",
+        "Player",
+        "S:Mode$ Continuous | Affected$ Creature.YouCtrl | AddPower$ 1 | Description$ Text.",
     );
-    assert_eq!(forge_test_blockers(&land_aura), ["enchant:Land"]);
+    assert_eq!(forge_test_blockers(&player_aura), ["enchant:Player"]);
     let narrowed = aura(
         "Test Favor",
         "W",
@@ -1343,4 +1343,254 @@ fn permanent_cards_in_a_graveyard_are_not_instants_or_sorceries() {
     s.cast("Test Unearthing");
     assert!(can_target(&s, forest));
     assert!(!can_target(&s, sorceries[0]));
+}
+
+// ---------------------------------------------------------------------------------------
+// Combat restrictions from static abilities.
+
+// CR 508.1c, 509.1b (2026-11-06): restrictions on attacking and blocking. Forge: the static
+// modes `CantBlock`, `CantBlockBy` (with or without `ValidBlocker$`), `CantAttack`, and
+// several modes on one line ("can't attack or block").
+#[test]
+fn static_abilities_that_restrict_attacking_and_blocking() {
+    let cards = [
+        creature(
+            "Test Craven",
+            "R",
+            "Goblin",
+            "2/2",
+            "S:Mode$ CantBlock | ValidCard$ Card.Self | Description$ Text.",
+        ),
+        creature(
+            "Test Wraith",
+            "1 U",
+            "Spirit",
+            "1/1",
+            "S:Mode$ CantBlockBy | ValidAttacker$ Creature.Self | Description$ Text.",
+        ),
+        creature(
+            "Test Skulker",
+            "1 B",
+            "Rogue",
+            "3/1",
+            "S:Mode$ CantBlockBy | ValidAttacker$ Creature.Self | ValidBlocker$ Creature.powerLE2 | Description$ Text.",
+        ),
+        creature(
+            "Test Lookout",
+            "1 G",
+            "Archer",
+            "1/4",
+            "K:Reach\nS:Mode$ CantBlockBy | ValidAttacker$ Creature.withoutFlying | ValidBlocker$ Creature.Self | Description$ Text.",
+        ),
+        creature("Test Kite", "1 U", "Bird", "1/1", "K:Flying"),
+        aura(
+            "Test Shackles",
+            "1 W",
+            "Creature",
+            "S:Mode$ CantAttack,CantBlock | ValidCard$ Creature.EnchantedBy | Description$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let defenders = ["Test Craven", "Test Golem", "Test Giant", "Test Lookout"];
+    let blockers_of = |attacker: &str| {
+        let mut sc = scenario(&cards);
+        let a = sc.card(P0, Zone::Battlefield, attacker);
+        sc.cards(P1, Zone::Battlefield, &defenders);
+        let mut s = Script::new(sc.build());
+        attack_with(&mut s, &[a]);
+        offered_blockers(&mut s, a)
+    };
+    // A plain attacker: the Craven can't block; the Lookout can't block a creature without
+    // flying.
+    assert_eq!(blockers_of("Test Brute"), ["Test Golem", "Test Giant"]);
+    // A flyer: only the Lookout (reach) could, and it may.
+    assert_eq!(blockers_of("Test Kite"), ["Test Lookout"]);
+    // "Can't be blocked."
+    assert_eq!(blockers_of("Test Wraith"), [] as [&str; 0]);
+    // "Can't be blocked by creatures with power 2 or less": the Golem is 2/3.
+    assert_eq!(blockers_of("Test Skulker"), ["Test Giant"]);
+
+    // "Enchanted creature can't attack or block."
+    let mut sc = scenario(&cards);
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    let giant = sc.card(P0, Zone::Battlefield, "Test Giant");
+    let shackles = sc.card(P1, Zone::Battlefield, "Test Shackles");
+    sc.attach(shackles, giant);
+    let mut s = Script::new(sc.build());
+    let asked = attack_with(&mut s, &[]);
+    assert_eq!(asked, [golem], "the shackled Giant isn't asked");
+    let mut sc = scenario(&cards);
+    let attacker = sc.card(P0, Zone::Battlefield, "Test Brute");
+    let giant = sc.card(P1, Zone::Battlefield, "Test Giant");
+    sc.card(P1, Zone::Battlefield, "Test Golem");
+    let shackles = sc.card(P0, Zone::Battlefield, "Test Shackles");
+    sc.attach(shackles, giant);
+    let mut s = Script::new(sc.build());
+    attack_with(&mut s, &[attacker]);
+    assert_eq!(offered_blockers(&mut s, attacker), ["Test Golem"]);
+}
+
+// Forge filter properties `.withoutFlying` ("without flying") and `.powerLE<n>` ("with
+// power n or less"), here in effects.
+#[test]
+fn filters_without_a_keyword_and_with_power_at_most() {
+    let cards = [
+        spell(
+            "Test Tremor",
+            "R",
+            "Sorcery",
+            "A:SP$ DamageAll | ValidCards$ Creature.withoutFlying | NumDmg$ 1 | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Culling",
+            "B",
+            "Sorcery",
+            "A:SP$ DestroyAll | ValidCards$ Creature.powerLE2 | SpellDescription$ Text.",
+        ),
+        creature("Test Kite", "1 U", "Bird", "1/1", "K:Flying"),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Mountain", "Swamp"]);
+    let kite = sc.card(P1, Zone::Battlefield, "Test Kite");
+    let elf = sc.card(P1, Zone::Battlefield, "Test Elf"); // 1/1
+    let golem = sc.card(P1, Zone::Battlefield, "Test Golem"); // 2/3
+    let giant = sc.card(P1, Zone::Battlefield, "Test Giant"); // 5/4
+    sc.cards(P0, Zone::Hand, &["Test Tremor", "Test Culling"]);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Tremor").pay().pass_all();
+    assert!(on_battlefield(&s, kite), "it flies");
+    assert!(!on_battlefield(&s, elf));
+    assert_eq!(s.st.object(golem).damage_marked, 1);
+    s.cast("Test Culling").pay().pass_all();
+    assert!(!on_battlefield(&s, kite) && !on_battlefield(&s, golem));
+    assert!(on_battlefield(&s, giant));
+}
+
+// ---------------------------------------------------------------------------------------
+// Equipment, and Auras that enchant other things than creatures.
+
+// CR 702.6a, 301.5, 704.5n, 701.3 (2026-11-06). Forge: `K:Equip:<cost>` and a static with
+// `AffectedDefined$ Equipped`.
+#[test]
+fn equipment_attaches_moves_and_falls_off() {
+    let blade = "Name:Test Blade\nManaCost:1\nTypes:Artifact Equipment\nK:Equip:1\n\
+        S:Mode$ Continuous | AffectedDefined$ Equipped | Affected$ Creature | AddPower$ 2 | AddToughness$ 2 | AddKeyword$ First Strike | Description$ Text.\nOracle:Text.";
+    let mut sc = scenario(&[blade, SMITE, ZAP]);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Forest", "Forest", "Swamp", "Mountain"],
+    );
+    let blade = sc.card(P0, Zone::Battlefield, "Test Blade");
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem"); // 2/3
+    let elf = sc.card(P0, Zone::Battlefield, "Test Elf"); // 1/1
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Golem");
+    sc.cards(P0, Zone::Hand, &["Test Smiting", "Test Zapping"]);
+    let mut s = Script::new(sc.build());
+    // It is on the battlefield unattached (CR 301.5b); equip targets only my creatures.
+    assert_eq!(s.st.object(blade).attached_to, None);
+    s.activate("Test Blade");
+    assert!(can_target(&s, golem) && can_target(&s, elf));
+    assert!(!can_target(&s, theirs), "equip: a creature you control");
+    s.target_object(elf).pay().pass_all();
+    assert_eq!(s.st.object(blade).attached_to, Some(elf));
+    assert_eq!(pt(&s, elf), (3, 3));
+    assert!(has(&s, elf, Keyword::FirstStrike));
+    // Equip again: it moves, the bonus with it.
+    s.activate("Test Blade")
+        .target_object(golem)
+        .pay()
+        .pass_all();
+    assert_eq!(s.st.object(blade).attached_to, Some(golem));
+    assert_eq!((pt(&s, elf), pt(&s, golem)), ((1, 1), (4, 5)));
+    // 3 damage on a 4/5; then the creature is destroyed: the Equipment stays on the
+    // battlefield, unattached (CR 704.5n).
+    s.cast("Test Zapping").target_object(golem).pay().pass_all();
+    assert!(on_battlefield(&s, golem));
+    s.cast("Test Smiting").target_object(golem).pay().pass_all();
+    assert!(!on_battlefield(&s, golem));
+    assert!(on_battlefield(&s, blade));
+    assert_eq!(s.st.object(blade).attached_to, None);
+}
+
+// CR 704.5g, 611.3a (2026-11-06): the Equipment's bonus lasts only while it is attached —
+// moving it away from a damaged creature it was keeping alive kills that creature.
+#[test]
+fn a_creature_kept_alive_by_equipment_dies_when_it_moves_away() {
+    let plate = "Name:Test Bulwark Plate\nManaCost:1\nTypes:Artifact Equipment\nK:Equip:1\n\
+        S:Mode$ Continuous | AffectedDefined$ Equipped | AddToughness$ 3 | Description$ Text.\nOracle:Text.";
+    let mut sc = scenario(&[plate, ZAP]);
+    sc.cards(P0, Zone::Battlefield, &["Mountain", "Forest"]);
+    let plate = sc.card(P0, Zone::Battlefield, "Test Bulwark Plate");
+    let elf = sc.card(P0, Zone::Battlefield, "Test Elf"); // 1/1, 1/4 with the plate
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    sc.attach(plate, elf);
+    sc.card(P0, Zone::Hand, "Test Zapping");
+    let mut s = Script::new(sc.build());
+    assert_eq!(pt(&s, elf), (1, 4));
+    s.cast("Test Zapping").target_object(elf).pay().pass_all();
+    assert!(on_battlefield(&s, elf), "3 damage on toughness 4");
+    s.activate("Test Bulwark Plate")
+        .target_object(golem)
+        .pay()
+        .pass_all();
+    assert_eq!(s.st.object(plate).attached_to, Some(golem));
+    assert!(!on_battlefield(&s, elf), "3 damage on toughness 1");
+}
+
+// Forge: `K:Enchant:<filter>` for other things than creatures: "enchant land", "enchant
+// creature you control". The Aura falls off when what it enchants stops matching
+// (CR 704.5m).
+#[test]
+fn auras_that_enchant_lands_or_your_own_creatures() {
+    let cards = [
+        aura(
+            "Test Overgrowing",
+            "G",
+            "Land",
+            "S:Mode$ Continuous | AffectedDefined$ Enchanted | AddKeyword$ Indestructible | Description$ Text.",
+        ),
+        aura(
+            "Test Devotion",
+            "W",
+            "Creature.YouCtrl",
+            "S:Mode$ Continuous | AffectedDefined$ Enchanted | AddPower$ 1 | AddToughness$ 1 | Description$ Text.",
+        ),
+        aura(
+            "Test Thrall",
+            "2 U U",
+            "Creature",
+            "S:Mode$ Continuous | AffectedDefined$ Enchanted | GainControl$ You | Description$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    let forest = sc.cards(P0, Zone::Battlefield, &["Forest", "Plains"])[0];
+    sc.cards(P1, Zone::Battlefield, &["Island"; 4]);
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Golem");
+    sc.cards(P0, Zone::Hand, &["Test Overgrowing", "Test Devotion"]);
+    sc.card(P1, Zone::Hand, "Test Thrall");
+    let mut s = Script::new(sc.build());
+    // "Enchant land": lands, not creatures.
+    s.cast("Test Overgrowing");
+    assert!(can_target(&s, forest) && !can_target(&s, golem));
+    s.target_object(forest).pay().pass_all();
+    assert!(has(&s, forest, Keyword::Indestructible));
+    // "Enchant creature you control": not the opponent's.
+    s.cast("Test Devotion");
+    assert!(can_target(&s, golem) && !can_target(&s, theirs));
+    s.target_object(golem).pay().pass_all();
+    assert_eq!(pt(&s, golem), (3, 4));
+    let devotion = s.find(P0, Zone::Battlefield, "Test Devotion").unwrap();
+    // The opponent takes control of the creature on their turn: it is no longer "a
+    // creature you control" for the Aura's controller, and the Aura goes to the graveyard.
+    drive_until(&mut s, |s| {
+        s.st.turn.active == P1 && s.st.turn.step == Step::PrecombatMain && s.who() == P1
+    });
+    s.cast("Test Thrall").target_object(golem).pay().pass_all();
+    assert_eq!(chars(&s.st, golem).controller, P1);
+    assert!(!on_battlefield(&s, devotion));
+    assert!(s.find(P0, Zone::Graveyard, "Test Devotion").is_some());
 }

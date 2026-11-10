@@ -51,6 +51,16 @@ impl StateCheckFrame {
             match core::mem::replace(&mut self.stage, CheckStage::Gather) {
                 CheckStage::Gather => {
                     let g = sba::gather(st);
+                    // Something was done on the spot (CR 704.5n): what it changed — a
+                    // creature that lost its Equipment's toughness — is checked next round.
+                    if g.changed
+                        && g.events.is_empty()
+                        && g.legend.is_empty()
+                        && g.commander.is_empty()
+                    {
+                        self.acted = true;
+                        continue;
+                    }
                     if g.events.is_empty() && g.legend.is_empty() && g.commander.is_empty() {
                         if !st.pending_triggers.is_empty() {
                             // CR 603.3 / 117.5: triggers go on the stack, then check again.

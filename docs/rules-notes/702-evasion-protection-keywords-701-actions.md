@@ -128,3 +128,34 @@ The layer cache is invalidated whenever the roles change. A change of controller
 the permanent from combat too (`GameAction::ControlChanged`; an attacker it was blocking
 stays blocked, CR 509.1h). Not implemented: removal when a creature stops being a creature (nothing
 that compiles does that yet).
+
+## Equipment (CR 301.5, 702.6, 704.5n, 701.3)
+> 702.6a Equip is an activated ability of Equipment cards. “Equip [cost]” means “[Cost]:
+> Attach this permanent to target creature you control. Activate only as a sorcery.”
+
+> 704.5n If an Equipment or Fortification is attached to an illegal permanent or to a
+> player, it becomes unattached from that permanent or player. It remains on the
+> battlefield.
+
+> 701.3c Attaching an Aura, Equipment, or Fortification on the battlefield to a different
+> object or player causes the Aura, Equipment, or Fortification to receive a new timestamp.
+
+From 301.5c (quoted in part): "An Equipment that’s also a creature can’t equip a creature
+unless that Equipment has reconfigure … An Equipment can’t equip itself. An Equipment that
+equips an illegal or nonexistent permanent becomes unattached from that permanent but
+remains on the battlefield."
+
+Engine: `Effect::AttachThis` (does nothing if the source left, is a creature, or the object
+isn't a creature or is the one it is already on — 701.3b); `sba.rs` unattaches (704.5n) and
+the state check runs again, because a creature may have been kept alive by the bonus.
+
+## Restrictions on attacking and blocking (CR 508.1c, 509.1b)
+> 509.1b The defending player checks each creature they control to see whether it’s affected
+> by any restrictions (effects that say a creature can’t block, or that it can’t block
+> unless some condition is met). If any restrictions are being disobeyed, the declaration of
+> blockers is illegal.
+
+Engine: `AbilityDef::CombatRule` abilities are collected from what permanents currently have
+(`combat::combat_rules`); a creature that can't attack or can't block is never offered, and
+`can_block` refuses a pair a rule forbids — so restrictions that look at one creature or one
+pair can't be disobeyed. (Menace looks at the whole declaration and is checked afterwards.)

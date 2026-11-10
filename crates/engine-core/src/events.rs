@@ -234,4 +234,8 @@ pub enum Event {
     GameOver {
         winner: Option<PlayerId>,
     },
+    /// CR 704.5n: an Equipment became unattached.
+    Unattached {
+        object: ObjectId,
+    },
 }

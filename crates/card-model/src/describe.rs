@@ -4,10 +4,10 @@
 //! vocabulary without describing it is a compile error.
 
 use crate::{
-    AbilityDef, Affected, Amount, Body, CardDef, CardType, Color, Condition, ContinuousEffect,
-    Cost, CounterKind, DamageBy, EachPlayerAction, Effect, Keyword, ManaProduce, Mode, ObjFilter,
-    ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, TargetFilter, TargetRef, Timing, Trigger,
-    TriggerStep, Who,
+    AbilityDef, Affected, Amount, Body, CardDef, CardType, Color, CombatRule, Condition,
+    ContinuousEffect, Cost, CounterKind, DamageBy, EachPlayerAction, Effect, Keyword, ManaProduce,
+    Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, TargetFilter, TargetRef,
+    Timing, Trigger, TriggerStep, Who,
 };
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -226,10 +226,16 @@ fn selector(s: &Selector, plural: bool) -> String {
     for k in &s.keywords {
         out.push_str(&format!(" with {}", keyword(*k)));
     }
+    for k in &s.not_keywords {
+        out.push_str(&format!(" without {}", keyword(*k).to_lowercase()));
+    }
     match (s.power_min, s.toughness_min) {
         (Some(p), _) => out.push_str(&format!(" with power {p} or greater")),
         (None, Some(t)) => out.push_str(&format!(" with toughness {t} or greater")),
         (None, None) => {}
+    }
+    if let Some(p) = s.power_max {
+        out.push_str(&format!(" with power {p} or less"));
     }
     match s.controller {
         Who::Any => {}
@@ -310,14 +316,20 @@ fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
                 format!("{get} {}/{}", half(*p, *t), half(*t, *p))
             }
             ContinuousEffect::ModifyPTBy { power, toughness } => {
-                let part = |s: &crate::Signed| {
+                let sign = |s: &crate::Signed| if s.negative { "-" } else { "+" };
+                let part = |s: &crate::Signed| format!("{}{}", sign(s), amount(&s.amount));
+                // "+X/+X, where X is the number of …" when one count is used for both.
+                let counted = |s: &crate::Signed| !matches!(s.amount, Amount::Fixed(_) | Amount::X);
+                if power.amount == toughness.amount && counted(power) {
                     format!(
-                        "{}{}",
-                        if s.negative { "-" } else { "+" },
-                        amount(&s.amount)
+                        "{get} {}X/{}X, where X is {}",
+                        sign(power),
+                        sign(toughness),
+                        amount(&power.amount)
                     )
-                };
-                format!("{get} {}/{}", part(power), part(toughness))
+                } else {
+                    format!("{get} {}/{}", part(power), part(toughness))
+                }
             }
             ContinuousEffect::SwitchPT => format!("{become_} power-and-toughness switched"),
         })
@@ -479,6 +491,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             )
         }
         Effect::SacrificeThis => "sacrifice this permanent".to_string(),
+        Effect::AttachThis { to } => format!("attach this permanent to {}", obj(mode, *to)),
         Effect::May(inner) => format!("you may {}", effect(mode, inner)),
         Effect::ReturnToBattlefield { what } => {
             format!("return {} to the battlefield", obj(mode, *what))
@@ -793,6 +806,30 @@ fn ability(a: &AbilityDef) -> String {
             "{} spells you cast cost {{{n}}} less to cast.",
             capitalize(selector(spells, false).replace("permanent", "").trim())
         ),
+        AbilityDef::CombatRule { affected, rule } => {
+            let (subject, plural) = match affected {
+                Affected::This => ("This creature".to_string(), false),
+                Affected::Enchanted => ("Enchanted creature".to_string(), false),
+                Affected::All(s) => (
+                    sentence(selector(s, true))
+                        .trim_end_matches('.')
+                        .to_string(),
+                    true,
+                ),
+            };
+            let _ = plural;
+            match rule {
+                CombatRule::CantAttack => format!("{subject} can't attack."),
+                CombatRule::CantBlock => format!("{subject} can't block."),
+                CombatRule::CantBeBlocked { by: None } => format!("{subject} can't be blocked."),
+                CombatRule::CantBeBlocked { by: Some(s) } => {
+                    format!("{subject} can't be blocked by {}.", selector(s, true))
+                }
+                CombatRule::CantBlockAttackers(s) => {
+                    format!("{subject} can't block {}.", selector(s, true))
+                }
+            }
+        }
         AbilityDef::AdditionalCost(c) => {
             let mut text = cost(c);
             if let Some(first) = text.chars().next() {
@@ -834,6 +871,26 @@ pub fn rules_text(def: &CardDef) -> Vec<String> {
         ));
     }
     lines.extend(def.abilities.iter().map(ability));
+    // What an attached permanent calls the thing it is attached to.
+    let host = if def.creature_types.iter().any(|t| t == "Equipment") {
+        Some("quipped creature")
+    } else {
+        def.abilities.iter().find_map(|a| match a {
+            AbilityDef::Enchant(TargetFilter::Creature) => None,
+            AbilityDef::Enchant(TargetFilter::Permanent(sels)) => Some(match sels.as_slice() {
+                [s] if s.types == [CardType::Land] => "nchanted land",
+                [s] if s.types == [CardType::Artifact] => "nchanted artifact",
+                [s] if s.types == [CardType::Creature] => "nchanted creature",
+                _ => "nchanted permanent",
+            }),
+            _ => None,
+        })
+    };
+    if let Some(host) = host {
+        for line in &mut lines {
+            *line = line.replace("nchanted creature", host);
+        }
+    }
     lines
 }
 

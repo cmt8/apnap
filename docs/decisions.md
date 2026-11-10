@@ -701,6 +701,51 @@ section of `docs/rules-notes/601-casting-602-activating-605-mana.md`.
   compared, and a cheap pre-check (`Walk::could_matter`) skips the comparison when the other
   effect can't change what this one looks at. Results are unchanged.
 
+## D-051 Compiler batch 3: conditional statics, combat restrictions, Equipment, Auras on anything (2026-11-09)
+5,001 → 5,468 of 34,463 scripts compile (15.9%); precons 103 → 109 of 275 deck slots.
+(D-049 and D-050 are reserved for the mana-ability and library-search work started in
+parallel worktrees.) Rules text: `docs/rules-notes/702-evasion-protection-keywords-701-actions.md`
+(Equipment, combat restrictions) and `613-layers.md` for the layer questions.
+
+- **`AbilityDef::Static { only_if }`**: "as long as …" / "during your turn". The condition is
+  judged inside the layer walk against the view computed so far (`Walk::holds`), never
+  through `chars` (which would be the computation calling itself), and it takes part in
+  CR 613.8 dependency: an effect that would make another's condition false is applied
+  first. New conditions `YourTurn`, `NotYourTurn`, `ControlAtMost`, `HandAtMost`; Forge's
+  `IsPresent$` (+ `EQ0`/`LE<n>`) and `Condition$ PlayerTurn | NotPlayerTurn | Threshold |
+  Metalcraft | Hellbent`. `CheckSVar$` conditions are a long tail and stay blocked.
+- **Static "+N/+N for each [permanent]"** is `ModifyPTBy` counted continuously in layer 7c.
+  Only counts of permanents that don't look at power or toughness are allowed there (the
+  validator enforces it): anything else would depend on the order of other 7c effects.
+- **`AbilityDef::CombatRule { affected, rule }`** — `CantAttack`, `CantBlock`,
+  `CantBeBlocked { by }`, `CantBlockAttackers(sel)`: restrictions (CR 508.1c, 509.1b), not
+  characteristics, so they are read by the combat frames from the abilities permanents
+  currently have, not by the layer walk. One Forge line with several modes ("can't attack
+  or block") becomes several abilities. Not compiled: `CantAttack` with `UnlessDefender$`
+  or `Target$`, `CantBeActivated`.
+- **Selectors:** `power_max` ("with power N or less"), `not_keywords` ("without flying").
+- **Equipment:** `K:Equip:<cost>` is an ordinary activated ability (sorcery timing, target
+  creature you control) whose effect is `Effect::AttachThis`; "equipped creature" is the
+  existing `Affected::Enchanted` (what the source is attached to — the generated text says
+  "equipped" for an Equipment). CR 704.5n: an Equipment whose host is gone or not a
+  creature becomes unattached (`GameAction::Unattach`, done on the spot by the state
+  check, which then runs again). A new attachment is a new timestamp (CR 701.3c).
+  Restricted equips ("equip legendary creature") are blocked.
+- **Auras enchant any permanent filter** ("enchant land", "enchant creature you control"):
+  `Enchant(TargetFilter::Permanent(..))`; the engine needed no change (targets, attachment
+  and the CR 704.5m check all go through the filter). Players can't be enchanted yet.
+- **A mis-compilation fixed:** off the battlefield Forge's filter word `Permanent` means a
+  permanent *card* (CR 110.4a); it compiled as "any card" for graveyard targets and counts
+  and for counterspell and cost-reduction filters (`Tx::card_selector`).
+- **Heuristic AI and illegal block declarations:** its block plan doesn't know every
+  restriction the engine applies; when a planned double-block of a creature with menace
+  lost one blocker the engine rejected the declaration, and the agent repeated it forever
+  (two soak games hit the decision cap). Asked about the same blocker twice in one combat,
+  it now declares no blocks.
+- **Parallel agents:** two worktree agents (mana abilities, library search) were started on
+  the user's suggestion; both were stopped by declined tool calls inside their worktrees
+  and left only partial, uncommitted work there.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

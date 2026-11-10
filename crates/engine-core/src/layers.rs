@@ -301,6 +301,10 @@ pub fn matches_parts(
             (a, b) => a.is_none_or(|a| attacking == a) && b.is_none_or(|b| blocking == b),
         }
         && sel.keywords.iter().all(|k| c.has(*k))
+        && !sel.not_keywords.iter().any(|k| c.has(*k))
+        && sel
+            .power_max
+            .is_none_or(|n| c.power.is_some_and(|p| p <= n))
         && match sel.controller {
             Who::Any => true,
             Who::You => object_controller == controller,
@@ -551,12 +555,14 @@ impl Walk<'_> {
                 ContinuousEffect::AddTypes { .. } => true,
                 ContinuousEffect::SetColors(_) => !s.colors.is_empty(),
                 ContinuousEffect::AddKeywords(_) | ContinuousEffect::LoseKeywords(_) => {
-                    !s.keywords.is_empty()
+                    !s.keywords.is_empty() || !s.not_keywords.is_empty()
                 }
                 ContinuousEffect::SetPT(..)
                 | ContinuousEffect::ModifyPT(..)
                 | ContinuousEffect::ModifyPTBy { .. }
-                | ContinuousEffect::SwitchPT => s.power_min.is_some() || s.toughness_min.is_some(),
+                | ContinuousEffect::SwitchPT => {
+                    s.power_min.is_some() || s.toughness_min.is_some() || s.power_max.is_some()
+                }
                 ContinuousEffect::LoseAllAbilities | ContinuousEffect::GainControl => true,
             }) || matches!(
                 p,
