@@ -289,7 +289,17 @@ fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
             ContinuousEffect::LoseKeywords(ks) => format!("{lose} {}", kws(ks)),
             ContinuousEffect::LoseAllAbilities => format!("{lose} all abilities"),
             ContinuousEffect::SetPT(p, t) => format!("{have} base power and toughness {p}/{t}"),
-            ContinuousEffect::ModifyPT(p, t) => format!("{get} {}/{}", signed(*p), signed(*t)),
+            // A zero takes the sign of the other half: "-1/-0", as cards print it.
+            ContinuousEffect::ModifyPT(p, t) => {
+                let half = |n: i32, other: i32| {
+                    if n == 0 && other < 0 {
+                        "-0".to_string()
+                    } else {
+                        signed(n)
+                    }
+                };
+                format!("{get} {}/{}", half(*p, *t), half(*t, *p))
+            }
             ContinuousEffect::ModifyPTBy { power, toughness } => {
                 let part = |s: &crate::Signed| {
                     format!(
