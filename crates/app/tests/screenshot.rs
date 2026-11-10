@@ -134,4 +134,17 @@ fn render_menu_and_mid_game() {
         s.respond(r).unwrap();
     }
     shot(&mut h, dir.join("game-end.png"));
+    // Looking through a graveyard.
+    let with_cards = {
+        let v = h.state().session.as_ref().unwrap().view();
+        v.players
+            .iter()
+            .position(|p| !p.graveyard.is_empty())
+            .map(|i| PlayerId(i as u8))
+    };
+    if let Some(p) = with_cards {
+        h.remove_cursor();
+        h.state_mut().zone_view = Some((p, app::ui::Pile::Graveyard));
+        shot(&mut h, dir.join("pile.png"));
+    }
 }

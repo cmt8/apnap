@@ -221,3 +221,62 @@ fn pointing_at_a_card_enlarges_it() {
     assert!(h.query_by_label("Test Shock (enlarged)").is_none());
     assert!(h.state().zoomed.is_none());
 }
+
+/// Each player's plate shows their life; hand, library and graveyard are icons with a
+/// count; exile appears only when that player has exiled cards. Clicking the graveyard or
+/// exile counter opens the pile to look through.
+#[test]
+fn graveyards_and_exile_can_be_looked_through() {
+    use app::ui::Pile;
+    let mut sc = scenario();
+    sc.cards(P0, Zone::Graveyard, &["Test Golem", "Test Sprout"]);
+    sc.card(P1, Zone::Exile, "Test Giant");
+    sc.card(P0, Zone::Battlefield, "Mountain");
+    sc.card(P0, Zone::Hand, "Test Shock");
+    let mut h = harness_for(sc.build());
+    for label in [
+        "P0 (you) — 20 life",
+        "P1 — 20 life",
+        "P0 hand: 1 card",
+        "P0 library: 20 cards",
+        "P0 graveyard: 2 cards",
+        "P1 graveyard: 0 cards",
+        "P1 exile: 1 card",
+    ] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    assert!(
+        h.query_by_label_contains("P0 exile").is_none(),
+        "nothing exiled: not shown"
+    );
+    let cards_named = |h: &Harness<'_, App>, name: &str| {
+        h.query_all_by_label_contains(&format!("{name}  ")).count()
+    };
+    assert_eq!(cards_named(&h, "Test Golem"), 0);
+
+    button(&mut h, "P0 graveyard: 2 cards");
+    assert_eq!(h.state().zone_view, Some((P0, Pile::Graveyard)));
+    assert!(h.query_by_label_contains("Your graveyard").is_some());
+    assert_eq!(cards_named(&h, "Test Golem"), 1);
+    assert_eq!(cards_named(&h, "Test Sprout"), 1);
+    // Pointing at a card in the pile enlarges it like any other.
+    h.query_all_by_label_contains("Test Golem  ")
+        .next()
+        .unwrap()
+        .hover();
+    h.run_ok();
+    assert!(h.query_by_label("Test Golem (enlarged)").is_some());
+    // Clicking the counter again closes the pile.
+    button(&mut h, "P0 graveyard: 2 cards");
+    assert_eq!(h.state().zone_view, None);
+    assert_eq!(cards_named(&h, "Test Golem"), 0);
+
+    button(&mut h, "P1 exile: 1 card");
+    assert_eq!(h.state().zone_view, Some((P1, Pile::Exile)));
+    assert!(h.query_by_label_contains("P1's exiled cards").is_some());
+    assert_eq!(cards_named(&h, "Test Giant"), 1);
+    // So does Escape.
+    h.key_press(egui::Key::Escape);
+    h.run_ok();
+    assert_eq!(h.state().zone_view, None);
+}

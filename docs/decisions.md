@@ -466,6 +466,12 @@ named Arena's combat as the model, and asked for the four players in a grid.
   the decision bar shows only what has no place on the table (pass, keep/mulligan, modes,
   yes/no…). "List every option" in the top bar brings the full list back. The main action
   — pass priority, confirm — is one large button, and the space bar presses it.
+- **Player plates and piles** (user request, same day). Each seat's header is a plate
+  with the player's name and a large life total (red at 5 or less), then icons with counts
+  for hand, library and graveyard; exile appears only when that player has exiled cards.
+  Clicking the graveyard or exile counter opens that pile in a window beside the counter
+  (most recent first; cards enlarge on hover and can be clicked when they are a choice;
+  click the counter again or press Escape to close). A pile holding a choice is outlined.
 - **Tests.** `tests/combat.rs` drives all of this with real pointer presses and drags at
   the places the cards are drawn; the robot (`tests/robot.rs`) declares every attack and
   block of its games that way too.

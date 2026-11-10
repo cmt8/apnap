@@ -600,3 +600,230 @@ pub fn card_large(ui: &mut egui::Ui, art: &mut Art, def: &CardDef, height: f32) 
     }
     resp
 }
+
+// ---------------------------------------------------------------------------------------
+// Player plate and zone counters
+// ---------------------------------------------------------------------------------------
+
+/// The small pictures next to a player's zone counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Icon {
+    /// A fan of cards.
+    Hand,
+    /// A pile of cards.
+    Library,
+    /// A headstone.
+    Graveyard,
+    /// A struck-through circle: removed from the game.
+    Exile,
+}
+
+/// Draw `icon` in the square `rect`.
+pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
+    let (w, h) = (rect.width(), rect.height());
+    let at = |x: f32, y: f32| pos2(rect.min.x + x * w, rect.min.y + y * h);
+    let dark = Color32::from_rgb(34, 34, 42);
+    let line = Stroke::new((w * 0.075).max(1.2), color);
+    match icon {
+        Icon::Hand => {
+            // Three cards fanned out from a point below them.
+            let pivot = at(0.5, 1.0);
+            let (cw, ch) = (w * 0.4, h * 0.78);
+            for angle in [-0.5_f32, 0.0, 0.5] {
+                let (sin, cos) = angle.sin_cos();
+                let corners = [(-0.5, -1.0), (0.5, -1.0), (0.5, -0.12), (-0.5, -0.12)].map(
+                    |(x, y): (f32, f32)| {
+                        let (x, y) = (x * cw, y * ch);
+                        pos2(pivot.x + x * cos - y * sin, pivot.y + x * sin + y * cos)
+                    },
+                );
+                painter.add(egui::Shape::convex_polygon(corners.to_vec(), dark, line));
+            }
+        }
+        Icon::Library => {
+            // A pile: three cards, each a little further down and right.
+            for i in (0..3).rev() {
+                let d = i as f32 * 0.11;
+                let r = Rect::from_min_max(at(0.12 + d, 0.04 + d), at(0.66 + d, 0.74 + d));
+                painter.rect(r, w * 0.08, dark, line, StrokeKind::Middle);
+            }
+        }
+        Icon::Graveyard => {
+            // A headstone on the ground, with a cross.
+            let top = at(0.5, 0.36);
+            painter.circle_filled(top, w * 0.27, color);
+            painter.rect_filled(
+                Rect::from_min_max(at(0.23, 0.36), at(0.77, 0.9)),
+                0.0,
+                color,
+            );
+            painter.line_segment([at(0.08, 0.92), at(0.92, 0.92)], line);
+            let cross = Stroke::new((w * 0.085).max(1.2), dark);
+            painter.line_segment([at(0.5, 0.24), at(0.5, 0.7)], cross);
+            painter.line_segment([at(0.36, 0.42), at(0.64, 0.42)], cross);
+        }
+        Icon::Exile => {
+            let r = w * 0.38;
+            painter.circle_stroke(rect.center(), r, line);
+            let d = vec2(r, r) * std::f32::consts::FRAC_1_SQRT_2;
+            painter.line_segment([rect.center() - d, rect.center() + d], line);
+        }
+    }
+}
+
+/// An icon with a number: how many cards a player has in a zone. `label` is its accessible
+/// name. A clickable one (a zone that can be looked through) reacts to the pointer;
+/// `outline` marks one that holds something that can be chosen.
+pub fn zone_count(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    count: usize,
+    label: &str,
+    clickable: bool,
+    outline: Option<Stroke>,
+) -> Response {
+    let font = FontId::proportional(15.0);
+    let text = ui
+        .painter()
+        .layout_no_wrap(count.to_string(), font, Color32::PLACEHOLDER);
+    let icon_side = 20.0;
+    let pad = vec2(5.0, 3.0);
+    let size = vec2(icon_side + 4.0 + text.size().x, icon_side) + 2.0 * pad;
+    let sense = if clickable {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(size, sense);
+    let role = if clickable {
+        egui::Role::Button
+    } else {
+        egui::Role::Label
+    };
+    resp.widget_info(|| egui::WidgetInfo::labeled(role, true, label));
+    if ui.is_rect_visible(rect) {
+        let hot = clickable && resp.hovered();
+        let color = if count == 0 {
+            Color32::from_gray(120)
+        } else if hot {
+            Color32::WHITE
+        } else {
+            Color32::from_gray(205)
+        };
+        if hot {
+            ui.painter()
+                .rect_filled(rect, 6.0, Color32::from_rgb(54, 54, 66));
+        }
+        if let Some(stroke) = outline {
+            ui.painter()
+                .rect_stroke(rect, 6.0, stroke, StrokeKind::Inside);
+        }
+        let icon_rect = Rect::from_min_size(rect.min + pad, Vec2::splat(icon_side));
+        paint_icon(ui.painter(), icon_rect, icon, color);
+        let pos = pos2(icon_rect.max.x + 4.0, rect.center().y - text.size().y / 2.0);
+        ui.painter().galley(pos, text, color);
+    }
+    if clickable {
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        resp
+    }
+}
+
+/// How a player's plate is drawn.
+#[derive(Debug)]
+pub struct Plate<'a> {
+    /// The accessible name ("P1 — 20 life").
+    pub label: &'a str,
+    pub name: &'a str,
+    pub life: i32,
+    /// It is this player's turn.
+    pub active: bool,
+    /// They have left the game.
+    pub out: bool,
+    /// Can be clicked (a target, a player to attack).
+    pub clickable: bool,
+    pub outline: Option<Stroke>,
+}
+
+/// A player's name with their life total, large.
+pub fn player_plate(ui: &mut egui::Ui, plate: &Plate<'_>) -> Response {
+    let gold = Color32::from_rgb(235, 190, 60);
+    let name_color = if plate.active {
+        gold
+    } else {
+        Color32::from_gray(225)
+    };
+    let name = ui.painter().layout_no_wrap(
+        plate.name.to_string(),
+        FontId::proportional(15.0),
+        name_color,
+    );
+    let life_text = if plate.out {
+        "OUT".to_string()
+    } else {
+        plate.life.to_string()
+    };
+    let life = ui.painter().layout_no_wrap(
+        life_text,
+        FontId::proportional(if plate.out { 15.0 } else { 26.0 }),
+        Color32::WHITE,
+    );
+    let height = 36.0;
+    let life_box = vec2((life.size().x + 18.0).max(46.0), height - 6.0);
+    let size = vec2(10.0 + name.size().x + 10.0 + life_box.x + 3.0, height);
+    let sense = if plate.clickable {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(size, sense);
+    let role = if plate.clickable {
+        egui::Role::Button
+    } else {
+        egui::Role::Label
+    };
+    resp.widget_info(|| egui::WidgetInfo::labeled(role, true, plate.label));
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        let fill = if plate.clickable && resp.hovered() {
+            Color32::from_rgb(58, 58, 70)
+        } else {
+            Color32::from_rgb(40, 40, 50)
+        };
+        p.rect_filled(rect, 9.0, fill);
+        let stroke = plate.outline.unwrap_or(Stroke::new(
+            1.0,
+            if plate.active {
+                gold
+            } else {
+                Color32::from_gray(80)
+            },
+        ));
+        p.rect_stroke(rect, 9.0, stroke, StrokeKind::Inside);
+        p.galley(
+            pos2(rect.min.x + 10.0, rect.center().y - name.size().y / 2.0),
+            name,
+            name_color,
+        );
+        // The life total: the thing to see at a glance.
+        let life_rect = Rect::from_min_size(
+            pos2(rect.max.x - life_box.x - 3.0, rect.min.y + 3.0),
+            life_box,
+        );
+        let life_fill = if plate.out {
+            Color32::from_gray(70)
+        } else if plate.life <= 5 {
+            Color32::from_rgb(168, 40, 40)
+        } else {
+            Color32::from_rgb(24, 24, 30)
+        };
+        p.rect_filled(life_rect, 7.0, life_fill);
+        p.galley(life_rect.center() - life.size() / 2.0, life, Color32::WHITE);
+    }
+    if plate.clickable {
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        resp
+    }
+}

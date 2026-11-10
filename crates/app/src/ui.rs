@@ -4,7 +4,7 @@
 //! player can also be chosen by clicking that card or player on the board.
 
 use crate::art::Art;
-use crate::cardview::{self, Badge, CardLook, Corner};
+use crate::cardview::{self, Badge, CardLook, Corner, Icon, Plate};
 use crate::combat::Plan;
 use crate::session::Session;
 use card_model::describe;
@@ -89,6 +89,11 @@ pub struct App {
     pub zoomed: Option<Preview>,
     /// The attack or block being planned on the board (see `combat`).
     pub plan: Option<Plan>,
+    /// The graveyard or exile pile being looked through.
+    pub zone_view: Option<(PlayerId, Pile)>,
+    /// Where to put the pile window when it next opens: beside the counter that was
+    /// clicked, not over it.
+    zone_place: Option<(egui::Pos2, egui::Align2)>,
     /// Also show a button for every option that can be chosen by clicking the board.
     pub list_options: bool,
     /// Animate cards turning and stepping forward.
@@ -96,6 +101,13 @@ pub struct App {
     /// Where things were drawn last frame (for tests that use the pointer).
     pub card_rects: BTreeMap<ObjectId, egui::Rect>,
     pub player_rects: BTreeMap<PlayerId, egui::Rect>,
+}
+
+/// A pile of cards that can be looked through.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pile {
+    Graveyard,
+    Exile,
 }
 
 /// The card shown enlarged next to the pointer.
@@ -173,6 +185,8 @@ impl App {
             resume_at: None,
             zoomed: None,
             plan: None,
+            zone_view: None,
+            zone_place: None,
             list_options: false,
             animate: true,
             card_rects: BTreeMap::new(),
@@ -235,6 +249,7 @@ impl App {
         self.decision_id = u64::MAX;
         self.zoomed = None;
         self.plan = None;
+        self.zone_view = None;
         self.resume_at = None;
     }
 
@@ -485,6 +500,8 @@ struct Pointer {
     /// While planning combat: a creature that was clicked, a player that was clicked.
     plan_click: Option<ObjectId>,
     player_click: Option<PlayerId>,
+    /// A graveyard or exile counter (drawn here) was clicked: open or close that pile.
+    pile_click: Option<(PlayerId, Pile, egui::Rect)>,
     /// A creature being dragged, and where the pointer is.
     dragging: Option<(ObjectId, egui::Pos2)>,
     /// A creature that was dropped, and where.
@@ -511,6 +528,8 @@ enum Place {
     Hand,
     Battlefield,
     Command,
+    /// In a graveyard or in exile, shown in the pile viewer.
+    Pile,
 }
 
 fn counter_name(kind: CounterKind) -> &'static str {
@@ -821,6 +840,15 @@ fn piles<'a>(cx: &Ctx<'_>, lands: &[&'a ObjectView]) -> Vec<Vec<&'a ObjectView>>
     out
 }
 
+/// A pile holding something that can be chosen right now is outlined.
+fn pile_outline<'a>(
+    cx: &Ctx<'_>,
+    mut pile: impl Iterator<Item = &'a ObjectView>,
+) -> Option<Stroke> {
+    pile.any(|o| !cx.options_at(Anchor::Obj(o.id)).is_empty())
+        .then_some(Stroke::new(2.0, GOLD))
+}
+
 /// What one player has on the table, in drawing order.
 struct Rows<'a> {
     /// Their cards in the command zone.
@@ -904,7 +932,7 @@ pub struct SeatSize {
 }
 
 /// Space a seat needs besides its cards: the player's line and the frame.
-const SEAT_HEADER: f32 = 34.0;
+const SEAT_HEADER: f32 = 46.0;
 const SEAT_MARGIN: f32 = 7.0;
 const SEAT_GAP: f32 = 6.0;
 /// How wide the seat of a player who has left the game is.
@@ -991,19 +1019,15 @@ fn player_area(
     let pl = &v.players[p.index()];
     let me = p == v.viewer;
     let mut head = format!(
-        "P{}{} — {} life — hand {} — library {} — graveyard {}",
+        "P{}{} — {} life",
         p.0,
         if me { " (you)" } else { "" },
-        pl.life,
-        pl.hand_size,
-        pl.library_size,
-        pl.graveyard.len()
+        pl.life
     );
     if pl.has_lost {
         head.push_str(" — OUT");
     }
     let opts = cx.options_at(Anchor::Player(p));
-    let active = v.active == p;
     // Planning an attack with more than one player to attack: players are clickable, and
     // the one new attackers are sent at is marked.
     let attackable = cx
@@ -1012,48 +1036,111 @@ fn player_area(
         .map(Plan::defenders)
         .filter(|d| d.len() > 1 && d.contains(&p));
     let is_target = attackable.is_some() && cx.plan.and_then(|plan| plan.target) == Some(p);
-    let header = ui.horizontal_wrapped(|ui| {
-        let text = RichText::new(head).strong().size(14.0).color(if active {
-            GOLD
+    let who = if me {
+        "your".to_string()
+    } else {
+        format!("P{}'s", p.0)
+    };
+    let cards = |n: usize| {
+        if n == 1 {
+            "1 card".to_string()
         } else {
-            Color32::from_gray(225)
-        });
-        let resp = if attackable.is_some() {
-            let stroke = if is_target {
-                Stroke::new(3.0, RED)
-            } else {
-                Stroke::new(2.0, GOLD)
-            };
-            let r = ui.add(egui::Button::new(text).stroke(stroke));
-            if r.clicked() {
+            format!("{n} cards")
+        }
+    };
+    let exiled: Vec<&ObjectView> = v.exile.iter().filter(|o| o.owner == p).collect();
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let outline = if is_target {
+            Some(Stroke::new(3.0, RED))
+        } else if cx.focus == Some(Anchor::Player(p)) {
+            Some(Stroke::new(3.0, Color32::WHITE))
+        } else if attackable.is_some() || !opts.is_empty() {
+            Some(Stroke::new(2.0, GOLD))
+        } else {
+            None
+        };
+        let name = if me {
+            format!("P{} (you)", p.0)
+        } else {
+            format!("P{}", p.0)
+        };
+        let plate = cardview::player_plate(
+            ui,
+            &Plate {
+                label: &head,
+                name: &name,
+                life: pl.life,
+                active: v.active == p,
+                out: pl.has_lost,
+                clickable: attackable.is_some() || !opts.is_empty(),
+                outline,
+            },
+        );
+        ptr.headers.insert(p, plate.rect);
+        if plate.clicked() {
+            if attackable.is_some() {
                 ptr.player_click = Some(p);
-            }
-            if is_target {
-                ui.label(RichText::new("attacking this player").strong().color(RED));
-            }
-            r
-        } else if opts.is_empty() {
-            ui.label(text)
-        } else {
-            let stroke = if cx.focus == Some(Anchor::Player(p)) {
-                Stroke::new(3.0, Color32::WHITE)
-            } else {
-                Stroke::new(2.0, GOLD)
-            };
-            let r = ui.add(egui::Button::new(text).stroke(stroke));
-            if r.clicked() {
+            } else if !opts.is_empty() {
                 ptr.clicked = Some(opts);
             }
-            r
-        };
-        resp.on_hover_text(if pl.graveyard.is_empty() {
-            "Graveyard: empty".to_string()
+        }
+        if is_target {
+            ui.label(RichText::new("attacking this player").strong().color(RED));
+        }
+        ui.add_space(6.0);
+        cardview::zone_count(
+            ui,
+            Icon::Hand,
+            pl.hand_size,
+            &format!("P{} hand: {}", p.0, cards(pl.hand_size)),
+            false,
+            None,
+        )
+        .on_hover_text(format!("Cards in {who} hand"));
+        cardview::zone_count(
+            ui,
+            Icon::Library,
+            pl.library_size,
+            &format!("P{} library: {}", p.0, cards(pl.library_size)),
+            false,
+            None,
+        )
+        .on_hover_text(format!("Cards in {who} library"));
+        let n = pl.graveyard.len();
+        let graveyard = cardview::zone_count(
+            ui,
+            Icon::Graveyard,
+            n,
+            &format!("P{} graveyard: {}", p.0, cards(n)),
+            n > 0,
+            pile_outline(cx, pl.graveyard.iter()),
+        )
+        .on_hover_text(if n > 0 {
+            format!("Cards in {who} graveyard — click to look through it")
         } else {
-            let names: Vec<&str> = pl.graveyard.iter().map(|o| o.name.as_str()).collect();
-            format!("Graveyard (top last): {}", names.join(", "))
+            format!("Nothing in {who} graveyard")
         });
+        if graveyard.clicked() {
+            ptr.pile_click = Some((p, Pile::Graveyard, graveyard.rect));
+        }
+        // Exile is shown only when there is something in it.
+        if !exiled.is_empty() {
+            let exile = cardview::zone_count(
+                ui,
+                Icon::Exile,
+                exiled.len(),
+                &format!("P{} exile: {}", p.0, cards(exiled.len())),
+                true,
+                pile_outline(cx, exiled.iter().copied()),
+            )
+            .on_hover_text(format!("{who} cards in exile — click to look through them"));
+            if exile.clicked() {
+                ptr.pile_click = Some((p, Pile::Exile, exile.rect));
+            }
+        }
         if pl.mana_pool.total() > 0 {
-            let mut pool = String::from("mana ");
+            let mut pool = String::new();
             for t in engine_core::mana::ManaType::ALL {
                 let n = pl.mana_pool.amounts[t.index()];
                 if n > 6 {
@@ -1064,7 +1151,8 @@ fn player_area(
                     }
                 }
             }
-            cardview::rich_label(ui, art, pool.trim_end(), 15.0, Color32::from_gray(225));
+            ui.add_space(6.0);
+            cardview::rich_label(ui, art, pool.trim_end(), 17.0, Color32::from_gray(225));
         }
         // Commander damage this player has taken (CR 903.10a).
         for (card, n) in &pl.commander_damage {
@@ -1082,7 +1170,6 @@ fn player_area(
             );
         }
     });
-    ptr.headers.insert(p, header.response.rect);
     if pl.has_lost {
         // CR 800.4a: everything they owned has left the game; only the header remains.
         return;
@@ -2068,6 +2155,26 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
         }
     }
     combat_arrows(ui.ctx(), &view, app.plan.as_ref(), &ptr);
+    if let Some((p, pile, counter)) = ptr.pile_click {
+        // Clicking the counter of the pile that is open closes it.
+        app.zone_view = (app.zone_view != Some((p, pile))).then_some((p, pile));
+        // The window opens below a counter in the top half of the screen and above one in
+        // the bottom half, so it never hides the counter.
+        let screen = ui.ctx().content_rect();
+        app.zone_place = Some(if counter.center().y < screen.center().y {
+            (
+                counter.left_bottom() + vec2(0.0, 8.0),
+                egui::Align2::LEFT_TOP,
+            )
+        } else {
+            (
+                counter.left_top() - vec2(0.0, 8.0),
+                egui::Align2::LEFT_BOTTOM,
+            )
+        });
+    }
+    let place = app.zone_place.take();
+    pile_window(ui.ctx(), art, &cx, &mut app.zone_view, place, &mut ptr);
     app.card_rects = std::mem::take(&mut ptr.cards);
     app.player_rects = std::mem::take(&mut ptr.players);
 
@@ -2150,6 +2257,69 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
     false
 }
 
+/// The window for looking through a graveyard or a player's exiled cards. The cards can be
+/// pointed at (to enlarge them) and, when one is a choice in the current decision, clicked.
+fn pile_window(
+    ctx: &egui::Context,
+    art: &mut Art,
+    cx: &Ctx<'_>,
+    open: &mut Option<(PlayerId, Pile)>,
+    place: Option<(egui::Pos2, egui::Align2)>,
+    ptr: &mut Pointer,
+) {
+    let Some((p, pile)) = *open else {
+        return;
+    };
+    let v = cx.view;
+    // Most recent first: the top of a graveyard is its last card.
+    let cards: Vec<&ObjectView> = match pile {
+        Pile::Graveyard => v.players[p.index()].graveyard.iter().rev().collect(),
+        Pile::Exile => v.exile.iter().filter(|o| o.owner == p).rev().collect(),
+    };
+    let who = if p == v.viewer {
+        "Your".to_string()
+    } else {
+        format!("P{}'s", p.0)
+    };
+    let title = match pile {
+        Pile::Graveyard => format!("{who} graveyard — most recent first"),
+        Pile::Exile => format!("{who} exiled cards — most recent first"),
+    };
+    let mut keep = true;
+    let screen = ctx.content_rect();
+    let mut window = egui::Window::new(title)
+        .id(egui::Id::unique("pile viewer"))
+        .open(&mut keep)
+        .collapsible(false)
+        .resizable(true);
+    if let Some((pos, pivot)) = place {
+        window = window.pivot(pivot).current_pos(pos);
+    }
+    window
+        .default_size(vec2(
+            (screen.width() * 0.5).clamp(420.0, 1100.0),
+            (screen.height() * 0.45).clamp(280.0, 620.0),
+        ))
+        .show(ctx, |ui| {
+            if cards.is_empty() {
+                ui.weak("No cards.");
+            }
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(CARD_GAP, CARD_GAP);
+                        for o in cards {
+                            card(ui, art, cx, &[o], Place::Pile, 240.0, 0.0, ptr);
+                        }
+                    });
+                });
+        });
+    if !keep || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        *open = None;
+    }
+}
+
 /// The point on the edge of `rect` nearest to `toward` along the line from its centre.
 fn edge_point(rect: egui::Rect, toward: egui::Pos2) -> egui::Pos2 {
     let c = rect.center();
@@ -2172,8 +2342,9 @@ fn edge_point(rect: egui::Rect, toward: egui::Pos2) -> egui::Pos2 {
 /// who blocks what, and the creature being dragged. Declared combat is drawn softer than
 /// what is still being planned.
 fn combat_arrows(ctx: &egui::Context, view: &PlayerView, plan: Option<&Plan>, ptr: &Pointer) {
-    let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("combat arrows"));
-    let painter = ctx.layer_painter(layer);
+    // On the table's own layer (drawn after it, so on top of the cards), which keeps the
+    // arrows underneath windows and the enlarged card.
+    let painter = ctx.layer_painter(egui::LayerId::background());
     let between = |from: egui::Rect, to: egui::Rect, color: Color32, width: f32| {
         let a = edge_point(from, to.center());
         let b = edge_point(to, from.center());
