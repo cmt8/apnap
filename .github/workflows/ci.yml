@@ -29,14 +29,15 @@ jobs:
         with:
           path: ${{ runner.temp }}/apnap-cache
           key: cards-${{ runner.os }}-${{ hashFiles('crates/cards/decks/precon_*.ron', 'crates/card-db/src/forge/mod.rs') }}
-      - name: fetch printed card data (Scryfall) + coverage report
+      - name: fetch printed card data (Scryfall) and Forge's card scripts (pinned commit)
         run: |
-          cargo run -p harness --locked -- fetch-cards
-          cargo run -p harness --locked -- coverage
-      - name: fetch Forge's card scripts (pinned commit) + compile coverage over all cards
-        run: |
+          cargo run --release -p harness --locked -- fetch-cards
           cargo run --release -p harness --locked -- fetch-forge
           cargo run --release -p harness --locked -- fetch-bulk
+      # Both reports compile Forge's scripts, so they come after the fetches.
+      - name: coverage of the precons, and compile coverage over all cards
+        run: |
+          cargo run --release -p harness --locked -- coverage
           cargo run --release -p harness --locked -- forge-coverage --top 25
       - name: rustfmt
         run: cargo fmt --all --check
