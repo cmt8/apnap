@@ -22,6 +22,7 @@ use crate::zones::Zone;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
+use card_model::ContinuousEffect;
 use card_model::{
     AbilityDef, Amount, Body, CardType, DamageBy, EachPlayerAction, Effect, Keyword, ObjRef,
     PlayerRef, TargetFilter, TargetRef,
@@ -185,6 +186,23 @@ impl ResolveFrame {
                 .unwrap_or(0)
                 .max(0) as u32,
         }
+    }
+
+    /// CR 608.2h: amounts in a one-shot continuous effect are worked out once, as it begins.
+    fn fix_amounts(&self, st: &GameState, effects: Vec<ContinuousEffect>) -> Vec<ContinuousEffect> {
+        effects
+            .into_iter()
+            .map(|e| match e {
+                ContinuousEffect::ModifyPTBy { power, toughness } => {
+                    let value = |s: &card_model::Signed| {
+                        let n = self.amount(st, &s.amount) as i32;
+                        if s.negative { -n } else { n }
+                    };
+                    ContinuousEffect::ModifyPT(value(&power), value(&toughness))
+                }
+                other => other,
+            })
+            .collect()
     }
 
     fn damage(&self, st: &GameState, target: DamageTarget, amount: u32) -> Proposed {
@@ -533,6 +551,7 @@ impl ResolveFrame {
             } => {
                 // CR 611.2c: the affected set is locked in now.
                 let affected = crate::layers::matching(st, &affected, self.source, self.controller);
+                let effects = self.fix_amounts(st, effects);
                 if !affected.is_empty() {
                     execute(
                         st,
@@ -593,6 +612,7 @@ impl ResolveFrame {
                 until_end_of_turn,
             } => {
                 // CR 611.2c: the affected set is locked in now.
+                let effects = self.fix_amounts(st, effects);
                 if let Some(o) = self.obj(st, k, what) {
                     execute(
                         st,

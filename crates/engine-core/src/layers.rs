@@ -324,7 +324,7 @@ fn layer_of(e: &ContinuousEffect) -> Layer {
         | ContinuousEffect::LoseKeywords(_)
         | ContinuousEffect::LoseAllAbilities => Layer::L6,
         ContinuousEffect::SetPT(..) => Layer::L7b,
-        ContinuousEffect::ModifyPT(..) => Layer::L7c,
+        ContinuousEffect::ModifyPT(..) | ContinuousEffect::ModifyPTBy { .. } => Layer::L7c,
         ContinuousEffect::SwitchPT => Layer::L7d,
     }
 }
@@ -487,6 +487,8 @@ fn apply_part(c: &mut Characteristics, part: &ContinuousEffect, you: PlayerId) {
                 *tg += t;
             }
         }
+        // Fixed into a `ModifyPT` when the effect began (frames::resolve); never stored.
+        ContinuousEffect::ModifyPTBy { .. } => {}
         ContinuousEffect::SwitchPT => {
             if let (Some(p), Some(t)) = (c.power, c.toughness) {
                 c.power = Some(t);

@@ -256,6 +256,14 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 if effects.is_empty() {
                     p.push(at("a static ability needs at least one effect".into()));
                 }
+                if effects
+                    .iter()
+                    .any(|e| matches!(e, card_model::ContinuousEffect::ModifyPTBy { .. }))
+                {
+                    p.push(at(
+                        "ModifyPTBy is for one-shot effects; a static ability can't use it".into(),
+                    ));
+                }
                 // The affected set is worked out inside the layer walk, before power and
                 // toughness are final (CR 613.4): it can't depend on them.
                 if let card_model::Affected::All(s) = affected

@@ -308,6 +308,49 @@ pub fn try_forge_library() -> Result<card_db::forge::Library, String> {
     )
 }
 
+/// A catalog for a feature test of the Forge compiler (CLAUDE.md invariant 15): the
+/// self-contained cards plus invented cards written in Forge's script format, compiled the
+/// way real ones are. `tokens` are `(script name, script)`. Panics, naming the blockers,
+/// if any of them doesn't compile. Only the subtypes on these scripts' type lines are
+/// known to the compiler.
+pub fn forge_test_catalog(cards: &[&str], tokens: &[(&str, &str)]) -> Arc<CardCatalog> {
+    let cards: Vec<(String, String)> = cards
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (format!("test_{i}"), t.to_string()))
+        .collect();
+    let tokens: Vec<(String, String)> = tokens
+        .iter()
+        .map(|(n, t)| (n.to_string(), t.to_string()))
+        .collect();
+    let lib = card_db::forge::Library::build(&cards, &tokens, None);
+    assert_eq!(lib.unreadable, 0, "a test script could not be read");
+    assert!(lib.blocked.is_empty(), "blocked: {:?}", lib.blocked);
+    assert!(
+        lib.blocked_tokens.is_empty(),
+        "blocked tokens: {:?}",
+        lib.blocked_tokens
+    );
+    let names: Vec<&str> = lib.cards.keys().map(String::as_str).collect();
+    for name in &names {
+        assert!(
+            catalog().find(name).is_none(),
+            "{name} is already a self-contained card: pick another name"
+        );
+    }
+    Arc::new(
+        lib.catalog_for(&catalog(), names)
+            .unwrap_or_else(|e| panic!("{e:?}")),
+    )
+}
+
+/// The blockers the Forge compiler reports for one invented card (empty = it compiles).
+pub fn forge_test_blockers(card: &str) -> Vec<String> {
+    let lib = card_db::forge::Library::build(&[("test".to_string(), card.to_string())], &[], None);
+    assert_eq!(lib.unreadable, 0, "the test script could not be read");
+    lib.blocked.into_values().flatten().collect()
+}
+
 /// Is the printed data the real cards need in the local cache? `Err` carries the hint
 /// (which command downloads it).
 pub fn real_cards_ready() -> Result<(), String> {

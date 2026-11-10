@@ -14,7 +14,7 @@ use card_model::{
     AbilityDef, Affected, Amount, BasicLandType, Body, CardDef, CardType, Color, Condition,
     ContinuousEffect, Cost, CounterKind, DamageBy, EachPlayerAction, Effect, Keyword, ManaCost,
     ManaProduce, ManaType, Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector,
-    Supertype, TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
+    Signed, Supertype, TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -680,7 +680,7 @@ impl<'a> Tx<'a> {
                 }
             }
             "Pump" | "PumpAll" => {
-                let effects = self.pump_effects(&rd)?;
+                let effects = self.pump_effects(&rd, chain)?;
                 if api == "PumpAll" {
                     let sel = rd.get("ValidCards").and_then(|f| self.selector(f));
                     Effect::ApplyAll {
@@ -739,17 +739,31 @@ impl<'a> Tx<'a> {
     }
 
     /// `NumAtt$` / `NumDef$` / `KW$` of Pump and PumpAll (which last until end of turn).
-    fn pump_effects(&mut self, rd: &Rd<'a>) -> Option<Vec<ContinuousEffect>> {
+    fn pump_effects(&mut self, rd: &Rd<'a>, chain: &mut Chain) -> Option<Vec<ContinuousEffect>> {
         let int =
             |t: Option<&str>| t.map_or(Some(0), |t| t.trim_start_matches('+').parse::<i32>().ok());
-        let (p, t) = (int(rd.get("NumAtt")), int(rd.get("NumDef")));
-        let (Some(p), Some(t)) = (p, t) else {
-            self.block("Pump:variable-amount");
-            return None;
-        };
+        let (att, def) = (rd.get("NumAtt"), rd.get("NumDef"));
         let mut effects = Vec::new();
-        if (p, t) != (0, 0) {
-            effects.push(ContinuousEffect::ModifyPT(p, t));
+        match (int(att), int(def)) {
+            (Some(p), Some(t)) => {
+                if (p, t) != (0, 0) {
+                    effects.push(ContinuousEffect::ModifyPT(p, t));
+                }
+            }
+            // "+X/+X", "-X/-0": worked out as the effect resolves.
+            _ => {
+                let mut part = |text: Option<&str>| -> Option<Signed> {
+                    let text = text.unwrap_or("0");
+                    let negative = text.starts_with('-');
+                    let amount = self.amount(text.trim_start_matches(['+', '-']), chain)?;
+                    Some(Signed { negative, amount })
+                };
+                let (power, toughness) = (part(att), part(def));
+                effects.push(ContinuousEffect::ModifyPTBy {
+                    power: Box::new(power?),
+                    toughness: Box::new(toughness?),
+                });
+            }
         }
         if let Some(kw) = rd.get("KW") {
             let mut ks = Vec::new();
@@ -944,9 +958,15 @@ impl<'a> Tx<'a> {
         })?;
         match kind {
             "SP" => {
-                if rec.get("Cost").is_some() {
-                    self.block("spell:Cost");
-                    return None;
+                // A spell's `Cost$` normally just repeats its mana cost; anything else is
+                // an additional or alternative cost.
+                if let Some(cost) = rec.get("Cost") {
+                    let printed = self.face.mana_cost.as_deref().unwrap_or("no cost");
+                    let same = cost.split_whitespace().eq(printed.split_whitespace());
+                    if !same {
+                        self.block("spell:additional-cost");
+                        return None;
+                    }
                 }
                 self.body(rec, false, "SP").map(AbilityDef::Spell)
             }

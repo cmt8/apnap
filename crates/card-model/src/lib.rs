@@ -530,6 +530,13 @@ pub enum ContinuousEffect {
     ModifyPT(i32, i32),
     /// Layer 7d: switch power and toughness.
     SwitchPT,
+    /// Layer 7c: "+X/+X" (or "-X/-0" …) with amounts that are worked out when the spell or
+    /// ability resolves and then stay fixed (CR 608.2h). Only in one-shot effects (`Apply`,
+    /// `ApplyAll`): the engine turns it into a plain `ModifyPT` as the effect begins.
+    ModifyPTBy {
+        power: Box<Signed>,
+        toughness: Box<Signed>,
+    },
 }
 
 /// Events a static replacement effect watches for (CR 614). M2 vocabulary.
@@ -560,6 +567,14 @@ pub enum ReplaceWith {
     EntersTapped,
     /// "enters with N [kind] counters".
     EntersWithCounters { kind: CounterKind, n: u32 },
+}
+
+/// An amount with a sign: "+X" or "-X".
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Signed {
+    #[serde(default)]
+    pub negative: bool,
+    pub amount: Amount,
 }
 
 /// Counter kinds (CR 122). M2: the two P/T counters.

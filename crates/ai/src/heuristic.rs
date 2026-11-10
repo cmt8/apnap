@@ -86,6 +86,13 @@ fn continuous_polarity(effects: &[ContinuousEffect]) -> Polarity {
                     Polarity::Help
                 };
             }
+            ContinuousEffect::ModifyPTBy { power, toughness } => {
+                return if power.negative || toughness.negative {
+                    Polarity::Harm
+                } else {
+                    Polarity::Help
+                };
+            }
             ContinuousEffect::AddKeywords(_) | ContinuousEffect::AddTypes { .. } => {
                 return Polarity::Help;
             }

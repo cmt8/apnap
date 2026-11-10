@@ -248,6 +248,16 @@ fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
             ContinuousEffect::LoseAllAbilities => format!("{lose} all abilities"),
             ContinuousEffect::SetPT(p, t) => format!("{have} base power and toughness {p}/{t}"),
             ContinuousEffect::ModifyPT(p, t) => format!("{get} {}/{}", signed(*p), signed(*t)),
+            ContinuousEffect::ModifyPTBy { power, toughness } => {
+                let part = |s: &crate::Signed| {
+                    format!(
+                        "{}{}",
+                        if s.negative { "-" } else { "+" },
+                        amount(&s.amount)
+                    )
+                };
+                format!("{get} {}/{}", part(power), part(toughness))
+            }
             ContinuousEffect::SwitchPT => format!("{become_} power-and-toughness switched"),
         })
         .collect();
