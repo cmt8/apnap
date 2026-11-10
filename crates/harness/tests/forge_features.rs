@@ -75,17 +75,17 @@ fn pump_by_a_negative_counted_amount() {
     assert_eq!(pt(&s, giant), (3, 2), "two lands: -2/-2");
 }
 
-// Forge: a spell's `Cost$` normally repeats `ManaCost:`. When it says anything else the
-// spell has an additional or alternative cost, which must not be silently dropped.
+// Forge: a spell's `Cost$` restates the whole cost. Mana that differs from `ManaCost:` is
+// some other way of casting the spell, not an additional cost.
 #[test]
-fn a_spell_cost_that_differs_from_the_mana_cost_blocks() {
-    let card = "Name:Test Offering\n\
+fn a_spell_cost_with_different_mana_blocks() {
+    let card = "Name:Test Bargain\n\
         ManaCost:1 B\n\
         Types:Sorcery\n\
-        A:SP$ Draw | Cost$ 1 B Sac<1/Creature> | NumCards$ 2 | SpellDescription$ Text.\n\
+        A:SP$ Draw | Cost$ 2 B | NumCards$ 2 | SpellDescription$ Text.\n\
         Oracle:Text.";
-    assert_eq!(forge_test_blockers(card), ["spell:additional-cost"]);
-    let plain = card.replace(" Sac<1/Creature>", "");
+    assert_eq!(forge_test_blockers(card), ["spell:other-cost"]);
+    let plain = card.replace("Cost$ 2 B", "Cost$ 1 B");
     assert_eq!(forge_test_blockers(&plain), [] as [&str; 0]);
 }
 
@@ -757,5 +757,273 @@ fn x_of_the_permanent_spell_in_its_enters_trigger_is_not_compiled_yet() {
     assert_eq!(
         forge_test_blockers(&card),
         ["expr:Count$xPaid in a trigger"]
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// Costs.
+
+// CR 601.2h, 701.21a, 118.3 (2026-11-06). Forge: `Cost$ … Sac<1/Creature>` — sacrifice a
+// permanent of your choice as the cost is paid; `Creature.Other` is "another creature".
+#[test]
+fn sacrificing_a_chosen_permanent_as_a_cost() {
+    let cards = [
+        "Name:Test Altar\nManaCost:2\nTypes:Artifact\n\
+         A:AB$ Draw | Cost$ 1 Sac<1/Creature> | NumCards$ 1 | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+        creature(
+            "Test Cannibal",
+            "1 B",
+            "Ogre",
+            "3/3",
+            "A:AB$ GainLife | Cost$ Sac<1/Creature.Other/another creature> | LifeAmount$ 2 | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Swamp", "Swamp", "Test Altar"]);
+    let cannibal = sc.card(P0, Zone::Battlefield, "Test Cannibal");
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    sc.card(P1, Zone::Battlefield, "Test Golem");
+    let mut s = Script::new(sc.build());
+    // The Altar: either of my creatures (not the opponent's).
+    s.activate("Test Altar");
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::Sacrifice));
+    assert_eq!(s.options().len(), 2);
+    s.pick(
+        "the Golem",
+        |_, o| matches!(o, OptionDesc::Card { card } if *card == golem),
+    );
+    s.pay();
+    // Paid on activation: the Golem is gone while the ability is still on the stack.
+    assert!(!on_battlefield(&s, golem));
+    assert_eq!(s.st.stack.len(), 1);
+    assert_eq!(hand(&s, P0), 0);
+    s.pass_all();
+    assert_eq!(hand(&s, P0), 1);
+    // "Sacrifice another creature": the Cannibal is now my only creature — it can't pay
+    // with itself, so the ability isn't offered; the Altar still is.
+    assert!(!s.has(
+        |s, o| matches!(o, OptionDesc::ActivateAbility { source, .. } if s.name(*source) == "Test Cannibal")
+    ));
+    s.activate("Test Altar");
+    assert_eq!(s.options().len(), 1);
+    s.respond(Response::Pick(vec![0])).pay().pass_all();
+    assert!(!on_battlefield(&s, cannibal));
+    // Nothing left to sacrifice (CR 118.3): the Altar can't be activated.
+    assert!(!s.has(|_, o| matches!(o, OptionDesc::ActivateAbility { .. })));
+}
+
+// CR 601.2h, 119.4 (2026-11-06). Forge: `Discard<1/Card>` and `PayLife<2>` in a cost.
+#[test]
+fn discarding_and_paying_life_as_costs() {
+    let cards = [
+        creature(
+            "Test Rummager",
+            "1 R",
+            "Goblin",
+            "1/1",
+            "A:AB$ DealDamage | Cost$ Discard<1/Card> | ValidTgts$ Player | NumDmg$ 1 | SpellDescription$ Text.",
+        ),
+        creature(
+            "Test Bloodletter",
+            "1 B",
+            "Vampire",
+            "1/1",
+            "A:AB$ Draw | Cost$ PayLife<2> | NumCards$ 1 | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let can = |s: &Script, name: &str| {
+        s.has(|s, o| matches!(o, OptionDesc::ActivateAbility { source, .. } if s.name(*source) == name))
+    };
+    let mut sc = scenario(&cards);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Test Rummager", "Test Bloodletter"],
+    );
+    sc.cards(P0, Zone::Hand, &["Forest"]);
+    sc.life(P0, 3);
+    let mut s = Script::new(sc.build());
+    // Discard: chosen from hand, gone at once; with an empty hand it can't be paid.
+    s.activate("Test Rummager").target_player(P1);
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::Discard));
+    s.respond(Response::Pick(vec![0]));
+    assert!(s.find(P0, Zone::Graveyard, "Forest").is_some());
+    s.pass_all();
+    assert_eq!(life(&s, P1), 39);
+    assert!(!can(&s, "Test Rummager"));
+    // Life: 3 -> 1 on activation; then 1 < 2, so it can't be paid again.
+    s.activate("Test Bloodletter");
+    assert_eq!(life(&s, P0), 1);
+    s.pass_all();
+    assert_eq!(hand(&s, P0), 1);
+    assert!(!can(&s, "Test Bloodletter"));
+}
+
+// CR 118.8, 601.2b/h (2026-11-06). Forge: `A:SP$ … | Cost$ <mana cost> Sac<1/Creature>` —
+// "as an additional cost to cast this spell, sacrifice a creature".
+#[test]
+fn additional_costs_of_spells() {
+    let cards = [
+        spell(
+            "Test Offering",
+            "1 B",
+            "Sorcery",
+            "A:SP$ Draw | Cost$ 1 B Sac<1/Creature> | NumCards$ 2 | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Insight",
+            "U",
+            "Instant",
+            "A:SP$ Draw | Cost$ U Discard<1/Card> | NumCards$ 2 | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Swamp", "Swamp", "Island"]);
+    sc.cards(P0, Zone::Hand, &["Test Insight", "Test Offering"]);
+    let elf = sc.card(P1, Zone::Battlefield, "Test Elf");
+    let mut s = Script::new(sc.build());
+    // No creature of mine to sacrifice: the Offering can't be cast.
+    assert!(!s.can_cast("Test Offering"));
+    assert!(on_battlefield(&s, elf));
+    // The Insight discards another card: the Offering is the only candidate (the Insight
+    // itself is on the stack by then).
+    assert!(s.can_cast("Test Insight"));
+    s.cast("Test Insight");
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::Discard));
+    assert_eq!(s.options().len(), 1);
+    s.respond(Response::Pick(vec![0])).pay().pass_all();
+    assert!(s.find(P0, Zone::Graveyard, "Test Offering").is_some());
+    assert_eq!(hand(&s, P0), 2, "drew two");
+    // With only itself in hand, a spell that needs a discard can't be cast.
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Swamp", "Swamp", "Island"]);
+    sc.card(P0, Zone::Hand, "Test Insight");
+    let s = Script::new(sc.build());
+    assert!(!s.can_cast("Test Insight"));
+    // The Offering with a creature: sacrificed as the spell is cast.
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Swamp", "Swamp"]);
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    sc.card(P0, Zone::Hand, "Test Offering");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Offering");
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::Sacrifice));
+    s.respond(Response::Pick(vec![0])).pay();
+    assert!(!on_battlefield(&s, golem));
+    assert!(s.find(P0, Zone::Stack, "Test Offering").is_some());
+    s.pass_all();
+    assert_eq!(hand(&s, P0), 2);
+}
+
+// ---------------------------------------------------------------------------------------
+// Auras.
+
+fn aura(name: &str, cost: &str, enchant: &str, rest: &str) -> String {
+    format!(
+        "Name:{name}\nManaCost:{cost}\nTypes:Enchantment Aura\nK:Enchant:{enchant}\n{rest}\nOracle:Text."
+    )
+}
+
+// CR 702.5a, 303.4 (2026-11-06). Forge: `K:Enchant:Creature` and a static with
+// `AffectedDefined$ Enchanted` — "Enchant creature. Enchanted creature gets +1/+2 and has
+// flying." `GainControl$ You`: "You control enchanted creature."
+#[test]
+fn auras_enchant_a_creature_and_affect_it() {
+    let cards = [
+        aura(
+            "Test Blessing",
+            "W",
+            "Creature",
+            "S:Mode$ Continuous | AffectedDefined$ Enchanted | Affected$ Creature | AddPower$ 1 | AddToughness$ 2 | AddKeyword$ Flying | Description$ Text.",
+        ),
+        aura(
+            "Test Thrall",
+            "2 U U",
+            "Creature",
+            "S:Mode$ Continuous | AffectedDefined$ Enchanted | GainControl$ You | Description$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Plains", "Island", "Island", "Island", "Island"],
+    );
+    let mine = sc.card(P0, Zone::Battlefield, "Test Golem"); // 2/3
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Giant"); // 5/4
+    sc.cards(P0, Zone::Hand, &["Test Blessing", "Test Thrall"]);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Blessing").target_object(mine).pay().pass_all();
+    let blessing = s.find(P0, Zone::Battlefield, "Test Blessing").unwrap();
+    assert_eq!(s.st.object(blessing).attached_to, Some(mine));
+    assert_eq!(pt(&s, mine), (3, 5));
+    assert!(chars(&s.st, mine).has(Keyword::Flying));
+    assert_eq!(pt(&s, theirs), (5, 4), "only the enchanted creature");
+    s.cast("Test Thrall").target_object(theirs).pay().pass_all();
+    assert_eq!(chars(&s.st, theirs).controller, P0);
+}
+
+// CR 303.4c, 702.18a (2026-11-06): shroud stops targeting, not being enchanted — an Aura
+// already attached stays. (The same test decides both in the engine; they must differ.)
+#[test]
+fn an_aura_stays_on_a_creature_with_shroud() {
+    let cards = [
+        aura(
+            "Test Blessing",
+            "W",
+            "Creature",
+            "S:Mode$ Continuous | AffectedDefined$ Enchanted | AddPower$ 1 | AddToughness$ 1 | Description$ Text.",
+        ),
+        creature("Test Hermit", "1 G", "Beast", "2/2", "K:Shroud"),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    let hermit = sc.card(P0, Zone::Battlefield, "Test Hermit");
+    let blessing = sc.card(P0, Zone::Battlefield, "Test Blessing");
+    sc.attach(blessing, hermit);
+    let mut s = Script::new(sc.build());
+    // State-based actions have been checked: both are still there.
+    s.pass_all();
+    assert!(on_battlefield(&s, blessing));
+    assert_eq!(pt(&s, hermit), (3, 3));
+}
+
+// Forge: `AffectedDefined$ Self` is "this permanent". What isn't compiled: Auras that
+// enchant something other than a creature, and an `Affected$` that narrows the enchanted
+// permanent ("as long as enchanted creature is white").
+#[test]
+fn statics_about_the_card_itself_and_aura_forms_not_compiled() {
+    let brawler = creature(
+        "Test Brawler",
+        "1 G",
+        "Ogre",
+        "2/2",
+        "S:Mode$ Continuous | AffectedDefined$ Self | AddPower$ 1 | AddToughness$ 1 | Description$ Text.",
+    );
+    let mut sc = scenario(&[&brawler]);
+    let b = sc.card(P0, Zone::Battlefield, "Test Brawler");
+    let s = Script::new(sc.build());
+    assert_eq!(pt(&s, b), (3, 3));
+    let land_aura = aura(
+        "Test Wellspring",
+        "G",
+        "Land",
+        "S:Mode$ Continuous | AffectedDefined$ Enchanted | AddKeyword$ Indestructible | Description$ Text.",
+    );
+    assert_eq!(forge_test_blockers(&land_aura), ["enchant:Land"]);
+    let narrowed = aura(
+        "Test Favor",
+        "W",
+        "Creature",
+        "S:Mode$ Continuous | AffectedDefined$ Enchanted | Affected$ Creature.White | AddPower$ 1 | Description$ Text.",
+    );
+    assert_eq!(
+        forge_test_blockers(&narrowed),
+        ["static:Enchanted-as-long-as"]
     );
 }

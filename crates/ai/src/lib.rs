@@ -17,6 +17,9 @@ pub struct RandomAgent {
     rng: GameRng,
 }
 
+/// The stack depth from which [`RandomAgent`] only passes.
+pub const DEEP_STACK: usize = 8;
+
 impl RandomAgent {
     pub fn new(seed: u64) -> Self {
         RandomAgent {
@@ -30,8 +33,20 @@ impl RandomAgent {
 }
 
 impl Agent for RandomAgent {
-    fn decide(&mut self, _view: &PlayerView, d: &PendingDecision) -> Response {
+    fn decide(&mut self, view: &PlayerView, d: &PendingDecision) -> Response {
         let n = d.options.len();
+        // An ability that costs nothing can be activated without end. A player choosing at
+        // random between "pass" and "again" makes the stack a random walk that may never
+        // come back down, so with a deep stack this agent lets it resolve.
+        if d.kind == engine_core::ChoiceKind::Priority
+            && view.stack.len() >= DEEP_STACK
+            && let Some(pass) = d
+                .options
+                .iter()
+                .position(|o| matches!(o, engine_core::OptionDesc::Pass))
+        {
+            return Response::Pick(vec![pass]);
+        }
         match &d.prim {
             Primitive::PickN { min, max } => {
                 let max = (*max).min(n);

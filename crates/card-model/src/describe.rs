@@ -525,6 +525,36 @@ fn cost(c: &Cost) -> String {
     if c.sacrifice_self {
         parts.push("Sacrifice this permanent".to_string());
     }
+    let chosen = |c: &crate::CostChoice, cards: bool| {
+        let what: Vec<String> = c
+            .what
+            .iter()
+            .map(|s| {
+                if cards {
+                    card_noun(s)
+                } else {
+                    selector(s, c.count != 1)
+                }
+            })
+            .collect();
+        let what = join(what, "or");
+        if c.count == 1 {
+            with_article(&what)
+        } else if cards {
+            format!("{} {what}s", c.count)
+        } else {
+            format!("{} {what}", c.count)
+        }
+    };
+    if let Some(s) = &c.sacrifice {
+        parts.push(format!("Sacrifice {}", chosen(s, false)));
+    }
+    if let Some(d) = &c.discard {
+        parts.push(format!("Discard {}", chosen(d, true)));
+    }
+    if c.life > 0 {
+        parts.push(format!("Pay {} life", c.life));
+    }
     parts.join(", ")
 }
 
@@ -712,6 +742,14 @@ fn ability(a: &AbilityDef) -> String {
             "{} spells you cast cost {{{n}}} less to cast.",
             capitalize(selector(spells, false).replace("permanent", "").trim())
         ),
+        AbilityDef::AdditionalCost(c) => {
+            let mut text = cost(c);
+            if let Some(first) = text.chars().next() {
+                let lower: String = first.to_lowercase().collect();
+                text.replace_range(..first.len_utf8(), &lower);
+            }
+            format!("As an additional cost to cast this spell, {text}.")
+        }
         AbilityDef::SelfCostReduction(a) => match a {
             Amount::Fixed(n) => format!("This spell costs {{{n}}} less to cast."),
             other => format!(

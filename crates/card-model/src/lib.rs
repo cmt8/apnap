@@ -398,6 +398,9 @@ pub enum AbilityDef {
     /// CR 702.5: "Enchant [filter]" — what an Aura spell targets and what the Aura can
     /// enchant (CR 303.4a).
     Enchant(TargetFilter),
+    /// "As an additional cost to cast this spell, [sacrifice a creature / discard a card /
+    /// pay N life]" (CR 601.2b, 601.2f). Only the non-mana parts of the cost are used.
+    AdditionalCost(Cost),
 }
 
 /// Whose / which player, relative to the ability's controller.
@@ -697,6 +700,22 @@ pub struct Cost {
     /// "Sacrifice this [permanent]" (CR 701.21: its controller moves it to its owner's
     /// graveyard; it can't be regenerated or otherwise saved, but the move is replaceable).
     pub sacrifice_self: bool,
+    /// "Sacrifice N [permanents]": ones the player controls, chosen as the cost is paid
+    /// (CR 601.2h, 701.21a).
+    pub sacrifice: Option<CostChoice>,
+    /// "Discard N [cards]" from the player's hand, chosen as the cost is paid.
+    pub discard: Option<CostChoice>,
+    /// "Pay N life" (CR 119.4: only a player with at least that much life can).
+    pub life: u32,
+}
+
+/// Things chosen to pay a cost with: `count` of those matching any of `what`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CostChoice {
+    pub count: u32,
+    /// "an artifact or creature" is two selectors. `other` is relative to the ability's
+    /// source ("sacrifice another creature").
+    pub what: Vec<Selector>,
 }
 
 /// When an activated ability may be activated (CR 602.5d).

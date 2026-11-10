@@ -12,9 +12,9 @@ pub mod real;
 pub mod scryfall;
 
 use card_model::{
-    AbilityDef, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript, CardType, Color, Effect,
-    ManaCost, ManaProduce, ManaSymbol, ManaType, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces,
-    Supertype, TargetFilter, TargetRef,
+    AbilityDef, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript, CardType, Color, Cost,
+    Effect, ManaCost, ManaProduce, ManaSymbol, ManaType, Mode, ObjRef, PlayerRef, ReplaceWith,
+    Replaces, Supertype, TargetFilter, TargetRef,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -239,15 +239,34 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
             AbilityDef::Spell(body) => check_body(body, card_has_x, &mut |m| p.push(at(m))),
             AbilityDef::Activated { cost, body, .. } => {
                 let has_x = cost.mana.as_ref().is_some_and(|m| m.has_x());
-                if cost.mana.is_none() && !cost.tap && !cost.sacrifice_self {
+                if *cost == Cost::default() {
                     p.push(at("activated ability with no cost".into()));
                 }
+                check_cost(cost, &mut |m| p.push(at(m)));
                 check_body(body, has_x, &mut |m| p.push(at(m)));
             }
             AbilityDef::Mana { cost, .. } => {
-                if !(cost.tap && cost.mana.is_none() && !cost.sacrifice_self) {
+                let just_tap = Cost {
+                    tap: true,
+                    ..Cost::default()
+                };
+                if *cost != just_tap {
                     p.push(at("M1 mana abilities must cost exactly {T} (D-021)".into()));
                 }
+            }
+            AbilityDef::AdditionalCost(cost) => {
+                if cost.mana.is_some() || cost.tap || cost.sacrifice_self {
+                    p.push(at(
+                        "an additional cost is a sacrifice, a discard or life, nothing else".into(),
+                    ));
+                }
+                if cost.sacrifice.is_none() && cost.discard.is_none() && cost.life == 0 {
+                    p.push(at("an additional cost of nothing".into()));
+                }
+                if c.has_type(CardType::Land) {
+                    p.push(at("lands aren't cast: no additional cost".into()));
+                }
+                check_cost(cost, &mut |m| p.push(at(m)));
             }
             AbilityDef::Triggered { body, .. } => {
                 check_body(body, false, &mut |m| p.push(at(m)));
@@ -338,6 +357,35 @@ fn check_body(body: &Body, has_x: bool, p: &mut dyn FnMut(String)) {
         check_effect(&mode.effect, mode, has_x, &mut |m| {
             p(format!("mode {mi}: {m}"))
         });
+    }
+}
+
+/// The chosen parts of a cost.
+fn check_cost(cost: &Cost, p: &mut dyn FnMut(String)) {
+    for (what, choice) in [("sacrifice", &cost.sacrifice), ("discard", &cost.discard)] {
+        if let Some(ch) = choice {
+            if ch.count == 0 {
+                p(format!("a cost to {what} nothing"));
+            }
+            if ch.what.is_empty() {
+                p(format!("a cost to {what} needs at least one selector"));
+            }
+        }
+    }
+    // Cards in a hand are matched by card type and subtype only.
+    if let Some(d) = &cost.discard {
+        for s in &d.what {
+            let asked = card_model::Selector {
+                types: s.types.clone(),
+                not_types: s.not_types.clone(),
+                subtypes: s.subtypes.clone(),
+                not_subtypes: s.not_subtypes.clone(),
+                ..Default::default()
+            };
+            if asked != *s {
+                p("a discard cost can only ask for card types and subtypes".into());
+            }
+        }
     }
 }
 

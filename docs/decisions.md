@@ -639,6 +639,55 @@ written in Forge's format (`harness::forge_test_catalog`).
 - **`forge-Np` soak setup:** random two-colour 60-card decks drawn by seed from every
   compiled card, so the fuzzers reach cards no hand-made deck contains.
 
+## D-048 Compiler batch 2: costs that need a choice, additional costs; what the all-cards soak found (2026-11-09)
+4,368 → 4,858 of 34,463 scripts compile (14.1%). Rules text: the "Costs that aren't mana"
+section of `docs/rules-notes/601-casting-602-activating-605-mana.md`.
+
+- **`Cost` gained `sacrifice`, `discard` (a `CostChoice`: N of those matching any of the
+  selectors) and `life`.** Chosen after targets (`CastStage::ChooseSacrifice/ChooseDiscard`),
+  paid with the mana in one Apply batch (CR 601.2h); `can_begin` refuses a spell or ability
+  whose cost can't be paid in full (CR 118.3, 119.4). The golden state hashes changed
+  because every activated ability's `Cost` has three more fields; the event-log hashes of
+  all 15 golden games are identical.
+- **`AbilityDef::AdditionalCost(Cost)`** for "as an additional cost to cast this spell".
+  Forge restates the whole cost on the `SP$` line; mana that differs from the card's mana
+  cost is not an additional cost and stays blocked (`spell:other-cost`).
+- **Not compiled:** `Sac<X/…>`, `Discard<…/Hand|Random|CARDNAME>`, two sacrifice or two
+  discard parts in one cost, `tapXType` (tapping other permanents interacts with paying
+  mana from them: needs the payment-feasibility rework of D-021), mana abilities with any
+  cost but `{T}` (Treasure).
+- **Three guards against compiler holes** (the first two found real mis-compilations):
+  a line that yields nothing without naming a blocker is `unexplained:*` (12 cards had lost
+  their only ability: `DamageAll` with `ValidPlayers$` and no `ValidCards$`); every compiled
+  card goes through `card_db::validate`, problems are `invalid:*` (2 cards used the X of a
+  permanent spell in its enters trigger, CR 107.3m — now `expr:Count$xPaid in a trigger`);
+  the `forge-Np` soak.
+- **Free abilities and the agents.** "{0}: this gets -1/-0 and gains swampwalk" compiles
+  correctly, and a player who chooses at random between passing and activating it makes
+  the stack a random walk: games ran for minutes. `RandomAgent` now passes when the stack
+  is 8 deep (`ai::DEEP_STACK`), and `HeuristicAgent` activates one ability at most three
+  times a turn — without that the app's CPU players could keep a turn going forever.
+- **Auras compile:** `K:Enchant:Creature` is `AbilityDef::Enchant(Creature)`, a static with
+  `AffectedDefined$ Enchanted` is `Affected::Enchanted` (`Self` is `Affected::This`), and
+  `GainControl$ You` is layer 2. Forge filters the enchanted permanent again with
+  `Affected$`; that is accepted only when it repeats the enchant filter (anything narrower
+  is "as long as enchanted creature is …", not compiled). Other enchant filters (land,
+  player, permanent) are `enchant:*` blockers until the engine's Enchant takes them.
+- **Hexproof/shroud and Auras:** `targeting::is_legal` (may it be targeted?) is now
+  `describes` (is it what the filter says?) plus the hexproof/shroud check. The state-based
+  check for an Aura's attachment (CR 704.5m, 303.4c) uses `describes`: an Aura doesn't fall
+  off a creature that has or gains shroud.
+- **Reading the blocker list:** `svar:unused-ability` is now reported only for a card with
+  no other blocker (an ability is unused *because* something else was blocked), which
+  raised "one feature away" from 8,500 to 10,400 cards and reordered the list; and
+  `forge-coverage` prints the sets of two or three blockers that together are all that
+  stops the most cards (an Aura needed both "enchant" and "enchanted creature gets").
+- **Layer walk:** with hundreds of resolved effects in one layer, CR 613.8 dependency
+  checks copied the whole view for every pair of effects. Effects that can't depend on
+  anything (resolved ones, statics already started: CR 611.2c, 613.6) are no longer
+  compared, and a cheap pre-check (`Walk::could_matter`) skips the comparison when the other
+  effect can't change what this one looks at. Results are unchanged.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

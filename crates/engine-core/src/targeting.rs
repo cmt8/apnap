@@ -9,9 +9,33 @@ use crate::zones::Zone;
 use alloc::vec::Vec;
 use card_model::{CardType, Keyword, TargetFilter};
 
-/// Whether `t` satisfies `filter` for a spell/ability controlled by `controller` whose own
-/// stack object is `this` (CR 115.5: it can't target itself).
+/// Whether `t` is a legal target for `filter`, for a spell/ability controlled by
+/// `controller` whose own stack object is `this` (CR 115.5: it can't target itself): it is
+/// what the filter describes, and nothing stops it from being targeted.
 pub fn is_legal(
+    st: &GameState,
+    filter: &TargetFilter,
+    t: Target,
+    controller: PlayerId,
+    this: Option<ObjectId>,
+) -> bool {
+    // CR 702.18a (shroud) and 702.11b (hexproof): abilities of permanents.
+    if let Target::Object(id) = t
+        && let Some(o) = st.objects.get(&id)
+        && o.zone == Zone::Battlefield
+    {
+        let c = chars(st, id);
+        if c.has(Keyword::Shroud) || (c.has(Keyword::Hexproof) && c.controller != controller) {
+            return false;
+        }
+    }
+    describes(st, filter, t, controller, this)
+}
+
+/// Whether `t` is what `filter` describes — without asking whether it can be targeted.
+/// This is the test for what an Aura may stay attached to (CR 303.4c): hexproof and shroud
+/// stop targeting, they don't make an Aura fall off.
+pub fn describes(
     st: &GameState,
     filter: &TargetFilter,
     t: Target,
@@ -40,15 +64,6 @@ pub fn is_legal(
             let Some(o) = st.objects.get(&id) else {
                 return false;
             };
-            // CR 702.18a (shroud) and 702.11b (hexproof): abilities of permanents.
-            if o.zone == Zone::Battlefield {
-                let c = chars(st, id);
-                if c.has(Keyword::Shroud)
-                    || (c.has(Keyword::Hexproof) && c.controller != controller)
-                {
-                    return false;
-                }
-            }
             match filter {
                 TargetFilter::AnyTarget | TargetFilter::Creature => {
                     o.zone == Zone::Battlefield && chars(st, id).is(CardType::Creature)

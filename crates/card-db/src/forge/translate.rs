@@ -12,9 +12,9 @@
 use super::parse::{Face, Record, Script};
 use card_model::{
     AbilityDef, Affected, Amount, BasicLandType, Body, CardDef, CardType, Color, Condition,
-    ContinuousEffect, Cost, CounterKind, DamageBy, EachPlayerAction, Effect, Keyword, ManaCost,
-    ManaProduce, ManaType, Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector,
-    Signed, Supertype, TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
+    ContinuousEffect, Cost, CostChoice, CounterKind, DamageBy, EachPlayerAction, Effect, Keyword,
+    ManaCost, ManaProduce, ManaType, Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces,
+    Selector, Signed, Supertype, TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -113,6 +113,10 @@ struct Tx<'a> {
     has_x_cost: bool,
     /// Compiling the body of a triggered ability (where "X" is not the X being paid).
     in_trigger: bool,
+    /// Additional costs of the spell, found on its `SP$` line.
+    additional: Vec<AbilityDef>,
+    /// The filter of the card's `K:Enchant:<filter>` line, if it is an Aura.
+    enchant: Option<&'a str>,
     /// The script variables that hold abilities, parsed.
     records: &'a [(String, Record)],
     known: &'a Known,
@@ -163,6 +167,31 @@ const CARD_TYPES: [(&str, CardType); 9] = [
     ("Planeswalker", CardType::Planeswalker),
     ("Sorcery", CardType::Sorcery),
 ];
+
+/// The tokens of a cost: separated by spaces, except inside `<…>`
+/// (`Sac<1/Creature.Other/another creature>` is one token).
+fn cost_tokens(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut start, mut depth) = (None, 0u32);
+    for (i, c) in text.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if c.is_whitespace() && depth == 0 {
+            if let Some(s) = start.take() {
+                out.push(&text[s..i]);
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(s) = start {
+        out.push(&text[s..]);
+    }
+    out
+}
 
 fn card_type(word: &str) -> Option<CardType> {
     CARD_TYPES.iter().find(|(n, _)| *n == word).map(|(_, t)| *t)
@@ -1135,17 +1164,76 @@ impl<'a> Tx<'a> {
     fn cost(&mut self, text: &str) -> Option<Cost> {
         let mut cost = Cost::default();
         let mut mana = String::new();
-        for tok in text.split_whitespace() {
-            match tok {
-                "T" => cost.tap = true,
-                "Sac<1/CARDNAME>" => cost.sacrifice_self = true,
-                _ if tok.parse::<u32>().is_ok()
-                    || matches!(tok, "W" | "U" | "B" | "R" | "G" | "C") =>
+        for tok in cost_tokens(text) {
+            let kind = tok.split('<').next().unwrap_or(tok);
+            // `Name<Amount/Type/Description>`: the description is text only.
+            let args: Vec<&str> = tok
+                .strip_prefix(kind)
+                .and_then(|r| r.strip_prefix('<'))
+                .and_then(|r| r.strip_suffix('>'))
+                .map(|r| r.splitn(3, '/').collect())
+                .unwrap_or_default();
+            let count = args.first().and_then(|n| n.parse::<u32>().ok());
+            match (kind, tok.contains('<')) {
+                ("T", false) => cost.tap = true,
+                ("Sac", true) if args.get(1) == Some(&"CARDNAME") && count == Some(1) => {
+                    cost.sacrifice_self = true
+                }
+                ("Sac" | "Discard", true) => {
+                    let (Some(count), Some(types)) = (count.filter(|n| *n > 0), args.get(1)) else {
+                        self.block(format!("cost:{kind}-amount"));
+                        return None;
+                    };
+                    // Alternatives are separated by `;` here ("an artifact or creature").
+                    let mut what = Vec::new();
+                    for alt in types.split(';') {
+                        match self.alt(alt.trim())? {
+                            Alt::Sel(s) => what.push(s),
+                            Alt::This => {
+                                self.block(format!("cost:{kind}-this"));
+                                return None;
+                            }
+                        }
+                    }
+                    let slot = if kind == "Sac" {
+                        &mut cost.sacrifice
+                    } else {
+                        // A card in a hand has types and subtypes; nothing else is asked.
+                        let plain = what.iter().all(|s| {
+                            *s == Selector {
+                                types: s.types.clone(),
+                                not_types: s.not_types.clone(),
+                                subtypes: s.subtypes.clone(),
+                                not_subtypes: s.not_subtypes.clone(),
+                                ..Selector::default()
+                            }
+                        });
+                        if !plain {
+                            self.block("cost:Discard-filter");
+                            return None;
+                        }
+                        &mut cost.discard
+                    };
+                    if slot.is_some() {
+                        self.block(format!("cost:{kind}-twice"));
+                        return None;
+                    }
+                    *slot = Some(CostChoice { count, what });
+                }
+                ("PayLife", true) => match count {
+                    Some(n) if cost.life == 0 && n > 0 => cost.life = n,
+                    _ => {
+                        self.block("cost:PayLife-amount");
+                        return None;
+                    }
+                },
+                (_, false)
+                    if tok.parse::<u32>().is_ok()
+                        || matches!(tok, "W" | "U" | "B" | "R" | "G" | "C") =>
                 {
                     mana.push_str(&format!("{{{tok}}}"))
                 }
                 _ => {
-                    let kind = tok.split('<').next().unwrap_or(tok);
                     self.block(format!("cost:{kind}"));
                     return None;
                 }
@@ -1168,12 +1256,20 @@ impl<'a> Tx<'a> {
             "SP" => {
                 // A spell's `Cost$` normally just repeats its mana cost; anything else is
                 // an additional or alternative cost.
-                if let Some(cost) = rec.get("Cost") {
+                if let Some(text) = rec.get("Cost") {
                     let printed = self.face.mana_cost.as_deref().unwrap_or("no cost");
-                    let same = cost.split_whitespace().eq(printed.split_whitespace());
+                    let same = text.split_whitespace().eq(printed.split_whitespace());
                     if !same {
-                        self.block("spell:additional-cost");
-                        return None;
+                        // The whole cost is restated: the card's mana cost plus what is
+                        // paid in addition ("as an additional cost to cast this spell, …").
+                        let mut cost = self.cost(text)?;
+                        let mana = std::mem::take(&mut cost.mana);
+                        let printed = mana_cost(printed).ok().flatten();
+                        if mana != printed || cost.tap || cost.sacrifice_self {
+                            self.block("spell:other-cost");
+                            return None;
+                        }
+                        self.additional.push(AbilityDef::AdditionalCost(cost));
                     }
                 }
                 self.body(rec, false, "SP").map(AbilityDef::Spell)
@@ -1201,7 +1297,11 @@ impl<'a> Tx<'a> {
                     return None;
                 };
                 let cost = cost?;
-                if !(cost.tap && cost.mana.is_none() && !cost.sacrifice_self) {
+                let just_tap = Cost {
+                    tap: true,
+                    ..Cost::default()
+                };
+                if cost != just_tap {
                     self.block("Mana:cost");
                     return None;
                 }
@@ -1418,10 +1518,31 @@ impl<'a> Tx<'a> {
         let rd = Rd::new(rec, format!("static {mode}"));
         let out = match mode {
             "Continuous" => {
-                let affected = match rd.get("Affected") {
-                    Some("Card.Self") => Some(Affected::This),
-                    Some(f) => self.selector(f).map(Affected::All),
-                    None => {
+                let affected = match (rd.get("AffectedDefined"), rd.get("Affected")) {
+                    (None, Some("Card.Self")) | (Some("Self"), None | Some("Card.Self")) => {
+                        Some(Affected::This)
+                    }
+                    // "Enchanted creature …". Forge filters the enchanted permanent again
+                    // with `Affected$`; that says nothing new only when it repeats what the
+                    // Aura can enchant at all.
+                    (Some("Enchanted"), again) => match (self.enchant, again) {
+                        (Some(_), None) => Some(Affected::Enchanted),
+                        (Some(e), Some(a)) if e == a => Some(Affected::Enchanted),
+                        (None, _) => {
+                            self.block("static:Enchanted-without-Enchant");
+                            None
+                        }
+                        (Some(_), Some(_)) => {
+                            self.block("static:Enchanted-as-long-as");
+                            None
+                        }
+                    },
+                    (Some(other), _) => {
+                        self.block(format!("static:AffectedDefined {other}"));
+                        None
+                    }
+                    (None, Some(f)) => self.selector(f).map(Affected::All),
+                    (None, None) => {
                         self.block("static:no-Affected");
                         None
                     }
@@ -1450,6 +1571,15 @@ impl<'a> Tx<'a> {
                         }
                     }
                     effects.push(ContinuousEffect::AddKeywords(ks));
+                }
+                // "You control [it]" (layer 2).
+                match rd.get("GainControl") {
+                    None => {}
+                    Some("You") => effects.insert(0, ContinuousEffect::GainControl),
+                    Some(other) => {
+                        self.block(format!("param:static Continuous.GainControl={other}"));
+                        return None;
+                    }
                 }
                 if effects.is_empty() {
                     self.block("static:Continuous-nothing");
@@ -1626,6 +1756,8 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
         tokens: BTreeSet::new(),
         has_x_cost: false,
         in_trigger: false,
+        additional: Vec::new(),
+        enchant: None,
         records: &parsed,
         known,
     };
@@ -1704,7 +1836,26 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
         cs.sort();
         def.colors = Some(cs);
     }
+    // Abilities, in the order the engine's own scripts use: as written, line kind by line
+    // kind (the order within a kind is the script's).
+    let mut abilities: Vec<(usize, AbilityDef)> = Vec::new();
     for k in &face.keywords {
+        // `Enchant:<what>[:<description>]` (CR 702.5): what the Aura targets as a spell and
+        // may be attached to. It is printed first.
+        if let Some(rest) = k.strip_prefix("Enchant:") {
+            let what = rest.split(':').next().unwrap_or(rest).trim();
+            match what {
+                "Creature" if tx.enchant.is_none() => {
+                    tx.enchant = Some(what);
+                    abilities.push((0, AbilityDef::Enchant(TargetFilter::Creature)));
+                }
+                _ => {
+                    tx.block(format!("enchant:{what}"));
+                    tx.enchant.get_or_insert(what);
+                }
+            }
+            continue;
+        }
         match keyword(k) {
             Some(k) => def.keywords.push(k),
             None => {
@@ -1717,14 +1868,17 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
             }
         }
     }
-    // Abilities, in the order the engine's own scripts use: as written, line kind by line
-    // kind (the order within a kind is the script's).
-    let mut abilities: Vec<(usize, AbilityDef)> = Vec::new();
     let order = line_order(face);
     for (i, rec) in face.abilities.iter().enumerate() {
         let before = tx.blockers.len();
         match tx.ability(rec) {
-            Some(a) => abilities.push((order.abilities[i], a)),
+            Some(a) => {
+                // "As an additional cost…" is printed before what the spell does.
+                for extra in tx.additional.drain(..) {
+                    abilities.push((order.abilities[i], extra));
+                }
+                abilities.push((order.abilities[i], a))
+            }
             None => tx.explained(before, "ability"),
         }
     }
@@ -1750,9 +1904,13 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
     def.abilities = abilities.into_iter().map(|(_, a)| a).collect();
     // A variable holding an ability that nothing refers to means part of the card was
     // not understood.
-    for (name, _) in &parsed {
-        if !tx.used_svars.contains(name) {
-            tx.block("svar:unused-ability");
+    // (Only reported for a card that is otherwise understood: when something else is
+    // blocked, the abilities it would have used are unused as a consequence.)
+    if tx.blockers.is_empty() {
+        for (name, _) in &parsed {
+            if !tx.used_svars.contains(name) {
+                tx.block("svar:unused-ability");
+            }
         }
     }
     if tx.blockers.is_empty() {

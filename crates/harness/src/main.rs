@@ -327,6 +327,25 @@ fn main() -> ExitCode {
                 println!("  {alone:6} / {all:6}  {name}");
             }
             println!("  ({} distinct blockers)", rows.len());
+            // Features that only ever block together (an Aura needs both "enchant" and
+            // "enchanted creature gets…") never show up as "alone": list the sets of two
+            // or three blockers that are all that stops the most cards.
+            let mut sets: std::collections::BTreeMap<Vec<&str>, usize> = Default::default();
+            for blockers in lib.blocked.values() {
+                if (2..=3).contains(&blockers.len()) {
+                    *sets
+                        .entry(blockers.iter().map(String::as_str).collect())
+                        .or_default() += 1;
+                }
+            }
+            let mut sets: Vec<(Vec<&str>, usize)> = sets.into_iter().collect();
+            sets.sort_by_key(|(names, n)| (std::cmp::Reverse(*n), names.clone()));
+            if top > 0 {
+                println!("\nsets of two or three blockers — cards they alone block together");
+            }
+            for (names, n) in sets.iter().take(top / 2) {
+                println!("  {n:6}  {}", names.join("  +  "));
+            }
             ExitCode::SUCCESS
         }
         "coverage" => {

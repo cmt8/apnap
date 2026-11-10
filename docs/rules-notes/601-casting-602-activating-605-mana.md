@@ -118,3 +118,38 @@
 
 ## Tests
 `crates/harness/tests/rules_m1.rs`: `cr_601_*`, `cr_602_*`, `cr_605_*`, `cr_107_3a_*`, `cr_700_2a_*`, `cr_115_5_*`.
+
+## Costs that aren't mana: sacrifice, discard, life; additional costs (D-048)
+> 118.3. A player can’t pay a cost without having the necessary resources to pay it fully.
+> For example, a player with only 1 life can’t pay a cost of 2 life, and a permanent that’s
+> already tapped can’t be tapped to pay a cost.
+
+> 118.8. Some spells and abilities have additional costs. An additional cost is a cost
+> listed in a spell’s rules text, or applied to a spell or ability from another effect, that
+> its controller must pay at the same time they pay the spell’s mana cost or the ability’s
+> activation cost.
+
+> 119.4. If a cost or effect allows a player to pay an amount of life greater than 0, the
+> player may do so only if their life total is greater than or equal to the amount of the
+> payment. If a player pays life, the payment is subtracted from their life total; in other
+> words, the player loses that much life.
+
+> 701.21a To sacrifice a permanent, its controller moves it from the battlefield directly to
+> its owner’s graveyard. A player can’t sacrifice something that isn’t a permanent, or
+> something that’s a permanent they don’t control.
+
+Engine (`frames/cast.rs`):
+- `can_begin` offers a spell or ability only if every part of its cost can be paid
+  (`extra_payable`): enough permanents to sacrifice, enough cards to discard — the card
+  being cast doesn't count, it is on the stack by then (601.2a) — and life total ≥ the life
+  to pay.
+- Which permanents and cards pay is asked after targets (`CastStage::ChooseSacrifice`,
+  `ChooseDiscard`) and before mana. They leave with the rest of the payment in `finish`
+  (601.2h, one Apply batch: sacrifices, discards, the life loss), so a land chosen to be
+  sacrificed can still be tapped for mana first. They are events like any other:
+  replaceable, and they trigger ("dies", "whenever you lose life").
+- A spell's additional cost is `AbilityDef::AdditionalCost` on its card. Forge restates the
+  whole cost on the `SP$` line (`Cost$ 1 B Sac<1/Creature>`); the compiler requires the mana
+  in it to be the card's mana cost and takes the rest as the additional cost.
+- Costs are paid whether or not the spell or ability later resolves (601.2h happens before
+  it can be responded to).

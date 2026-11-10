@@ -657,6 +657,27 @@ pub fn play_random(seed: u64, opts: PlayOptions) -> Result<GameRecord, HarnessEr
                 decisions: max,
             });
         }
+        // `APNAP_TRACE=1`: where a long game is, every 2,000 decisions (for finding out why
+        // a soak game doesn't end).
+        if rec.responses.len().is_multiple_of(2000) && std::env::var_os("APNAP_TRACE").is_some() {
+            let top = st.stack.last().map(|top| match &top.kind {
+                engine_core::stack::StackKind::Ability {
+                    source_card, index, ..
+                } => format!("{} ability {index}", st.catalog.get(*source_card).name),
+                engine_core::stack::StackKind::Spell => st.card_def(top.id).name.clone(),
+            });
+            eprintln!(
+                "TRACE n={} turn={} {:?} {:?} options={} stack={} (top: {top:?}) effects={} battlefield={}",
+                rec.responses.len(),
+                st.turn.turn_number,
+                st.turn.step,
+                d.kind,
+                d.options.len(),
+                st.stack.len(),
+                st.continuous.len(),
+                st.zones.battlefield.len(),
+            );
+        }
         let view = player_view(&st, d.player);
         let r = agents[d.player.index()].decide(&view, &d);
         rec.events_before.push(rec.events.len());

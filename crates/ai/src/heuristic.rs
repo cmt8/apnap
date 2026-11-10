@@ -163,7 +163,14 @@ pub struct HeuristicAgent {
     attack_key: Option<u32>,
     /// The modes chosen for the spell currently being cast (targets come next).
     last_modes: Vec<u8>,
+    /// How often each ability was activated this turn (`ability_turn`). An ability that
+    /// costs nothing would otherwise be activated every time this player has priority.
+    ability_uses: BTreeMap<(ObjectId, u16), u8>,
+    ability_turn: u32,
 }
+
+/// How many times the heuristic agent activates one ability in a turn.
+const ABILITY_USES_PER_TURN: u8 = 3;
 
 impl HeuristicAgent {
     pub fn new(seed: u64, catalog: Arc<CardCatalog>) -> Self {
@@ -175,6 +182,8 @@ impl HeuristicAgent {
             attack_plan: BTreeMap::new(),
             attack_key: None,
             last_modes: Vec::new(),
+            ability_uses: BTreeMap::new(),
+            ability_turn: 0,
         }
     }
 
@@ -417,6 +426,10 @@ impl HeuristicAgent {
 
     fn priority(&mut self, v: &PlayerView, d: &PendingDecision) -> Response {
         let me = Self::me(v);
+        if self.ability_turn != v.turn_number {
+            self.ability_turn = v.turn_number;
+            self.ability_uses.clear();
+        }
         // 1. Play a land (prefer one that doesn't enter tapped: basics first).
         let lands: Vec<usize> = d
             .options
@@ -457,10 +470,16 @@ impl HeuristicAgent {
                     }
                     self.spell_score(v, ov.card, None) + if ov.is_commander { 20 } else { 0 }
                 }
-                OptionDesc::ActivateAbility { source, index } => match Self::find(v, *source) {
-                    Some(ov) => self.spell_score(v, ov.card, Some(*index)) - 5,
-                    None => continue,
-                },
+                OptionDesc::ActivateAbility { source, index } => {
+                    let used = self.ability_uses.get(&(*source, *index)).copied();
+                    if used.unwrap_or(0) >= ABILITY_USES_PER_TURN {
+                        continue;
+                    }
+                    match Self::find(v, *source) {
+                        Some(ov) => self.spell_score(v, ov.card, Some(*index)) - 5,
+                        None => continue,
+                    }
+                }
                 _ => continue,
             };
             if s > 0 && best.is_none_or(|(b, _)| s > b) {
@@ -468,7 +487,12 @@ impl HeuristicAgent {
             }
         }
         match best {
-            Some((_, i)) => Response::Pick(vec![i]),
+            Some((_, i)) => {
+                if let OptionDesc::ActivateAbility { source, index } = &d.options[i] {
+                    *self.ability_uses.entry((*source, *index)).or_insert(0) += 1;
+                }
+                Response::Pick(vec![i])
+            }
             None => Response::Pick(vec![
                 d.options
                     .iter()

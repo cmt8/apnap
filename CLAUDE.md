@@ -73,6 +73,7 @@ cargo run -p harness -- coverage [--verbose]              # which precon cards a
 cargo run --release -p harness -- fetch-forge             # Forge's card scripts (pinned commit) -> ~/.cache/apnap/forge (git, network)
 cargo run --release -p harness -- forge-coverage [--top N] [--sample N] [--why TEXT]   # how many of ALL cards compile; what blocks the rest; --why lists the cards behind a blocker
 cargo run --release -p harness -- fuzz --setup forge-4p --games 400 --threads 8      # random decks drawn from EVERY compiled card (finds what precon decks never reach)
+APNAP_TRACE=1 cargo run --release -p harness -- run --seed N --setup forge-4p        # a game that doesn't end: where it is, every 2,000 decisions
 ```
 
 ## Definition of done for any change
@@ -125,7 +126,7 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-047): 4,368 of 34,463 scripts compile (12.7%); about 8,500 more are one feature
+Status (D-048): 4,858 of 34,463 scripts compile (14.1%); about 10,400 more are one feature
 away. Feature tests live in `crates/harness/tests/forge_features.rs`: invented cards written
 in Forge's format, compiled by `harness::forge_test_catalog` and played (`forge_test_blockers`
 for "this must not compile"). Three guards catch compiler holes — keep them: a line that
@@ -137,8 +138,9 @@ filters, `Defined$`, expressions), `effects.md` (every effect API), and
 feature: Forge's defaults are often not what the key names suggest (flags are tested for
 presence, `Defined$ Targeted` means every target of the chain, a trigger that runs an
 `AB$` with a cost is "you may pay", triggers without `TriggerZones$` work from any zone).
-Not built yet: the generated-text-vs-Oracle round trip, multi-face cards, costs that need
-a choice, library search, mana abilities that make more than one mana (see the blocker list).
+Not built yet: the generated-text-vs-Oracle round trip, multi-face cards, library search
+(untargeted ChangeZone, Dig, Scry, Surveil), mana abilities that make more than one mana or
+cost more than {T} (Treasure), "you may pay" triggers, `.attacking` filters, regeneration.
 
 ## Current milestone: M4 — IN PROGRESS (started 2026-11-09), branch `m4-wip`
 Decisions: D-034 (precons: Calling All Angels, Wretched Ranks, Reign of Dragons,

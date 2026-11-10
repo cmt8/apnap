@@ -23,7 +23,7 @@ use crate::zones::{LibraryPosition, Zone};
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use card_model::{AbilityDef, Body, CardType, Keyword, ManaCost, Timing};
+use card_model::{AbilityDef, Body, CardType, Cost, Keyword, ManaCost, Timing};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +43,9 @@ pub enum CastStage {
     Modes,
     X,
     Targets,
+    /// CR 601.2h: choose what to sacrifice / discard for the cost (paid with the mana).
+    ChooseSacrifice,
+    ChooseDiscard,
     Pay,
     PayGeneric,
 }
@@ -64,6 +67,12 @@ pub struct CastFrame {
     pub discount: u32,
     /// Cast from the command zone (CR 903.8: counts toward future tax).
     pub from_command: Option<crate::ids::CardInstanceId>,
+    /// The permanents chosen to be sacrificed, and the cards chosen to be discarded, as
+    /// part of the cost.
+    #[serde(default)]
+    pub pay_sacrifice: Vec<ObjectId>,
+    #[serde(default)]
+    pub pay_discard: Vec<ObjectId>,
 }
 
 /// CR 903.8: the commander tax `p` would pay to cast `card` from the command zone now.
@@ -89,6 +98,80 @@ struct Proposal {
     tap: Option<ObjectId>,
     /// "Sacrifice this permanent" in the cost.
     sacrifice: Option<ObjectId>,
+    /// The parts of the cost that aren't mana or this permanent: chosen sacrifices and
+    /// discards, life. For a spell, its additional cost.
+    extra: Cost,
+}
+
+/// What `p` could sacrifice to pay `choice` for a cost whose source is `source`.
+fn sacrifice_candidates(
+    st: &GameState,
+    p: PlayerId,
+    choice: &card_model::CostChoice,
+    source: ObjectId,
+    not: Option<ObjectId>,
+) -> Vec<ObjectId> {
+    st.zones
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| Some(id) != not)
+        .filter(|&id| {
+            let c = chars(st, id);
+            // CR 701.21a: only a permanent they control.
+            c.controller == p
+                && choice
+                    .what
+                    .iter()
+                    .any(|s| crate::layers::matches(s, &c, st.object(id), source, p))
+        })
+        .collect()
+}
+
+/// What `p` could discard to pay `choice` (never the card being cast: `not`).
+fn discard_candidates(
+    st: &GameState,
+    p: PlayerId,
+    choice: &card_model::CostChoice,
+    not: Option<ObjectId>,
+) -> Vec<ObjectId> {
+    st.zones.hands[p.index()]
+        .iter()
+        .copied()
+        .filter(|&id| Some(id) != not)
+        .filter(|&id| {
+            choice
+                .what
+                .iter()
+                .any(|s| crate::targeting::card_matches(st, id, s))
+        })
+        .collect()
+}
+
+/// The object a cost's "another" is relative to, and that pays `{T}`/"sacrifice this".
+fn cost_source(source: &CastSource) -> ObjectId {
+    match source {
+        CastSource::Card(card) => *card,
+        CastSource::Ability { source, .. } => *source,
+        CastSource::Trigger(t) => t.source,
+    }
+}
+
+/// CR 601.2h / 119.4: can `p` pay the non-mana parts of the cost at all?
+fn extra_payable(st: &GameState, p: PlayerId, source: &CastSource, prop: &Proposal) -> bool {
+    let this = cost_source(source);
+    let card = match source {
+        CastSource::Card(card) => Some(*card),
+        _ => None,
+    };
+    prop.extra.sacrifice.as_ref().is_none_or(|ch| {
+        sacrifice_candidates(st, p, ch, this, prop.sacrifice).len() >= ch.count as usize
+    }) && prop
+        .extra
+        .discard
+        .as_ref()
+        .is_none_or(|ch| discard_candidates(st, p, ch, card).len() >= ch.count as usize)
+        && st.player(p).life >= prop.extra.life as i32
 }
 
 fn proposal(st: &GameState, source: &CastSource) -> Proposal {
@@ -106,6 +189,16 @@ fn proposal(st: &GameState, source: &CastSource) -> Proposal {
             cost: chars(st, *card).mana_cost,
             tap: None,
             sacrifice: None,
+            // "As an additional cost to cast this spell, …"
+            extra: st
+                .card_def(*card)
+                .abilities
+                .iter()
+                .find_map(|a| match a {
+                    AbilityDef::AdditionalCost(c) => Some(c.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default(),
         },
         CastSource::Ability { source, index } => {
             match &st.card_def(*source).abilities[*index as usize] {
@@ -114,6 +207,7 @@ fn proposal(st: &GameState, source: &CastSource) -> Proposal {
                     cost: cost.mana.clone(),
                     tap: cost.tap.then_some(*source),
                     sacrifice: cost.sacrifice_self.then_some(*source),
+                    extra: cost.clone(),
                 },
                 other => unreachable!("not an activated ability: {other:?}"),
             }
@@ -125,6 +219,7 @@ fn proposal(st: &GameState, source: &CastSource) -> Proposal {
                     cost: None,
                     tap: None,
                     sacrifice: None,
+                    extra: Cost::default(),
                 },
                 other => unreachable!("not a triggered ability: {other:?}"),
             }
@@ -306,6 +401,9 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
     {
         return false;
     }
+    if !extra_payable(st, p, &source, &prop) {
+        return false;
+    }
     let (tax, discount) = match &source {
         CastSource::Card(card) => (commander_tax(st, p, *card), cost_reduction(st, p, *card)),
         _ => (0, 0),
@@ -326,6 +424,8 @@ impl CastFrame {
             tax: 0,
             discount: 0,
             from_command: None,
+            pay_sacrifice: Vec::new(),
+            pay_discard: Vec::new(),
         }
     }
 
@@ -551,7 +651,60 @@ impl CastFrame {
                         },
                     );
                     // CR 601.2e: legality is guaranteed by construction (D-019).
-                    self.stage = CastStage::Pay;
+                    self.stage = CastStage::ChooseSacrifice;
+                }
+                // CR 601.2h: which permanents / cards pay the cost. They are chosen here
+                // and leave with the rest of the payment (`finish`), so a land chosen to be
+                // sacrificed can still be tapped for mana first.
+                CastStage::ChooseSacrifice | CastStage::ChooseDiscard => {
+                    let sacrificing = self.stage == CastStage::ChooseSacrifice;
+                    if let Some(inp) = input.take() {
+                        let picked: Vec<ObjectId> = inp
+                            .picked()
+                            .into_iter()
+                            .map(|o| match o {
+                                OptionDesc::Card { card } => *card,
+                                other => unreachable!("{other:?}"),
+                            })
+                            .collect();
+                        if sacrificing {
+                            self.pay_sacrifice = picked;
+                        } else {
+                            self.pay_discard = picked;
+                        }
+                    } else {
+                        let prop = self.proposal(st);
+                        let this = cost_source(&self.source);
+                        let (choice, pool, kind) = if sacrificing {
+                            let pool =
+                                prop.extra.sacrifice.as_ref().map(|ch| {
+                                    sacrifice_candidates(st, p, ch, this, prop.sacrifice)
+                                });
+                            (prop.extra.sacrifice.clone(), pool, ChoiceKind::Sacrifice)
+                        } else {
+                            // The card being cast is on the stack already, not in hand.
+                            let pool = prop
+                                .extra
+                                .discard
+                                .as_ref()
+                                .map(|ch| discard_candidates(st, p, ch, None));
+                            (prop.extra.discard.clone(), pool, ChoiceKind::Discard)
+                        };
+                        if let (Some(choice), Some(pool)) = (choice, pool) {
+                            let n = choice.count as usize;
+                            assert!(pool.len() >= n, "cost not payable: D-019 violated");
+                            let options = pool
+                                .into_iter()
+                                .map(|card| OptionDesc::Card { card })
+                                .collect();
+                            return self.ask(kind, Primitive::PickN { min: n, max: n }, options);
+                        }
+                    }
+                    self.stage = if sacrificing {
+                        CastStage::ChooseDiscard
+                    } else {
+                        CastStage::Pay
+                    };
                 }
                 CastStage::Pay => {
                     // CR 601.2f: total cost, locked in. CR 601.2g: mana abilities.
@@ -569,7 +722,14 @@ impl CastFrame {
                     if req.payable_from(&pool) {
                         match req.forced_generic(&pool) {
                             Some(alloc) => {
-                                return self.finish(st, req, alloc, prop.tap, prop.sacrifice);
+                                return self.finish(
+                                    st,
+                                    req,
+                                    alloc,
+                                    prop.tap,
+                                    prop.sacrifice,
+                                    prop.extra.life,
+                                );
                             }
                             None => {
                                 // CR 601.2h: the player picks which floating mana pays generic.
@@ -627,7 +787,7 @@ impl CastFrame {
                         };
                         alloc[mana.index()] = n;
                     }
-                    return self.finish(st, req, alloc, prop.tap, prop.sacrifice);
+                    return self.finish(st, req, alloc, prop.tap, prop.sacrifice, prop.extra.life);
                 }
             }
         }
@@ -641,6 +801,7 @@ impl CastFrame {
         generic: [u32; 6],
         tap: Option<ObjectId>,
         sacrifice: Option<ObjectId>,
+        life: u32,
     ) -> Flow {
         let p = self.player;
         if req.total() > 0 {
@@ -665,22 +826,38 @@ impl CastFrame {
             // CR 601.2i: "whenever ... casts" abilities trigger now.
             triggers::detect_cast(st, p, spell);
         }
-        // "Sacrifice this permanent" as a cost (CR 701.21a): a move to the graveyard like
-        // any other, so it goes through the replacement pipeline (and can trigger "dies").
-        if let Some(source) = sacrifice
-            && st
-                .objects
-                .get(&source)
+        // The rest of the cost, paid at once (CR 601.2h). Sacrifices (CR 701.21a), discards
+        // and life are events like any other: they go through the replacement pipeline
+        // and can trigger ("dies", "whenever you discard", "whenever you lose life").
+        let on_battlefield = |st: &GameState, id: &ObjectId| {
+            st.objects
+                .get(id)
                 .is_some_and(|o| o.zone == Zone::Battlefield)
-        {
-            let events = vec![Proposed::moving(
-                source,
-                Zone::Graveyard,
-                MoveCause::Sacrifice,
-            )];
-            return Flow::then(Frame::Apply(ApplyFrame::new(st, events)));
+        };
+        let mut events: Vec<Proposed> = sacrifice
+            .iter()
+            .chain(self.pay_sacrifice.iter())
+            .filter(|id| on_battlefield(st, id))
+            .map(|&id| Proposed::moving(id, Zone::Graveyard, MoveCause::Sacrifice))
+            .collect();
+        events.extend(
+            self.pay_discard
+                .iter()
+                .filter(|id| st.objects.get(id).is_some_and(|o| o.zone == Zone::Hand))
+                .map(|&id| Proposed::moving(id, Zone::Graveyard, MoveCause::Discard)),
+        );
+        if life > 0 {
+            // CR 119.4: paying life is losing that much life.
+            events.push(Proposed::LoseLife {
+                player: p,
+                amount: life,
+            });
         }
-        Flow::done()
+        if events.is_empty() {
+            Flow::done()
+        } else {
+            Flow::then(Frame::Apply(ApplyFrame::new(st, events)))
+        }
     }
 }
 
