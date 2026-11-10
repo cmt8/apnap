@@ -1,0 +1,16 @@
+RealCard(
+    oracle_id: "08d1a5d1-141d-48e3-ac22-c2529191cb13",
+    name: "Reya Dawnbringer",
+    verified: true,
+    tests: ["reya_dawnbringer_may_return_a_creature_each_upkeep"],
+    keywords: [Flying],
+    abilities: [
+        Triggered(
+            when: BeginningOf(step: Upkeep, whose: You),
+            body: Effect((
+                targets: [CardInGraveyard(cards: (types: [Creature]), whose: You)],
+                effect: May(ReturnToBattlefield(what: Target(0))),
+            )),
+        ),
+    ],
+)

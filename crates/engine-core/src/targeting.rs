@@ -24,9 +24,10 @@ pub fn is_legal(
                 && match filter {
                     TargetFilter::AnyTarget | TargetFilter::Player => true,
                     TargetFilter::Opponent => p != controller,
-                    TargetFilter::Creature | TargetFilter::Spell | TargetFilter::Permanent(_) => {
-                        false
-                    }
+                    TargetFilter::Creature
+                    | TargetFilter::Spell
+                    | TargetFilter::Permanent(_)
+                    | TargetFilter::CardInGraveyard { .. } => false,
                 }
         }
         Target::Object(id) => {
@@ -55,10 +56,29 @@ pub fn is_legal(
                             .any(|s| crate::layers::matches(s, &c, o, none, controller))
                     }
                 }
+                TargetFilter::CardInGraveyard { cards, whose } => {
+                    o.zone == Zone::Graveyard
+                        && match whose {
+                            card_model::Who::Any => true,
+                            card_model::Who::You => o.owner == controller,
+                            card_model::Who::Opponent => o.owner != controller,
+                        }
+                        && card_matches(st, id, cards)
+                }
                 TargetFilter::Player | TargetFilter::Opponent => false,
             }
         }
     }
+}
+
+/// Is the card `id` (in a graveyard, hand, library…) one of the cards `sel` names? Only
+/// card types and subtypes are compared — what a card has wherever it is (CR 109.2).
+pub fn card_matches(st: &GameState, id: ObjectId, sel: &card_model::Selector) -> bool {
+    let c = chars(st, id);
+    (sel.types.is_empty() || sel.types.iter().any(|t| c.is(*t)))
+        && !sel.not_types.iter().any(|t| c.is(*t))
+        && (sel.subtypes.is_empty() || sel.subtypes.iter().any(|s| c.subtypes.contains(s)))
+        && !sel.not_subtypes.iter().any(|s| c.subtypes.contains(s))
 }
 
 /// Every legal choice for `filter`, in stable order: objects by stack/battlefield order
@@ -74,6 +94,13 @@ pub fn candidates(
         TargetFilter::Spell => out.extend(st.stack.iter().map(|s| Target::Object(s.id))),
         TargetFilter::AnyTarget | TargetFilter::Creature | TargetFilter::Permanent(_) => {
             out.extend(st.zones.battlefield.iter().map(|&id| Target::Object(id)));
+        }
+        TargetFilter::CardInGraveyard { .. } => {
+            // Graveyards in seat order, each from the bottom up.
+            for p in 0..st.num_players() {
+                let cards = st.zones.list(Zone::Graveyard, PlayerId(p as u8));
+                out.extend(cards.iter().map(|&id| Target::Object(id)));
+            }
         }
         TargetFilter::Player | TargetFilter::Opponent => {}
     }

@@ -280,3 +280,42 @@ fn graveyards_and_exile_can_be_looked_through() {
     h.run_ok();
     assert_eq!(h.state().zone_view, None);
 }
+
+/// A card in a graveyard that is a choice (here: the target of an ability) is chosen by
+/// opening the graveyard and clicking it. Uses real cards: needs the Scryfall cache.
+#[test]
+fn a_card_in_a_graveyard_is_chosen_from_the_pile() {
+    let mut sc = Scenario::new(GameConfig::constructed_1v1(), harness::full_catalog(), 21);
+    for p in [P0, P1] {
+        sc.library(p, "Swamp", 20);
+    }
+    sc.card(P0, Zone::Battlefield, "Lord of the Undead");
+    sc.cards(P0, Zone::Battlefield, &["Swamp", "Swamp"]);
+    // Two Zombie cards, so there is a choice to make (a single legal target is chosen
+    // automatically).
+    sc.cards(
+        P0,
+        Zone::Graveyard,
+        &["Vengeful Dead", "Champion of the Perished"],
+    );
+    let mut h = harness_for(sc.build());
+    // Activate the Lord by clicking it: its ability targets a Zombie card in the graveyard.
+    button_containing(&mut h, "Lord of the Undead  ");
+    assert_eq!(decision(&h).0, ChoiceKind::ChooseTargets { slot: 0 });
+    // The card isn't on the table, so the option is also listed; here it is picked from
+    // the pile instead.
+    button(&mut h, "P0 graveyard: 2 cards");
+    button_containing(&mut h, "Champion of the Perished  ");
+    button(&mut h, "Pass priority");
+    let s = h.state().session.as_ref().unwrap();
+    assert!(
+        s.st.zones.list(Zone::Hand, P0).iter().any(|id| s
+            .st
+            .catalog
+            .get(s.st.object(*id).card)
+            .name
+            == "Champion of the Perished"),
+        "{:?}",
+        s.log
+    );
+}

@@ -86,6 +86,15 @@ fn target_filter(f: &TargetFilter) -> String {
             let parts: Vec<String> = selectors.iter().map(|s| selector(s, false)).collect();
             format!("target {}", join(parts, "or"))
         }
+        TargetFilter::CardInGraveyard { cards, whose } => format!(
+            "target {} from {}",
+            card_noun(cards),
+            match whose {
+                Who::Any => "a graveyard",
+                Who::You => "your graveyard",
+                Who::Opponent => "an opponent's graveyard",
+            }
+        ),
     }
 }
 
@@ -352,6 +361,10 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             }
         ),
         Effect::SetX(a) => format!("X is {}", amount(a)),
+        Effect::May(inner) => format!("you may {}", effect(mode, inner)),
+        Effect::ReturnToBattlefield { what } => {
+            format!("return {} to the battlefield", obj(mode, *what))
+        }
     }
 }
 
@@ -382,6 +395,16 @@ fn body(b: &Body) -> String {
             format!("{n} — {}", list.join(" • "))
         }
     }
+}
+
+/// "creature card", "Zombie card", "card".
+fn card_noun(s: &Selector) -> String {
+    let mut words: Vec<String> = s.subtypes.clone();
+    if !s.types.is_empty() {
+        words.push(types(&s.types, "or"));
+    }
+    words.push("card".into());
+    words.join(" ")
 }
 
 fn capitalize(s: &str) -> String {
@@ -477,6 +500,10 @@ fn condition(c: &Condition) -> String {
     match c {
         Condition::LifeAtMost(n) => format!("if you have {n} or less life"),
         Condition::LifeAtLeast(n) => format!("if you have {n} or more life"),
+        Condition::CardsInGraveyard { cards, at_least } => format!(
+            "if you have {at_least} or more {}s in your graveyard",
+            card_noun(cards)
+        ),
         Condition::Control { what, at_least } => {
             if *at_least == 1 {
                 format!(

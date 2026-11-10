@@ -105,7 +105,7 @@ fn every_verified_real_card_names_existing_tests() {
             script.name
         );
     }
-    assert!(verified >= 77);
+    assert!(verified >= 83);
 }
 
 #[test]
@@ -1731,4 +1731,180 @@ fn ghalta_costs_less_by_your_total_power() {
             .supertypes
             .contains(&card_model::Supertype::Legendary)
     );
+}
+
+// ------------------------------------------------------------------------------------------
+// Batch 5: cards in graveyards as targets, "you may" (D-044)
+// ------------------------------------------------------------------------------------------
+
+fn yes(s: &mut Script) {
+    assert_eq!(s.kind(), ChoiceKind::MayAbility);
+    s.pick("yes", |_, o| matches!(o, OptionDesc::Accept));
+}
+
+fn no(s: &mut Script) {
+    assert_eq!(s.kind(), ChoiceKind::MayAbility);
+    s.pick("no", |_, o| matches!(o, OptionDesc::Decline));
+}
+
+#[test]
+fn reya_dawnbringer_may_return_a_creature_each_upkeep() {
+    for accept in [true, false] {
+        let mut sc = scenario();
+        sc.turn(P1, Step::End);
+        let reya = sc.card(P0, Zone::Battlefield, "Reya Dawnbringer");
+        let golem = sc.card(P0, Zone::Graveyard, "Test Golem");
+        let spell = sc.card(P0, Zone::Graveyard, "Lightning Bolt");
+        let theirs = sc.card(P1, Zone::Graveyard, "Test Golem");
+        let mut s = Script::new(sc.build());
+        assert_eq!(pt(&s, reya), (4, 6));
+        assert!(has(&s, reya, Keyword::Flying));
+        // The target is chosen as the trigger goes on the stack: a creature card in your
+        // own graveyard.
+        drive_until(&mut s, |s| {
+            matches!(s.kind(), ChoiceKind::ChooseTargets { .. })
+        });
+        assert_eq!(s.st.turn.step, Step::Upkeep);
+        assert!(can_target(&s, golem) && !can_target(&s, spell) && !can_target(&s, theirs));
+        s.target_object(golem);
+        drive_until(&mut s, |s| s.kind() == ChoiceKind::MayAbility);
+        // "You may": chosen as it resolves.
+        if accept {
+            yes(&mut s);
+            assert_eq!(named(&s, "Test Golem").len(), 1);
+            assert_eq!(in_zone(&s, P0, Zone::Graveyard), 1);
+        } else {
+            no(&mut s);
+            assert!(named(&s, "Test Golem").is_empty());
+            assert_eq!(in_zone(&s, P0, Zone::Graveyard), 2);
+        }
+    }
+    // Nothing to target: the trigger isn't put on the stack (CR 603.3d).
+    let mut sc = scenario();
+    sc.turn(P1, Step::End);
+    sc.card(P0, Zone::Battlefield, "Reya Dawnbringer");
+    let s = through_upkeep(sc);
+    assert!(!s.answered.iter().any(|d| d.kind == ChoiceKind::MayAbility));
+}
+
+#[test]
+fn lord_of_the_undead_pumps_zombies_and_recovers_them() {
+    let mut sc = scenario();
+    let lord = sc.card(P0, Zone::Battlefield, "Lord of the Undead");
+    let theirs = sc.card(P1, Zone::Battlefield, "Vengeful Dead");
+    sc.cards(P0, Zone::Battlefield, &["Swamp"; 2]);
+    let zombie = sc.card(P0, Zone::Graveyard, "Vengeful Dead");
+    let golem = sc.card(P0, Zone::Graveyard, "Test Golem");
+    let mut s = Script::new(sc.build());
+    assert_eq!(pt(&s, lord), (2, 2), "other Zombies");
+    assert_eq!(pt(&s, theirs), (4, 3), "anyone's Zombie creatures");
+    s.activate("Lord of the Undead");
+    assert!(
+        can_target(&s, zombie) && !can_target(&s, golem),
+        "a Zombie card"
+    );
+    s.target_object(zombie).pay().pass_all();
+    assert_eq!(hand(&s, P0), 1);
+    assert!(s.find(P0, Zone::Hand, "Vengeful Dead").is_some());
+}
+
+#[test]
+fn memorial_to_folly_is_sacrificed_to_recover_a_creature() {
+    let mut sc = scenario();
+    sc.card(P0, Zone::Hand, "Memorial to Folly");
+    let mut s = Script::new(sc.build());
+    s.pick("play the land", |_, o| {
+        matches!(o, OptionDesc::PlayLand { .. })
+    });
+    assert!(s.st.object(named(&s, "Memorial to Folly")[0]).tapped);
+    let mut sc = scenario();
+    sc.card(P0, Zone::Battlefield, "Memorial to Folly");
+    sc.cards(P0, Zone::Battlefield, &["Swamp"; 3]);
+    let golem = sc.card(P0, Zone::Graveyard, "Test Golem");
+    let mut s = Script::new(sc.build());
+    s.activate("Memorial to Folly")
+        .target_object(golem)
+        .pay()
+        .pass_all();
+    assert!(s.find(P0, Zone::Hand, "Test Golem").is_some());
+    assert!(s.find(P0, Zone::Graveyard, "Memorial to Folly").is_some());
+}
+
+#[test]
+fn oversold_cemetery_needs_four_creature_cards() {
+    for (creatures, triggers_at_upkeep) in [(3usize, false), (4, true)] {
+        let mut sc = scenario();
+        sc.turn(P1, Step::End);
+        sc.card(P0, Zone::Battlefield, "Oversold Cemetery");
+        sc.cards(P0, Zone::Graveyard, &vec!["Test Golem"; creatures]);
+        sc.card(P0, Zone::Graveyard, "Lightning Bolt"); // not a creature card
+        let mut s = Script::new(sc.build());
+        drive_until(&mut s, |s| {
+            matches!(s.kind(), ChoiceKind::ChooseTargets { .. })
+                || (s.st.turn.active == P0 && s.st.turn.step == Step::PrecombatMain)
+        });
+        let triggered = matches!(s.kind(), ChoiceKind::ChooseTargets { .. });
+        assert_eq!(triggered, triggers_at_upkeep, "{creatures} creature cards");
+        if triggered {
+            s.respond(Response::Pick(vec![0]));
+            drive_until(&mut s, |s| s.kind() == ChoiceKind::MayAbility);
+            yes(&mut s);
+            // The Golem, and then the draw step's card.
+            drive_until(&mut s, |s| s.st.turn.step == Step::PrecombatMain);
+            assert_eq!(hand(&s, P0), 2);
+            assert_eq!(in_zone(&s, P0, Zone::Graveyard), creatures);
+        }
+    }
+}
+
+#[test]
+fn cemetery_reaper_exiles_a_creature_card_for_a_zombie() {
+    let mut sc = scenario();
+    let reaper = sc.card(P0, Zone::Battlefield, "Cemetery Reaper");
+    let mine = sc.card(P0, Zone::Battlefield, "Vengeful Dead");
+    let theirs_zombie = sc.card(P1, Zone::Battlefield, "Vengeful Dead");
+    sc.cards(P0, Zone::Battlefield, &["Swamp"; 3]);
+    let theirs = sc.card(P1, Zone::Graveyard, "Test Golem");
+    let bolt = sc.card(P1, Zone::Graveyard, "Lightning Bolt");
+    let mut s = Script::new(sc.build());
+    assert_eq!(pt(&s, reaper), (2, 2));
+    assert_eq!(pt(&s, mine), (4, 3));
+    assert_eq!(pt(&s, theirs_zombie), (3, 2), "you control");
+    s.activate("Cemetery Reaper");
+    assert!(
+        can_target(&s, theirs) && !can_target(&s, bolt),
+        "any graveyard's creature card"
+    );
+    s.target_object(theirs).pay().pass_all();
+    assert_eq!(in_zone(&s, P1, Zone::Exile), 1);
+    // The new Zombie gets the Reaper's bonus.
+    let tokens = named(&s, "Zombie Token");
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(pt(&s, tokens[0]), (3, 3));
+}
+
+#[test]
+fn garruks_packleader_may_draw_for_big_creatures() {
+    let mut sc = scenario();
+    let pack = sc.card(P0, Zone::Battlefield, "Garruk's Packleader");
+    sc.cards(P0, Zone::Battlefield, &["Forest"; 7]);
+    sc.cards(
+        P0,
+        Zone::Hand,
+        &["Llanowar Elves", "Regal Imperiosaur", "Regal Imperiosaur"],
+    );
+    let mut s = Script::new(sc.build());
+    assert_eq!(pt(&s, pack), (4, 4));
+    s.cast("Llanowar Elves").pay();
+    resolve_all(&mut s);
+    assert_eq!(triggers(&s), 0, "power 1");
+    s.cast("Regal Imperiosaur").pay();
+    drive_until(&mut s, |s| s.kind() == ChoiceKind::MayAbility);
+    yes(&mut s);
+    assert_eq!(hand(&s, P0), 2, "drew one");
+    s.cast("Regal Imperiosaur").pay();
+    drive_until(&mut s, |s| s.kind() == ChoiceKind::MayAbility);
+    no(&mut s);
+    assert_eq!(hand(&s, P0), 1);
+    assert_eq!(triggers(&s), 2);
 }

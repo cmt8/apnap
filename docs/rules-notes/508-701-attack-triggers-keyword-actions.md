@@ -84,3 +84,10 @@ permanents the caster controls (only abilities they currently have, invariant 4)
 spell's own "this spell costs {N} less"; `total` takes it off the generic part only, after
 adding commander tax, never below nothing. It is worked out when the cast is announced,
 with the tax; nothing can change the board between then and payment.
+
+## "You may", and targets that are cards in a graveyard — D-044
+`Effect::May`: the controller decides as the effect resolves (the targets were chosen when
+the spell or ability was put on the stack, CR 601.2c / 603.3d — a "may" doesn't make
+targeting optional). `TargetFilter::CardInGraveyard` targets a card by what it is
+everywhere (its card types and subtypes); it becomes an illegal target if it leaves that
+graveyard (it would be a new object, CR 400.7).

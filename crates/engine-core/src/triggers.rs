@@ -92,6 +92,14 @@ pub(crate) fn condition_holds(
         Some(Condition::Control { what, at_least }) => {
             matching(st, what, source, controller).len() >= *at_least as usize
         }
+        Some(Condition::CardsInGraveyard { cards, at_least }) => {
+            st.zones
+                .list(crate::zones::Zone::Graveyard, controller)
+                .iter()
+                .filter(|&&id| crate::targeting::card_matches(st, id, cards))
+                .count()
+                >= *at_least as usize
+        }
     }
 }
 

@@ -375,6 +375,17 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             }
         }
         Effect::SetX(a) => amount(a, p),
+        Effect::May(inner) => check_effect(inner, mode, has_x, p),
+        Effect::ReturnToBattlefield { what } => match what {
+            ObjRef::Target(i)
+                if matches!(
+                    mode.targets.get(*i as usize),
+                    Some(TargetFilter::CardInGraveyard { .. })
+                ) => {}
+            other => p(format!(
+                "ReturnToBattlefield needs a card-in-graveyard target, got {other:?}"
+            )),
+        },
         Effect::DestroyAll(s) => selector(s, p),
         Effect::DamageEach { each, amount: a } => {
             selector(each, p);

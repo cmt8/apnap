@@ -50,7 +50,9 @@ fn effect_polarity(e: &Effect) -> Polarity {
             CounterKind::MinusOne => Polarity::Harm,
         },
         Effect::Apply { effects, .. } => continuous_polarity(effects),
+        Effect::May(inner) => effect_polarity(inner),
         Effect::GainLife { .. }
+        | Effect::ReturnToBattlefield { .. }
         | Effect::Draw { .. }
         | Effect::CreateToken { .. }
         | Effect::PreventNext { .. } => Polarity::Help,

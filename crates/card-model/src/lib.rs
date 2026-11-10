@@ -13,6 +13,7 @@ extern crate alloc;
 
 pub mod describe;
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
@@ -481,6 +482,11 @@ pub enum Condition {
         what: Selector,
         at_least: u32,
     },
+    /// "if you have N or more [cards] in your graveyard" (card types and subtypes only).
+    CardsInGraveyard {
+        cards: Selector,
+        at_least: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -615,6 +621,13 @@ pub enum TargetFilter {
     /// power 4 or greater". `controller` is relative to the spell or ability's controller;
     /// `other` isn't meaningful for a target.
     Permanent(Vec<Selector>),
+    /// A card in a graveyard: "target creature card from your graveyard", "target Zombie
+    /// card from your graveyard", "target creature card from a graveyard". Only the card
+    /// types and subtypes of `cards` are looked at; `whose` is whose graveyard.
+    CardInGraveyard {
+        cards: Selector,
+        whose: Who,
+    },
 }
 
 impl TargetFilter {
@@ -622,7 +635,10 @@ impl TargetFilter {
     pub fn allows_permanents(&self) -> bool {
         matches!(
             self,
-            TargetFilter::AnyTarget | TargetFilter::Creature | TargetFilter::Permanent(_)
+            TargetFilter::AnyTarget
+                | TargetFilter::Creature
+                | TargetFilter::Permanent(_)
+                | TargetFilter::CardInGraveyard { .. }
         )
     }
 
@@ -766,6 +782,14 @@ pub enum Effect {
         effects: Vec<ContinuousEffect>,
         #[serde(default)]
         until_end_of_turn: bool,
+    },
+    /// "You may [effect]": the controller chooses as this resolves (CR 603.5 for triggers:
+    /// the choice is made on resolution, targets are still chosen when it is put on the
+    /// stack).
+    May(Box<Effect>),
+    /// "Return [it] to the battlefield" (a card from your graveyard, under your control).
+    ReturnToBattlefield {
+        what: ObjRef,
     },
     /// "…where X is [amount]": works X out once, now; later `Amount::X` in the same
     /// resolution uses it (CR 608.2h: determined once, when the effect is applied).

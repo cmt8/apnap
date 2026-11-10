@@ -527,6 +527,17 @@ appended to `docs/rules-notes/508-701-attack-triggers-keyword-actions.md`.
 - CR 118.7a: only the generic part is reduced, after commander tax is added, never below
   nothing; locked in when the cast is announced (CR 601.2f).
 
+## D-044 M4 card batch 5: graveyard targets and "you may"
+6 more cards (83 of 254 unique).
+- `TargetFilter::CardInGraveyard { cards, whose }`, `Effect::ReturnToBattlefield`,
+  `Condition::CardsInGraveyard`. Cards are matched by card type and subtype only.
+- `Effect::May(effect)`: a yes/no decision (`ChoiceKind::MayAbility`) for the controller as
+  it resolves; targets are still chosen when it goes on the stack.
+- In the app a graveyard card that is a choice is listed as a button and can be clicked in
+  the pile viewer (its counter is outlined).
+- Not yet: effects that depend on what the targeted card is ("if it's a Zombie card, draw
+  a card"), which need a conditional on the target.
+
 ## D-039 Future scope: other 1v1 constructed formats (user note 2026-11-09)
 The user wants 1v1 **Modern, Legacy, Vintage, etc.** supported in future. Nothing is built
 for this yet; it is recorded so current work doesn't close the door:

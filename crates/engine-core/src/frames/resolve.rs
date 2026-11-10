@@ -32,6 +32,8 @@ use serde::{Deserialize, Serialize};
 pub enum Work {
     /// Perform `effect` for the `k`-th chosen mode (targets = `targets[k]`).
     Eval { k: usize, effect: Box<Effect> },
+    /// "You may [effect]": ask the controller, then perform it or not.
+    May { k: usize, effect: Box<Effect> },
     /// CR 101.4: players choose in APNAP order (later players know earlier choices,
     /// 101.4b); then all the actions happen simultaneously.
     EachPlayerChoose {
@@ -177,6 +179,24 @@ impl ResolveFrame {
                         ]);
                     }
                 }
+                Work::May { k, effect } => match input.take() {
+                    None if st.in_game(self.controller) => {
+                        let controller = self.controller;
+                        self.work.push(Work::May { k, effect });
+                        return Flow::ask_one(
+                            Frame::Resolve(Box::new(self)),
+                            controller,
+                            ChoiceKind::MayAbility,
+                            vec![OptionDesc::Accept, OptionDesc::Decline],
+                        );
+                    }
+                    None => {}
+                    Some(inp) => {
+                        if matches!(inp.picked_one(), Some(OptionDesc::Accept)) {
+                            self.work.push(Work::Eval { k, effect });
+                        }
+                    }
+                },
                 Work::EachPlayerChoose {
                     action,
                     order,
@@ -402,6 +422,14 @@ impl ResolveFrame {
                 self.x = self.amount(st, &amount);
                 Vec::new()
             }
+            Effect::May(effect) => {
+                self.work.push(Work::May { k, effect });
+                Vec::new()
+            }
+            Effect::ReturnToBattlefield { what } => match self.obj(st, k, what) {
+                Some(o) => vec![Proposed::moving(o, Zone::Battlefield, MoveCause::Rule)],
+                None => Vec::new(),
+            },
             Effect::DestroyAll(sel) => {
                 crate::layers::matching(st, &sel, self.source, self.controller)
                     .into_iter()
