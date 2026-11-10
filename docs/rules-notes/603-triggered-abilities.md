@@ -194,3 +194,49 @@
 | 120.2, 510.3a | `deals_damage_triggers_by_recipient_and_kind_of_damage` |
 | 510.2, 120.9, 603.2c | `simultaneous_damage_triggers_once_where_the_card_says_so` |
 | 303.4, 603.10a | `triggers_about_the_enchanted_creature` |
+
+## Attacking, blocking, life, draws, discards, sacrifices as events (D-061)
+
+> 508.1m Any abilities that trigger on attackers being declared trigger.
+>
+> 509.1h An attacking creature with one or more creatures declared as blockers for it becomes a blocked creature; one with no creatures declared as blockers for it becomes an unblocked creature. This remains unchanged until the creature is removed from combat, an effect says that it becomes blocked or unblocked, or the combat phase ends, whichever comes first. A creature remains blocked even if all the creatures blocking it are removed from combat.
+>
+> 509.3a An ability that reads “Whenever [a creature] blocks, . . .” generally triggers only once each combat for that creature, even if it blocks multiple creatures. It triggers if the creature is declared as a blocker. It will also trigger if that creature becomes a blocker as the result of an effect, but only if it wasn’t a blocking creature at that time. (See rule 509.1g.) It won’t trigger if the creature is put onto the battlefield blocking.
+>
+> 509.3b An ability that reads “Whenever [a creature] blocks a creature, . . .” triggers once for each attacking creature the creature with the ability blocks. It triggers if the creature is declared as a blocker. It will also trigger if an effect causes that creature to block an attacking creature, but only if it wasn’t already blocking that attacking creature at that time. It won’t trigger if the creature is put onto the battlefield blocking.
+>
+> 509.3c An ability that reads “Whenever [a creature] becomes blocked, . . .” generally triggers only once each combat for that creature, even if it’s blocked by multiple creatures. It will trigger if that creature becomes blocked by at least one creature declared as a blocker. It will also trigger if that creature becomes blocked by an effect or by a creature that’s put onto the battlefield as a blocker, but only if the attacking creature was an unblocked creature at that time. (See rule 509.1h.)
+>
+> 509.3d An ability that reads “Whenever [a creature] becomes blocked by a creature, . . .” triggers once for each creature that blocks the specified creature. It triggers if a creature is declared as a blocker for the attacking creature. It will also trigger if an effect causes a creature to block the attacking creature, but only if it wasn’t already blocking that attacking creature at that time. In addition, it will trigger if a creature is put onto the battlefield blocking that creature. It won’t trigger if the creature becomes blocked by an effect rather than a creature.
+>
+> 509.3g An ability that reads “Whenever [a creature] attacks and isn’t blocked, . . .” triggers if no creatures are declared as blockers for that creature. It will trigger even if the creature was never declared as an attacker (for example, if it entered the battlefield attacking). It won’t trigger if the attacking creature is blocked and then all its blockers are removed from combat.
+>
+> 119.9. Some triggered abilities are written, “Whenever [a player] gains life, . . . .” Such abilities are treated as though they are written, “Whenever a source causes [a player] to gain life, . . . .” If a player gains 0 life, no life gain event has occurred, and these abilities won’t trigger.
+>
+> 121.1. A player draws a card by putting the top card of their library into their hand. This is done as a turn-based action during each player’s draw step. It may also be done as part of a cost or effect of a spell or ability.
+>
+> 701.21a To sacrifice a permanent, its controller moves it from the battlefield directly to its owner’s graveyard. A player can’t sacrifice something that isn’t a permanent, or something that’s a permanent they don’t control. Sacrificing a permanent doesn’t destroy it, so regeneration or other effects that replace destruction can’t affect this action.
+>
+> 702.45a Bushido is a triggered ability. “Bushido N” means “Whenever this creature blocks or becomes blocked, it gets +N/+N until end of turn.” (See rule 509, “Declare Blockers Step.”)
+>
+> 702.25a Flanking is a triggered ability that triggers during the declare blockers step. (See rule 509, “Declare Blockers Step.”) “Flanking” means “Whenever this creature becomes blocked by a creature without flanking, the blocking creature gets -1/-1 until end of turn.”
+
+- `Trigger::PlayerAttacks` is found once for a declaration of attackers (508.1m);
+  `Blocks`, `BecomesBlocked`, `Unblocked` and `BlockedBy` when the last defending player
+  has declared blockers (509.1h): once for a creature that blocks (509.3a) or becomes
+  blocked (509.3c), once for each pair for "blocks a creature" / "becomes blocked by a
+  creature" (509.3b, 509.3d), and for each attacker left without a blocker (509.3g).
+  Creatures put onto the battlefield blocking, and blockers added by effects, are not
+  events here: the engine has no such effects yet.
+- `GainsLife`/`LosesLife`, `Draws`, `Discards`, `Sacrifices` are found from the events of
+  an Apply batch. A draw knows which card of the turn it was
+  (`PlayerState::drawn_this_turn`). A sacrificed permanent is matched as it last existed.
+- Bushido and flanking compile to their triggered abilities (702.45a, 702.25a). Flanking
+  is also a keyword on the card — "a creature without flanking" needs to know who has it —
+  but no script effect can grant that keyword, because the ability would not come with it.
+
+| Rule | Test (`crates/harness/tests/forge_features.rs`) |
+|---|---|
+| 508.1m | `whenever_you_attack` |
+| 119.9, 121.1, 701.9, 701.21 | `life_draw_discard_and_sacrifice_triggers` |
+| 509.3a–d, 509.3g, 702.45a, 702.25a | `blocking_triggers` |

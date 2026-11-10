@@ -35,6 +35,7 @@ pub fn keyword(k: Keyword) -> &'static str {
         Keyword::Shroud => "Shroud",
         Keyword::Shadow => "Shadow",
         Keyword::Horsemanship => "Horsemanship",
+        Keyword::Flanking => "Flanking",
         Keyword::Landwalk(crate::BasicLandType::Plains) => "Plainswalk",
         Keyword::Landwalk(crate::BasicLandType::Island) => "Islandwalk",
         Keyword::Landwalk(crate::BasicLandType::Swamp) => "Swampwalk",
@@ -1090,6 +1091,64 @@ fn trigger(t: &Trigger) -> String {
     match t {
         Trigger::Attacks(f) => format!("Whenever {} attacks", obj_filter(f)),
         Trigger::AttacksAlone(f) => format!("Whenever {} attacks alone", obj_filter(f)),
+        Trigger::PlayerAttacks { by, with, at_least } => {
+            let who = match by {
+                Who::Any => "a player attacks",
+                Who::You => "you attack",
+                Who::Opponent => "an opponent attacks",
+            };
+            match (with, at_least) {
+                (None, 0 | 1) => format!("Whenever {who}"),
+                (None, n) => format!("Whenever {who} with {n} or more creatures"),
+                (Some(s), 0 | 1) => {
+                    format!("Whenever {who} with one or more {}", selector(s, true))
+                }
+                (Some(s), n) => format!("Whenever {who} with {n} or more {}", selector(s, true)),
+            }
+        }
+        Trigger::GainsLife(who) => match who {
+            Who::Any => "Whenever a player gains life".to_string(),
+            Who::You => "Whenever you gain life".to_string(),
+            Who::Opponent => "Whenever an opponent gains life".to_string(),
+        },
+        Trigger::LosesLife(who) => match who {
+            Who::Any => "Whenever a player loses life".to_string(),
+            Who::You => "Whenever you lose life".to_string(),
+            Who::Opponent => "Whenever an opponent loses life".to_string(),
+        },
+        Trigger::Draws { who, nth } => {
+            let who_draws = match who {
+                Who::Any => "a player draws",
+                Who::You => "you draw",
+                Who::Opponent => "an opponent draws",
+            };
+            match nth {
+                None => format!("Whenever {who_draws} a card"),
+                Some(n) => format!("Whenever {who_draws} card number {n} of a turn"),
+            }
+        }
+        Trigger::Discards(who) => match who {
+            Who::Any => "Whenever a player discards a card".to_string(),
+            Who::You => "Whenever you discard a card".to_string(),
+            Who::Opponent => "Whenever an opponent discards a card".to_string(),
+        },
+        Trigger::Sacrifices { who, what } => format!(
+            "Whenever {} {}",
+            match who {
+                Who::Any => "a player sacrifices",
+                Who::You => "you sacrifice",
+                Who::Opponent => "an opponent sacrifices",
+            },
+            obj_filter(what)
+        ),
+        Trigger::Blocks(f) => format!("Whenever {} blocks", obj_filter(f)),
+        Trigger::BecomesBlocked(f) => format!("Whenever {} becomes blocked", obj_filter(f)),
+        Trigger::Unblocked(f) => format!("Whenever {} attacks and isn't blocked", obj_filter(f)),
+        Trigger::BlockedBy { attacker, blocker } => format!(
+            "Whenever {} blocks {}",
+            obj_filter(blocker),
+            obj_filter(attacker)
+        ),
         Trigger::Cycles { this: true, .. } => "When you cycle this card".to_string(),
         Trigger::Cycles { by, this: false } => format!(
             "Whenever {} a card",
@@ -1104,8 +1163,12 @@ fn trigger(t: &Trigger) -> String {
             let parts: Vec<String> = v.iter().map(trigger).collect();
             let mut out = parts.first().cloned().unwrap_or_default();
             for p in parts.iter().skip(1) {
-                let words: Vec<&str> = p.split(' ').collect();
-                out.push_str(&format!(" or {}", words.last().copied().unwrap_or("")));
+                // The verb: the last word, or "becomes blocked".
+                let verb = match p.strip_suffix("becomes blocked") {
+                    Some(_) => "becomes blocked",
+                    None => p.rsplit(' ').next().unwrap_or(""),
+                };
+                out.push_str(&format!(" or {verb}"));
             }
             out
         }

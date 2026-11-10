@@ -41,6 +41,9 @@ pub struct PlayerState {
     /// added. Not part of `mana_pool`.
     #[serde(default)]
     pub restricted_mana: Vec<RestrictedMana>,
+    /// Cards drawn this turn ("whenever you draw your second card each turn").
+    #[serde(default)]
+    pub drawn_this_turn: u32,
 }
 
 /// CR 106.6: mana with a spending restriction — the `spend` of mana ability `index` of

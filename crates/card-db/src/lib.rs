@@ -281,6 +281,8 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                     Trigger::Damage { to, .. } => {
                         !needs_player || matches!(to, card_model::DamageTo::Player(_))
                     }
+                    Trigger::GainsLife(_) | Trigger::LosesLife(_) => true,
+                    Trigger::Draws { .. } | Trigger::Discards(_) => needs_player,
                     _ => false,
                 }),
                 _ => false,

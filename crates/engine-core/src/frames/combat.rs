@@ -323,6 +323,8 @@ impl DeclareBlockersFrame {
         for &(blocker, attacker) in &self.chosen {
             st.emit(Event::BlockerDeclared { blocker, attacker });
         }
+        // CR 509.1h–i: abilities that trigger on blockers being declared trigger now.
+        crate::triggers::detect_blocks(st, &self.chosen);
         Flow::done()
     }
 

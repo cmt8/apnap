@@ -157,33 +157,35 @@ struct Tx<'a> {
 /// What a trigger's event gives its ability to refer to (Forge's `Triggered…` names).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TrigCtx {
-    /// `TriggeredCard`: the event's object ("it").
-    card: bool,
-    /// `TriggeredTarget` is the player dealt damage ("that player").
-    target_player: bool,
-    /// `TriggeredTarget` is the permanent dealt damage ("it").
-    target_object: bool,
-    /// `TriggeredSource` is the ability's own source.
-    source_this: bool,
-    /// `TriggeredSource` is the event's object: the one source of damage dealt to a player.
-    source: bool,
-    /// `TriggerCount$DamageAmount` ("that much").
-    amount: bool,
+    /// Names of the event's object ("it"): `TriggeredCard`, `TriggeredAttacker`, … (each
+    /// also with `LKICopy` appended).
+    it: &'static [&'static str],
+    /// Names that mean the ability's own source.
+    this: &'static [&'static str],
+    /// The name of "that player".
+    player: Option<&'static str>,
+    /// The expression for "that much".
+    amount: Option<&'static str>,
     /// A permanent died: `TriggeredNewCardLKICopy` is the card it became in the graveyard.
     died: bool,
     /// … and that permanent was the ability's own source.
     died_self: bool,
 }
 
+/// What one of Forge's `Triggered…` names stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Named {
+    It,
+    This,
+}
+
 impl Default for TrigCtx {
     fn default() -> Self {
         TrigCtx {
-            card: true,
-            target_player: false,
-            target_object: false,
-            source_this: false,
-            source: false,
-            amount: false,
+            it: &["TriggeredCard"],
+            this: &[],
+            player: None,
+            amount: None,
             died: false,
             died_self: false,
         }
@@ -191,33 +193,100 @@ impl Default for TrigCtx {
 }
 
 impl TrigCtx {
+    const NOTHING: TrigCtx = TrigCtx {
+        it: &[],
+        this: &[],
+        player: None,
+        amount: None,
+        died: false,
+        died_self: false,
+    };
+
+    fn named(&self, name: &str) -> Option<Named> {
+        let base = name.strip_suffix("LKICopy").unwrap_or(name);
+        if self.it.contains(&base) {
+            Some(Named::It)
+        } else if self.this.contains(&base) {
+            Some(Named::This)
+        } else {
+            None
+        }
+    }
+
     fn of(when: &Trigger) -> TrigCtx {
+        let about_source = |f: &ObjFilter| matches!(f, ObjFilter::This | ObjFilter::Host);
         match when {
             Trigger::Damage { by, to, per, .. } => {
                 let player = matches!(to, DamageTo::Player(_));
+                let own = *by == Some(ObjFilter::This);
                 TrigCtx {
-                    card: false,
-                    target_player: player,
-                    target_object: matches!(to, DamageTo::Permanent(_)),
-                    source_this: *by == Some(ObjFilter::This),
-                    source: player && *per != DamagePer::Recipient,
-                    amount: true,
-                    died: false,
-                    died_self: false,
+                    // The permanent dealt damage; or the one source of damage dealt to a
+                    // player.
+                    it: match to {
+                        DamageTo::Permanent(_) => &["TriggeredTarget"],
+                        DamageTo::Player(_) if !own && *per != DamagePer::Recipient => {
+                            &["TriggeredSource"]
+                        }
+                        _ => &[],
+                    },
+                    this: if own { &["TriggeredSource"] } else { &[] },
+                    player: player.then_some("TriggeredTarget"),
+                    amount: Some("TriggerCount$DamageAmount"),
+                    ..TrigCtx::NOTHING
                 }
             }
-            // Several events for one ability: only what all of them give.
+            Trigger::GainsLife(_) | Trigger::LosesLife(_) => TrigCtx {
+                player: Some("TriggeredPlayer"),
+                amount: Some("TriggerCount$LifeAmount"),
+                ..TrigCtx::NOTHING
+            },
+            Trigger::Draws { .. } | Trigger::Discards(_) => TrigCtx {
+                player: Some("TriggeredPlayer"),
+                ..TrigCtx::NOTHING
+            },
+            Trigger::PlayerAttacks { .. } => TrigCtx::NOTHING,
+            Trigger::Attacks(_) | Trigger::AttacksAlone(_) => TrigCtx {
+                it: &["TriggeredCard", "TriggeredAttacker"],
+                ..TrigCtx::NOTHING
+            },
+            Trigger::Blocks(_) => TrigCtx {
+                it: &["TriggeredBlocker"],
+                ..TrigCtx::NOTHING
+            },
+            Trigger::BecomesBlocked(_) | Trigger::Unblocked(_) => TrigCtx {
+                it: &["TriggeredAttacker"],
+                ..TrigCtx::NOTHING
+            },
+            // "It" is the other creature.
+            Trigger::BlockedBy { attacker, blocker } => {
+                if about_source(blocker) {
+                    TrigCtx {
+                        it: &["TriggeredAttacker"],
+                        this: if *blocker == ObjFilter::This {
+                            &["TriggeredBlocker"]
+                        } else {
+                            &[]
+                        },
+                        ..TrigCtx::NOTHING
+                    }
+                } else {
+                    TrigCtx {
+                        it: &["TriggeredBlocker"],
+                        this: if *attacker == ObjFilter::This {
+                            &["TriggeredAttacker"]
+                        } else {
+                            &[]
+                        },
+                        ..TrigCtx::NOTHING
+                    }
+                }
+            }
+            // Several events for one ability: only what all of them give alike.
             Trigger::Any(v) => {
-                let all: Vec<TrigCtx> = v.iter().map(TrigCtx::of).collect();
-                TrigCtx {
-                    card: all.iter().all(|c| c.card),
-                    target_player: all.iter().all(|c| c.target_player),
-                    target_object: all.iter().all(|c| c.target_object),
-                    source_this: all.iter().all(|c| c.source_this),
-                    source: all.iter().all(|c| c.source),
-                    amount: all.iter().all(|c| c.amount),
-                    died: all.iter().all(|c| c.died),
-                    died_self: all.iter().all(|c| c.died_self),
+                let mut all = v.iter().map(TrigCtx::of);
+                match all.next() {
+                    Some(first) if all.all(|c| c == first) => first,
+                    _ => TrigCtx::NOTHING,
                 }
             }
             Trigger::Dies(f) => TrigCtx {
@@ -752,15 +821,22 @@ impl<'a> Tx<'a> {
             };
             return self.expr_text(inner, depth + 1);
         }
+        // "Its power": of the event's object, or of this permanent under another name.
+        if let Some((name, what)) = v.split_once('$') {
+            let amount = match (self.trig.named(name), what) {
+                (Some(Named::It), "CardPower") => Some(Amount::TriggeringPower),
+                (Some(Named::It), "CardToughness") => Some(Amount::TriggeringToughness),
+                (Some(Named::This), "CardPower") => Some(Amount::SourcePower),
+                (Some(Named::This), "CardToughness") => Some(Amount::SourceToughness),
+                _ => None,
+            };
+            if amount.is_some() {
+                return amount;
+            }
+        }
         match v {
-            "TriggeredCard$CardPower" if self.trig.card => return Some(Amount::TriggeringPower),
-            "TriggeredCard$CardToughness" if self.trig.card => {
-                return Some(Amount::TriggeringToughness);
-            }
-            // "That much damage", "that many".
-            "TriggerCount$DamageAmount" if self.trig.amount => {
-                return Some(Amount::TriggeringAmount);
-            }
+            // "That much damage", "that many", "that much life".
+            v if self.trig.amount == Some(v) => return Some(Amount::TriggeringAmount),
             // "the sacrificed creature's power": what was sacrificed to pay the cost.
             "Sacrificed$CardPower" => return Some(Amount::SacrificedPower),
             // The card the ability is on.
@@ -851,21 +927,22 @@ impl<'a> Tx<'a> {
             None | Some("You") => Some(PlayerRef::You),
             Some("Player.Opponent" | "Opponent") => Some(PlayerRef::EachOpponent),
             Some("Player") => Some(PlayerRef::Each),
-            // The rules' "its controller" is whoever controlled it last (CR 608.2h).
-            Some("TriggeredCardController") if triggered && self.trig.card => {
-                Some(PlayerRef::TriggeringController)
-            }
-            // "That player": the player dealt damage.
-            Some("TriggeredTarget") if triggered && self.trig.target_player => {
+            // "That player": the player the event happened to.
+            Some(name) if triggered && self.trig.player == Some(name) => {
                 Some(PlayerRef::TriggeringPlayer)
             }
-            // The controller of the source of the damage: of this permanent — the
-            // ability's controller — or of the creature that dealt it.
-            Some("TriggeredSourceController") if triggered && self.trig.source_this => {
-                Some(PlayerRef::You)
-            }
-            Some("TriggeredSourceController") if triggered && self.trig.source => {
-                Some(PlayerRef::TriggeringController)
+            // "Its controller": whoever controlled the event's object last (CR 608.2h);
+            // of this permanent, the ability's controller.
+            Some(name)
+                if triggered
+                    && name
+                        .strip_suffix("Controller")
+                        .is_some_and(|base| self.trig.named(base).is_some()) =>
+            {
+                match self.trig.named(name.trim_end_matches("Controller")) {
+                    Some(Named::This) => Some(PlayerRef::You),
+                    _ => Some(PlayerRef::TriggeringController),
+                }
             }
             Some("Targeted") => match chain.targets.len() {
                 0 => {
@@ -888,15 +965,16 @@ impl<'a> Tx<'a> {
     /// is the card itself.
     fn recipient(&mut self, rd: &Rd<'a>, chain: &Chain, triggered: bool) -> Option<TargetRef> {
         match rd.rec.get("Defined") {
-            Some(
-                "You"
-                | "Opponent"
-                | "Player.Opponent"
-                | "Player"
-                | "TriggeredCardController"
-                | "TriggeredSourceController",
-            ) => self.player(rd, chain, triggered).map(TargetRef::Players),
-            Some("TriggeredTarget") if self.trig.target_player => {
+            Some("You" | "Opponent" | "Player.Opponent" | "Player") => {
+                self.player(rd, chain, triggered).map(TargetRef::Players)
+            }
+            // A player the event names.
+            Some(name)
+                if self.trig.player == Some(name)
+                    || name
+                        .strip_suffix("Controller")
+                        .is_some_and(|base| self.trig.named(base).is_some()) =>
+            {
                 self.player(rd, chain, triggered).map(TargetRef::Players)
             }
             Some("Targeted") => match chain.targets.len() {
@@ -922,22 +1000,11 @@ impl<'a> Tx<'a> {
             // form is the snapshot from the event; for the effects that use this reference
             // (counters and pumps on a permanent) both act only if it is still the
             // permanent that triggered the ability, which is what `Triggering` means.
-            Some("TriggeredCard" | "TriggeredCardLKICopy") if triggered && self.trig.card => {
-                Some(ObjRef::Triggering)
-            }
-            // The permanent dealt damage; the source of damage dealt to a player.
-            Some("TriggeredTarget" | "TriggeredTargetLKICopy")
-                if triggered && self.trig.target_object =>
-            {
-                Some(ObjRef::Triggering)
-            }
-            Some("TriggeredSource" | "TriggeredSourceLKICopy")
-                if triggered && self.trig.source_this =>
-            {
-                Some(ObjRef::This)
-            }
-            Some("TriggeredSource" | "TriggeredSourceLKICopy") if triggered && self.trig.source => {
-                Some(ObjRef::Triggering)
+            Some(name) if triggered && self.trig.named(name).is_some() => {
+                match self.trig.named(name) {
+                    Some(Named::This) => Some(ObjRef::This),
+                    _ => Some(ObjRef::Triggering),
+                }
             }
             Some("Targeted") if !chain.targets.is_empty() => {
                 chain.refers_to_targets.set(true);
@@ -2764,6 +2831,152 @@ impl<'a> Tx<'a> {
                     per,
                 })
             }
+            // "Whenever you attack [with N or more creatures]" (CR 508.1).
+            "AttackersDeclared" => {
+                let by = match rd.get("AttackingPlayer") {
+                    None | Some("Player") => Some(Who::Any),
+                    Some("You") => Some(Who::You),
+                    Some("Opponent" | "Player.Opponent") => Some(Who::Opponent),
+                    Some(other) => {
+                        self.block(format!("trig:AttackersDeclared player {other}"));
+                        None
+                    }
+                };
+                let with = match rd.get("ValidAttackers") {
+                    None | Some("Creature") => Some(None),
+                    Some(f) => self.selector(f).map(Some),
+                };
+                let at_least = match rd.get("ValidAttackersAmount") {
+                    None => Some(1),
+                    Some(c) => match self.compare(c) {
+                        Some((Cmp::AtLeast, n)) => Some(n),
+                        Some(_) => {
+                            self.block("trig:AttackersDeclared amount");
+                            None
+                        }
+                        None => None,
+                    },
+                };
+                Some(Trigger::PlayerAttacks {
+                    by: by?,
+                    with: with?,
+                    at_least: at_least?,
+                })
+            }
+            // Life gained or lost, cards drawn or discarded: by whom.
+            mode @ ("LifeGained" | "LifeLost" | "Drawn" | "Discarded") => {
+                let who = match (rd.get("ValidPlayer"), rd.get("ValidCard")) {
+                    (None, None | Some("Card")) => Some(Who::Any),
+                    (Some("Player"), None | Some("Card")) => Some(Who::Any),
+                    (Some("You"), None | Some("Card")) => Some(Who::You),
+                    (Some("Opponent" | "Player.Opponent"), None | Some("Card")) => {
+                        Some(Who::Opponent)
+                    }
+                    // A card in a library or hand is its owner's.
+                    (None, Some("Card.YouCtrl" | "Card.YouOwn")) if mode != "LifeGained" => {
+                        Some(Who::You)
+                    }
+                    (None, Some("Card.OppCtrl" | "Card.OppOwn")) if mode != "LifeGained" => {
+                        Some(Who::Opponent)
+                    }
+                    (p, c) => {
+                        self.block(format!(
+                            "trig:{mode} who {} {}",
+                            p.unwrap_or("-"),
+                            c.unwrap_or("-")
+                        ));
+                        None
+                    }
+                };
+                match mode {
+                    "LifeGained" => who.map(Trigger::GainsLife),
+                    "LifeLost" => who.map(Trigger::LosesLife),
+                    "Discarded" => who.map(Trigger::Discards),
+                    _ => {
+                        // `Number$ 2`: "your second card each turn".
+                        let nth = match rd.get("Number") {
+                            None => Some(None),
+                            Some(n) => match n.parse::<u32>() {
+                                Ok(n) if n > 0 => Some(Some(n)),
+                                _ => {
+                                    self.block("param:trig Drawn.Number value");
+                                    None
+                                }
+                            },
+                        };
+                        Some(Trigger::Draws {
+                            who: who?,
+                            nth: nth?,
+                        })
+                    }
+                }
+            }
+            "Sacrificed" => {
+                let who = match rd.get("ValidPlayer") {
+                    None | Some("Player") => Some(Who::Any),
+                    Some("You") => Some(Who::You),
+                    Some("Opponent" | "Player.Opponent") => Some(Who::Opponent),
+                    Some(other) => {
+                        self.block(format!("trig:Sacrificed player {other}"));
+                        None
+                    }
+                };
+                let what = match rd.get("ValidCard") {
+                    None => Some(ObjFilter::Matching(Selector::default())),
+                    Some(f) => self.obj_filter(f),
+                };
+                // "When you sacrifice this" would have to trigger from the graveyard.
+                if what == Some(ObjFilter::This) {
+                    self.block("trig:Sacrificed this");
+                    return None;
+                }
+                Some(Trigger::Sacrifices {
+                    who: who?,
+                    what: what?,
+                })
+            }
+            // Blockers being declared (CR 509.1h).
+            "Blocks" => {
+                let blocker = rd.get("ValidCard").and_then(|f| self.obj_filter(f));
+                match rd.get("ValidBlocked") {
+                    None => blocker.map(Trigger::Blocks),
+                    Some(f) => {
+                        let attacker = self.obj_filter(f);
+                        Some(Trigger::BlockedBy {
+                            attacker: attacker?,
+                            blocker: blocker?,
+                        })
+                    }
+                }
+            }
+            "AttackerBlocked" => {
+                let attacker = rd.get("ValidCard").and_then(|f| self.obj_filter(f));
+                match rd.get("ValidBlocker") {
+                    None => attacker.map(Trigger::BecomesBlocked),
+                    // Once however many of those blockers there are: the same as once
+                    // for each only where the blocker is this one creature.
+                    Some("Card.Self") => Some(Trigger::BlockedBy {
+                        attacker: attacker?,
+                        blocker: ObjFilter::This,
+                    }),
+                    Some(_) => {
+                        self.block("trig:AttackerBlocked by several");
+                        None
+                    }
+                }
+            }
+            "AttackerBlockedByCreature" => {
+                let attacker = rd.get("ValidCard").and_then(|f| self.obj_filter(f));
+                let blocker = rd.get("ValidBlocker").and_then(|f| self.obj_filter(f));
+                Some(Trigger::BlockedBy {
+                    attacker: attacker?,
+                    blocker: blocker?,
+                })
+            }
+            "AttackerUnblocked" => rd
+                .get("ValidCard")
+                .and_then(|f| self.obj_filter(f))
+                .map(Trigger::Unblocked),
             // CR 702.29c: "when you cycle this card"; "whenever [a player] cycles a card",
             // which a permanent watches for (the cycled card is never that permanent, so
             // "another card" says nothing more).
@@ -2823,6 +3036,18 @@ impl<'a> Tx<'a> {
                 (Some("Attacks"), _) => rec.get("ValidCard") == Some("Card.Self"),
                 // "When you cycle this card": from wherever the card went.
                 (Some("Cycled"), _) => rec.get("ValidCard") == Some("Card.Self"),
+                // A creature that blocks or is blocked is on the battlefield.
+                (
+                    Some(
+                        "Blocks"
+                        | "AttackerBlocked"
+                        | "AttackerBlockedByCreature"
+                        | "AttackerUnblocked",
+                    ),
+                    _,
+                ) => ["ValidCard", "ValidBlocker", "ValidBlocked"]
+                    .iter()
+                    .any(|k| rec.get(k) == Some("Card.Self")),
                 // A permanent that deals or is dealt damage is on the battlefield; so is
                 // an Aura or Equipment whose host does. (An instant's own "whenever this
                 // deals damage" would be something else.)
@@ -3544,6 +3769,37 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
                 ));
                 continue;
             }
+            // CR 702.25a: "Whenever this creature becomes blocked by a creature without
+            // flanking, the blocking creature gets -1/-1 until end of turn." The keyword
+            // itself only marks who has flanking; it can't be granted on its own (each
+            // instance triggers separately), so nothing else compiles to it.
+            "Flanking" => {
+                def.keywords.push(Keyword::Flanking);
+                abilities.push((
+                    0,
+                    AbilityDef::Triggered {
+                        when: Trigger::BlockedBy {
+                            attacker: ObjFilter::This,
+                            blocker: ObjFilter::Matching(Selector {
+                                types: vec![CardType::Creature],
+                                not_keywords: vec![Keyword::Flanking],
+                                ..Selector::default()
+                            }),
+                        },
+                        intervening_if: None,
+                        body: Body::Effect(Mode {
+                            targets: Vec::new(),
+                            effect: Effect::Apply {
+                                what: ObjRef::Triggering,
+                                effects: vec![ContinuousEffect::ModifyPT(-1, -1)],
+                                until_end_of_turn: true,
+                            },
+                            groups: Vec::new(),
+                        }),
+                    },
+                ));
+                continue;
+            }
             // CR 702.114a: "This object is colorless", everywhere: the same as having no
             // color to begin with (its color identity still comes from its mana cost).
             "Devoid" => {
@@ -3551,6 +3807,33 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
                 continue;
             }
             _ => {}
+        }
+        // CR 702.45a: "Bushido N": "Whenever this creature blocks or becomes blocked, it
+        // gets +N/+N until end of turn."
+        if let Some(n) = k.strip_prefix("Bushido:") {
+            match n.parse::<i32>() {
+                Ok(n) => abilities.push((
+                    0,
+                    AbilityDef::Triggered {
+                        when: Trigger::Any(vec![
+                            Trigger::Blocks(ObjFilter::This),
+                            Trigger::BecomesBlocked(ObjFilter::This),
+                        ]),
+                        intervening_if: None,
+                        body: Body::Effect(Mode {
+                            targets: Vec::new(),
+                            effect: Effect::Apply {
+                                what: ObjRef::This,
+                                effects: vec![ContinuousEffect::ModifyPT(n, n)],
+                                until_end_of_turn: true,
+                            },
+                            groups: Vec::new(),
+                        }),
+                    },
+                )),
+                Err(_) => tx.block("kw:Bushido amount"),
+            }
+            continue;
         }
         // CR 702.41a: "Affinity for [things]": "This spell costs {1} less to cast for each
         // [thing] you control."

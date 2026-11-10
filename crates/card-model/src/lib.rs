@@ -355,6 +355,10 @@ pub enum Keyword {
     Shadow,
     /// CR 702.31b: can't be blocked by creatures without horsemanship.
     Horsemanship,
+    /// CR 702.25a: "Whenever this creature becomes blocked by a creature without
+    /// flanking, the blocking creature gets -1/-1 until end of turn." The keyword marks
+    /// who has it; the trigger is an ability of the card.
+    Flanking,
 }
 
 /// One ability printed on a card (CR 113).
@@ -589,6 +593,38 @@ pub enum Trigger {
     /// CR 702.83b, 506.5: "Whenever [filter] attacks alone" — it is the only creature
     /// declared as an attacker.
     AttacksAlone(ObjFilter),
+    /// "Whenever [who] attacks [with N or more creatures]": once for a declaration of
+    /// attackers (CR 508.1) with at least `at_least` attackers that match `with` (any
+    /// attacker, if `None`).
+    PlayerAttacks {
+        by: Who,
+        with: Option<Selector>,
+        at_least: u32,
+    },
+    /// "Whenever [who] gains life" (CR 119.9); "that much" is the life gained.
+    GainsLife(Who),
+    /// "Whenever [who] loses life" — damage included (CR 119.3); "that much" is the loss.
+    LosesLife(Who),
+    /// "Whenever [who] draws a card" (CR 121.1); `nth`: only their Nth card of the turn
+    /// ("whenever you draw your second card each turn").
+    Draws { who: Who, nth: Option<u32> },
+    /// "Whenever [who] discards a card" (CR 701.9); "it" is the card, where it went.
+    Discards(Who),
+    /// "Whenever [who] sacrifices [a permanent]" (CR 701.21); looks back (CR 603.10a).
+    Sacrifices { who: Who, what: ObjFilter },
+    /// CR 509.1h: "Whenever [filter] blocks" — once, however many creatures it blocks.
+    Blocks(ObjFilter),
+    /// CR 509.1h: "Whenever [filter] becomes blocked" — once, by however many creatures.
+    BecomesBlocked(ObjFilter),
+    /// "Whenever [filter] attacks and isn't blocked": no blocker was declared for it.
+    Unblocked(ObjFilter),
+    /// "Whenever [blocker] blocks [attacker]" / "whenever [attacker] becomes blocked by
+    /// [blocker]": once for each such pair. "It"/"that creature" is the blocker — or the
+    /// attacker, where the blocker is this permanent (or what it is attached to).
+    BlockedBy {
+        attacker: ObjFilter,
+        blocker: ObjFilter,
+    },
 }
 
 /// What a damage trigger's damage was dealt to.

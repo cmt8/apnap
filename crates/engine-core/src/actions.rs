@@ -412,6 +412,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 return ActionResult::Drew(None);
             };
             let new = perform_move(st, top, Zone::Hand, LibraryPosition::Top, None);
+            st.player_mut(player).drawn_this_turn += 1;
             st.emit(Event::Drew { player, card: new });
             ActionResult::Drew(Some(new))
         }

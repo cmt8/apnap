@@ -4593,3 +4593,253 @@ fn devoid_and_affinity() {
     s.cast("Test Scrapling").pay().pass_all();
     assert!(s.find(P0, Zone::Battlefield, "Test Scrapling").is_some());
 }
+
+// ---------------------------------------------------------------------------------------
+// More events: attacking, blocking, life, draws, discards, sacrifices (D-061).
+
+// CR 508.1m (2026-11-06). Forge: `Mode$ AttackersDeclared | AttackingPlayer$ You` with
+// `ValidAttackersAmount$ GE2` — "whenever you attack [with two or more creatures]": once
+// for the declaration.
+#[test]
+fn whenever_you_attack() {
+    let cards = [
+        bell(
+            "Test Muster Bell",
+            "AttackersDeclared | AttackingPlayer$ You",
+            1,
+        ),
+        bell(
+            "Test Horde Bell",
+            "AttackersDeclared | AttackingPlayer$ You | ValidAttackers$ Creature | ValidAttackersAmount$ GE2",
+            10,
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let build = || {
+        let mut sc = scenario(&cards);
+        sc.cards(
+            P0,
+            Zone::Battlefield,
+            &["Test Muster Bell", "Test Horde Bell"],
+        );
+        let mine = sc.cards(P0, Zone::Battlefield, &["Test Golem", "Test Golem"]);
+        let theirs = sc.card(P1, Zone::Battlefield, "Test Golem");
+        (Script::new(sc.build()), mine, theirs)
+    };
+    let (mut s, mine, _) = build();
+    attack_with(&mut s, &mine[..1]);
+    drive_until(&mut s, |s| at(s, P0, Step::PostcombatMain));
+    assert_eq!(life(&s, P0), 41);
+    let (mut s, mine, theirs) = build();
+    attack_with(&mut s, &mine);
+    drive_until(&mut s, |s| at(s, P0, Step::PostcombatMain));
+    assert_eq!(life(&s, P0), 51, "once, not once for each attacker");
+    // The opponent attacking isn't "you attack"; and with nobody attacking nothing happens.
+    drive_until(&mut s, |s| at(s, P1, Step::PrecombatMain));
+    attack_with(&mut s, &[theirs]);
+    drive_until(&mut s, |s| at(s, P1, Step::PostcombatMain));
+    assert_eq!(life(&s, P0), 51 - 2);
+}
+
+// CR 119.9, 121.1, 701.9, 701.21 (2026-11-06). Forge: `LifeGained`, `Drawn` (with
+// `Number$ 2`: the second card of a turn), `Discarded`, `Sacrificed`.
+#[test]
+fn life_draw_discard_and_sacrifice_triggers() {
+    let cards = [
+        format!(
+            "{}\nSVar:X:TriggerCount$LifeAmount\nOracle:Text.",
+            "Name:Test Sanguine Bell\nManaCost:1\nTypes:Enchantment\n\
+             T:Mode$ LifeGained | ValidPlayer$ You | TriggerZones$ Battlefield | Execute$ TrigDrain | TriggerDescription$ Text.\n\
+             SVar:TrigDrain:DB$ LoseLife | Defined$ Player.Opponent | LifeAmount$ X"
+        ),
+        bell("Test Second Bell", "Drawn | ValidCard$ Card.YouCtrl | Number$ 2", 10),
+        bell("Test Draw Bell", "Drawn | ValidCard$ Card.YouCtrl", 1),
+        bell("Test Loss Bell", "Discarded | ValidCard$ Card.YouCtrl", 100),
+        bell(
+            "Test Scrap Bell",
+            "Sacrificed | ValidCard$ Artifact | ValidPlayer$ You",
+            1000,
+        ),
+        spell(
+            "Test Healing",
+            "W",
+            "Instant",
+            "A:SP$ GainLife | LifeAmount$ 3 | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Divination",
+            "U",
+            "Instant",
+            "A:SP$ Draw | NumCards$ 3 | SpellDescription$ Text.",
+        ),
+        creature("Test Dune Beast", "5 R", "Beast", "4/4", "K:Cycling:1"),
+        "Name:Test Bauble\nManaCost:1\nTypes:Artifact\n\
+         A:AB$ Mill | Cost$ Sac<1/CARDNAME> | Defined$ Player.Opponent | NumCards$ 1 | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+        creature(
+            "Test Votary",
+            "W",
+            "Cleric",
+            "1/1",
+            "A:AB$ Mill | Cost$ Sac<1/CARDNAME> | Defined$ Player.Opponent | NumCards$ 1 | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let settle = |s: &mut Script| {
+        drive_until(s, |s| {
+            s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+        })
+    };
+    // "Whenever you gain life, each opponent loses that much life."
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Plains", "Test Sanguine Bell"]);
+    sc.card(P0, Zone::Hand, "Test Healing");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Healing").pay();
+    settle(&mut s);
+    assert_eq!((life(&s, P0), life(&s, P1)), (43, 37));
+
+    // Draws: +1 for each card, +10 for the second card of the turn only.
+    let mut sc = scenario(&cards);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &[
+            "Island",
+            "Island",
+            "Test Second Bell",
+            "Test Draw Bell",
+            "Test Loss Bell",
+        ],
+    );
+    sc.cards(P0, Zone::Hand, &["Test Divination", "Test Dune Beast"]);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Divination").pay();
+    settle(&mut s);
+    assert_eq!(life(&s, P0), 40 + 3 + 10);
+    // Cycling: a discard (+100), and the fourth card of the turn (+1).
+    s.activate("Test Dune Beast").pay();
+    settle(&mut s);
+    assert_eq!(life(&s, P0), 53 + 100 + 1);
+
+    // Sacrificing an artifact, not a creature.
+    let mut sc = scenario(&cards);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Test Scrap Bell", "Test Bauble", "Test Votary"],
+    );
+    let mut s = Script::new(sc.build());
+    s.activate("Test Votary");
+    settle(&mut s);
+    assert_eq!(life(&s, P0), 40);
+    s.activate("Test Bauble");
+    settle(&mut s);
+    assert_eq!(life(&s, P0), 1040);
+}
+
+// CR 509.3a–d, 509.3g, 702.45a, 702.25a (2026-11-06). Forge: `Blocks`, `AttackerBlocked`,
+// `AttackerBlockedByCreature`, `AttackerUnblocked`; `K:Bushido:1`, `K:Flanking`.
+#[test]
+fn blocking_triggers() {
+    let gains = |name: &str, pt: &str, trigger: &str, n: u32| {
+        creature(
+            name,
+            "2",
+            "Soldier",
+            pt,
+            &format!(
+                "T:Mode$ {trigger} | Execute$ TrigGain | TriggerDescription$ Text.\n\
+                 SVar:TrigGain:DB$ GainLife | LifeAmount$ {n}"
+            ),
+        )
+    };
+    let cards = [
+        gains("Test Gatewarden", "0/5", "Blocks | ValidCard$ Card.Self", 3),
+        gains(
+            "Test Brawler",
+            "1/7",
+            "AttackerBlocked | ValidCard$ Card.Self",
+            10,
+        ),
+        gains(
+            "Test Sneak",
+            "1/1",
+            "AttackerUnblocked | ValidCard$ Card.Self",
+            100,
+        ),
+        creature(
+            "Test Needler",
+            "2",
+            "Insect",
+            "1/7",
+            "T:Mode$ AttackerBlockedByCreature | ValidCard$ Card.Self | ValidBlocker$ Creature | Execute$ TrigDmg | TriggerDescription$ Text.\n\
+             SVar:TrigDmg:DB$ DealDamage | Defined$ TriggeredBlockerLKICopy | NumDmg$ 1",
+        ),
+        creature("Test Samurai", "2", "Samurai", "2/2", "K:Bushido:1"),
+        creature("Test Lancer", "2", "Knight", "2/2", "K:Flanking"),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    // Blocked by two creatures: "becomes blocked" once; "blocks" once for the Sentinel.
+    let mut sc = scenario(&cards);
+    let brawler = sc.card(P0, Zone::Battlefield, "Test Brawler");
+    let sneak = sc.card(P0, Zone::Battlefield, "Test Sneak");
+    let sentinel = sc.card(P1, Zone::Battlefield, "Test Gatewarden");
+    let golem = sc.card(P1, Zone::Battlefield, "Test Golem");
+    let mut s = Script::new(sc.build());
+    attack_with(&mut s, &[brawler, sneak]);
+    block_with(&mut s, &[(sentinel, brawler), (golem, brawler)]);
+    fight(&mut s);
+    // Mine: becomes blocked (+10), the Sneak isn't blocked (+100). Theirs: blocks (+3),
+    // less the Sneak's 1 damage.
+    assert_eq!((life(&s, P0), life(&s, P1)), (150, 40 + 3 - 1));
+
+    // "Becomes blocked by a creature": once for each blocker, and it is that creature.
+    let mut sc = scenario(&cards);
+    let stinger = sc.card(P0, Zone::Battlefield, "Test Needler");
+    let elves = sc.cards(P1, Zone::Battlefield, &["Test Elf", "Test Elf"]);
+    let idle = sc.card(P1, Zone::Battlefield, "Test Elf");
+    let mut s = Script::new(sc.build());
+    attack_with(&mut s, &[stinger]);
+    block_with(&mut s, &[(elves[0], stinger), (elves[1], stinger)]);
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() != ChoiceKind::OrderTriggers
+    });
+    assert!(!on_battlefield(&s, elves[0]) && !on_battlefield(&s, elves[1]));
+    assert!(on_battlefield(&s, idle));
+
+    // Bushido: +1/+1 when it blocks or becomes blocked. Flanking: a blocker without
+    // flanking gets -1/-1 (the 1/1 Elf dies), one with flanking doesn't.
+    let mut sc = scenario(&cards);
+    let samurai = sc.card(P0, Zone::Battlefield, "Test Samurai");
+    let lancer = sc.card(P0, Zone::Battlefield, "Test Lancer");
+    let golem = sc.card(P1, Zone::Battlefield, "Test Golem");
+    let elf = sc.card(P1, Zone::Battlefield, "Test Elf");
+    let mut s = Script::new(sc.build());
+    attack_with(&mut s, &[samurai, lancer]);
+    block_with(&mut s, &[(golem, samurai), (elf, lancer)]);
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() != ChoiceKind::OrderTriggers
+    });
+    assert_eq!(pt(&s, samurai), (3, 3));
+    assert!(!on_battlefield(&s, elf));
+    let mut sc = scenario(&cards);
+    let lancer = sc.card(P0, Zone::Battlefield, "Test Lancer");
+    let other = sc.card(P1, Zone::Battlefield, "Test Lancer");
+    let mut s = Script::new(sc.build());
+    attack_with(&mut s, &[lancer]);
+    block_with(&mut s, &[(other, lancer)]);
+    drive_until(&mut s, |s| s.kind() == ChoiceKind::Priority);
+    assert!(s.st.stack.is_empty());
+    assert_eq!(pt(&s, other), (2, 2));
+    // Granting flanking alone would not give the ability: it is not a keyword a script
+    // can hand out.
+    let b = forge_test_blockers(&creature(
+        "Test Banneret",
+        "2",
+        "Knight",
+        "2/2",
+        "S:Mode$ Continuous | Affected$ Creature.Other+YouCtrl | AddKeyword$ Flanking | Description$ Text.",
+    ));
+    assert_eq!(b, ["kw:Flanking"]);
+}

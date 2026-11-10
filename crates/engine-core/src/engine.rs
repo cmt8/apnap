@@ -90,6 +90,7 @@ pub fn new_game_with_commanders(
                 commander_damage: BTreeMap::new(),
                 commander_casts: BTreeMap::new(),
                 restricted_mana: Vec::new(),
+                drawn_this_turn: 0,
             })
             .collect(),
         config,

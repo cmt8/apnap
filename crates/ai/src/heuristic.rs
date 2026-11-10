@@ -136,7 +136,11 @@ fn kw_value(k: Keyword) -> i64 {
         | Keyword::Landwalk(_)
         | Keyword::Shadow
         | Keyword::Horsemanship => 2,
-        Keyword::Vigilance | Keyword::Haste | Keyword::Reach | Keyword::Flash => 1,
+        Keyword::Vigilance
+        | Keyword::Haste
+        | Keyword::Reach
+        | Keyword::Flash
+        | Keyword::Flanking => 1,
         Keyword::Defender => -1,
     }
 }

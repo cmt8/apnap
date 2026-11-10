@@ -1070,6 +1070,25 @@ Rules text: docs/rules-notes/702.29-cycling-113.6-ability-zones.md (last section
   comes from its mana cost (CR 903.4).
 - 8,060 → 8,237 of 34,463 scripts (23.9%). Golden hashes unchanged.
 
+## D-061 Compiler batch 10 (breadth): attacking, blocking, life, draws, discards, sacrifices as trigger events (2026-11-10)
+Rules text: docs/rules-notes/603-triggered-abilities.md (last section).
+- `Trigger::{PlayerAttacks, Blocks, BecomesBlocked, Unblocked, BlockedBy, GainsLife,
+  LosesLife, Draws, Discards, Sacrifices}`; `triggers::detect_with` is the one loop the new
+  kinds share. Blocks are detected in `DeclareBlockersFrame` once every defending player
+  has declared (`triggers::detect_blocks`).
+- `PlayerState::drawn_this_turn` for "your second card each turn".
+- The compiler's trigger context is now a table of Forge's names per event (`TrigCtx`:
+  which `Triggered…` names are "it", which are the ability's own source, which is "that
+  player", which expression is "that much") instead of one flag per damage case.
+- Bushido and flanking. **Caught by reading the sample before committing:** flanking had
+  first been added as a bare keyword, with no trigger. It is now the keyword (for "a
+  creature without flanking") plus the triggered ability, and only `K:Flanking` on the
+  card itself produces it.
+- Not done here: "becomes tapped/untapped" (taps happen outside Apply batches, where
+  triggers are detected: D-025), "becomes the target" (ward), "when you sacrifice this".
+- Golden state hashes re-blessed (`PlayerState` gained a field); event-log hashes unchanged.
+- 8,237 → 8,528 of 34,463 scripts (24.7%).
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

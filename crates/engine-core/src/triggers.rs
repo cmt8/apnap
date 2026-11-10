@@ -16,6 +16,7 @@ use crate::layers::{Characteristics, Facts, abilities, chars, matches_parts, mat
 use crate::state::GameState;
 use crate::turn::Step;
 use alloc::collections::BTreeMap;
+use alloc::vec;
 use alloc::vec::Vec;
 use card_model::{
     AbilityDef, CardDefId, Condition, DamagePer, DamageTo, ObjFilter, Selector, Trigger,
@@ -232,6 +233,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
     if !dealt.is_empty() {
         detect_damage(st, &dealt, lki);
     }
+    detect_player_events(st, events, lki);
     for e in events {
         if let Event::ZoneChange {
             old,
@@ -503,6 +505,192 @@ pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
         }
     }
     queue_matching(st, found, conds);
+    detect_player_attacks(st, attackers);
+}
+
+/// One occurrence of a trigger event: its object ("it"), what else it carries, and the
+/// object as it last existed if it is gone.
+type Hit = (Option<ObjectId>, EventFacts, Option<Characteristics>);
+
+/// Queue every ability of a permanent for each occurrence `hits` reports of one of its
+/// trigger events: the occurrence's object ("it") and what else it carries.
+fn detect_with(
+    st: &mut GameState,
+    mut hits: impl FnMut(&GameState, &Source<'_>, &Trigger) -> Vec<Hit>,
+) {
+    let mut found = Vec::new();
+    let mut conds = Vec::new();
+    for src in battlefield_sources(st) {
+        for &(index, a) in &src.abilities {
+            let AbilityDef::Triggered {
+                when,
+                intervening_if,
+                ..
+            } = a
+            else {
+                continue;
+            };
+            for t in when.events() {
+                for (subject, facts, subject_lki) in hits(st, &src, t) {
+                    found.push(PendingTrigger {
+                        controller: src.controller,
+                        source: src.id,
+                        source_card: src.card,
+                        index,
+                        source_lki: None,
+                        subject,
+                        subject_lki,
+                        facts,
+                    });
+                    conds.push(intervening_if.clone());
+                }
+            }
+        }
+    }
+    queue_matching(st, found, conds);
+}
+
+/// Things that happened to players in a batch: life gained and lost, cards drawn and
+/// discarded, permanents sacrificed.
+fn detect_player_events(st: &mut GameState, events: &[Event], lki: &BTreeMap<ObjectId, Lki>) {
+    let relevant = events.iter().any(|e| {
+        matches!(
+            e,
+            Event::LifeChanged { .. }
+                | Event::Drew { .. }
+                | Event::Discarded { .. }
+                | Event::Sacrificed { .. }
+        )
+    });
+    if !relevant {
+        return;
+    }
+    // Which card of the turn each draw was: the count is already past this batch.
+    let mut ordinals: Vec<(PlayerId, u32)> = Vec::new();
+    for e in events.iter().rev() {
+        if let Event::Drew { player, .. } = e {
+            let later = ordinals.iter().filter(|(p, _)| p == player).count() as u32;
+            ordinals.push((*player, st.player(*player).drawn_this_turn - later));
+        }
+    }
+    ordinals.reverse();
+    // What each sacrificed permanent was called before it left (CR 603.10a).
+    let before: BTreeMap<ObjectId, ObjectId> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ZoneChange { old, new, .. } => Some((*new, *old)),
+            _ => None,
+        })
+        .collect();
+    detect_with(st, |st, src, t| {
+        let amount = |amount: u32, player: PlayerId| EventFacts {
+            player: Some(player),
+            amount,
+            moved: None,
+        };
+        let mut out = Vec::new();
+        match t {
+            Trigger::GainsLife(who) | Trigger::LosesLife(who) => {
+                let gain = matches!(t, Trigger::GainsLife(_));
+                for e in events {
+                    if let Event::LifeChanged { player, delta, .. } = e
+                        && (*delta > 0) == gain
+                        && *delta != 0
+                        && who_matches(*who, *player, src.controller)
+                    {
+                        out.push((None, amount(delta.unsigned_abs(), *player), None));
+                    }
+                }
+            }
+            Trigger::Draws { who, nth } => {
+                for (player, ordinal) in &ordinals {
+                    if who_matches(*who, *player, src.controller)
+                        && nth.is_none_or(|n| n == *ordinal)
+                    {
+                        out.push((None, amount(1, *player), None));
+                    }
+                }
+            }
+            Trigger::Discards(who) => {
+                for e in events {
+                    if let Event::Discarded { player, card } = e
+                        && who_matches(*who, *player, src.controller)
+                    {
+                        out.push((Some(*card), amount(1, *player), None));
+                    }
+                }
+            }
+            Trigger::Sacrifices { who, what } => {
+                for e in events {
+                    if let Event::Sacrificed { player, object } = e
+                        && who_matches(*who, *player, src.controller)
+                        && let Some(old) = before.get(object)
+                        && object_hit(st, lki, what, *old, src)
+                    {
+                        out.push((
+                            Some(*old),
+                            EventFacts {
+                                player: Some(*player),
+                                amount: 1,
+                                moved: Some(*object),
+                            },
+                            lki.get(old).map(|l| l.chars.clone()),
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+        out
+    });
+}
+
+/// CR 509.1h–i: blockers were declared — `pairs` of (blocker, attacker). "Blocks" and
+/// "becomes blocked" trigger once for a creature; "blocks [a creature]" once for each
+/// pair; "attacks and isn't blocked" for each attacker left without a blocker.
+pub(crate) fn detect_blocks(st: &mut GameState, pairs: &[(ObjectId, ObjectId)]) {
+    let unblocked: Vec<ObjectId> = st
+        .combat
+        .as_ref()
+        .map(|c| {
+            c.attackers
+                .iter()
+                .filter(|a| a.blockers.is_empty())
+                .map(|a| a.attacker)
+                .collect()
+        })
+        .unwrap_or_default();
+    let none = BTreeMap::new();
+    detect_with(st, |st, src, t| {
+        let hit = |f: &ObjFilter, id: ObjectId| object_hit(st, &none, f, id, src);
+        let each = |ids: &mut dyn Iterator<Item = ObjectId>, f: &ObjFilter| {
+            let mut seen: Vec<ObjectId> = Vec::new();
+            for id in ids {
+                if !seen.contains(&id) && hit(f, id) {
+                    seen.push(id);
+                }
+            }
+            seen.into_iter()
+                .map(|id| (Some(id), EventFacts::default(), None))
+                .collect::<Vec<_>>()
+        };
+        match t {
+            Trigger::Blocks(f) => each(&mut pairs.iter().map(|(b, _)| *b), f),
+            Trigger::BecomesBlocked(f) => each(&mut pairs.iter().map(|(_, a)| *a), f),
+            Trigger::Unblocked(f) => each(&mut unblocked.iter().copied(), f),
+            Trigger::BlockedBy { attacker, blocker } => pairs
+                .iter()
+                .filter(|(b, a)| hit(blocker, *b) && hit(attacker, *a))
+                .map(|(b, a)| {
+                    // "It": the other creature.
+                    let about_blocker = matches!(blocker, ObjFilter::This | ObjFilter::Host);
+                    let it = if about_blocker { *a } else { *b };
+                    (Some(it), EventFacts::default(), None)
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    });
 }
 
 /// Damage that was dealt (one source, one recipient).
@@ -673,6 +861,41 @@ fn detect_damage(st: &mut GameState, dealt: &[Dealt], lki: &BTreeMap<ObjectId, L
         }
     }
     queue_matching(st, found, conds);
+}
+
+/// "Whenever [a player] attacks [with N or more creatures]" (CR 508.1): once for the
+/// declaration.
+fn detect_player_attacks(st: &mut GameState, attackers: &[ObjectId]) {
+    if attackers.is_empty() {
+        return;
+    }
+    let active = st.turn.active;
+    let none = BTreeMap::new();
+    detect_with(st, |st, src, t| {
+        let Trigger::PlayerAttacks { by, with, at_least } = t else {
+            return Vec::new();
+        };
+        let counted = attackers
+            .iter()
+            .filter(|&&a| {
+                with.as_ref()
+                    .is_none_or(|s| object_hit(st, &none, &ObjFilter::Matching(s.clone()), a, src))
+            })
+            .count() as u32;
+        if who_matches(*by, active, src.controller) && counted >= (*at_least).max(1) {
+            vec![(
+                None,
+                EventFacts {
+                    player: Some(active),
+                    amount: counted,
+                    moved: None,
+                },
+                None,
+            )]
+        } else {
+            Vec::new()
+        }
+    });
 }
 
 /// CR 702.29c: `player` cycled `card` (now wherever the discard put it). "Whenever [a
