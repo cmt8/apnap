@@ -124,7 +124,7 @@ fn main() -> ExitCode {
             let threads = num(&args, "--threads", 4) as usize;
             let results = harness::fuzz_with(opts, seed, games, threads);
             let mut wins = vec![0u64; usize::from(opts.setup.players())];
-            let mut failed = 0;
+            let (mut failed, mut runaway) = (0u64, 0u64);
             let (mut turns, mut decisions, mut draws) = (0u64, 0u64, 0u64);
             for (s, r) in &results {
                 match r {
@@ -136,15 +136,20 @@ fn main() -> ExitCode {
                             wins[w.index()] += 1;
                         }
                     }
+                    // A board that grows without bound: abandoned, not a failure.
+                    Err(e @ harness::HarnessError::Runaway { .. }) => {
+                        runaway += 1;
+                        eprintln!("seed={s} abandoned: {e}");
+                    }
                     Err(e) => {
                         failed += 1;
                         eprintln!("seed={s} FAILED: {e}");
                     }
                 }
             }
-            let ok = results.len() as u64 - failed;
+            let ok = results.len() as u64 - failed - runaway;
             println!(
-                "fuzz {}: {} games, {ok} ok, {failed} failed, {draws} draws, avg turns {:.1}, avg decisions {:.0}",
+                "fuzz {}: {} games, {ok} ok, {failed} failed, {runaway} abandoned (runaway board), {draws} draws, avg turns {:.1}, avg decisions {:.0}",
                 opts.setup.label(),
                 results.len(),
                 turns as f64 / ok.max(1) as f64,

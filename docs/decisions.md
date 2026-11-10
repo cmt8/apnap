@@ -667,6 +667,12 @@ section of `docs/rules-notes/601-casting-602-activating-605-mana.md`.
   the stack a random walk: games ran for minutes. `RandomAgent` now passes when the stack
   is 8 deep (`ai::DEEP_STACK`), and `HeuristicAgent` activates one ability at most three
   times a turn — without that the app's CPU players could keep a turn going forever.
+- **Runaway boards in the soak.** Horn of Gondor ("{3}, {T}: create X Human Soldier tokens,
+  where X is the number of Humans you control") doubles its controller's board every turn;
+  with 6,000 creatures each asked whether it attacks, a legal game doesn't end in practice.
+  A `forge-Np` game whose battlefield passes 1,000 permanents is abandoned
+  (`HarnessError::Runaway`, naming what the board consists of) and counted apart from
+  failures. Only the soak does this; the engine has no such limit.
 - **Auras compile:** `K:Enchant:Creature` is `AbilityDef::Enchant(Creature)`, a static with
   `AffectedDefined$ Enchanted` is `Affected::Enchanted` (`Self` is `Affected::This`), and
   `GainControl$ You` is layer 2. Forge filters the enchanted permanent again with

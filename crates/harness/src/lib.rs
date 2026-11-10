@@ -552,7 +552,23 @@ pub enum HarnessError {
         seed: u64,
         msg: String,
     },
+    /// A random-deck game (`Setup::Forge`) abandoned because the board grew without bound:
+    /// some cards double the tokens on the battlefield every turn, and thousands of
+    /// creatures each asked whether they attack make a game that is legal but endless in
+    /// practice. Not a failure of the engine.
+    Runaway {
+        seed: u64,
+        decisions: usize,
+        permanents: usize,
+        /// The most numerous permanent, and the nontoken cards on the battlefield (one of
+        /// them is making it).
+        mostly: String,
+        cards: Vec<String>,
+    },
 }
+
+/// The board size at which a `Setup::Forge` game is abandoned as a [`HarnessError::Runaway`].
+pub const RUNAWAY_PERMANENTS: usize = 1_000;
 
 impl fmt::Display for HarnessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -655,6 +671,31 @@ pub fn play_random(seed: u64, opts: PlayOptions) -> Result<GameRecord, HarnessEr
             return Err(HarnessError::Stuck {
                 seed,
                 decisions: max,
+            });
+        }
+        if matches!(opts.setup, Setup::Forge { .. })
+            && st.zones.battlefield.len() > RUNAWAY_PERMANENTS
+        {
+            let mut count: std::collections::BTreeMap<&str, usize> = Default::default();
+            let mut cards = std::collections::BTreeSet::new();
+            for &id in &st.zones.battlefield {
+                let def = st.card_def(id);
+                *count.entry(def.name.as_str()).or_default() += 1;
+                if !def.token && !def.has_type(card_model::CardType::Land) {
+                    cards.insert(def.name.clone());
+                }
+            }
+            let mostly = count
+                .iter()
+                .max_by_key(|(_, n)| **n)
+                .map(|(name, n)| format!("{n} x {name}"))
+                .unwrap_or_default();
+            return Err(HarnessError::Runaway {
+                seed,
+                decisions: rec.responses.len(),
+                permanents: st.zones.battlefield.len(),
+                mostly,
+                cards: cards.into_iter().collect(),
             });
         }
         // `APNAP_TRACE=1`: where a long game is, every 2,000 decisions (for finding out why
