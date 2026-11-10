@@ -850,6 +850,35 @@ two-thirds land. The decks are therefore smaller than 100 cards for now and grow
 setup. All four commanders compile. Chosen over waiting for 100% because the user wants to
 play and test now; chosen over filling with basics because that plays badly.
 
+## D-054 App: the user's first list of issues from playing the precons (2026-11-10)
+- **"Commander tax doesn't exist":** the engine charges it (checked over eight AI precon
+  games: every recast cost {2} more, except where Starnheim Aspirant's "Angel spells you
+  cast cost {2} less" cancelled Giada's first tax). The app never showed it: the commander
+  in the command zone now carries a "tax +N" badge, and the enlarged card says so.
+- **Token pictures:** tokens are pictured by Scryfall's token cards
+  (`scryfall::load_bulk_tokens`, `token_printing`): the printed token with the same name,
+  types, subtypes, colors, power/toughness and keywords, and rules text exactly when the
+  token has abilities; none when several with different text fit. 545 of the 659 tokens
+  that compile have one. They come from the bulk file already in the cache; images are
+  downloaded on demand like card images.
+- **Automatic passing (after MTGO):** while the human's own spell or ability is on top of
+  the stack, priority is passed for them ("Hold priority" in the stops panel turns that
+  off); "Pass unless an opponent acts" (F4) passes for the rest of the turn until an
+  opponent's spell or ability is on the stack; "Pass until end of turn" (F6) as before.
+  Both yields also decline the attack; blocks are always asked.
+- **Deck choice:** `Setup::Precon { players, decks }` — the deck of each seat, chosen in
+  the menu (label `precon-4p:2301`; old saves load with the default order).
+- **Slower opponents:** "Slower" (2 s) and "Slowest" (4 s); the speed is a drop-down.
+- **Cards that aren't on the table as choices** (graveyard targets, library searches) are
+  offered as the cards themselves with where they are, and named in option text ("target
+  X (in P0's graveyard)", was "target #123").
+- **The table resizing during actions:** the prompt area of the bottom bar changed height
+  as decisions came and went (three different table heights in a test game), and the top
+  bar could re-wrap when the turn label or the "loading images" note changed. The prompt
+  area now always has room for its title and a row of buttons, the turn label has a fixed
+  width, and image loading is reported in the side panel. `tests/layout.rs` holds this.
+- The log has room below its last line.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

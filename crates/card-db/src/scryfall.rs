@@ -297,6 +297,124 @@ pub fn load_bulk() -> Result<ScryfallData, ScryfallError> {
     Ok(data)
 }
 
+/// Every token in the bulk file that has a picture of its own (double-faced token cards
+/// don't), in the file's order.
+pub fn load_bulk_tokens() -> Result<Vec<ScryfallCard>, ScryfallError> {
+    use std::io::{BufRead, BufReader};
+    let path = bulk_file();
+    let file = std::fs::File::open(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ScryfallError::Io(BULK_HINT.to_string())
+        } else {
+            ScryfallError::Io(format!("{}: {e}", path.display()))
+        }
+    })?;
+    let mut out = Vec::new();
+    for line in BufReader::new(flate2::read::GzDecoder::new(file)).lines() {
+        let line = line.map_err(|e| ScryfallError::Io(format!("{}: {e}", path.display())))?;
+        let line = line.trim().trim_end_matches(',');
+        // Cheap test first: most of the file's 39,000 records aren't tokens.
+        if !line.starts_with('{') || !line.contains("\"layout\":\"token\"") {
+            continue;
+        }
+        let card: ScryfallCard = serde_json::from_str(line)
+            .map_err(|e| ScryfallError::Io(format!("{}: {e}", path.display())))?;
+        if card.layout == "token" && card.image_uris.is_some() {
+            out.push(card);
+        }
+    }
+    Ok(out)
+}
+
+/// Does the token card have rules text other than its keywords?
+fn token_has_other_text(card: &ScryfallCard) -> bool {
+    let text = card.oracle_text.as_deref().unwrap_or("");
+    // Reminder text is in parentheses.
+    let mut plain = String::new();
+    let mut depth = 0;
+    for c in text.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            c if depth == 0 => plain.push(c),
+            _ => {}
+        }
+    }
+    plain.lines().any(|line| {
+        let line = line.trim();
+        !line.is_empty()
+            && !line.split(',').all(|part| {
+                let part = part.trim().to_lowercase();
+                card.keywords.iter().any(|k| part == k.to_lowercase())
+            })
+    })
+}
+
+/// The printed token card that shows token definition `def`: the same name, types,
+/// subtypes, colors, power/toughness and keywords — and rules text exactly when the
+/// definition has abilities. `None` when there is no such card, or when several with
+/// different rules text fit (the picture would then show text the token may not have).
+pub fn token_printing<'a>(
+    tokens: &'a [ScryfallCard],
+    def: &card_model::CardDef,
+) -> Option<&'a ScryfallCard> {
+    use card_model::Color;
+    let name = def.name.strip_suffix(" Token").unwrap_or(&def.name);
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+    let mut kinds: Vec<String> = def.card_types.iter().map(|t| format!("{t:?}")).collect();
+    kinds.extend(def.supertypes.iter().map(|t| format!("{t:?}")));
+    let kinds = sorted(kinds);
+    let mut subtypes: Vec<String> = def.creature_types.clone();
+    subtypes.extend(def.land_types.iter().map(|t| format!("{t:?}")));
+    let subtypes = sorted(subtypes);
+    let colors = sorted(
+        def.printed_colors()
+            .iter()
+            .map(|c| {
+                match c {
+                    Color::White => "W",
+                    Color::Blue => "U",
+                    Color::Black => "B",
+                    Color::Red => "R",
+                    Color::Green => "G",
+                }
+                .to_string()
+            })
+            .collect(),
+    );
+    let keywords = sorted(
+        def.keywords
+            .iter()
+            .map(|k| card_model::describe::keyword(*k).to_lowercase())
+            .collect(),
+    );
+    let fits = |c: &&ScryfallCard| {
+        let (left, right) = c.type_line.split_once(" — ").unwrap_or((&c.type_line, ""));
+        c.name == name
+            && sorted(
+                left.split_whitespace()
+                    .filter(|w| *w != "Token")
+                    .map(String::from)
+                    .collect(),
+            ) == kinds
+            && sorted(right.split_whitespace().map(String::from).collect()) == subtypes
+            && c.power == def.power.map(|n| n.to_string())
+            && c.toughness == def.toughness.map(|n| n.to_string())
+            && sorted(c.colors.clone().unwrap_or_default()) == colors
+            && sorted(c.keywords.iter().map(|k| k.to_lowercase()).collect()) == keywords
+            && token_has_other_text(c) != def.abilities.is_empty()
+    };
+    let mut found = tokens.iter().filter(fits);
+    let first = found.next()?;
+    if !def.abilities.is_empty() && found.any(|c| c.oracle_text != first.oracle_text) {
+        return None;
+    }
+    Some(first)
+}
+
 /// Make sure `names` are in the cache, fetching the missing ones from Scryfall. Returns the
 /// full cache and how many cards were downloaded.
 pub fn fetch(names: &[String]) -> Result<(ScryfallData, usize), ScryfallError> {
@@ -347,4 +465,128 @@ pub fn fetch(names: &[String]) -> Result<(ScryfallData, usize), ScryfallError> {
         save_cache(&data)?;
     }
     Ok((data, fetched))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use card_model::{CardDef, CardType, Color, Keyword};
+
+    fn printed(
+        name: &str,
+        types: &str,
+        pt: Option<(&str, &str)>,
+        colors: &[&str],
+        text: &str,
+        keywords: &[&str],
+    ) -> ScryfallCard {
+        serde_json::from_value(serde_json::json!({
+            "name": name, "layout": "token", "type_line": types,
+            "power": pt.map(|p| p.0), "toughness": pt.map(|p| p.1),
+            "colors": colors, "oracle_text": text, "keywords": keywords,
+            "id": format!("{name}-{types}-{text}"),
+            "image_uris": { "normal": "https://cards.scryfall.io/x.jpg" },
+        }))
+        .unwrap()
+    }
+
+    fn token(name: &str, pt: (i32, i32), colors: &[Color], keywords: &[Keyword]) -> CardDef {
+        CardDef {
+            name: name.to_string(),
+            mana_cost: None,
+            supertypes: vec![],
+            card_types: vec![CardType::Creature],
+            land_types: vec![],
+            creature_types: vec!["Sprite".to_string()],
+            power: Some(pt.0),
+            toughness: Some(pt.1),
+            keywords: keywords.to_vec(),
+            abilities: vec![],
+            colors: Some(colors.to_vec()),
+            token: true,
+            key: None,
+        }
+    }
+
+    // A token is pictured by the printed token card with the same characteristics, and by
+    // none when the only candidates differ from it.
+    #[test]
+    fn a_token_is_matched_to_the_printed_token_with_the_same_characteristics() {
+        let tokens = vec![
+            printed(
+                "Test Sprite",
+                "Token Creature — Sprite",
+                Some(("1", "1")),
+                &["G"],
+                "",
+                &[],
+            ),
+            printed(
+                "Test Sprite",
+                "Token Creature — Sprite",
+                Some(("1", "1")),
+                &["U"],
+                "Flying",
+                &["Flying"],
+            ),
+            printed(
+                "Test Sprite",
+                "Token Creature — Sprite",
+                Some(("1", "1")),
+                &["U"],
+                "Flying\nWhen this creature dies, draw a card.",
+                &["Flying"],
+            ),
+            printed(
+                "Test Sprite",
+                "Token Artifact Creature — Sprite",
+                Some(("2", "2")),
+                &[],
+                "Flying (This creature can't be blocked except by creatures with flying or reach.)",
+                &["Flying"],
+            ),
+        ];
+        let find = |def: &CardDef| {
+            token_printing(&tokens, def).map(|c| tokens.iter().position(|t| t == c).unwrap())
+        };
+        // Name ("Sprite Token" is the token named Sprite), colour, keywords.
+        assert_eq!(
+            find(&token("Test Sprite Token", (1, 1), &[Color::Green], &[])),
+            Some(0)
+        );
+        assert_eq!(
+            find(&token(
+                "Test Sprite Token",
+                (1, 1),
+                &[Color::Blue],
+                &[Keyword::Flying]
+            )),
+            Some(1)
+        );
+        // Reminder text isn't rules text; the artifact type is part of the match.
+        let mut artifact = token("Test Sprite Token", (2, 2), &[], &[Keyword::Flying]);
+        assert_eq!(find(&artifact), None);
+        artifact.card_types.insert(0, CardType::Artifact);
+        assert_eq!(find(&artifact), Some(3));
+        // No printed card: a green flyer, a 3/3, another name.
+        assert_eq!(
+            find(&token(
+                "Test Sprite Token",
+                (1, 1),
+                &[Color::Green],
+                &[Keyword::Flying]
+            )),
+            None
+        );
+        assert_eq!(
+            find(&token("Test Sprite Token", (3, 3), &[Color::Green], &[])),
+            None
+        );
+        assert_eq!(
+            find(&token("Test Pixie Token", (1, 1), &[Color::Green], &[])),
+            None
+        );
+        // The blue flyer without abilities is never shown as the one that draws a card.
+        assert!(token_has_other_text(&tokens[2]) && !token_has_other_text(&tokens[1]));
+    }
 }

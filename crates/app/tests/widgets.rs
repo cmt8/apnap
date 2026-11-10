@@ -319,3 +319,147 @@ fn a_card_in_a_graveyard_is_chosen_from_the_pile() {
         s.log
     );
 }
+
+/// A choice among cards that aren't on the table is shown as those cards, each named and
+/// with where it is — not as "target #123". Uses real cards: needs the Scryfall cache.
+#[test]
+fn cards_in_a_graveyard_are_offered_as_cards() {
+    let mut sc = Scenario::new(GameConfig::constructed_1v1(), harness::full_catalog(), 21);
+    for p in [P0, P1] {
+        sc.library(p, "Swamp", 20);
+    }
+    sc.card(P0, Zone::Battlefield, "Lord of the Undead");
+    sc.cards(P0, Zone::Battlefield, &["Swamp", "Swamp"]);
+    sc.cards(
+        P0,
+        Zone::Graveyard,
+        &["Vengeful Dead", "Champion of the Perished"],
+    );
+    let mut h = harness_for(sc.build());
+    button_containing(&mut h, "Lord of the Undead  ");
+    assert_eq!(decision(&h).0, ChoiceKind::ChooseTargets { slot: 0 });
+    assert!(
+        h.query_by_label_contains("#").is_none(),
+        "an option is shown by its id"
+    );
+    assert_eq!(h.query_all_by_label_contains("your graveyard").count(), 2);
+    // The card itself is the button.
+    button(
+        &mut h,
+        "target Champion of the Perished (in P0's graveyard)",
+    );
+    let s = h.state().session.as_ref().unwrap();
+    assert!(
+        s.human_decision()
+            .is_none_or(|d| d.kind != ChoiceKind::ChooseTargets { slot: 0 }),
+        "the target wasn't chosen"
+    );
+}
+
+/// CR 903.8: the commander in the command zone shows what it costs more to cast now.
+#[test]
+fn the_commander_tax_is_shown_on_the_commander() {
+    let mut sc = Scenario::new(GameConfig::commander(2), harness::catalog(), 21);
+    for p in [P0, P1] {
+        sc.library(p, "Forest", 20);
+    }
+    sc.commander(P0, Zone::Command, "Test Warlord");
+    sc.cards(P0, Zone::Battlefield, &["Forest"; 6]);
+    sc.cards(P0, Zone::Battlefield, &["Mountain"; 6]);
+    sc.cards(P1, Zone::Battlefield, &["Mountain"; 4]);
+    sc.card(P1, Zone::Hand, "Test Doom");
+    let mut s = Script::new(sc.build());
+    // Cast it, have it killed, put it back in the command zone.
+    s.cast("Test Warlord").pay().pass_all();
+    s.pass();
+    s.cast("Test Doom").target("Test Warlord").pay().pass_all();
+    s.pick("to the command zone", |_, o| {
+        *o == engine_core::OptionDesc::Accept
+    });
+    let h = harness_for(s.st);
+    assert!(
+        h.query_by_label_contains("commander tax +2").is_some(),
+        "no tax shown"
+    );
+}
+
+/// With "hold priority" off (the default), the human's own spell on top of the stack
+/// resolves without them being asked again; a yield passes for the rest of the turn until
+/// an opponent does something.
+#[test]
+fn own_spells_resolve_without_another_click_unless_holding_priority() {
+    let build = || {
+        let mut sc = scenario();
+        // Enough for the Golem and then an instant in response (with a creature to aim it
+        // at): otherwise there is nothing to hold priority for.
+        sc.cards(P0, Zone::Battlefield, &["Forest"; 6]);
+        sc.card(P0, Zone::Battlefield, "Test Elf");
+        sc.cards(P0, Zone::Hand, &["Test Golem", "Test Growth"]);
+        sc.build()
+    };
+    let cast = |s: &mut Session| {
+        let d = s.human_decision().expect("priority").clone();
+        let i = d
+            .options
+            .iter()
+            .position(|o| {
+                matches!(o, engine_core::OptionDesc::CastSpell { card }
+                    if s.st.catalog.get(s.st.object(*card).card).name == "Test Golem")
+            })
+            .expect("can cast the Golem");
+        s.respond(engine_core::Response::Pick(vec![i])).unwrap();
+        s.pump(1_000);
+    };
+    // Default: after casting, priority is passed for the human; the Golem resolves.
+    let mut s = Session::from_state(build(), Some(P0), Agents::Random);
+    s.pump(1_000);
+    cast(&mut s);
+    assert!(s.st.stack.is_empty(), "the Golem is still on the stack");
+    // Holding priority: asked with the Golem on the stack.
+    let mut s = Session::from_state(build(), Some(P0), Agents::Random);
+    s.stops.hold_priority = true;
+    s.pump(1_000);
+    cast(&mut s);
+    assert_eq!(s.st.stack.len(), 1);
+    assert_eq!(
+        s.human_decision().map(|d| d.kind),
+        Some(ChoiceKind::Priority)
+    );
+}
+
+/// "Pass unless an opponent acts" (MTGO's F4): no more questions this turn — until an
+/// opponent's spell or ability is on the stack, which ends the yield.
+#[test]
+fn yielding_the_turn_stops_when_an_opponent_acts() {
+    // Nothing happens: the yield carries the human past their own stops to the next turn.
+    let mut sc = scenario();
+    sc.cards(P0, Zone::Battlefield, &["Forest"; 4]);
+    sc.card(P0, Zone::Battlefield, "Test Elf");
+    sc.cards(P0, Zone::Hand, &["Test Growth", "Test Growth"]);
+    let mut s = Session::from_state(sc.build(), Some(P0), Agents::Random);
+    s.pump(1_000);
+    let turn = s.st.turn.turn_number;
+    assert_eq!(s.st.turn.active, P0);
+    s.yield_the_turn();
+    s.pump(10_000);
+    assert!(
+        s.is_over() || s.st.turn.turn_number > turn,
+        "asked again in the turn that was yielded"
+    );
+    assert_eq!(s.yield_turn, None, "a yield ends with its turn");
+    // An opponent's spell is on the stack: the yield is over and the human is asked.
+    let mut sc = scenario();
+    sc.cards(P0, Zone::Battlefield, &["Forest"; 4]);
+    sc.card(P0, Zone::Battlefield, "Test Elf");
+    sc.cards(P0, Zone::Hand, &["Test Growth"]);
+    sc.card(P1, Zone::Stack, "Test Golem");
+    let mut s = Session::from_state(sc.build(), Some(P0), Agents::Random);
+    s.yield_the_turn();
+    s.pump(1_000);
+    assert_eq!(s.yield_turn, None);
+    assert_eq!(
+        s.human_decision().map(|d| d.kind),
+        Some(ChoiceKind::Priority)
+    );
+    assert_eq!(s.st.stack.len(), 1);
+}

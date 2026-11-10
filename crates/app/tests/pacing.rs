@@ -144,6 +144,9 @@ fn the_app_waits_after_an_opponent_acts() {
     assert!(!s.is_over());
     assert!(h.query_by_label_contains("is acting").is_some());
     // "Instant" turns the pauses off: the game runs to the human's next decision.
+    h.get_by_label("Opponents act:").click();
+    h.step();
+    h.step();
     h.get_by_label("Instant").click();
     h.step();
     h.step();

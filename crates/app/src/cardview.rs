@@ -537,7 +537,7 @@ pub fn card_widget(ui: &mut egui::Ui, art: &mut Art, look: &CardLook<'_>) -> Res
         return resp;
     }
     let tex = if look.def.token {
-        None
+        art.token(ui.ctx(), look.def, width_px)
     } else {
         art.card(ui.ctx(), &look.def.name, width_px)
     };
@@ -589,7 +589,7 @@ pub fn card_large(ui: &mut egui::Ui, art: &mut Art, def: &CardDef, height: f32) 
     });
     if ui.is_rect_visible(rect) {
         let tex = if def.token {
-            None
+            art.token(ui.ctx(), def, width_px)
         } else {
             art.card(ui.ctx(), &def.name, width_px)
         };

@@ -20,6 +20,9 @@ pub struct Stops {
     pub theirs: BTreeSet<Step>,
     /// Tap lands automatically when paying costs (same responses a player could give).
     pub auto_pay: bool,
+    /// Keep priority after casting a spell or activating an ability. Off (the default):
+    /// priority is passed automatically while the top of the stack is the human's own.
+    pub hold_priority: bool,
 }
 
 impl Default for Stops {
@@ -30,6 +33,7 @@ impl Default for Stops {
                 .collect(),
             theirs: BTreeSet::new(),
             auto_pay: true,
+            hold_priority: false,
         }
     }
 }
@@ -74,8 +78,11 @@ pub struct Session {
     pub log: Vec<String>,
     narrator: Narrator,
     pub stops: Stops,
-    /// Pass priority automatically until this turn is over.
+    /// Pass priority automatically until this turn is over, whatever happens.
     pub pass_turn: Option<u32>,
+    /// Pass priority automatically until this turn is over, unless an opponent puts
+    /// something on the stack.
+    pub yield_turn: Option<u32>,
     /// Replay viewing: the remaining recorded responses (front = next).
     pub replay_queue: Option<std::collections::VecDeque<Response>>,
 }
@@ -106,6 +113,7 @@ impl Session {
             narrator,
             stops: Stops::default(),
             pass_turn: None,
+            yield_turn: None,
             replay_queue: None,
         };
         s.narrate(&out.events);
@@ -133,6 +141,7 @@ impl Session {
             narrator,
             stops: Stops::default(),
             pass_turn: None,
+            yield_turn: None,
             replay_queue: None,
         };
         s.narrate(&out.events);
@@ -251,10 +260,33 @@ impl Session {
         self.pass_turn = Some(self.st.turn.turn_number);
     }
 
+    /// Pass priority automatically for the rest of this turn, but stop as soon as an
+    /// opponent's spell or ability is on the stack.
+    pub fn yield_the_turn(&mut self) {
+        self.yield_turn = Some(self.st.turn.turn_number);
+    }
+
+    /// Who controls the top object of the stack: the human (`Some(true)`), someone else
+    /// (`Some(false)`), or the stack is empty.
+    fn top_is_mine(&self) -> Option<bool> {
+        self.st
+            .stack
+            .last()
+            .map(|s| Some(s.controller) == self.human)
+    }
+
     /// The response the session gives on the human's behalf, if the decision is trivial
     /// under the current stops.
     pub fn auto_response(&self, d: &PendingDecision) -> Option<Response> {
         let n = d.options.len();
+        // Passing the rest of the turn includes not attacking. (Blocks are always asked.)
+        let turn = Some(self.st.turn.turn_number);
+        if d.kind == ChoiceKind::DeclareAttackers
+            && (self.pass_turn == turn || self.yield_turn == turn)
+            && matches!(d.prim, Primitive::PickN { min: 0, .. })
+        {
+            return Some(Response::Pick(Vec::new()));
+        }
         match (&d.prim, d.kind) {
             (Primitive::PickNumber { min, max }, _) if min == max => {
                 return Some(Response::Number(*min));
@@ -299,6 +331,15 @@ impl Session {
         if only_pass_or_mana || self.pass_turn == Some(self.st.turn.turn_number) {
             return pass;
         }
+        let top = self.top_is_mine();
+        // Yielding the turn: everything but an opponent's spell or ability.
+        if self.yield_turn == Some(self.st.turn.turn_number) && top != Some(false) {
+            return pass;
+        }
+        // Their own spell or ability is on top: let it resolve (unless holding priority).
+        if top == Some(true) && !self.stops.hold_priority {
+            return pass;
+        }
         if self.st.stack.is_empty() {
             let mine = Some(self.st.turn.active) == self.human;
             let stops = if mine {
@@ -334,6 +375,13 @@ impl Session {
                 .is_some_and(|t| t != self.st.turn.turn_number)
             {
                 self.pass_turn = None;
+            }
+            // A yield ends with the turn, or when an opponent acts.
+            if self
+                .yield_turn
+                .is_some_and(|t| t != self.st.turn.turn_number || self.top_is_mine() == Some(false))
+            {
+                self.yield_turn = None;
             }
             let Some(d) = self.st.pending.clone() else {
                 break;

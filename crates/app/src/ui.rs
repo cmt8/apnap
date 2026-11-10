@@ -32,11 +32,17 @@ pub enum Screen {
 pub const SETUPS: &[(&str, Setup)] = &[
     (
         "Commander — the four precons, 4 players (the cards that work so far)",
-        Setup::Precon { players: 4 },
+        Setup::Precon {
+            players: 4,
+            decks: harness::precon_seats(),
+        },
     ),
     (
-        "Commander — precons, 1 v 1 (Calling All Angels vs Wretched Ranks)",
-        Setup::Precon { players: 2 },
+        "Commander — precons, 1 v 1",
+        Setup::Precon {
+            players: 2,
+            decks: harness::precon_seats(),
+        },
     ),
     (
         "60-card duel — real cards (Stompy vs Angels)",
@@ -74,6 +80,8 @@ pub struct App {
     pub screen: Screen,
     pub session: Option<Session>,
     pub setup_index: usize,
+    /// The precon each seat plays (seat 0 is the human), for the precon setups.
+    pub decks: [u8; 4],
     pub seed: u64,
     pub opponents: Agents,
     pub status: String,
@@ -109,6 +117,8 @@ pub struct App {
     /// Where things were drawn last frame (for tests that use the pointer).
     pub card_rects: BTreeMap<ObjectId, egui::Rect>,
     pub player_rects: BTreeMap<PlayerId, egui::Rect>,
+    /// The room the table had last frame (between the bars and the side panel).
+    pub table_rect: egui::Rect,
 }
 
 /// A pile of cards that can be looked through.
@@ -131,6 +141,8 @@ pub const SPEEDS: &[(&str, u64)] = &[
     ("Fast", 150),
     ("Normal", 450),
     ("Slow", 1000),
+    ("Slower", 2000),
+    ("Slowest", 4000),
 ];
 
 impl Default for App {
@@ -162,6 +174,9 @@ enum Action {
         step: Step,
     },
     AutoPay(bool),
+    HoldPriority(bool),
+    /// Pass for the rest of the turn unless an opponent does something.
+    YieldTurn,
     Pace(u64),
     ListOptions(bool),
     /// Confirm the planned attack or block.
@@ -176,6 +191,7 @@ impl App {
             screen: Screen::Menu,
             session: None,
             setup_index: 0,
+            decks: harness::precon_seats(),
             seed: 1,
             opponents: Agents::Heuristic,
             status: String::new(),
@@ -199,6 +215,7 @@ impl App {
             animate: true,
             card_rects: BTreeMap::new(),
             player_rects: BTreeMap::new(),
+            table_rect: egui::Rect::NOTHING,
         };
         app.refresh_saves();
         app
@@ -247,7 +264,13 @@ impl App {
     }
 
     pub fn start_game(&mut self) {
-        let setup = SETUPS[self.setup_index].1;
+        let setup = match SETUPS[self.setup_index].1 {
+            Setup::Precon { players, .. } => Setup::Precon {
+                players,
+                decks: self.decks,
+            },
+            other => other,
+        };
         if !self.cards_ready(setup) {
             return;
         }
@@ -554,6 +577,42 @@ fn counter_name(kind: CounterKind) -> &'static str {
     }
 }
 
+/// CR 903.8: the additional generic mana a commander in the command zone costs its owner
+/// to cast now ({2} for each time they have cast it from there).
+fn commander_tax(v: &PlayerView, o: &ObjectView) -> u32 {
+    if !o.is_commander || !v.command.iter().any(|c| c.id == o.id) {
+        return 0;
+    }
+    v.players
+        .get(o.owner.index())
+        .and_then(|p| {
+            p.commander_casts
+                .iter()
+                .find(|(c, _)| *c == o.card_instance)
+        })
+        .map_or(0, |(_, n)| 2 * n)
+}
+
+/// Where a card that isn't on the table is.
+fn whereabouts(v: &PlayerView, id: ObjectId) -> String {
+    for p in &v.players {
+        if p.graveyard.iter().any(|o| o.id == id) {
+            return if p.id == v.viewer {
+                "your graveyard".to_string()
+            } else {
+                format!("P{}'s graveyard", p.id.0)
+            };
+        }
+    }
+    if v.exile.iter().any(|o| o.id == id) {
+        return "exile".to_string();
+    }
+    if v.revealed.iter().any(|o| o.id == id) {
+        return "library".to_string();
+    }
+    String::new()
+}
+
 /// A card's accessible name: everything the picture and its badges show, as text.
 fn card_text(o: &ObjectView, cat: &CardCatalog) -> String {
     let def = cat.get(o.card);
@@ -626,6 +685,16 @@ fn badges(cx: &Ctx<'_>, o: &ObjectView, place: Place) -> Vec<Badge> {
             DARK,
             Color32::from_gray(220),
         ));
+        // CR 903.8: what it costs more to cast from here now.
+        let tax = commander_tax(cx.view, o);
+        if tax > 0 {
+            out.push(Badge::new(
+                Corner::TopRight,
+                format!("tax +{tax}"),
+                RED,
+                Color32::WHITE,
+            ));
+        }
     }
     if place != Place::Battlefield {
         return out;
@@ -770,6 +839,10 @@ fn card(
     };
     let offset = vec2(0.0, (forward * step * height).round());
     let mut label = card_text(o, cx.cat);
+    let tax = commander_tax(cx.view, o);
+    if tax > 0 {
+        label.push_str(&format!(" · commander tax +{tax}"));
+    }
     if group.len() > 1 {
         label.push_str(&format!("\nx{}", group.len()));
     }
@@ -1230,6 +1303,23 @@ fn menu_ui(app: &mut App, ui: &mut egui::Ui) {
         for (i, (name, _)) in SETUPS.iter().enumerate() {
             ui.radio_value(&mut app.setup_index, i, *name);
         }
+        if let Setup::Precon { players, .. } = SETUPS[app.setup_index].1 {
+            let names = harness::precon_names();
+            ui.add_space(4.0);
+            for seat in 0..(players as usize).min(app.decks.len()) {
+                ui.horizontal(|ui| {
+                    let who = if seat == 0 {
+                        "Your deck:".to_string()
+                    } else {
+                        format!("P{seat}'s deck:")
+                    };
+                    ui.label(who);
+                    for (d, name) in names.iter().enumerate() {
+                        ui.radio_value(&mut app.decks[seat], d as u8, name);
+                    }
+                });
+            }
+        }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             let label = ui.label("Seed:");
@@ -1317,7 +1407,6 @@ fn menu_ui(app: &mut App, ui: &mut egui::Ui) {
 fn top_bar(
     ui: &mut egui::Ui,
     s: &Session,
-    art: &Art,
     playing: bool,
     pace_ms: u64,
     list_options: bool,
@@ -1337,11 +1426,18 @@ fn top_bar(
         } else {
             (format!("P{}'s turn", t.active.0), GOLD)
         };
-        ui.label(
-            RichText::new(format!("Turn {} — {whose}", t.turn_number))
-                .strong()
-                .size(17.0)
-                .color(color),
+        // A fixed width: the bar must not reflow (and the table resize) as turns change.
+        let turn = RichText::new(format!("Turn {} — {whose}", t.turn_number))
+            .strong()
+            .size(17.0)
+            .color(color);
+        ui.allocate_ui_with_layout(
+            vec2(230.0, 22.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_min_width(230.0);
+                ui.add(egui::Label::new(turn).truncate());
+            },
         );
         for step in STOP_STEPS {
             let text = RichText::new(step_name(step));
@@ -1384,23 +1480,46 @@ fn top_bar(
                 actions.push(Action::ListOptions(list));
             }
             ui.separator();
-            ui.label("Opponents act:");
-            for (name, ms) in SPEEDS {
-                if ui.selectable_label(pace_ms == *ms, *name).clicked() {
-                    actions.push(Action::Pace(*ms));
-                }
-            }
-        }
-        if art.pending > 0 {
-            ui.separator();
-            ui.weak(format!("loading {} image(s)…", art.pending));
-        } else if let Some(e) = &art.last_error {
-            ui.separator();
-            ui.weak("some images are unavailable").on_hover_text(e);
+            // One drop-down rather than a button per speed: the bar stays on one line.
+            let label = ui.label("Opponents act:");
+            let current = SPEEDS
+                .iter()
+                .find(|(_, ms)| *ms == pace_ms)
+                .map_or("Custom", |(name, _)| *name);
+            egui::ComboBox::from_id_salt("pace")
+                .selected_text(current)
+                .width(86.0)
+                .show_ui(ui, |ui| {
+                    for (name, ms) in SPEEDS {
+                        if ui.selectable_label(pace_ms == *ms, *name).clicked() {
+                            actions.push(Action::Pace(*ms));
+                        }
+                    }
+                })
+                .response
+                .labelled_by(label.id);
         }
     });
     if s.replay_queue.is_none() {
-        ui.collapsing("Stops (when you get priority with an empty stack)", |ui| {
+        ui.collapsing("Stops and automatic passing", |ui| {
+            let mut hold = s.stops.hold_priority;
+            if ui
+                .checkbox(
+                    &mut hold,
+                    "Hold priority after I cast a spell or use an ability",
+                )
+                .on_hover_text(
+                    "Off: while your own spell or ability is on top of the stack, priority is \
+                     passed for you so it can resolve. On: you are asked every time.",
+                )
+                .changed()
+            {
+                actions.push(Action::HoldPriority(hold));
+            }
+            ui.weak(
+                "With an empty stack you get priority only at these steps (and whenever an \
+                 opponent does something you could respond to):",
+            );
             for (mine, label) in [(true, "My turn:"), (false, "Opponents' turns:")] {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(label);
@@ -1458,7 +1577,7 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
     let (card, _) = cardview::card_size(height, ppp);
     let def = cx.cat.get(pv.card);
     let credit = if def.token {
-        None
+        art.token_credit(ctx, def)
     } else {
         art.credit(&def.name)
     };
@@ -1483,6 +1602,10 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
                 "owned by P{}, controlled by P{}",
                 o.owner.0, o.controller.0
             ));
+        }
+        let tax = commander_tax(cx.view, o);
+        if tax > 0 {
+            now.push(format!("commander tax: {{{tax}}} more to cast"));
         }
     }
     let lines = usize::from(credit.is_some()) + usize::from(!now.is_empty());
@@ -1514,7 +1637,18 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
 
 fn side_panel(ui: &mut egui::Ui, art: &mut Art, cx: &Ctx<'_>, s: &Session, ptr: &mut Pointer) {
     let v = cx.view;
-    ui.strong("Stack (top first)");
+    // Image loading is reported here, in a row that is always there, so that nothing
+    // moves when it comes and goes.
+    ui.horizontal(|ui| {
+        ui.strong("Stack (top first)");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if art.pending > 0 {
+                ui.weak(format!("loading {} image(s)…", art.pending));
+            } else if let Some(e) = &art.last_error {
+                ui.weak("some images unavailable").on_hover_text(e);
+            }
+        });
+    });
     if v.stack.is_empty() {
         ui.weak("empty");
     }
@@ -1589,8 +1723,13 @@ fn side_panel(ui: &mut egui::Ui, art: &mut Art, cx: &Ctx<'_>, s: &Session, ptr: 
                     ui.label(RichText::new(line).size(12.0));
                 }
             }
+            // Room below the last line, so it isn't flush against the window's edge.
+            ui.add_space(28.0);
         });
 }
+
+/// Room always kept for the prompt: its title and one row of buttons.
+const PROMPT_HEIGHT: f32 = 60.0;
 
 /// The main thing to do right now: a big button, also triggered by the space bar.
 fn primary_button(ui: &mut egui::Ui, label: &str) -> bool {
@@ -1664,6 +1803,79 @@ fn plan_panel(app: &mut App, ui: &mut egui::Ui, cx: &Ctx<'_>, actions: &mut Vec<
     });
 }
 
+/// The card an option is about, if that card isn't on the table (it is in a graveyard, in
+/// exile, or shown from a library) and no other option is about it: such options are
+/// picked from a row of the cards themselves.
+fn off_table_card<'a>(cx: &Ctx<'a>, d: &PendingDecision, i: usize) -> Option<&'a ObjectView> {
+    let a = anchor(&d.options[i])?;
+    let Anchor::Obj(id) = a else {
+        return None;
+    };
+    if on_board(cx.view, a) || d.options.iter().filter(|o| anchor(o) == Some(a)).count() != 1 {
+        return None;
+    }
+    find_object(cx.view, id)
+}
+
+/// A row of cards to pick from (see [`off_table_card`]). Returns the option clicked.
+fn card_strip(
+    ui: &mut egui::Ui,
+    art: &mut Art,
+    cx: &Ctx<'_>,
+    items: &[(usize, &ObjectView, &str)],
+    ptr: &mut Pointer,
+) -> Option<usize> {
+    let mut clicked = None;
+    egui::ScrollArea::horizontal()
+        .id_salt("card picker")
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (i, o, label) in items {
+                    ui.vertical(|ui| {
+                        let chosen = cx.picked.contains(i);
+                        let look = CardLook {
+                            def: cx.cat.get(o.card),
+                            label,
+                            height: 150.0,
+                            tapped: false,
+                            pile: 1,
+                            outline: Some(if chosen {
+                                Stroke::new(3.5, GREEN)
+                            } else {
+                                Stroke::new(2.5, GOLD)
+                            }),
+                            badges: &[],
+                            offset: egui::Vec2::ZERO,
+                            motion: None,
+                            draggable: false,
+                        };
+                        let resp = cardview::card_widget(ui, art, &look);
+                        if resp.hovered() {
+                            ptr.hovered = Some(Hover {
+                                card: Preview {
+                                    card: o.card,
+                                    object: Some(o.id),
+                                },
+                                rect: resp.rect,
+                                in_hand: true,
+                            });
+                        }
+                        if resp.clicked() {
+                            clicked = Some(*i);
+                        }
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(whereabouts(cx.view, o.id)).small().weak(),
+                            )
+                            .truncate(),
+                        );
+                    });
+                }
+            });
+        });
+    clicked
+}
+
 /// The decision panel: prompt plus a button for every option, by primitive.
 fn decision_panel(
     app: &mut App,
@@ -1671,6 +1883,7 @@ fn decision_panel(
     ui: &mut egui::Ui,
     cx: &Ctx<'_>,
     actions: &mut Vec<Action>,
+    ptr: &mut Pointer,
 ) {
     if app.plan.is_some() {
         plan_panel(app, ui, cx, actions);
@@ -1712,6 +1925,20 @@ fn decision_panel(
                 Some(_) => 0,
                 None => labels.len() - shown.len(),
             };
+            // Cards that aren't on the table are shown as cards.
+            let strip: Vec<(usize, &ObjectView, &str)> = shown
+                .iter()
+                .filter_map(|&i| off_table_card(cx, d, i).map(|o| (i, o, labels[i].as_str())))
+                .collect();
+            if !strip.is_empty()
+                && let Some(i) = card_strip(ui, art, cx, &strip, ptr)
+            {
+                actions.push(Action::Respond(Response::Pick(vec![i])));
+            }
+            let shown: Vec<usize> = shown
+                .into_iter()
+                .filter(|i| !strip.iter().any(|(s, _, _)| s == i))
+                .collect();
             ui.horizontal_wrapped(|ui| {
                 for i in shown {
                     // Passing priority is the main button (and the space bar).
@@ -1738,8 +1965,36 @@ fn decision_panel(
                 if app.focus.is_some() && ui.button("Show all options").clicked() {
                     app.focus = None;
                 }
-                if d.kind == ChoiceKind::Priority && ui.button("Pass until end of turn").clicked() {
-                    actions.push(Action::PassTurn);
+                if d.kind == ChoiceKind::Priority {
+                    // MTGO's yields: F4 = until an opponent does something, F6 = no
+                    // matter what.
+                    let ctx = ui.ctx().clone();
+                    let key = |k: egui::Key| {
+                        !ctx.egui_wants_keyboard_input()
+                            && ctx.input(|i| i.key_pressed(k) && i.modifiers.is_none())
+                    };
+                    if ui
+                        .button("Pass unless an opponent acts")
+                        .on_hover_text(
+                            "F4 — pass priority for the rest of this turn (no attack), but \
+                             stop when an opponent casts a spell or uses an ability.",
+                        )
+                        .clicked()
+                        || key(egui::Key::F4)
+                    {
+                        actions.push(Action::YieldTurn);
+                    }
+                    if ui
+                        .button("Pass until end of turn")
+                        .on_hover_text(
+                            "F6 — pass priority for the rest of this turn (no attack), whatever \
+                             happens. You are still asked how to block.",
+                        )
+                        .clicked()
+                        || key(egui::Key::F6)
+                    {
+                        actions.push(Action::PassTurn);
+                    }
                 }
                 if on_the_board > 0 {
                     ui.weak(match d.kind {
@@ -1764,11 +2019,27 @@ fn decision_panel(
                 },
                 app.picked.len()
             ));
+            let strip: Vec<(usize, &ObjectView, &str)> = (0..labels.len())
+                .filter(|&i| listed(i))
+                .filter_map(|i| off_table_card(cx, d, i).map(|o| (i, o, labels[i].as_str())))
+                .collect();
+            if !strip.is_empty()
+                && let Some(i) = card_strip(ui, art, cx, &strip, ptr)
+            {
+                if app.picked.contains(&i) {
+                    app.picked.retain(|x| *x != i);
+                } else {
+                    app.picked.push(i);
+                }
+            }
             ui.horizontal_wrapped(|ui| {
                 let mut on_the_board = false;
                 for (i, label) in labels.iter().enumerate() {
                     if !listed(i) {
                         on_the_board = true;
+                        continue;
+                    }
+                    if strip.iter().any(|(s, _, _)| *s == i) {
                         continue;
                     }
                     let on = app.picked.contains(&i);
@@ -1993,7 +2264,6 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
         top_bar(
             ui,
             session,
-            art,
             app.replay_playing,
             app.pace_ms,
             app.list_options,
@@ -2006,6 +2276,9 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
             side_panel(ui, art, &cx, session, &mut ptr);
         });
     egui::Panel::bottom("bottom").show(ui, |ui| {
+        // The prompt and its buttons get the same room whether or not there is anything
+        // to decide, so the table above doesn't resize every time a decision comes or goes.
+        let prompt_top = ui.cursor().top();
         if let Some(result) = &session.st.result {
             let text = match result.winner {
                 Some(w) if Some(w) == session.human => "Game over — you win!".to_string(),
@@ -2014,7 +2287,7 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
             };
             ui.strong(RichText::new(text).size(18.0).color(GOLD));
         } else if decision.is_some() {
-            decision_panel(app, art, ui, &cx, &mut actions);
+            decision_panel(app, art, ui, &cx, &mut actions, &mut ptr);
         } else if session.replay_queue.is_some() {
             ui.weak("Replay: use Step or Play above.");
         } else {
@@ -2029,6 +2302,10 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
         }
         if !app.status.is_empty() {
             ui.small(&app.status);
+        }
+        let used = ui.cursor().top() - prompt_top;
+        if used < PROMPT_HEIGHT {
+            ui.add_space(PROMPT_HEIGHT - used);
         }
         ui.separator();
         ui.small("Your hand");
@@ -2060,6 +2337,7 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
         ui.add_space(4.0);
     });
     egui::CentralPanel::default().show(ui, |ui| {
+        app.table_rect = ui.max_rect();
         let n = view.players.len();
         let seat = |k: usize| PlayerId(((view.viewer.index() + k) % n) as u8);
         let (top, bottom) = table_layout(n);
@@ -2238,6 +2516,8 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
                 }
             }
             Action::AutoPay(on) => session.stops.auto_pay = on,
+            Action::HoldPriority(on) => session.stops.hold_priority = on,
+            Action::YieldTurn => session.yield_the_turn(),
             Action::Pace(ms) => {
                 app.pace_ms = ms;
                 app.resume_at = None;

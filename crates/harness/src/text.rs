@@ -297,6 +297,21 @@ fn view_name(v: &PlayerView, id: ObjectId) -> String {
     if let Some(s) = v.stack.iter().find(|s| s.id == id) {
         return stack_name(s);
     }
+    // Cards that aren't on the table: say where they are.
+    for pl in &v.players {
+        if let Some(o) = pl.graveyard.iter().find(|o| o.id == id) {
+            return format!("{} (in {}'s graveyard)", o.name, p(pl.id));
+        }
+    }
+    if let Some(o) = v.exile.iter().find(|o| o.id == id) {
+        return format!("{} (exiled)", o.name);
+    }
+    if let Some(o) = v.command.iter().find(|o| o.id == id) {
+        return format!("{} (command zone)", o.name);
+    }
+    if let Some(o) = v.revealed.iter().find(|o| o.id == id) {
+        return o.name.clone();
+    }
     format!("#{}", id.0)
 }
 

@@ -8,7 +8,7 @@
 //! Only this module and `card_db` touch the network or the cache.
 
 use card_db::images::{self, ImageKind};
-use card_db::scryfall::{self, ScryfallData};
+use card_db::scryfall::{self, ScryfallCard, ScryfallData};
 use eframe::egui::{self, ColorImage, TextureHandle};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -54,6 +54,8 @@ enum Job {
         names: Vec<String>,
         ctx: egui::Context,
     },
+    /// Read the token cards out of Scryfall's bulk file (if it is in the cache).
+    Tokens { ctx: egui::Context },
 }
 
 enum Done {
@@ -62,6 +64,14 @@ enum Done {
         result: Result<ColorImage, String>,
     },
     Data(Result<ScryfallData, String>),
+    Tokens(Vec<ScryfallCard>),
+}
+
+/// The printed token cards, for picturing tokens.
+enum Tokens {
+    NotAsked,
+    Loading,
+    Known(Vec<ScryfallCard>),
 }
 
 pub struct Art {
@@ -79,6 +89,10 @@ pub struct Art {
     pub pending: usize,
     /// The most recent problem, for the status line.
     pub last_error: Option<String>,
+    tokens: Tokens,
+    /// Token definitions already looked up: the name their printed card has in `data`,
+    /// or `None` if no printed token card shows this token.
+    token_names: BTreeMap<String, Option<String>>,
 }
 
 impl std::fmt::Debug for Art {
@@ -107,6 +121,8 @@ impl Art {
             data_requested: true,
             pending: 0,
             last_error: None,
+            tokens: Tokens::NotAsked,
+            token_names: BTreeMap::new(),
         }
     }
 
@@ -142,6 +158,8 @@ impl Art {
             data_requested: false,
             pending: 0,
             last_error: None,
+            tokens: Tokens::NotAsked,
+            token_names: BTreeMap::new(),
         }
     }
 
@@ -204,8 +222,13 @@ impl Art {
                     };
                     self.slots.insert(key, Slot { state, used: frame });
                 }
+                Done::Tokens(tokens) => {
+                    self.tokens = Tokens::Known(tokens);
+                }
                 Done::Data(Ok(data)) => {
                     self.data = data;
+                    // (The token cards were filed in the old data: look them up again.)
+                    self.token_names.clear();
                     // Cards that had no image address may have one now.
                     self.slots.retain(|_, s| !matches!(s.state, State::Failed));
                 }
@@ -295,6 +318,70 @@ impl Art {
             })
     }
 
+    /// The name under which the printed token card for `def` is filed, once the token
+    /// cards have been read (asked for on first use). `None`: not known yet, or no printed
+    /// token shows this token — it is then drawn from its definition.
+    fn token_name(&mut self, ctx: &egui::Context, def: &card_model::CardDef) -> Option<String> {
+        let tx = self.jobs.as_ref()?;
+        match &self.tokens {
+            Tokens::NotAsked => {
+                if tx.send(Job::Tokens { ctx: ctx.clone() }).is_ok() {
+                    self.pending += 1;
+                    self.tokens = Tokens::Loading;
+                }
+                None
+            }
+            Tokens::Loading => None,
+            Tokens::Known(tokens) => {
+                // Tokens with the same name can be different tokens: everything a
+                // printed card is matched on is part of the key.
+                let key = format!(
+                    "token:{}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{}",
+                    def.name,
+                    def.card_types,
+                    def.creature_types,
+                    def.power,
+                    def.toughness,
+                    def.colors,
+                    def.keywords,
+                    def.abilities.len()
+                );
+                if let Some(known) = self.token_names.get(&key) {
+                    return known.clone();
+                }
+                let found = scryfall::token_printing(tokens, def).cloned();
+                let name = found.map(|card| {
+                    self.data.cards.insert(key.clone(), card);
+                    key.clone()
+                });
+                self.token_names.insert(key, name.clone());
+                name
+            }
+        }
+    }
+
+    /// The picture of a token: the printed token card with the same characteristics, if
+    /// Scryfall has one (see [`scryfall::token_printing`]).
+    pub fn token(
+        &mut self,
+        ctx: &egui::Context,
+        def: &card_model::CardDef,
+        width_px: u32,
+    ) -> Option<TextureHandle> {
+        let name = self.token_name(ctx, def)?;
+        self.card(ctx, &name, width_px)
+    }
+
+    /// "Illustrated by …" for the token card shown for `def`.
+    pub fn token_credit(
+        &mut self,
+        ctx: &egui::Context,
+        def: &card_model::CardDef,
+    ) -> Option<String> {
+        let name = self.token_name(ctx, def)?;
+        self.credit(&name)
+    }
+
     /// The texture for a symbol such as `{G}` or `{T}`, `side_px` screen pixels across.
     pub fn symbol(
         &mut self,
@@ -339,6 +426,11 @@ fn worker(jobs: &Mutex<mpsc::Receiver<Job>>, done: &mpsc::Sender<Done>) {
                 let result = load(&key, &path, url.as_deref());
                 (Done::Image { key, result }, ctx)
             }
+            // No bulk file in the cache: tokens are drawn from their definitions.
+            Job::Tokens { ctx } => (
+                Done::Tokens(scryfall::load_bulk_tokens().unwrap_or_default()),
+                ctx,
+            ),
             Job::Data { names, ctx } => (
                 Done::Data(
                     scryfall::fetch(&names)

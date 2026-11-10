@@ -107,7 +107,9 @@ APNAP_TRACE=1 cargo run --release -p harness -- run --seed N --setup forge-4p   
   (planning attacks/blocks on the table, D-040), `cardview.rs` (card widget: image or
   drawn proxy, badges, motion, arrows, mana-symbol text),
   `art.rs` (Scryfall images/symbols: worker threads + cache, one texture per exact pixel
-  size; `Art::disabled()` in tests), tests driven headlessly with
+  size; tokens pictured by Scryfall's token cards; `Art::disabled()` in tests),
+  `session.rs` also answers for the human where MTGO would (stops, own spell on top of
+  the stack, F4/F6 yields: D-054), tests driven headlessly with
   egui_kittest (D-036, D-037). `card-db/src/images.rs` = image/symbol paths + download.
 - `crates/xtask` — check-deps.
 - Engine extras: `stack.rs` (StackObject), `targeting.rs` (choose + 608.2b legality in one

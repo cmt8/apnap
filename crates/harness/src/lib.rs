@@ -38,7 +38,19 @@ pub enum Setup {
     /// M4: a Commander game with the four precons in seat order (D-034), as far as their
     /// cards compile from Forge's scripts: a card that doesn't yet is left out, and basic
     /// lands are trimmed to keep the deck's proportion of lands (D-053). Needs the caches.
-    Precon { players: u8 },
+    ///
+    /// `decks[seat]` is the index into [`PRECON_DECKS`] of that seat's deck (the same deck
+    /// may sit in several seats).
+    Precon {
+        players: u8,
+        #[serde(default = "precon_seats")]
+        decks: [u8; 4],
+    },
+}
+
+/// Each seat its own precon, in the order of [`PRECON_DECKS`].
+pub const fn precon_seats() -> [u8; 4] {
+    [0, 1, 2, 3]
 }
 
 /// The real-card decks, in seat order.
@@ -60,7 +72,7 @@ impl Setup {
             | Setup::M2 { players }
             | Setup::Commander { players }
             | Setup::Real { players }
-            | Setup::Precon { players }
+            | Setup::Precon { players, .. }
             | Setup::Forge { players } => players,
         }
     }
@@ -74,7 +86,17 @@ impl Setup {
             Setup::Commander { players } => format!("cmd-{players}p"),
             Setup::Real { players } => format!("real-{players}p"),
             Setup::Forge { players } => format!("forge-{players}p"),
-            Setup::Precon { players } => format!("precon-{players}p"),
+            Setup::Precon { players, decks } if decks == precon_seats() => {
+                format!("precon-{players}p")
+            }
+            // `precon-4p:2301`: the deck of each seat.
+            Setup::Precon { players, decks } => {
+                let seats: String = decks[..(players as usize).min(4)]
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect();
+                format!("precon-{players}p:{seats}")
+            }
         }
     }
 
@@ -91,8 +113,25 @@ impl Setup {
             return Some(Setup::Forge { players: n });
         }
         if let Some(rest) = label.strip_prefix("precon-") {
-            let n = rest.strip_suffix('p')?.parse().ok()?;
-            return Some(Setup::Precon { players: n });
+            let (count, seats) = match rest.split_once(':') {
+                Some((c, s)) => (c, Some(s)),
+                None => (rest, None),
+            };
+            let n: u8 = count.strip_suffix('p')?.parse().ok()?;
+            let mut decks = precon_seats();
+            if let Some(seats) = seats {
+                if seats.len() != (n as usize).min(4) {
+                    return None;
+                }
+                for (i, c) in seats.chars().enumerate() {
+                    let d = c.to_digit(10)? as usize;
+                    if d >= PRECON_DECKS.len() {
+                        return None;
+                    }
+                    decks[i] = d as u8;
+                }
+            }
+            return Some(Setup::Precon { players: n, decks });
         }
         if let Some(rest) = label.strip_prefix("real-") {
             let n = rest.strip_suffix('p')?.parse().ok()?;
@@ -153,11 +192,14 @@ impl Setup {
                 .collect();
             return engine_core::new_game(config, catalog, &decks, seed).expect("valid setup");
         }
-        if let Setup::Precon { players } = self {
+        if let Setup::Precon { players, decks } = self {
             let lib = forge_library();
             let base = catalog();
             let lists: Vec<PreconDeck> = (0..players as usize)
-                .map(|i| precon_deck(&lib, PRECON_DECKS[i % PRECON_DECKS.len()]))
+                .map(|i| {
+                    let deck = decks[i % decks.len()] as usize;
+                    precon_deck(&lib, PRECON_DECKS[deck % PRECON_DECKS.len()])
+                })
                 .collect();
             let names = lists
                 .iter()
@@ -327,6 +369,12 @@ pub fn precon_deck(lib: &card_db::forge::Library, file: &str) -> PreconDeck {
         missing,
         basics_trimmed,
     }
+}
+
+/// The names of the precons, in the order of [`PRECON_DECKS`].
+pub fn precon_names() -> &'static [String] {
+    static NAMES: OnceLock<Vec<String>> = OnceLock::new();
+    NAMES.get_or_init(|| PRECON_DECKS.iter().map(|f| precon_list(f).name).collect())
 }
 
 /// A precon's unresolved list: (deck name, commander, [(count, card name)]).
