@@ -136,8 +136,8 @@ impl ResolveFrame {
         match a {
             Amount::Fixed(n) => *n,
             Amount::X => self.x,
-            Amount::Count(sel) => {
-                crate::layers::matching(st, sel, self.source, self.controller).len() as u32
+            Amount::Count(_) | Amount::TotalPower(_) => {
+                crate::layers::count_amount(st, a, self.source, self.controller)
             }
             Amount::SourcePower => self
                 .source_chars(st)

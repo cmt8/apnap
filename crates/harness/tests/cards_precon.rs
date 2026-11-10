@@ -105,7 +105,7 @@ fn every_verified_real_card_names_existing_tests() {
             script.name
         );
     }
-    assert!(verified >= 68);
+    assert!(verified >= 77);
 }
 
 #[test]
@@ -1440,4 +1440,295 @@ fn bonders_enclave_draws_only_with_a_big_creature() {
             assert_eq!(hand(&s, P0), 1);
         }
     }
+}
+
+// ------------------------------------------------------------------------------------------
+// Batch 4: cost reductions (CR 601.2f, 118.7a) (D-043)
+// ------------------------------------------------------------------------------------------
+
+/// Can P0 cast `spell` from hand with `lands` copies of `land` and `permanent` in play?
+fn castable_with(permanent: &str, land: &str, lands: usize, spell: &str) -> bool {
+    let mut sc = scenario();
+    sc.card(P0, Zone::Battlefield, permanent);
+    sc.cards(P0, Zone::Battlefield, &vec![land; lands]);
+    sc.card(P0, Zone::Hand, spell);
+    Script::new(sc.build()).can_cast(spell)
+}
+
+/// The mana P0 paid for spells so far.
+fn mana_paid(s: &Script) -> u32 {
+    s.events
+        .iter()
+        .map(|e| match e {
+            Event::ManaPaid { amount, .. } => *amount,
+            _ => 0,
+        })
+        .sum()
+}
+
+#[test]
+fn dragonlords_servant_makes_dragon_spells_cheaper() {
+    // Utvara Hellkite costs {6}{R}{R}: seven lands with the Servant, not six.
+    assert!(castable_with(
+        "Dragonlord's Servant",
+        "Mountain",
+        7,
+        "Utvara Hellkite"
+    ));
+    assert!(!castable_with(
+        "Dragonlord's Servant",
+        "Mountain",
+        6,
+        "Utvara Hellkite"
+    ));
+    // Not a Dragon: full price ({1}{R}{R}… here Lightning Bolt's {R} is untouched, and a
+    // 4-mana non-Dragon still needs four).
+    assert!(!castable_with(
+        "Dragonlord's Servant",
+        "Mountain",
+        3,
+        "Chain Reaction"
+    ));
+    assert!(castable_with(
+        "Dragonlord's Servant",
+        "Mountain",
+        4,
+        "Chain Reaction"
+    ));
+    // An opponent's Servant doesn't help you.
+    let mut sc = scenario();
+    sc.card(P1, Zone::Battlefield, "Dragonlord's Servant");
+    sc.cards(P0, Zone::Battlefield, &["Mountain"; 7]);
+    sc.card(P0, Zone::Hand, "Utvara Hellkite");
+    assert!(!Script::new(sc.build()).can_cast("Utvara Hellkite"));
+    // And what is paid is the reduced cost.
+    let mut sc = scenario();
+    sc.card(P0, Zone::Battlefield, "Dragonlord's Servant");
+    sc.cards(P0, Zone::Battlefield, &["Mountain"; 8]);
+    sc.card(P0, Zone::Hand, "Utvara Hellkite");
+    let mut s = Script::new(sc.build());
+    s.cast("Utvara Hellkite").pay();
+    assert_eq!(mana_paid(&s), 7);
+}
+
+#[test]
+fn dragonspeaker_shaman_takes_two_off_dragon_spells() {
+    assert!(castable_with(
+        "Dragonspeaker Shaman",
+        "Mountain",
+        6,
+        "Utvara Hellkite"
+    ));
+    assert!(!castable_with(
+        "Dragonspeaker Shaman",
+        "Mountain",
+        5,
+        "Utvara Hellkite"
+    ));
+    // CR 118.7a: only generic mana comes off — a {1}{R} Dragon still costs {R}.
+    assert!(castable_with(
+        "Dragonspeaker Shaman",
+        "Mountain",
+        1,
+        "Test Wyrmling"
+    ));
+    assert!(!castable_with(
+        "Dragonspeaker Shaman",
+        "Forest",
+        1,
+        "Test Wyrmling"
+    ));
+}
+
+#[test]
+fn starnheim_aspirant_takes_two_off_angel_spells() {
+    // Angel of Finality costs {3}{W}.
+    assert!(castable_with(
+        "Starnheim Aspirant",
+        "Plains",
+        2,
+        "Angel of Finality"
+    ));
+    assert!(!castable_with(
+        "Starnheim Aspirant",
+        "Plains",
+        1,
+        "Angel of Finality"
+    ));
+    assert!(!castable_with(
+        "Starnheim Aspirant",
+        "Plains",
+        3,
+        "Day of Judgment"
+    ));
+}
+
+#[test]
+fn undead_warchief_discounts_and_pumps_zombies() {
+    // Vengeful Dead costs {3}{B}.
+    assert!(castable_with(
+        "Undead Warchief",
+        "Swamp",
+        3,
+        "Vengeful Dead"
+    ));
+    assert!(!castable_with(
+        "Undead Warchief",
+        "Swamp",
+        2,
+        "Vengeful Dead"
+    ));
+    let mut sc = scenario();
+    let chief = sc.card(P0, Zone::Battlefield, "Undead Warchief");
+    let zombie = sc.card(P0, Zone::Battlefield, "Vengeful Dead");
+    let theirs = sc.card(P1, Zone::Battlefield, "Vengeful Dead");
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    let s = Script::new(sc.build());
+    assert_eq!(pt(&s, chief), (3, 2), "a Zombie itself: 1/1 +2/+1");
+    assert_eq!(pt(&s, zombie), (5, 3));
+    assert_eq!(pt(&s, theirs), (3, 2));
+    assert_eq!(pt(&s, golem), (2, 3));
+}
+
+#[test]
+fn bontus_monument_discounts_black_creatures_and_drains() {
+    assert!(castable_with(
+        "Bontu's Monument",
+        "Swamp",
+        3,
+        "Vengeful Dead"
+    ));
+    assert!(!castable_with(
+        "Bontu's Monument",
+        "Swamp",
+        2,
+        "Vengeful Dead"
+    ));
+    // A black noncreature spell isn't discounted (Night's Whisper, {1}{B}).
+    assert!(!castable_with(
+        "Bontu's Monument",
+        "Swamp",
+        1,
+        "Night's Whisper"
+    ));
+    let mut sc = scenario();
+    sc.card(P0, Zone::Battlefield, "Bontu's Monument");
+    sc.cards(P0, Zone::Battlefield, &["Forest", "Swamp", "Swamp"]);
+    sc.cards(P0, Zone::Hand, &["Llanowar Elves", "Night's Whisper"]);
+    let mut s = Script::new(sc.build());
+    // Any creature spell drains, whatever its colour.
+    s.cast("Llanowar Elves").pay();
+    resolve_all(&mut s);
+    assert_eq!((life(&s, P0), life(&s, P1), triggers(&s)), (41, 39, 1));
+    s.cast("Night's Whisper").pay();
+    resolve_all(&mut s);
+    assert_eq!((life(&s, P1), triggers(&s)), (39, 1));
+}
+
+#[test]
+fn rhonass_monument_discounts_green_creatures_and_pumps_one() {
+    // Regal Imperiosaur costs {1}{G}{G}.
+    assert!(castable_with(
+        "Rhonas's Monument",
+        "Forest",
+        2,
+        "Regal Imperiosaur"
+    ));
+    assert!(!castable_with(
+        "Rhonas's Monument",
+        "Forest",
+        1,
+        "Regal Imperiosaur"
+    ));
+    let mut sc = scenario();
+    sc.card(P0, Zone::Battlefield, "Rhonas's Monument");
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Golem");
+    sc.card(P0, Zone::Battlefield, "Forest");
+    sc.card(P0, Zone::Hand, "Llanowar Elves");
+    let mut s = Script::new(sc.build());
+    s.cast("Llanowar Elves").pay();
+    // The trigger targets a creature you control.
+    assert_eq!(s.kind(), ChoiceKind::ChooseTargets { slot: 0 });
+    assert!(can_target(&s, golem) && !can_target(&s, theirs));
+    s.target_object(golem);
+    resolve_all(&mut s);
+    assert_eq!(pt(&s, golem), (4, 5));
+    assert!(has(&s, golem, Keyword::Trample));
+}
+
+#[test]
+fn goreclaw_discounts_big_creatures_and_leads_the_charge() {
+    let goreclaw = "Goreclaw, Terror of Qal Sisma";
+    // Regal Imperiosaur is a 5/4 for {1}{G}{G}: only its generic mana comes off.
+    assert!(castable_with(goreclaw, "Forest", 2, "Regal Imperiosaur"));
+    assert!(!castable_with(goreclaw, "Forest", 1, "Regal Imperiosaur"));
+    // Power 2: full price ({2}{G}{G} for Beast Whisperer).
+    assert!(!castable_with(goreclaw, "Forest", 3, "Beast Whisperer"));
+    let mut sc = scenario();
+    sc.turn(P0, Step::BeginningOfCombat);
+    let bear = sc.card(P0, Zone::Battlefield, goreclaw);
+    let big = sc.card(P0, Zone::Battlefield, "Gigantosaurus");
+    let small = sc.card(P0, Zone::Battlefield, "Test Golem");
+    let mut s = Script::new(sc.build());
+    assert_eq!(pt(&s, bear), (4, 3));
+    attack_with(&mut s, &[bear]);
+    resolve_all(&mut s);
+    assert_eq!(pt(&s, bear), (5, 4));
+    assert_eq!(pt(&s, big), (11, 11));
+    assert!(has(&s, bear, Keyword::Trample) && has(&s, big, Keyword::Trample));
+    assert_eq!(pt(&s, small), (2, 3));
+    assert!(!has(&s, small, Keyword::Trample));
+}
+
+#[test]
+fn blasphemous_act_gets_cheaper_and_deals_thirteen() {
+    let setup = |lands: usize| {
+        let mut sc = scenario();
+        sc.cards(P0, Zone::Battlefield, &vec!["Mountain"; lands]);
+        sc.cards(P0, Zone::Battlefield, &["Test Golem", "Test Sprout"]);
+        sc.cards(
+            P1,
+            Zone::Battlefield,
+            &["Gigantosaurus", "Test Grazer", "Test Golem"],
+        );
+        sc.card(P0, Zone::Hand, "Blasphemous Act");
+        Script::new(sc.build())
+    };
+    // {8}{R} with five creatures on the battlefield: {3}{R}.
+    assert!(!setup(3).can_cast("Blasphemous Act"));
+    let mut s = setup(4);
+    s.cast("Blasphemous Act").pay().pass_all();
+    assert_eq!(mana_paid(&s), 4);
+    // 13 damage kills even a 10/10.
+    for name in ["Test Golem", "Test Sprout", "Gigantosaurus", "Test Grazer"] {
+        assert!(named(&s, name).is_empty(), "{name}");
+    }
+}
+
+#[test]
+fn ghalta_costs_less_by_your_total_power() {
+    let ghalta = "Ghalta, Primal Hunger";
+    // {10}{G}{G}: a 10/10 of your own takes off all the generic mana.
+    assert!(castable_with("Gigantosaurus", "Forest", 2, ghalta));
+    assert!(!castable_with("Gigantosaurus", "Forest", 1, ghalta));
+    // A 2/3 takes off two: ten lands, not nine.
+    assert!(castable_with("Test Golem", "Forest", 10, ghalta));
+    assert!(!castable_with("Test Golem", "Forest", 9, ghalta));
+    // An opponent's creatures don't count.
+    let mut sc = scenario();
+    sc.card(P1, Zone::Battlefield, "Gigantosaurus");
+    sc.cards(P0, Zone::Battlefield, &["Forest"; 11]);
+    sc.card(P0, Zone::Hand, ghalta);
+    assert!(!Script::new(sc.build()).can_cast(ghalta));
+    let mut sc = scenario();
+    let g = sc.card(P0, Zone::Battlefield, ghalta);
+    let s = Script::new(sc.build());
+    assert_eq!(pt(&s, g), (12, 12));
+    assert!(has(&s, g, Keyword::Trample));
+    assert!(
+        chars(&s.st, g)
+            .supertypes
+            .contains(&card_model::Supertype::Legendary)
+    );
 }

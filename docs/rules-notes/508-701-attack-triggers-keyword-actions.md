@@ -62,3 +62,25 @@ each instruction.
 `Condition::Control` ("if you control six or more lands", "if you control a creature with
 power 4 or greater") is checked when the event occurs and again on resolution, like the
 life conditions.
+
+## Cost reductions (CR 601.2f, 118.7) — D-043
+> 601.2f The player determines the total cost of the spell. Usually this is just the mana
+> cost. Some spells have additional or alternative costs. Some effects may increase or
+> reduce the cost to pay, or may provide other alternative costs. […] The total cost is the
+> mana cost or alternative cost (as determined in rule 601.2b), plus all additional costs
+> and cost increases, and minus all cost reductions. If multiple cost reductions apply, the
+> player may apply them in any order. If the mana component of the total cost is reduced to
+> nothing by cost reduction effects, it is considered to be {0}. It can’t be reduced to less
+> than {0}. Once the total cost is determined, any effects that directly affect the total
+> cost are applied. Then the resulting total cost becomes “locked in.” If effects would
+> change the total cost after this time, they have no effect.
+
+> 118.7a Effects that reduce a cost by an amount of generic mana affect only the generic
+> mana component of that cost. They can’t affect the colored or colorless mana components
+> of that cost.
+
+Engine: `cast::cost_reduction` adds up "[these] spells you cast cost {N} less" from
+permanents the caster controls (only abilities they currently have, invariant 4) and the
+spell's own "this spell costs {N} less"; `total` takes it off the generic part only, after
+adding commander tax, never below nothing. It is worked out when the cast is announced,
+with the tax; nothing can change the board between then and payment.

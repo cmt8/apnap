@@ -197,6 +197,26 @@ pub struct Facts {
     pub tapped: bool,
 }
 
+/// An amount read off the battlefield ("the number of …", "the total power of …"); 0 for
+/// amounts that depend on a resolving spell or ability.
+pub fn count_amount(
+    st: &GameState,
+    a: &card_model::Amount,
+    source: ObjectId,
+    controller: PlayerId,
+) -> u32 {
+    use card_model::Amount;
+    match a {
+        Amount::Fixed(n) => *n,
+        Amount::Count(sel) => matching(st, sel, source, controller).len() as u32,
+        Amount::TotalPower(sel) => matching(st, sel, source, controller)
+            .into_iter()
+            .map(|id| chars(st, id).power.unwrap_or(0).max(0) as u32)
+            .sum(),
+        Amount::X | Amount::SourcePower => 0,
+    }
+}
+
 /// Every permanent matching `sel` right now, in battlefield (timestamp) order.
 pub fn matching(
     st: &GameState,

@@ -1,0 +1,13 @@
+RealCard(
+    oracle_id: "e6af56bf-bd78-4801-8f6e-033cdd68de3d",
+    name: "Undead Warchief",
+    verified: true,
+    tests: ["undead_warchief_discounts_and_pumps_zombies"],
+    abilities: [
+        CostReduction(spells: (subtypes: ["Zombie"]), amount: 1),
+        Static(
+            affected: All((types: [Creature], subtypes: ["Zombie"], controller: You)),
+            effects: [ModifyPT(2, 1)],
+        ),
+    ],
+)

@@ -352,6 +352,11 @@ pub enum AbilityDef {
         only_if: Option<Condition>,
         body: Body,
     },
+    /// A static ability: "[Selector] spells you cast cost {N} less to cast" (generic mana
+    /// only, CR 118.7a). The selector is matched against the spell being cast.
+    CostReduction { spells: Selector, amount: u32 },
+    /// "This spell costs {N} less to cast[, where N is …]": functions while it is cast.
+    SelfCostReduction(Amount),
     /// An activated mana ability (CR 605.1a). M1: the cost must be exactly `{T}`.
     Mana { cost: Cost, produce: ManaProduce },
     /// A triggered ability (CR 603): "[When/Whenever/At] `when`, [if `intervening_if`,] `body`."
@@ -807,6 +812,8 @@ pub enum Amount {
     /// "the number of [selector]" on the battlefield as this resolves (relative to the
     /// controller and source).
     Count(Selector),
+    /// "the total power of [selector]" (negative powers count as 0).
+    TotalPower(Selector),
     /// The announced value of X (CR 107.3a).
     X,
     /// The source's power: current if it's still on the battlefield, otherwise as it last

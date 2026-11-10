@@ -1,0 +1,9 @@
+RealCard(
+    oracle_id: "faf81ae0-0b35-45ef-a50d-6cecf0c0eeeb",
+    name: "Dragonlord's Servant",
+    verified: true,
+    tests: ["dragonlords_servant_makes_dragon_spells_cheaper"],
+    abilities: [
+        CostReduction(spells: (subtypes: ["Dragon"]), amount: 1),
+    ],
+)

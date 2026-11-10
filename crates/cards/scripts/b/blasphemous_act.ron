@@ -1,0 +1,10 @@
+RealCard(
+    oracle_id: "7a2484a9-04fd-41a0-8224-610c1c07ed10",
+    name: "Blasphemous Act",
+    verified: true,
+    tests: ["blasphemous_act_gets_cheaper_and_deals_thirteen"],
+    abilities: [
+        SelfCostReduction(Count((types: [Creature]))),
+        Spell(Effect((effect: DamageEach(each: (types: [Creature]), amount: Fixed(13))))),
+    ],
+)

@@ -59,6 +59,9 @@ pub struct CastFrame {
     pub targets: Vec<Vec<Target>>,
     /// CR 903.8: commander tax (generic mana), locked in when the cast is announced.
     pub tax: u32,
+    /// CR 601.2f: generic mana taken off by cost reductions, locked in with the tax.
+    #[serde(default)]
+    pub discount: u32,
     /// Cast from the command zone (CR 903.8: counts toward future tax).
     pub from_command: Option<crate::ids::CardInstanceId>,
 }
@@ -135,11 +138,46 @@ fn requirement(cost: &Option<ManaCost>, x: u32) -> ManaRequirement {
         .unwrap_or_default()
 }
 
-/// CR 601.2f: the total cost — the mana cost plus additional costs such as commander tax.
-fn total(cost: &Option<ManaCost>, x: u32, tax: u32) -> ManaRequirement {
+/// CR 601.2f: the total cost — the mana cost plus additional costs such as commander tax,
+/// minus cost reductions. CR 118.7a: a reduction by generic mana only touches the generic
+/// part, which can't go below nothing.
+fn total(cost: &Option<ManaCost>, x: u32, tax: u32, discount: u32) -> ManaRequirement {
     let mut r = requirement(cost, x);
-    r.generic += tax;
+    r.generic = (r.generic + tax).saturating_sub(discount);
     r
+}
+
+/// CR 601.2f: the generic mana cost reductions take off `card` as `p` casts it — from
+/// permanents `p` controls ("Dragon spells you cast cost {1} less") and from the spell
+/// itself ("this spell costs {1} less for each creature on the battlefield").
+pub(crate) fn cost_reduction(st: &GameState, p: PlayerId, card: ObjectId) -> u32 {
+    let c = chars(st, card);
+    let facts = crate::layers::Facts {
+        id: card,
+        controller: p,
+        is_token: false,
+        tapped: false,
+    };
+    let mut total = 0;
+    for &id in &st.zones.battlefield {
+        if controller_of(st, id) != p {
+            continue;
+        }
+        // CLAUDE.md invariant 4: only abilities the permanent currently has.
+        for (_, a) in abilities(st, id) {
+            if let AbilityDef::CostReduction { spells, amount } = a
+                && crate::layers::matches_parts(spells, &c, facts, id, p)
+            {
+                total += amount;
+            }
+        }
+    }
+    for a in &st.card_def(card).abilities {
+        if let AbilityDef::SelfCostReduction(amount) = a {
+            total += crate::layers::count_amount(st, amount, card, p);
+        }
+    }
+    total
 }
 
 /// CR 302.6 / 602.5a: can this permanent's `{T}` abilities be activated now?
@@ -268,11 +306,11 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
     {
         return false;
     }
-    let tax = match &source {
-        CastSource::Card(card) => commander_tax(st, p, *card),
-        _ => 0,
+    let (tax, discount) = match &source {
+        CastSource::Card(card) => (commander_tax(st, p, *card), cost_reduction(st, p, *card)),
+        _ => (0, 0),
     };
-    feasible(st, p, &total(&prop.cost, 0, tax), prop.tap)
+    feasible(st, p, &total(&prop.cost, 0, tax, discount), prop.tap)
 }
 
 impl CastFrame {
@@ -286,6 +324,7 @@ impl CastFrame {
             x: 0,
             targets: Vec::new(),
             tax: 0,
+            discount: 0,
             from_command: None,
         }
     }
@@ -330,6 +369,7 @@ impl CastFrame {
                     if let CastSource::Card(card) = &self.source {
                         // CR 903.8 / 601.2f: commander tax, determined before the card moves.
                         self.tax = commander_tax(st, p, *card);
+                        self.discount = cost_reduction(st, p, *card);
                         if st.object(*card).zone == Zone::Command {
                             self.from_command = Some(st.object(*card).card_instance);
                         }
@@ -435,7 +475,12 @@ impl CastFrame {
                             });
                         } else {
                             let mut max = 0;
-                            while feasible(st, p, &total(&prop.cost, max + 1, self.tax), prop.tap) {
+                            while feasible(
+                                st,
+                                p,
+                                &total(&prop.cost, max + 1, self.tax, self.discount),
+                                prop.tap,
+                            ) {
                                 max += 1;
                             }
                             return self.ask(
@@ -507,7 +552,7 @@ impl CastFrame {
                 CastStage::Pay => {
                     // CR 601.2f: total cost, locked in. CR 601.2g: mana abilities.
                     let prop = self.proposal(st);
-                    let req = total(&prop.cost, self.x, self.tax);
+                    let req = total(&prop.cost, self.x, self.tax, self.discount);
                     if let Some(inp) = input.take() {
                         let Some(OptionDesc::TapForMana { source, mana }) =
                             inp.picked_one().cloned()
@@ -570,7 +615,7 @@ impl CastFrame {
                 CastStage::PayGeneric => {
                     let inp = input.take().expect("generic allocation");
                     let prop = self.proposal(st);
-                    let req = total(&prop.cost, self.x, self.tax);
+                    let req = total(&prop.cost, self.x, self.tax, self.discount);
                     let mut alloc = [0u32; 6];
                     for (i, &n) in inp.allocation().iter().enumerate() {
                         let OptionDesc::Mana { mana } = inp.decision.options[i] else {

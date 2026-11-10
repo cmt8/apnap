@@ -71,6 +71,7 @@ fn amount(a: &Amount) -> String {
         Amount::X => "X".into(),
         Amount::SourcePower => "its power".into(),
         Amount::Count(s) => format!("the number of {}", selector(s, true)),
+        Amount::TotalPower(s) => format!("the total power of {}", selector(s, true)),
     }
 }
 
@@ -383,6 +384,14 @@ fn body(b: &Body) -> String {
     }
 }
 
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 fn cost(c: &Cost) -> String {
     let mut parts = Vec::new();
     if let Some(m) = &c.mana {
@@ -573,6 +582,17 @@ fn ability(a: &AbilityDef) -> String {
                 }
             }
         }
+        AbilityDef::CostReduction { spells, amount: n } => format!(
+            "{} spells you cast cost {{{n}}} less to cast.",
+            capitalize(selector(spells, false).replace("permanent", "").trim())
+        ),
+        AbilityDef::SelfCostReduction(a) => match a {
+            Amount::Fixed(n) => format!("This spell costs {{{n}}} less to cast."),
+            other => format!(
+                "This spell costs {{X}} less to cast, where X is {}.",
+                amount(other)
+            ),
+        },
         AbilityDef::Enchant(f) => {
             format!("Enchant {}", target_filter(f).trim_start_matches("target "))
         }

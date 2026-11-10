@@ -1,0 +1,16 @@
+RealCard(
+    oracle_id: "940ba435-7abc-40f8-a5af-c1c653b3284e",
+    name: "Bontu's Monument",
+    verified: true,
+    tests: ["bontus_monument_discounts_black_creatures_and_drains"],
+    abilities: [
+        CostReduction(spells: (types: [Creature], colors: [Black]), amount: 1),
+        Triggered(
+            when: Cast(by: You, types: [Creature]),
+            body: Effect((effect: Seq([
+                LoseLife(who: EachOpponent, amount: Fixed(1)),
+                GainLife(who: You, amount: Fixed(1)),
+            ]))),
+        ),
+    ],
+)

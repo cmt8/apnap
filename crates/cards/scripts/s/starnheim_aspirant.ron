@@ -1,0 +1,9 @@
+RealCard(
+    oracle_id: "e7b92789-47a9-430a-ad57-be7b6c3d63cb",
+    name: "Starnheim Aspirant",
+    verified: true,
+    tests: ["starnheim_aspirant_takes_two_off_angel_spells"],
+    abilities: [
+        CostReduction(spells: (subtypes: ["Angel"]), amount: 2),
+    ],
+)

@@ -1,0 +1,10 @@
+RealCard(
+    oracle_id: "b0b6be0c-41cf-4757-9f0e-87227b6ba6b3",
+    name: "Ghalta, Primal Hunger",
+    verified: true,
+    tests: ["ghalta_costs_less_by_your_total_power"],
+    keywords: [Trample],
+    abilities: [
+        SelfCostReduction(TotalPower((types: [Creature], controller: You))),
+    ],
+)

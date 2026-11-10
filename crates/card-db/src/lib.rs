@@ -265,6 +265,18 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                     ));
                 }
             }
+            AbilityDef::CostReduction { amount, .. } => {
+                if *amount == 0 {
+                    p.push(at("a cost reduction of nothing".into()));
+                }
+            }
+            AbilityDef::SelfCostReduction(a) => {
+                if matches!(a, Amount::X | Amount::SourcePower) {
+                    p.push(at(
+                        "a spell's own cost reduction can't depend on X or its power".into(),
+                    ));
+                }
+            }
             AbilityDef::Enchant(f) => {
                 if !(c.has_type(CardType::Enchantment)
                     && c.creature_types.iter().any(|t| t == "Aura"))
@@ -332,7 +344,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         Amount::X if !has_x => {
             p("Amount::X used but nothing defines X (no {X} in the cost, no SetX)".into());
         }
-        Amount::Count(s) => selector(s, p),
+        Amount::Count(s) | Amount::TotalPower(s) => selector(s, p),
         _ => {}
     };
     let player = |r: &PlayerRef, p: &mut dyn FnMut(String)| {

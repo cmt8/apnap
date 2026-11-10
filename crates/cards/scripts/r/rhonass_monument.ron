@@ -1,0 +1,20 @@
+RealCard(
+    oracle_id: "b9a7c722-6b24-4383-ac6e-2a30f7834269",
+    name: "Rhonas's Monument",
+    verified: true,
+    tests: ["rhonass_monument_discounts_green_creatures_and_pumps_one"],
+    abilities: [
+        CostReduction(spells: (types: [Creature], colors: [Green]), amount: 1),
+        Triggered(
+            when: Cast(by: You, types: [Creature]),
+            body: Effect((
+                targets: [Permanent([(types: [Creature], controller: You)])],
+                effect: Apply(
+                    what: Target(0),
+                    effects: [ModifyPT(2, 2), AddKeywords([Trample])],
+                    until_end_of_turn: true,
+                ),
+            )),
+        ),
+    ],
+)

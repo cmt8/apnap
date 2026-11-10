@@ -518,6 +518,15 @@ cards verified (61 of 254 unique; 65 of 275 deck slots), each with a test.
 - Still not expressible, on purpose: mana abilities with a sacrifice cost (Treasure) and
   costs that need a choice (sacrifice *another* creature, discard a card).
 
+## D-043 M4 card batch 4: cost reductions
+9 more cards (77 of 254 unique), including the commander Ghalta, Primal Hunger. Rules text
+appended to `docs/rules-notes/508-701-attack-triggers-keyword-actions.md`.
+- `AbilityDef::CostReduction { spells, amount }` ("Dragon spells you cast cost {1} less")
+  and `AbilityDef::SelfCostReduction(amount)` ("this spell costs {1} less for each creature
+  on the battlefield"), with `Amount::TotalPower(selector)` for Ghalta.
+- CR 118.7a: only the generic part is reduced, after commander tax is added, never below
+  nothing; locked in when the cast is announced (CR 601.2f).
+
 ## D-039 Future scope: other 1v1 constructed formats (user note 2026-11-09)
 The user wants 1v1 **Modern, Legacy, Vintage, etc.** supported in future. Nothing is built
 for this yet; it is recorded so current work doesn't close the door:
