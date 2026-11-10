@@ -1027,3 +1027,122 @@ fn statics_about_the_card_itself_and_aura_forms_not_compiled() {
         ["static:Enchanted-as-long-as"]
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Attacking and blocking creatures.
+
+/// Declare blocks: each `(blocker, attacker)` pair blocks; nobody else does.
+fn block_with(s: &mut Script, blocks: &[(ObjectId, ObjectId)]) {
+    drive_until(s, |s| {
+        s.kind() == ChoiceKind::DeclareBlockers || s.st.turn.step == Step::PostcombatMain
+    });
+    while s.next.is_some() && s.kind() == ChoiceKind::DeclareBlockers {
+        let pick = s.options().iter().position(|o| {
+            matches!(o, OptionDesc::Block { blocker, attacker } if blocks.contains(&(*blocker, *attacker)))
+        });
+        s.respond(Response::Pick(pick.into_iter().collect()));
+    }
+}
+
+// CR 506.4 (2026-11-06): a creature is "attacking" from its declaration until it leaves
+// combat or combat ends; "blocking" likewise. Forge: the filter properties `.attacking` and
+// `.blocking` — in an effect, a target, and a static ability.
+#[test]
+fn attacking_and_blocking_creatures_in_filters() {
+    let cards = [
+        spell(
+            "Test Warcry",
+            "R",
+            "Instant",
+            "A:SP$ PumpAll | ValidCards$ Creature.attacking | NumAtt$ +2 | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Ambush",
+            "W",
+            "Instant",
+            "A:SP$ Destroy | ValidTgts$ Creature.attacking | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Bulwark Stance",
+            "W",
+            "Instant",
+            "A:SP$ PumpAll | ValidCards$ Creature.blocking | NumDef$ +3 | SpellDescription$ Text.",
+        ),
+        "Name:Test Banner\nManaCost:2\nTypes:Artifact\n\
+         S:Mode$ Continuous | Affected$ Creature.attacking+YouCtrl | AddPower$ 1 | Description$ Text.\nOracle:Text."
+            .to_string(),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Mountain", "Test Banner"]);
+    sc.cards(P1, Zone::Battlefield, &["Plains", "Plains"]);
+    let attacker = sc.card(P0, Zone::Battlefield, "Test Golem"); // 2/3
+    let home = sc.card(P0, Zone::Battlefield, "Test Giant"); // 5/4
+    let blocker = sc.card(P1, Zone::Battlefield, "Test Golem");
+    let idle = sc.card(P1, Zone::Battlefield, "Test Elf"); // 1/1
+    sc.cards(P0, Zone::Hand, &["Test Warcry"]);
+    sc.cards(P1, Zone::Hand, &["Test Ambush", "Test Bulwark Stance"]);
+    let mut s = Script::new(sc.build());
+    // Nobody is attacking yet: no bonus, and nothing for the Ambush to target.
+    assert_eq!(pt(&s, attacker), (2, 3));
+    attack_with(&mut s, &[attacker]);
+    // The Banner: +1/+0 while it attacks. The creature that stayed home gets nothing.
+    assert_eq!(s.st.turn.step, Step::DeclareAttackers);
+    assert_eq!(pt(&s, attacker), (3, 3));
+    assert_eq!(pt(&s, home), (5, 4));
+    // "Attacking creatures get +2/+0 until end of turn."
+    s.cast("Test Warcry").pay().pass_all();
+    assert_eq!(pt(&s, attacker), (5, 3));
+    assert_eq!(pt(&s, home), (5, 4));
+    // The Golem blocks; "blocking creatures get +0/+3" reaches only it.
+    block_with(&mut s, &[(blocker, attacker)]);
+    assert_eq!(s.st.turn.step, Step::DeclareBlockers);
+    assert_eq!(s.who(), P0);
+    s.pass();
+    assert_eq!(s.who(), P1);
+    s.cast("Test Bulwark Stance").pay().pass_all();
+    assert_eq!(pt(&s, blocker), (2, 6));
+    assert_eq!(pt(&s, idle), (1, 1));
+    // "Destroy target attacking creature": only the attacker is a legal target.
+    s.pass();
+    assert_eq!(s.who(), P1);
+    s.cast("Test Ambush");
+    assert!(can_target(&s, attacker));
+    assert!(!can_target(&s, home) && !can_target(&s, blocker));
+    s.target_object(attacker).pay().pass_all();
+    assert!(!on_battlefield(&s, attacker));
+    // After combat nothing is attacking: the bonus is gone with the role.
+    drive_until(&mut s, |s| s.st.turn.step == Step::PostcombatMain);
+    assert_eq!(pt(&s, home), (5, 4));
+}
+
+// CR 506.4 (2026-11-06): a permanent whose controller changes is removed from combat.
+#[test]
+fn a_creature_that_changes_controller_leaves_combat() {
+    let seize = "Name:Test Seizure\nManaCost:2 U U\nTypes:Enchantment Aura\nK:Flash\nK:Enchant:Creature\n\
+        S:Mode$ Continuous | AffectedDefined$ Enchanted | GainControl$ You | Description$ Text.\nOracle:Text.";
+    let mut sc = scenario(&[seize]);
+    sc.cards(P1, Zone::Battlefield, &["Island"; 4]);
+    let attacker = sc.card(P0, Zone::Battlefield, "Test Giant"); // 5/4
+    sc.card(P1, Zone::Hand, "Test Seizure");
+    let mut s = Script::new(sc.build());
+    attack_with(&mut s, &[attacker]);
+    assert_eq!(
+        engine_core::layers::combat_role(&s.st, attacker),
+        (true, false)
+    );
+    s.pass();
+    assert_eq!(s.who(), P1);
+    s.cast("Test Seizure")
+        .target_object(attacker)
+        .pay()
+        .pass_all();
+    assert_eq!(chars(&s.st, attacker).controller, P1);
+    assert_eq!(
+        engine_core::layers::combat_role(&s.st, attacker),
+        (false, false)
+    );
+    // No combat damage is dealt: it is no longer attacking.
+    drive_until(&mut s, |s| s.st.turn.step == Step::PostcombatMain);
+    assert_eq!((life(&s, P0), life(&s, P1)), (40, 40));
+}

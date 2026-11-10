@@ -87,7 +87,7 @@ pub fn describes(
                         let c = chars(st, id);
                         selectors
                             .iter()
-                            .any(|s| crate::layers::matches(s, &c, o, none, controller))
+                            .any(|s| crate::layers::matches(st, s, &c, o, none, controller))
                     }
                 }
                 TargetFilter::CardInGraveyard { cards, whose } => {

@@ -182,6 +182,7 @@ impl StepStage {
                 if step == Step::EndOfCombat {
                     // CR 511.3: all creatures are removed from combat.
                     st.combat = None;
+                    st.generation += 1;
                 }
                 if repeat_cleanup {
                     return Flow::then(Frame::Step(StepStage::Begin));

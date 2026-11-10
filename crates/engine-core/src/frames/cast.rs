@@ -123,7 +123,7 @@ fn sacrifice_candidates(
                 && choice
                     .what
                     .iter()
-                    .any(|s| crate::layers::matches(s, &c, st.object(id), source, p))
+                    .any(|s| crate::layers::matches(st, s, &c, st.object(id), source, p))
         })
         .collect()
 }
@@ -252,6 +252,8 @@ pub(crate) fn cost_reduction(st: &GameState, p: PlayerId, card: ObjectId) -> u32
         controller: p,
         is_token: false,
         tapped: false,
+        attacking: false,
+        blocking: false,
     };
     let mut total = 0;
     for &id in &st.zones.battlefield {

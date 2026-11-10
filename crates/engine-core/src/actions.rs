@@ -325,6 +325,15 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             let o = st.object_mut(object);
             o.last_controller = controller;
             o.summoning_sick = true;
+            // CR 506.4: a permanent whose controller changes is removed from combat. (An
+            // attacker it was blocking stays blocked, CR 509.1h.)
+            if let Some(c) = st.combat.as_mut() {
+                c.attackers.retain(|a| a.attacker != object);
+                for a in &mut c.attackers {
+                    a.blockers.retain(|b| *b != object);
+                }
+                st.generation += 1;
+            }
             st.emit(Event::ControlChanged { object, controller });
             ActionResult::Done
         }

@@ -51,16 +51,25 @@ pub struct Lki {
     pub controller: PlayerId,
     pub is_token: bool,
     pub tapped: bool,
+    /// Whether it was an attacking / a blocking creature ("whenever an attacking creature
+    /// dies").
+    #[serde(default)]
+    pub attacking: bool,
+    #[serde(default)]
+    pub blocking: bool,
 }
 
 pub(crate) fn snapshot(st: &GameState, id: ObjectId) -> Lki {
     let o = st.object(id);
+    let (attacking, blocking) = crate::layers::combat_role(st, id);
     Lki {
         card: o.card,
         chars: chars(st, id),
         controller: crate::layers::controller_of(st, id),
         is_token: o.is_token,
         tapped: o.tapped,
+        attacking,
+        blocking,
     }
 }
 
@@ -205,11 +214,14 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                         }
                         let o = st.object(e);
                         let c = chars(st, e);
+                        let (attacking, blocking) = crate::layers::combat_role(st, e);
                         let facts = Facts {
                             id: e,
                             controller: c.controller,
                             is_token: o.is_token,
                             tapped: o.tapped,
+                            attacking,
+                            blocking,
                         };
                         if filter_hit(filter, e, &c, facts, src.id, src.controller) {
                             found.push(PendingTrigger {
@@ -267,6 +279,8 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                             controller: l.controller,
                             is_token: l.is_token,
                             tapped: l.tapped,
+                            attacking: l.attacking,
+                            blocking: l.blocking,
                         };
                         if filter_hit(filter, *d, &l.chars, facts, src.id, src.controller) {
                             found.push(PendingTrigger {
@@ -360,6 +374,8 @@ pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
                         controller: c.controller,
                         is_token: o.is_token,
                         tapped: o.tapped,
+                        attacking: true,
+                        blocking: false,
                     };
                     if filter_hit(filter, attacker, &c, facts, src.id, src.controller) {
                         found.push(PendingTrigger {
@@ -445,6 +461,8 @@ mod tests {
             controller: you,
             is_token: false,
             tapped: false,
+            attacking: false,
+            blocking: false,
         };
         let filter = ObjFilter::ThisOr(Selector {
             subtypes: alloc::vec!["Zombie".into()],

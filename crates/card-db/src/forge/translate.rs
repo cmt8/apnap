@@ -311,6 +311,8 @@ impl<'a> Tx<'a> {
                 "token" => s.token = Some(true),
                 "tapped" => s.tapped = Some(true),
                 "untapped" => s.tapped = Some(false),
+                "attacking" => s.attacking = Some(true),
+                "blocking" => s.blocking = Some(true),
                 _ => {
                     if let Some(c) = color(p) {
                         s.colors.push(c);

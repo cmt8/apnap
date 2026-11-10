@@ -837,7 +837,7 @@ fn each_player_options(
                 .filter(|&id| {
                     let c = chars(st, id);
                     c.controller == p
-                        && crate::layers::matches(sel, &c, st.object(id), source, controller)
+                        && crate::layers::matches(st, sel, &c, st.object(id), source, controller)
                 })
                 .collect(),
         ),

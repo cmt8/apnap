@@ -673,6 +673,13 @@ section of `docs/rules-notes/601-casting-602-activating-605-mana.md`.
   A `forge-Np` game whose battlefield passes 1,000 permanents is abandoned
   (`HarnessError::Runaway`, naming what the board consists of) and counted apart from
   failures. Only the soak does this; the engine has no such limit.
+- **"Attacking" and "blocking" in selectors** (`Selector::attacking/blocking`, Forge's
+  `.attacking` / `.blocking`): read from `st.combat`, so `layers::matches` takes the state;
+  the last-known information of a permanent that left records the role it had ("whenever
+  an attacking creature dies"). Static abilities can use it ("attacking creatures you
+  control get +1/+0"), so declaring attackers or blockers and the end of combat now
+  invalidate the layer cache. Selectors gained two fields: state hashes re-blessed, event
+  logs of all 15 golden games identical. With this, 5,001 scripts compile (14.5%).
 - **Auras compile:** `K:Enchant:Creature` is `AbilityDef::Enchant(Creature)`, a static with
   `AffectedDefined$ Enchanted` is `Affected::Enchanted` (`Self` is `Affected::This`), and
   `GainControl$ You` is layer 2. Forge filters the enchanted permanent again with

@@ -126,7 +126,7 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-048): 4,858 of 34,463 scripts compile (14.1%); about 10,400 more are one feature
+Status (D-048): 5,001 of 34,463 scripts compile (14.5%); about 10,400 more are one feature
 away. Feature tests live in `crates/harness/tests/forge_features.rs`: invented cards written
 in Forge's format, compiled by `harness::forge_test_catalog` and played (`forge_test_blockers`
 for "this must not compile"). Three guards catch compiler holes — keep them: a line that
@@ -140,7 +140,8 @@ presence, `Defined$ Targeted` means every target of the chain, a trigger that ru
 `AB$` with a cost is "you may pay", triggers without `TriggerZones$` work from any zone).
 Not built yet: the generated-text-vs-Oracle round trip, multi-face cards, library search
 (untargeted ChangeZone, Dig, Scry, Surveil), mana abilities that make more than one mana or
-cost more than {T} (Treasure), "you may pay" triggers, `.attacking` filters, regeneration.
+cost more than {T} (Treasure), "you may pay" triggers, regeneration, Equipment, Auras that
+enchant anything but a creature, static abilities with a condition ("as long as …").
 
 ## Current milestone: M4 — IN PROGRESS (started 2026-11-09), branch `m4-wip`
 Decisions: D-034 (precons: Calling All Angels, Wretched Ranks, Reign of Dragons,

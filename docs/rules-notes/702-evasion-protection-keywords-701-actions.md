@@ -109,3 +109,22 @@ ability: its current controller while it is still that permanent, otherwise the 
 it last had on the battlefield. Forge scripts write "when this dies, draw a card" with it;
 for a permanent's own leaves-the-battlefield trigger that is the same player as "you"
 (603.3a).
+
+## Attacking and blocking creatures (CR 506.4)
+> 506.4. A permanent is removed from combat if it leaves the battlefield, if its controller
+> or protector changes, if it phases out, if an effect specifically removes it from combat,
+> if it’s a planeswalker that’s being attacked and stops being a planeswalker, if it’s a
+> battle that’s being attacked and stops being a battle, or if it’s an attacking or blocking
+> creature that regenerates (see rule 701.19), stops being a creature, or becomes a battle.
+> A creature that’s removed from combat stops being an attacking, blocking, blocked, and/or
+> unblocked creature. A planeswalker or battle that’s removed from combat stops being
+> attacked.
+
+Engine: a creature is attacking while it is in `st.combat.attackers`, blocking while it is
+among some attacker's blockers (`layers::combat_role`); leaving the battlefield removes it
+(`actions::move_object`), and `st.combat` is cleared at the end of combat. Selectors read
+this (`Selector::attacking`, `blocking`); "attacking or blocking creature" is two selectors.
+The layer cache is invalidated whenever the roles change. A change of controller removes
+the permanent from combat too (`GameAction::ControlChanged`; an attacker it was blocking
+stays blocked, CR 509.1h). Not implemented: removal when a creature stops being a creature (nothing
+that compiles does that yet).

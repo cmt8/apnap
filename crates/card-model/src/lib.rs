@@ -442,6 +442,11 @@ pub struct Selector {
     pub other: bool,
     /// `Some(false)` = nontoken.
     pub token: Option<bool>,
+    /// "attacking" (CR 506.4: from being declared as an attacker until it is removed from
+    /// combat or combat ends) / not attacking.
+    pub attacking: Option<bool>,
+    /// "blocking" / not blocking.
+    pub blocking: Option<bool>,
 }
 
 /// What a trigger condition or replacement watches: the source itself, or matching objects.

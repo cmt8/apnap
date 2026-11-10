@@ -188,19 +188,34 @@ pub fn view(st: &GameState) -> Arc<View> {
 /// Does object `o` (with characteristics `c`) match `sel`, relative to an ability whose
 /// source is `source`, controlled by `controller`?
 pub fn matches(
+    st: &GameState,
     sel: &Selector,
     c: &Characteristics,
     o: &GameObject,
     source: ObjectId,
     controller: PlayerId,
 ) -> bool {
+    let (attacking, blocking) = combat_role(st, o.id);
     let facts = Facts {
         id: o.id,
         controller: c.controller,
         is_token: o.is_token,
         tapped: o.tapped,
+        attacking,
+        blocking,
     };
     matches_parts(sel, c, facts, source, controller)
+}
+
+/// Is `id` an attacking creature / a blocking creature right now (CR 506.4)?
+pub fn combat_role(st: &GameState, id: ObjectId) -> (bool, bool) {
+    match &st.combat {
+        None => (false, false),
+        Some(c) => (
+            c.attackers.iter().any(|a| a.attacker == id),
+            c.attackers.iter().any(|a| a.blockers.contains(&id)),
+        ),
+    }
 }
 
 /// What a selector looks at besides an object's characteristics.
@@ -210,6 +225,8 @@ pub struct Facts {
     pub controller: PlayerId,
     pub is_token: bool,
     pub tapped: bool,
+    pub attacking: bool,
+    pub blocking: bool,
 }
 
 /// An amount read off the battlefield ("the number of …", "the total power of …"); 0 for
@@ -245,7 +262,7 @@ pub fn matching(
         .battlefield
         .iter()
         .copied()
-        .filter(|&id| matches(sel, &chars(st, id), st.object(id), source, controller))
+        .filter(|&id| matches(st, sel, &chars(st, id), st.object(id), source, controller))
         .collect()
 }
 
@@ -262,6 +279,8 @@ pub fn matches_parts(
         controller: object_controller,
         is_token,
         tapped,
+        attacking,
+        blocking,
     } = facts;
     (sel.types.is_empty() || sel.types.iter().any(|t| c.is(*t)))
         && !sel.not_types.iter().any(|t| c.is(*t))
@@ -276,6 +295,11 @@ pub fn matches_parts(
             .toughness_min
             .is_none_or(|n| c.toughness.is_some_and(|t| t >= n))
         && sel.tapped.is_none_or(|t| tapped == t)
+        // "attacking or blocking": either is enough when both are asked for.
+        && match (sel.attacking, sel.blocking) {
+            (Some(true), Some(true)) => attacking || blocking,
+            (a, b) => a.is_none_or(|a| attacking == a) && b.is_none_or(|b| blocking == b),
+        }
         && sel.keywords.iter().all(|k| c.has(*k))
         && match sel.controller {
             Who::Any => true,
@@ -404,7 +428,7 @@ impl Walk<'_> {
             Aff::Dynamic(Affected::All(sel)) => {
                 let you = self.you(e, view);
                 view.iter()
-                    .filter(|(id, c)| matches(sel, c, self.st.object(**id), e.source, you))
+                    .filter(|(id, c)| matches(self.st, sel, c, self.st.object(**id), e.source, you))
                     .map(|(id, _)| *id)
                     .collect()
             }
@@ -676,6 +700,8 @@ mod tests {
             controller: you,
             is_token: false,
             tapped: false,
+            attacking: false,
+            blocking: false,
         };
         let mountains = Selector {
             subtypes: alloc::vec!["Mountain".into()],

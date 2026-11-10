@@ -138,6 +138,8 @@ impl DeclareAttackersFrame {
             st.emit(Event::AttackerDeclared { attacker, defender });
         }
         st.combat = Some(combat);
+        // "Attacking creatures you control get …": the layered view depends on combat.
+        st.generation += 1;
         // CR 508.1m: abilities that trigger on attackers being declared trigger now.
         let attackers: Vec<ObjectId> = self.chosen.iter().map(|(a, _)| *a).collect();
         crate::triggers::detect_attacks(st, &attackers);
@@ -240,6 +242,7 @@ impl DeclareBlockersFrame {
             a.blocked = true;
             a.blockers.push(blocker);
         }
+        st.generation += 1;
         for &(blocker, attacker) in &self.chosen {
             st.emit(Event::BlockerDeclared { blocker, attacker });
         }

@@ -187,6 +187,15 @@ fn selector(s: &Selector, plural: bool) -> String {
     } else if s.tapped == Some(false) {
         out.push_str("untapped ");
     }
+    match (s.attacking, s.blocking) {
+        (Some(true), Some(true)) => out.push_str("attacking or blocking "),
+        (Some(true), _) => out.push_str("attacking "),
+        (_, Some(true)) => out.push_str("blocking "),
+        (Some(false), Some(false)) => out.push_str("nonattacking, nonblocking "),
+        (Some(false), _) => out.push_str("nonattacking "),
+        (_, Some(false)) => out.push_str("nonblocking "),
+        (None, None) => {}
+    }
     for c in &s.colors {
         out.push_str(&format!("{c:?} ").to_lowercase());
     }
