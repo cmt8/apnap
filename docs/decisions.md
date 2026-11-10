@@ -1115,6 +1115,32 @@ Rules notes: docs/rules-notes/613-layers.md (last section).
   double-faced cards 399, Forge's `Effect` objects 376, Sagas 185, protection 141,
   flashback 103.
 
+## D-063 Compiler batch 12 (breadth): costs paid while something resolves; "its controller" (2026-11-10)
+Rules text: docs/rules-notes/601-casting-602-activating-605-mana.md (last section).
+- **`Effect::Pay { who, cost, paid, unpaid }`** (CR 118.12, 118.12a): "you may pay {1}. If
+  you do, …" — Forge's trigger that runs an `AB$` with a `Cost$` — and "… unless [a
+  player] pays …" — `UnlessCost$`/`UnlessPayer$`/`UnlessSwitched$` on any effect.
+  The rest of a chain after an "unless" instruction happens either way (Forge's default).
+- **Paying reuses the cast frame**: `CastSource::Payment` starts a `CastFrame` at its
+  payment stage, so mana abilities, generic-mana allocation and chosen sacrifices/discards
+  work as for a spell. The resolve frame asks (`ChoiceKind::PayUnlessCost`) only when
+  `cast::can_pay` says the cost can be paid in full (CR 118.3), then carries on.
+- **`PlayerRef::ControllerOf(slot)`** ("its controller", Forge's `TargetedController`):
+  who controlled the target as resolution began (`ResolveFrame::target_controllers`,
+  CR 608.2h) — "destroy target land. Its controller loses 2 life".
+- **Found by the soak (1 game in 750): the engine asked a player to pay who then
+  couldn't.** A source of restricted mana ("spend this mana only to cast Angel spells")
+  counted towards a cost it can't pay. `Payee::Cost` now marks such payments; restricted
+  mana and its sources are left out. Regression test
+  `restricted_mana_cant_pay_a_cost_on_resolution`. The dead-end assertion now says who was
+  paying what for which card.
+- A trigger that is both "you may" and priced asks once (the payment is the choice).
+- The heuristic agent pays when asked.
+- Known and not fixed: two cards found whose Forge script restricts a target more than
+  the card does (Spirit Bonds, Konstrari Charm: "you control" in the script only). A probe
+  for it is too noisy to be a compiler guard yet.
+- 8,668 → 8,933 of 34,463 scripts (25.9%). Golden hashes unchanged.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

@@ -33,8 +33,9 @@ pub struct Compiled {
 
 /// Parameters that never affect the rules: descriptions shown to players, prompts, and
 /// hints for Forge's AI. (docs/forge/script-format.md, "keys a translator can ignore".)
-const TEXT_ONLY: [&str; 16] = [
+const TEXT_ONLY: [&str; 17] = [
     "ValidTgtsDesc",
+    "UnlessAI",
     "ChangeTypeDesc",
     "ChangeNumDesc",
     "DefinedDesc",
@@ -927,6 +928,11 @@ impl<'a> Tx<'a> {
             None | Some("You") => Some(PlayerRef::You),
             Some("Player.Opponent" | "Opponent") => Some(PlayerRef::EachOpponent),
             Some("Player") => Some(PlayerRef::Each),
+            // "Its controller": of the chain's one target, as resolution began.
+            Some("TargetedController") if chain.targets.len() == 1 => {
+                chain.refers_to_targets.set(true);
+                Some(PlayerRef::ControllerOf(0))
+            }
             // "That player": the player the event happened to.
             Some(name) if triggered && self.trig.player == Some(name) => {
                 Some(PlayerRef::TriggeringPlayer)
@@ -965,7 +971,7 @@ impl<'a> Tx<'a> {
     /// is the card itself.
     fn recipient(&mut self, rd: &Rd<'a>, chain: &Chain, triggered: bool) -> Option<TargetRef> {
         match rd.rec.get("Defined") {
-            Some("You" | "Opponent" | "Player.Opponent" | "Player") => {
+            Some("You" | "Opponent" | "Player.Opponent" | "Player" | "TargetedController") => {
                 self.player(rd, chain, triggered).map(TargetRef::Players)
             }
             // A player the event names.
@@ -1142,6 +1148,14 @@ impl<'a> Tx<'a> {
         rd.get("SubAbility");
         rd.get("Cost");
         chain.fresh_group = None;
+        // "… unless [a player] pays [cost]" (docs/forge/effects.md §0.3): this
+        // instruction only; the rest of the chain happens either way.
+        let unless = (
+            rd.get("UnlessCost"),
+            rd.get("UnlessPayer"),
+            rd.get("UnlessSwitched").is_some(),
+        );
+        let targets_before = chain.targets.len();
         if rec.head().map(|h| h.0) == Some("AB") {
             // Read by `ability`: when and whether the ability can be activated.
             for k in [
@@ -1915,7 +1929,63 @@ impl<'a> Tx<'a> {
             }
             _ => out,
         };
-        Some(out)
+        let (Some(price), payer, switched) = unless else {
+            return Some(out);
+        };
+        let cost = self.cost(price)?;
+        if cost == Cost::default() || cost.discard_self || cost.exile_self {
+            self.block("unless:cost");
+            return None;
+        }
+        // Who pays: Forge's default is the controller of this instruction's target.
+        let own_target =
+            (chain.targets.len() == targets_before + 1).then_some(targets_before as u8);
+        let who = match payer {
+            Some("You") => PlayerRef::You,
+            None | Some("TargetedController") => match own_target {
+                Some(slot) => PlayerRef::ControllerOf(slot),
+                None => {
+                    self.block("unless:payer without a target");
+                    return None;
+                }
+            },
+            Some(name) if triggered && self.trig.player == Some(name) => {
+                PlayerRef::TriggeringPlayer
+            }
+            Some(name)
+                if triggered
+                    && name
+                        .strip_suffix("Controller")
+                        .is_some_and(|base| self.trig.named(base) == Some(Named::It)) =>
+            {
+                PlayerRef::TriggeringController
+            }
+            Some(other) => {
+                self.block(format!("unless:payer {other}"));
+                return None;
+            }
+        };
+        if (cost.tap || cost.sacrifice_self) && who != PlayerRef::You {
+            self.block("unless:cost uses the source");
+            return None;
+        }
+        let nothing = Box::new(Effect::Seq(Vec::new()));
+        Some(if switched {
+            // "[They] may pay …. If they do, [this]."
+            Effect::Pay {
+                who,
+                cost,
+                paid: Box::new(out),
+                unpaid: nothing,
+            }
+        } else {
+            Effect::Pay {
+                who,
+                cost,
+                paid: nothing,
+                unpaid: Box::new(out),
+            }
+        })
     }
 
     /// `LibraryPosition$` of a move to a library: `0` (the default) is the top, `-1` the
@@ -2161,6 +2231,22 @@ impl<'a> Tx<'a> {
     fn mode(&mut self, first: &'a Record, triggered: bool, root: &str) -> Option<Mode> {
         let mut chain = Chain::default();
         let mut kind = root;
+        // A trigger that runs an `AB$` with a cost: "you may pay [cost]. If you do, [the
+        // whole ability]" (docs/forge/triggers-statics-replacements-keywords.md).
+        let mut price = None;
+        if triggered
+            && root == "DB"
+            && first.head().map(|h| h.0) == Some("AB")
+            && let Some(text) = first.get("Cost")
+        {
+            kind = "AB";
+            let cost = self.cost(text)?;
+            if cost == Cost::default() || cost.discard_self || cost.exile_self {
+                self.block("trigger:cost");
+                return None;
+            }
+            price = Some(cost);
+        }
         let mut next = Some(first);
         let mut ok = true;
         let mut steps = 0;
@@ -2203,6 +2289,15 @@ impl<'a> Tx<'a> {
             effects.remove(0)
         } else {
             Effect::Seq(effects)
+        };
+        let effect = match price {
+            None => effect,
+            Some(cost) => Effect::Pay {
+                who: PlayerRef::You,
+                cost,
+                paid: Box::new(effect),
+                unpaid: Box::new(Effect::Seq(Vec::new())),
+            },
         };
         // Slots left empty are simply missing from the end of the chosen targets.
         let slots = chain.targets.len() as u8;
@@ -3243,7 +3338,19 @@ impl<'a> Tx<'a> {
                 self.explained(before, "trigger");
                 continue;
             };
-            if optional {
+            // "You may pay …. If you do, …" is the choice already: asking "may?" first
+            // would ask twice.
+            let priced = matches!(
+                &body,
+                Body::Effect(Mode {
+                    effect: Effect::Pay {
+                        who: PlayerRef::You,
+                        ..
+                    },
+                    ..
+                })
+            );
+            if optional && !priced {
                 // "You may": decided as the ability resolves.
                 body = match body {
                     Body::Effect(m) => Body::Effect(Mode {

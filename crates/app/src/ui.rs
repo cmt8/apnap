@@ -1914,7 +1914,8 @@ fn decision_panel(
         ChoiceKind::ChooseTargets { .. }
         | ChoiceKind::ChooseModes
         | ChoiceKind::ChooseX
-        | ChoiceKind::PayMana,
+        | ChoiceKind::PayMana
+        | ChoiceKind::PayUnlessCost,
         Some(top),
     ) = (d.kind, cx.view.stack.last())
     {

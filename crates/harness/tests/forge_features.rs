@@ -5024,3 +5024,237 @@ fn statics_that_change_types_colors_and_base_power() {
     attack_with(&mut s, &[forest, mine]);
     assert!(offered_blockers(&mut s, forest).is_empty());
 }
+
+// ---------------------------------------------------------------------------------------
+// Costs paid while a spell or ability resolves (D-063).
+// Text: docs/rules-notes/601-casting-602-activating-605-mana.md (last section).
+
+fn yes(s: &mut Script) {
+    assert_eq!(s.kind(), ChoiceKind::PayUnlessCost);
+    s.pick("pay", |_, o| matches!(o, OptionDesc::Accept));
+}
+
+fn no(s: &mut Script) {
+    assert_eq!(s.kind(), ChoiceKind::PayUnlessCost);
+    s.pick("don't pay", |_, o| matches!(o, OptionDesc::Decline));
+}
+
+// CR 118.12, 118.3, 701.6a (2026-11-06). Forge: `Counter | UnlessCost$ 2` — "counter target
+// spell unless its controller pays {2}".
+#[test]
+fn counter_target_spell_unless_its_controller_pays() {
+    let cards = [spell(
+        "Test Tithing",
+        "U",
+        "Instant",
+        "A:SP$ Counter | TargetType$ Spell | ValidTgts$ Card | UnlessCost$ 2 | SpellDescription$ Text.",
+    )];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let build = |lands: usize| {
+        let mut sc = scenario(&cards);
+        sc.cards(P0, Zone::Battlefield, &vec!["Forest"; lands]);
+        sc.card(P1, Zone::Battlefield, "Island");
+        sc.card(P0, Zone::Hand, "Test Golem"); // {3}
+        sc.card(P1, Zone::Hand, "Test Tithing");
+        let mut s = Script::new(sc.build());
+        s.cast("Test Golem").pay().pass();
+        s.cast("Test Tithing").target("Test Golem").pay().pass_all();
+        s
+    };
+    // Two lands left: the caster is asked, pays {2} with them, and the spell resolves.
+    let mut s = build(5);
+    assert_eq!(s.who(), P0);
+    yes(&mut s);
+    s.pay();
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+    });
+    assert!(s.find(P0, Zone::Battlefield, "Test Golem").is_some());
+    let untapped = |s: &Script| {
+        s.st.zones
+            .battlefield
+            .iter()
+            .filter(|id| s.name(**id) == "Forest" && !s.st.object(**id).tapped)
+            .count()
+    };
+    assert_eq!(untapped(&s), 0);
+    // They may decline; then it is countered.
+    let mut s = build(5);
+    no(&mut s);
+    assert!(s.find(P0, Zone::Graveyard, "Test Golem").is_some());
+    assert_eq!(untapped(&s), 2);
+    // One land left: the cost can't be paid, so nobody is asked.
+    let s = build(4);
+    assert_eq!(s.kind(), ChoiceKind::Priority);
+    assert!(s.find(P0, Zone::Graveyard, "Test Golem").is_some());
+}
+
+// CR 118.12 (2026-11-06). Forge: a trigger that runs an `AB$` with a `Cost$` — "you may
+// pay [cost]. If you do, …" — and `UnlessCost$` with `UnlessPayer$ You` — "sacrifice this
+// unless you pay …".
+#[test]
+fn paying_as_an_ability_resolves() {
+    let cards = [
+        creature(
+            "Test Scribe",
+            "W",
+            "Cleric",
+            "1/1",
+            "T:Mode$ SpellCast | ValidCard$ Card | ValidActivatingPlayer$ You | TriggerZones$ Battlefield | Execute$ TrigGain | TriggerDescription$ Text.\n\
+             SVar:TrigGain:AB$ GainLife | Cost$ 1 | LifeAmount$ 3",
+        ),
+        creature(
+            "Test Ogre",
+            "R",
+            "Ogre",
+            "3/3",
+            "T:Mode$ Attacks | ValidCard$ Card.Self | Execute$ TrigPump | TriggerDescription$ Text.\n\
+             SVar:TrigPump:AB$ Pump | Cost$ Sac<1/Creature.Other/another creature> | Defined$ Self | NumAtt$ +2 | NumDef$ +2",
+        ),
+        creature(
+            "Test Efreet",
+            "B",
+            "Efreet",
+            "3/3",
+            "T:Mode$ Phase | Phase$ Upkeep | ValidPlayer$ You | TriggerZones$ Battlefield | Execute$ TrigSac | TriggerDescription$ Text.\n\
+             SVar:TrigSac:DB$ Sacrifice | UnlessPayer$ You | UnlessCost$ B B",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    // "Whenever you cast a spell, you may pay {1}. If you do, you gain 3 life."
+    let mut sc = scenario(&cards);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Forest", "Forest", "Forest", "Test Scribe"],
+    );
+    sc.cards(P0, Zone::Hand, &["Test Elf", "Test Elf", "Test Elf"]);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Elf").pay().pass_all();
+    assert_eq!(s.who(), P0);
+    yes(&mut s);
+    s.pay();
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+    });
+    assert_eq!(life(&s, P0), 43);
+    // The last Forest pays for the second Elf: nothing is left to pay with, nothing is
+    // asked, nothing is gained.
+    s.cast("Test Elf").pay();
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+    });
+    assert_eq!(life(&s, P0), 43);
+    assert_eq!(s.count(|e| matches!(e, Event::Triggered { .. })), 2);
+
+    // "Whenever this attacks, you may sacrifice another creature. If you do, it gets
+    // +2/+2": the sacrifice is chosen as the cost is paid.
+    let mut sc = scenario(&cards);
+    let ogre = sc.card(P0, Zone::Battlefield, "Test Ogre");
+    let elf = sc.card(P0, Zone::Battlefield, "Test Elf");
+    let mut s = Script::new(sc.build());
+    attack_with(&mut s, &[ogre]);
+    drive_until(&mut s, |s| s.kind() != ChoiceKind::Priority);
+    yes(&mut s);
+    if s.kind() == ChoiceKind::Sacrifice {
+        s.respond(Response::Pick(vec![0]));
+    }
+    assert!(!on_battlefield(&s, elf));
+    assert_eq!(pt(&s, ogre), (5, 5));
+    // Alone, it has nothing to sacrifice: no question.
+    let mut sc = scenario(&cards);
+    let ogre = sc.card(P0, Zone::Battlefield, "Test Ogre");
+    let mut s = Script::new(sc.build());
+    attack_with(&mut s, &[ogre]);
+    drive_until(&mut s, |s| at(s, P0, Step::PostcombatMain));
+    assert_eq!(life(&s, P1), 37);
+
+    // "At the beginning of your upkeep, sacrifice this unless you pay {B}{B}."
+    for pay in [true, false] {
+        let mut sc = scenario(&cards);
+        sc.cards(P0, Zone::Battlefield, &["Swamp", "Swamp"]);
+        let efreet = sc.card(P0, Zone::Battlefield, "Test Efreet");
+        sc.turn(P1, Step::End);
+        let mut s = Script::new(sc.build());
+        drive_until(&mut s, |s| s.kind() == ChoiceKind::PayUnlessCost);
+        assert!(at(&s, P0, Step::Upkeep));
+        if pay {
+            yes(&mut s);
+            s.pay();
+        } else {
+            no(&mut s);
+        }
+        drive_until(&mut s, |s| at(s, P0, Step::Draw));
+        assert_eq!(on_battlefield(&s, efreet), pay);
+    }
+}
+
+// CR 608.2h (2026-11-06). Forge: `Defined$ TargetedController` — "its controller", who
+// controlled the target as the spell began to resolve, though the target is gone by then.
+#[test]
+fn the_targets_controller() {
+    let cards = [spell(
+        "Test Despoiling",
+        "B",
+        "Sorcery",
+        "A:SP$ Destroy | ValidTgts$ Creature | SubAbility$ DBLose | SpellDescription$ Text.\n\
+         SVar:DBLose:DB$ LoseLife | Defined$ TargetedController | LifeAmount$ 2",
+    )];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.card(P0, Zone::Battlefield, "Swamp");
+    let golem = sc.card(P1, Zone::Battlefield, "Test Golem");
+    sc.card(P0, Zone::Hand, "Test Despoiling");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Despoiling")
+        .target_object(golem)
+        .pay()
+        .pass_all();
+    assert!(!on_battlefield(&s, golem));
+    assert_eq!((life(&s, P0), life(&s, P1)), (40, 38));
+}
+
+// CR 106.6, 118.3 (2026-11-06): mana that can be spent only on certain spells can't pay a
+// cost paid on resolution, so a player with nothing else isn't asked to pay. (Found by
+// the soak: the engine asked, the player accepted, and the payment had no way to finish.)
+#[test]
+fn restricted_mana_cant_pay_a_cost_on_resolution() {
+    let cards = [
+        creature(
+            "Test Scribe",
+            "W",
+            "Cleric",
+            "1/1",
+            "T:Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield | ValidCard$ Creature.Other+YouCtrl | TriggerZones$ Battlefield | Execute$ TrigGain | TriggerDescription$ Text.\n\
+             SVar:TrigGain:AB$ GainLife | Cost$ 1 | LifeAmount$ 3",
+        ),
+        "Name:Test Cloister\nManaCost:no cost\nTypes:Land\n\
+         A:AB$ Mana | Cost$ T | Produced$ W | RestrictValid$ Spell.Angel | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+        creature("Test Seraph", "W", "Angel", "1/1", ""),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let build = |spare: &str| {
+        let mut sc = scenario(&cards);
+        sc.cards(P0, Zone::Battlefield, &["Plains", spare, "Test Scribe"]);
+        sc.card(P0, Zone::Hand, "Test Seraph");
+        let mut s = Script::new(sc.build());
+        // Pay for the Angel with the Plains.
+        s.cast("Test Seraph");
+        s.tap("Plains", engine_core::mana::ManaType::White);
+        s.pay().pass_all().pass_all();
+        s
+    };
+    // Only the Cloister is left: its mana couldn't pay {1} here, so there is no question.
+    let s = build("Test Cloister");
+    assert_eq!(s.kind(), ChoiceKind::Priority);
+    assert_eq!(life(&s, P0), 40);
+    // With a second Plains there is.
+    let mut s = build("Plains");
+    yes(&mut s);
+    s.pay();
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+    });
+    assert_eq!(life(&s, P0), 43);
+}

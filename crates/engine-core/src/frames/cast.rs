@@ -35,6 +35,10 @@ pub enum CastSource {
     /// Put a triggered ability on the stack (CR 603.3): modes and targets as in 601.2b–c,
     /// no costs; with no legal choice it's removed instead (603.3c–d).
     Trigger(Box<PendingTrigger>),
+    /// Pay a cost while a spell or ability resolves (CR 118.12): nothing goes on the
+    /// stack. `source` is the object the resolving ability is on ("sacrifice another
+    /// creature" is relative to it; `{T}` and "sacrifice this" are it).
+    Payment { source: ObjectId, cost: Box<Cost> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +167,7 @@ fn cost_source(source: &CastSource) -> ObjectId {
         CastSource::Card(card) => *card,
         CastSource::Ability { source, .. } => *source,
         CastSource::Trigger(t) => t.source,
+        CastSource::Payment { source, .. } => *source,
     }
 }
 
@@ -171,7 +176,7 @@ fn cost_source(source: &CastSource) -> ObjectId {
 fn ability_source(source: &CastSource) -> Option<ObjectId> {
     match source {
         CastSource::Card(_) => None,
-        CastSource::Ability { source, .. } => Some(*source),
+        CastSource::Ability { source, .. } | CastSource::Payment { source, .. } => Some(*source),
         CastSource::Trigger(t) => Some(t.source),
     }
 }
@@ -232,6 +237,22 @@ fn proposal(st: &GameState, source: &CastSource) -> Proposal {
                     extra: cost.clone(),
                 },
                 other => unreachable!("not an activated ability: {other:?}"),
+            }
+        }
+        // A cost paid on resolution: `{T}` and "sacrifice this" are the ability's source,
+        // if the payer still controls it.
+        CastSource::Payment { source, cost } => {
+            let here = |st: &GameState| {
+                st.objects
+                    .get(source)
+                    .is_some_and(|o| o.zone == Zone::Battlefield)
+            };
+            Proposal {
+                body: None,
+                cost: cost.mana.clone(),
+                tap: (cost.tap && here(st)).then_some(*source),
+                sacrifice: (cost.sacrifice_self && here(st)).then_some(*source),
+                extra: (**cost).clone(),
             }
         }
         CastSource::Trigger(t) => {
@@ -314,6 +335,9 @@ pub(crate) enum Payee {
     Spell(ObjectId),
     /// An activated ability of this permanent.
     Ability(ObjectId),
+    /// A cost paid while something resolves (CR 118.12): neither casting a spell nor
+    /// activating an ability, so mana restricted to those can't pay it.
+    Cost,
 }
 
 fn payee_of(source: &CastSource) -> Option<Payee> {
@@ -321,6 +345,7 @@ fn payee_of(source: &CastSource) -> Option<Payee> {
         CastSource::Card(card) => Some(Payee::Spell(*card)),
         CastSource::Ability { source, .. } => Some(Payee::Ability(*source)),
         CastSource::Trigger(_) => None,
+        CastSource::Payment { .. } => Some(Payee::Cost),
     }
 }
 
@@ -348,6 +373,7 @@ fn may_spend(st: &GameState, p: PlayerId, r: &card_model::ManaRestriction, payee
                 .iter()
                 .any(|s| crate::layers::matches(st, s, &c, st.object(source), source, p))
         }
+        Payee::Cost => false,
     }
 }
 
@@ -667,6 +693,35 @@ fn feasible(
     payable_within(req, &usable_pool(st, p, payee), &sources, limit.as_ref())
 }
 
+/// CR 118.3: can `p` pay `cost` right now — for an ability of `source` that is resolving?
+/// (`{T}` and "sacrifice this" need the source to be theirs and able.)
+pub(crate) fn can_pay(st: &GameState, p: PlayerId, source: ObjectId, cost: &Cost) -> bool {
+    let own = st
+        .objects
+        .get(&source)
+        .is_some_and(|o| o.zone == Zone::Battlefield && controller_of(st, source) == p);
+    if (cost.tap || cost.sacrifice_self) && !own {
+        return false;
+    }
+    if cost.tap && !can_tap_for_ability(st, source) {
+        return false;
+    }
+    let src = CastSource::Payment {
+        source,
+        cost: Box::new(cost.clone()),
+    };
+    let prop = proposal(st, &src);
+    extra_payable(st, p, &src, &prop)
+        && feasible(
+            st,
+            p,
+            &src,
+            &prop,
+            payee_of(&src),
+            &total(&prop.cost, 0, 0, 0),
+        )
+}
+
 /// Mode indices whose every target slot has at least one legal choice (CR 700.2a).
 fn legal_modes(
     st: &GameState,
@@ -725,7 +780,7 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
                 return false;
             }
         }
-        CastSource::Trigger(_) => return false,
+        CastSource::Trigger(_) | CastSource::Payment { .. } => return false,
         CastSource::Ability { source, index } => {
             let (source, index) = (*source, *index);
             let o = st.object(source);
@@ -815,6 +870,20 @@ impl CastFrame {
         CastFrame::new(t.controller, CastSource::Trigger(Box::new(t)))
     }
 
+    /// `player` pays `cost` now, for an ability of `source` that is resolving. Only for a
+    /// cost `can_pay` says they can pay.
+    pub(crate) fn payment(player: PlayerId, source: ObjectId, cost: Cost) -> Self {
+        let mut f = CastFrame::new(
+            player,
+            CastSource::Payment {
+                source,
+                cost: Box::new(cost),
+            },
+        );
+        f.stage = CastStage::Pay;
+        f
+    }
+
     /// The proposal's body/cost, read through the *current* source object.
     fn proposal(&self, st: &GameState) -> Proposal {
         match &self.source {
@@ -899,6 +968,9 @@ impl CastFrame {
                                     facts: Default::default(),
                                 },
                             )
+                        }
+                        CastSource::Payment { .. } => {
+                            unreachable!("a payment starts at the Pay stage")
                         }
                         // CR 603.3: the triggered ability becomes the topmost object.
                         CastSource::Trigger(t) => put(
@@ -1228,7 +1300,16 @@ impl CastFrame {
                             }
                         }
                     }
-                    assert!(!options.is_empty(), "payment dead-ended: D-019 violated");
+                    assert!(
+                        !options.is_empty(),
+                        "payment dead-ended (D-019 violated): {p:?} paying {req:?} for {:?} \
+                         ({}); pool {pool:?}; {} mana sources",
+                        self.source,
+                        st.objects
+                            .get(&cost_source(&self.source))
+                            .map_or("gone", |o| st.catalog.get(o.card).name.as_str()),
+                        sources.len(),
+                    );
                     return self.ask(
                         ChoiceKind::PayMana,
                         Primitive::PickN { min: 1, max: 1 },
@@ -1314,7 +1395,9 @@ impl CastFrame {
                 .get(id)
                 .is_some_and(|o| o.zone == Zone::Battlefield)
         };
-        if !self.pay_sacrifice.is_empty() {
+        if !self.pay_sacrifice.is_empty()
+            && let Some(object) = self.object
+        {
             // CR 608.2h: "the sacrificed creature's power" is its power as it last existed.
             let power = self
                 .pay_sacrifice
@@ -1322,13 +1405,7 @@ impl CastFrame {
                 .filter(|id| on_battlefield(st, id))
                 .map(|&id| chars(st, id).power.unwrap_or(0).max(0) as u32)
                 .sum();
-            execute(
-                st,
-                GameAction::SetSacrificedPower {
-                    object: self.object.expect("announced"),
-                    power,
-                },
-            );
+            execute(st, GameAction::SetSacrificedPower { object, power });
         }
         let mut events: Vec<Proposed> = sacrifice
             .iter()

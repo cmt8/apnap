@@ -93,6 +93,14 @@ pub enum Work {
         moves: Vec<Proposed>,
         checked: usize,
     },
+    /// CR 118.12: `player` may pay `cost` now; then `paid` or `unpaid` is performed.
+    Pay {
+        k: usize,
+        player: PlayerId,
+        cost: Box<card_model::Cost>,
+        paid: Box<Effect>,
+        unpaid: Box<Effect>,
+    },
 }
 
 /// The fixed part of a [`Work::ChooseCards`] (amounts already worked out, CR 608.2h).
@@ -157,6 +165,10 @@ pub struct ResolveFrame {
     /// owner then shuffles ("exile this spell", "shuffle it into its owner's library").
     #[serde(default)]
     pub spell_to: Option<(card_model::CardDest, bool)>,
+    /// Who controlled each target that was legal as resolution began (`[k][slot]`): "its
+    /// controller" still means that player once the target is gone (CR 608.2h).
+    #[serde(default)]
+    pub target_controllers: Vec<Vec<Option<PlayerId>>>,
 }
 
 impl ResolveFrame {
@@ -175,6 +187,7 @@ impl ResolveFrame {
             sacrificed_power: 0,
             facts: Default::default(),
             spell_to: None,
+            target_controllers: Vec::new(),
         }
     }
 
@@ -241,6 +254,17 @@ impl ResolveFrame {
             PlayerRef::TriggeringPlayer => self
                 .facts
                 .player
+                .filter(|p| st.in_game(*p))
+                .into_iter()
+                .collect(),
+            // The controller of the targeted spell or permanent, as resolution began —
+            // even if the target is gone by now (CR 608.2h).
+            PlayerRef::ControllerOf(i) => self
+                .target_controllers
+                .get(k)
+                .and_then(|c| c.get(i as usize))
+                .copied()
+                .flatten()
                 .filter(|p| st.in_game(*p))
                 .into_iter()
                 .collect(),
@@ -429,6 +453,47 @@ impl ResolveFrame {
                         ]);
                     }
                 }
+                Work::Pay {
+                    k,
+                    player,
+                    cost,
+                    paid,
+                    unpaid,
+                } => match input.take() {
+                    // CR 118.3: a player can't pay a cost they can't pay in full; then
+                    // there is nothing to ask.
+                    None if st.in_game(player)
+                        && super::cast::can_pay(st, player, self.source, &cost) =>
+                    {
+                        self.work.push(Work::Pay {
+                            k,
+                            player,
+                            cost,
+                            paid,
+                            unpaid,
+                        });
+                        return Flow::ask_one(
+                            Frame::Resolve(Box::new(self)),
+                            player,
+                            ChoiceKind::PayUnlessCost,
+                            vec![OptionDesc::Accept, OptionDesc::Decline],
+                        );
+                    }
+                    None => self.work.push(Work::Eval { k, effect: unpaid }),
+                    Some(inp) => {
+                        if matches!(inp.picked_one(), Some(OptionDesc::Accept)) {
+                            // The payment runs first (mana abilities, choices); this
+                            // resolution carries on with `paid` after it.
+                            let source = self.source;
+                            self.work.push(Work::Eval { k, effect: paid });
+                            return Flow::Continue(vec![
+                                Frame::Resolve(Box::new(self)),
+                                Frame::Cast(super::cast::CastFrame::payment(player, source, *cost)),
+                            ]);
+                        }
+                        self.work.push(Work::Eval { k, effect: unpaid });
+                    }
+                },
                 Work::May { k, effect } => match input.take() {
                     None if st.in_game(self.controller) => {
                         let controller = self.controller;
@@ -1110,6 +1175,23 @@ impl ResolveFrame {
             st.emit(Event::Fizzled { object: top.id });
             return Some(self.leave_stack(st, MoveCause::Fizzled));
         }
+        self.target_controllers = (0..self.targets.len())
+            .map(|k| {
+                (0..self.targets[k].len())
+                    .map(|i| match self.target(st, k, TargetRef::Target(i as u8)) {
+                        Some(Target::Object(o)) => {
+                            st.stack_object(o).map(|s| s.controller).or_else(|| {
+                                st.objects
+                                    .get(&o)
+                                    .filter(|x| x.zone == Zone::Battlefield)
+                                    .map(|_| chars(st, o).controller)
+                            })
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect();
         // CR 700.2: chosen modes are performed in printed order (modes are stored sorted).
         for (k, &m) in top.modes.iter().enumerate().rev() {
             self.work.push(Work::Eval {
@@ -1554,6 +1636,25 @@ impl ResolveFrame {
             }
             Effect::ThisSpellTo { to, shuffle } => {
                 self.spell_to = Some((to, shuffle));
+                Vec::new()
+            }
+            Effect::Pay {
+                who,
+                cost,
+                paid,
+                unpaid,
+            } => {
+                match self.player(st, k, who) {
+                    Some(player) => self.work.push(Work::Pay {
+                        k,
+                        player,
+                        cost: Box::new(cost),
+                        paid,
+                        unpaid,
+                    }),
+                    // Nobody to pay: it isn't paid.
+                    None => self.work.push(Work::Eval { k, effect: unpaid }),
+                }
                 Vec::new()
             }
             Effect::PutInto { what, to, shuffle } => {

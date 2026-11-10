@@ -236,6 +236,7 @@ fn player(mode: &Mode, r: PlayerRef) -> String {
         PlayerRef::Each => "each player".into(),
         PlayerRef::TriggeringController => "its controller".into(),
         PlayerRef::TriggeringPlayer => "that player".into(),
+        PlayerRef::ControllerOf(_) => "its controller".into(),
     }
 }
 
@@ -813,6 +814,46 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                     ""
                 }
             )
+        }
+        Effect::Pay {
+            who,
+            cost: c,
+            paid,
+            unpaid,
+        } => {
+            let nothing = |e: &Effect| matches!(e, Effect::Seq(v) if v.is_empty());
+            let who = player(mode, *who);
+            let you = who == "you";
+            // "pay {2}", "sacrifice a creature", "pay 2 life": as an action of the player.
+            let action = |third: bool| {
+                let mut parts: Vec<String> = Vec::new();
+                for part in cost(c).split(", ") {
+                    let text = if part.starts_with('{') {
+                        format!("pay {part}")
+                    } else {
+                        part.to_lowercase()
+                    };
+                    parts.push(match (third, text.split_once(' ')) {
+                        (true, Some((v, rest))) => format!("{v}s {rest}"),
+                        _ => text,
+                    });
+                }
+                join(parts, "and")
+            };
+            if nothing(paid) {
+                format!("{} unless {who} {}", effect(mode, unpaid), action(!you))
+            } else {
+                let does = if you { "you do" } else { "they do" };
+                let mut out = format!(
+                    "{who} may {}. If {does}, {}",
+                    action(false),
+                    effect(mode, paid)
+                );
+                if !nothing(unpaid) {
+                    out.push_str(&format!(". Otherwise, {}", effect(mode, unpaid)));
+                }
+                out
+            }
         }
         Effect::ThisSpellTo { to, shuffle } => {
             if *shuffle {

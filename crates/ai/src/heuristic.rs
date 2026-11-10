@@ -69,6 +69,11 @@ fn effect_polarity(e: &Effect) -> Polarity {
         },
         Effect::Apply { effects, .. } => continuous_polarity(effects),
         Effect::May(inner) => effect_polarity(inner),
+        // What happens either way: paying, or not paying.
+        Effect::Pay { paid, unpaid, .. } => match effect_polarity(unpaid) {
+            Polarity::Neutral => effect_polarity(paid),
+            p => p,
+        },
         Effect::Together(v) => v.first().map_or(Polarity::Neutral, effect_polarity),
         Effect::GainLife { .. }
         | Effect::AddMana { .. }
@@ -1018,6 +1023,14 @@ impl Agent for HeuristicAgent {
                 };
                 Response::Pick(vec![d.options.iter().position(keeps).unwrap_or(0)])
             }
+            // Paying is nearly always right: it is offered only when it can be afforded,
+            // and it buys the effect or stops the harm.
+            (ChoiceKind::PayUnlessCost, _) => Response::Pick(vec![
+                d.options
+                    .iter()
+                    .position(|o| matches!(o, OptionDesc::Accept))
+                    .unwrap_or(0),
+            ]),
             _ => return self.fallback.decide(v, d),
         };
         if d.validate(&r).is_ok() {

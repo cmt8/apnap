@@ -236,3 +236,31 @@ cast frame offers, for each slot of a group, only what the group hasn't taken ye
 lets the player stop once the group's minimum is reached (`PickN { min: 0, max: 1 }`).
 `legal_modes` requires as many candidates as the minimum. Tests:
 `two_target_creatures`, `up_to_two_target_creatures`.
+
+## Costs paid while a spell or ability resolves (D-063)
+
+> 118.3. A player can’t pay a cost without having the necessary resources to pay it fully. For example, a player with only 1 life can’t pay a cost of 2 life, and a permanent that’s already tapped can’t be tapped to pay a cost. See rule 202, “Mana Cost and Color,” and rule 602, “Activating Activated Abilities.”
+>
+> 118.12. Some spells, activated abilities, and triggered abilities read, “[Do something]. If [a player] [does, doesn’t, or can’t], [effect].” Or “[A player] may [do something]. If [that player] [does, doesn’t, or can’t], [effect].” The action [do something] is a cost, paid when the spell or ability resolves. The “If [a player] [does, doesn’t, or can’t]” clause checks whether the player chose to pay an optional cost or started to pay a mandatory cost, regardless of what events actually occurred.
+>
+> 118.12a Some spells, activated abilities, and triggered abilities read, “[Do something] unless [a player does something else].” This means the same thing as “[A player may do something else]. If [that player doesn’t], [do something].”
+>
+> 608.2h If an effect requires information from the game (such as the number of creatures on the battlefield), the answer is determined only once, when the effect is applied. If the effect requires information from a specific object, including the source of the ability itself, the effect uses the current information of that object if it’s in the public zone it was expected to be in; if it’s no longer in that zone, or if the effect has moved it from a public zone to a hidden zone, the effect uses the object’s last known information. See rule 113.7a. If an ability states that an object does something, it’s the object as it exists—or as it most recently existed—that does it, not the ability.
+
+- `Effect::Pay { who, cost, paid, unpaid }` is both forms of 118.12: "[who] may pay
+  [cost]. If they do, [paid]" and (118.12a) "[unpaid] unless [who] pays [cost]".
+- The player is asked (`ChoiceKind::PayUnlessCost`) only if they can pay in full (118.3):
+  the same test as for casting — mana in the pool and from mana abilities, permanents to
+  sacrifice, cards to discard, life. A player who can't pay isn't paying.
+- Paying runs the cast frame's payment stages (`CastSource::Payment`): mana abilities,
+  which floating mana pays generic costs, what is sacrificed or discarded. Nothing goes
+  on the stack; the resolution carries on afterwards. Restricted mana ("spend this mana
+  only to cast …") can't pay such a cost.
+- "Its controller" of a target (`PlayerRef::ControllerOf`) is who controlled it as
+  resolution began (608.2h): "destroy target land. Its controller loses 2 life".
+
+| Rule | Test (`crates/harness/tests/forge_features.rs`) |
+|---|---|
+| 118.12a, 118.3, 701.6a | `counter_target_spell_unless_its_controller_pays` |
+| 118.12, 118.12a | `paying_as_an_ability_resolves` |
+| 608.2h | `the_targets_controller` |

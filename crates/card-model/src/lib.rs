@@ -1321,6 +1321,15 @@ pub enum Effect {
         #[serde(default)]
         shuffle: bool,
     },
+    /// A cost paid while the spell or ability resolves (CR 118.12): "[`unpaid`] unless
+    /// [who] pays [cost]", or "[who] may pay [cost]. If they do, [`paid`]". The player is
+    /// asked only if they can pay; one of the two instructions is usually empty.
+    Pay {
+        who: PlayerRef,
+        cost: Cost,
+        paid: Box<Effect>,
+        unpaid: Box<Effect>,
+    },
 }
 
 /// A zone an effect takes cards out of as it resolves.
@@ -1426,6 +1435,9 @@ pub enum PlayerRef {
     /// "That player": the player the triggering event happened to (the player dealt
     /// damage).
     TriggeringPlayer,
+    /// "Its controller": the controller of the spell or permanent chosen for target slot
+    /// `n` ("counter target spell unless its controller pays {3}").
+    ControllerOf(u8),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -730,6 +730,37 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         }
         Effect::SetX(a) => amount(a, p),
         Effect::May(inner) => check_effect(inner, mode, has_x, p),
+        Effect::Pay {
+            who,
+            cost,
+            paid,
+            unpaid,
+        } => {
+            match who {
+                PlayerRef::Each | PlayerRef::EachOpponent => {
+                    p("a cost paid on resolution is paid by one player".into())
+                }
+                PlayerRef::ControllerOf(i) => {
+                    if mode.targets.get(*i as usize).is_none() {
+                        p(format!("PlayerRef::ControllerOf({i}) has no target slot"));
+                    }
+                }
+                other => player(other, p),
+            }
+            if *cost == Cost::default() {
+                p("a cost of nothing".into());
+            }
+            if cost.discard_self || cost.exile_self {
+                p("a cost paid on resolution can't use the card in hand or graveyard".into());
+            }
+            // `{T}` and "sacrifice this" are the ability's source: its controller's.
+            if (cost.tap || cost.sacrifice_self) && *who != PlayerRef::You {
+                p("only the ability's controller can tap or sacrifice its source".into());
+            }
+            check_cost(cost, p);
+            check_effect(paid, mode, has_x, p);
+            check_effect(unpaid, mode, has_x, p);
+        }
         Effect::Together(v) => {
             for x in v {
                 if matches!(
