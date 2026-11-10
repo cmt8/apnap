@@ -1025,8 +1025,13 @@ impl<'a> Tx<'a> {
                     }
                 }
             }
+            // Chosen as it resolves: from a hidden zone, or — with `Hidden$` — from a
+            // public one ("return a creature card from your graveyard to your hand",
+            // "return a creature you control to its owner's hand": no target).
             "ChangeZone"
-                if matches!(rec.get("Origin"), Some("Library" | "Hand"))
+                if (matches!(rec.get("Origin"), Some("Library" | "Hand"))
+                    || (rec.get("Hidden").is_some()
+                        && matches!(rec.get("Origin"), Some("Graveyard" | "Battlefield"))))
                     && rec.get("ValidTgts").is_none()
                     && rec.get("Defined").is_none() =>
             {
@@ -1159,10 +1164,9 @@ impl<'a> Tx<'a> {
                 let dest = rd.get("Destination");
                 let what = match self.target(&rd, chain, origin == "Graveyard") {
                     Some(slot) => ObjRef::Target(slot),
-                    // A permanent named some other way: "return this to its owner's hand".
-                    None if origin == "Battlefield" && rd.rec.get("Defined").is_some() => {
-                        self.object(&rd, chain, triggered)?
-                    }
+                    // A permanent named some other way: "return this to its owner's hand"
+                    // (the card itself is Forge's default).
+                    None if origin == "Battlefield" => self.object(&rd, chain, triggered)?,
                     None => {
                         self.block("ChangeZone:no-target");
                         return None;
@@ -1493,8 +1497,12 @@ impl<'a> Tx<'a> {
     fn choose_cards(&mut self, rd: &Rd<'a>, chain: &mut Chain, triggered: bool) -> Option<Effect> {
         let from = match rd.get("Origin") {
             Some("Library") => CardZone::Library,
+            Some("Graveyard") => CardZone::Graveyard,
+            Some("Battlefield") => CardZone::Battlefield,
             _ => CardZone::Hand,
         };
+        rd.get("Hidden");
+        let public = matches!(from, CardZone::Graveyard | CardZone::Battlefield);
         // Whose zone: the activator's unless `DefinedPlayer$` says otherwise.
         let who = match rd.get("DefinedPlayer") {
             None | Some("You") => PlayerRef::You,
@@ -1509,8 +1517,18 @@ impl<'a> Tx<'a> {
         let filter = rd.get("ChangeType");
         let cards = match filter {
             None => Some(Vec::new()),
-            Some(f) => self.card_alts(f, true),
+            Some(f) => self.card_alts(f, from != CardZone::Battlefield),
         };
+        // In a public zone Forge offers every player's cards that fit; the engine offers
+        // the chooser's own. The same thing only when the filter says "your".
+        if public
+            && !cards
+                .as_ref()
+                .is_some_and(|c| !c.is_empty() && c.iter().all(|s| s.controller == Who::You))
+        {
+            self.block("ChangeZone:chosen among every player's cards");
+            return None;
+        }
         let count = self.amount(rd.get("ChangeNum").unwrap_or("1"), chain);
         // Without `Mandatory$` every pick may be declined (CR 701.23b).
         let must = rd.get("Mandatory").is_some();
@@ -1535,7 +1553,8 @@ impl<'a> Tx<'a> {
         // Forge reveals what was found when a quality was asked for and the cards don't
         // go to the battlefield ("search for a creature card, reveal it, …").
         let restricted = filter.is_some_and(|f| f.trim() != "Card");
-        let reveal = rd.get("NoReveal").is_none()
+        let reveal = !public
+            && rd.get("NoReveal").is_none()
             && (rd.get("Reveal").is_some()
                 || (restricted && !matches!(to, CardDest::Battlefield { .. })));
         // A library that was searched is shuffled (CR 701.23, the effects all say so)

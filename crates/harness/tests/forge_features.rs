@@ -3102,3 +3102,106 @@ fn a_condition_on_graveyard_cards_meets_a_card_with_a_defined_power() {
     assert_eq!(pt(&s, sage), (3, 3), "two creature cards in the graveyard");
     assert_eq!(pt(&s, warden), (1, 1));
 }
+
+// ---------------------------------------------------------------------------------------
+// Cards chosen as an effect resolves, without targeting (D-055).
+
+// CR 608.2d (2026-11-06). Forge: `ChangeZone | Origin$ Graveyard | Destination$ Hand |
+// Hidden$ True | ChangeType$ Creature.YouOwn` — "return a creature card from your graveyard
+// to your hand": nothing is targeted, the card is chosen on resolution.
+#[test]
+fn a_card_chosen_from_your_graveyard_on_resolution() {
+    let cards = [
+        spell(
+            "Test Recollection",
+            "B",
+            "Sorcery",
+            "A:SP$ ChangeZone | Origin$ Graveyard | Destination$ Hand | Hidden$ True | Mandatory$ True | ChangeType$ Creature.YouOwn | ChangeNum$ 1 | SpellDescription$ Text.",
+        ),
+        // Forge would offer every graveyard's creature cards for this filter; the engine's
+        // choice is among the chooser's own cards. Not the same: not compiled.
+        spell(
+            "Test Graverobbing",
+            "B",
+            "Sorcery",
+            "A:SP$ ChangeZone | Origin$ Graveyard | Destination$ Hand | Hidden$ True | ChangeType$ Creature | SpellDescription$ Text.",
+        ),
+    ];
+    assert_eq!(
+        forge_test_blockers(&cards[1]),
+        ["ChangeZone:chosen among every player's cards"]
+    );
+    let cards = [cards[0].as_str()];
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Swamp"]);
+    sc.cards(P0, Zone::Graveyard, &["Test Elf", "Forest", "Test Golem"]);
+    sc.cards(P1, Zone::Graveyard, &["Test Giant"]);
+    sc.card(P0, Zone::Hand, "Test Recollection");
+    let mut s = Script::new(sc.build());
+    // No target is chosen as it is cast.
+    s.cast("Test Recollection").pay();
+    assert_eq!(s.kind(), ChoiceKind::Priority);
+    assert!(s.st.stack[0].targets.iter().all(Vec::is_empty));
+    s.pass_all();
+    // On resolution: my creature cards, not the land, not the opponent's Giant.
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::ChooseCards));
+    assert_eq!(s.decision().prim, Primitive::PickN { min: 1, max: 1 });
+    assert_eq!(option_names(&s), ["Test Elf", "Test Golem"]);
+    s.pick(
+        "the Golem",
+        |s, o| matches!(o, OptionDesc::Card { card } if s.name(*card) == "Test Golem"),
+    );
+    assert!(s.find(P0, Zone::Hand, "Test Golem").is_some());
+    assert!(s.find(P0, Zone::Graveyard, "Test Elf").is_some());
+    // Public cards: nothing is "revealed".
+    assert_eq!(s.count(|e| matches!(e, Event::Revealed { .. })), 0);
+}
+
+// Forge: `ChangeZone | Origin$ Battlefield | Destination$ Hand | Hidden$ True | Mandatory$
+// True | ChangeType$ Creature.YouCtrl` — "when this enters, return a creature you control
+// to its owner's hand" (it may be the creature itself); and a ChangeZone with neither a
+// target nor `Defined$` moves the card it is on.
+#[test]
+fn returning_a_creature_you_control_and_returning_this() {
+    let cards = [
+        creature(
+            "Test Gatecrasher",
+            "U",
+            "Drake",
+            "2/2",
+            "T:Mode$ ChangesZone | ValidCard$ Card.Self | Origin$ Any | Destination$ Battlefield | Execute$ TrigBounce | TriggerDescription$ Text.\n\
+             SVar:TrigBounce:DB$ ChangeZone | Origin$ Battlefield | Destination$ Hand | Hidden$ True | Mandatory$ True | ChangeType$ Creature.YouCtrl | ChangeNum$ 1",
+        ),
+        creature(
+            "Test Homing Sprite",
+            "U",
+            "Faerie",
+            "1/1",
+            "A:AB$ ChangeZone | Cost$ U | Origin$ Battlefield | Destination$ Hand | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Island", "Island"]);
+    let elf = sc.card(P0, Zone::Battlefield, "Test Elf");
+    let sprite = sc.card(P0, Zone::Battlefield, "Test Homing Sprite");
+    sc.card(P1, Zone::Battlefield, "Test Golem");
+    sc.card(P0, Zone::Hand, "Test Gatecrasher");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Gatecrasher").pay().pass_all();
+    // The trigger resolves: one of my three creatures (not the opponent's Golem), and one
+    // must be returned.
+    s.pass_all();
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::ChooseCards));
+    assert_eq!(s.decision().prim, Primitive::PickN { min: 1, max: 1 });
+    assert_eq!(s.options().len(), 3);
+    s.pick(
+        "the Elf",
+        |_, o| matches!(o, OptionDesc::Card { card } if *card == elf),
+    );
+    assert!(s.find(P0, Zone::Hand, "Test Elf").is_some());
+    // "{U}: Return this creature to its owner's hand."
+    s.activate("Test Homing Sprite").pay().pass_all();
+    assert!(!on_battlefield(&s, sprite));
+    assert!(s.find(P0, Zone::Hand, "Test Homing Sprite").is_some());
+}

@@ -933,6 +933,13 @@ The user's direction from here: the biggest blockers across all cards, not the p
     as running (`LayerCache`), and a card that isn't on the battlefield is looked at as
     printed from inside it; card-db already keeps anything evaluated there from looking
     at power or toughness. Regression test, mutation-checked.
+- **Cards chosen on resolution from a public zone** (`Hidden$ True` with `Origin$
+  Graveyard` or `Battlefield`: "return a creature card from your graveyard to your hand",
+  "return a creature you control to its owner's hand") compile onto `Effect::ChooseCards`.
+  Forge offers every player's matching cards; the engine's choice is among the chooser's
+  own, so the filter must say "your" (`YouOwn`/`YouCtrl`), else a blocker. And a
+  `ChangeZone` from the battlefield with neither target nor `Defined$` moves its own card
+  (Forge's default): "return this to its owner's hand". +93 cards.
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
