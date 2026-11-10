@@ -386,15 +386,26 @@ symbols and the normal Scryfall card image.
   tests). The menu has a checkbox to turn images (and with them all network use) off.
   Tests construct the app with `Art::disabled()`: no threads, no cache, no network.
 - **What is drawn.** A real card is its whole Scryfall image, scaled, never cropped or
-  recoloured, turned a quarter when tapped (Scryfall's image guidelines); the enlarged view
-  in the side panel names the artist. What the printed card can't show — current
-  power/toughness, damage, counters, attacking/blocking, summoning sickness, commander,
+  recoloured, turned a quarter when tapped (Scryfall's image guidelines). Pointing at a
+  card shows it enlarged **right next to the pointer** (beside the card, above it for cards
+  in the hand; never over the card itself), at the image's own resolution, with the artist
+  credit and the object's current state — the user asked for this instead of a preview in
+  the side panel (2026-11-09). What the printed card can't show — power/toughness
+  **only when it differs from the printed numbers** (user request: the card already shows
+  the rest), damage, counters, attacking/blocking, summoning sickness, commander,
   attachment, piles of identical lands — is drawn as small corner badges that stay clear of
   the artist/copyright line. A card without an image (the invented test cards, tokens,
   anything still loading, offline) is drawn from its `CardDef` as a plain "proxy" in the
   same shape, with rules text from `card_model::describe` — so the fallback is still what
-  the engine does. Board-size textures are 320 px wide (decoded and scaled on the worker);
-  full-size textures are kept only for the last dozen cards looked at.
+  the engine does.
+- **Sharpness.** A texture is made for the exact number of screen pixels a card (or
+  symbol) is drawn at: card sizes are whole pixels, the worker scales the image once with a
+  Lanczos filter, and it is painted one texture pixel per screen pixel. (The first version
+  used one 320 px texture for every size and let the GPU rescale it, which the user found
+  unreadable on a 1440p monitor.) Sizes above 488 px use Scryfall's `large` image.
+  Textures nothing has drawn for a while are dropped. Board cards are as tall as the
+  window allows without making a row wrap (up to 380 points), so a big monitor gets big,
+  readable cards.
 - **New dependencies (app only):** `image` (JPEG/PNG decode) and `resvg` (SVG symbols).
 - **Pacing.** The session used to run every AI decision in one frame, so a human with
   nothing to do saw their own turns back to back with no sign of the opponents' turns in
@@ -424,6 +435,22 @@ symbols and the normal Scryfall card image.
   real-card catalog is larger than the self-contained one).
 - Golden re-bless: only `state_hash` changed (the catalog is part of the state: `Selector`
   gained a field and `Test Wyrmling` was added); every `log_hash` is unchanged.
+
+## D-039 Future scope: other 1v1 constructed formats (user note 2026-11-09)
+The user wants 1v1 **Modern, Legacy, Vintage, etc.** supported in future. Nothing is built
+for this yet; it is recorded so current work doesn't close the door:
+- Formats stay *configuration* (D-004): `GameConfig` for the game rules (life, deck
+  size, mulligan/draw rules are already there), plus deck-legality rules per format — a
+  card pool, a banned list, a restricted list (Vintage) — which belong in `card-db` next to
+  the Commander validation. Scryfall's `legalities` field is the data source; it is not
+  cached yet.
+- Matches: constructed play is normally best-of-three with a 15-card sideboard; the
+  engine has no notion of a match or sideboard yet (CR 100.4, 100.6).
+- The card pool is the real cost: those formats span tens of thousands of cards. The
+  behaviour-only script + printed-data pipeline (D-035) and the vocabulary are meant to
+  scale to it, but only cards with a verified script load (invariant 8), so a format is
+  playable deck by deck, not all at once.
+- Not in M4. To be scheduled with the user after the precons (spec §13).
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may

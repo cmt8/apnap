@@ -191,3 +191,33 @@ fn players_are_clickable_targets() {
     let s = h.state().session.as_ref().unwrap();
     assert_eq!(s.st.player(P1).life, 18);
 }
+
+/// Pointing at a card shows it enlarged (next to the pointer, not in a side panel); moving
+/// off it takes the enlarged view away.
+#[test]
+fn pointing_at_a_card_enlarges_it() {
+    let mut sc = scenario();
+    sc.card(P0, Zone::Battlefield, "Test Golem");
+    sc.card(P0, Zone::Hand, "Test Shock");
+    let mut h = harness_for(sc.build());
+    assert!(h.query_by_label("Test Golem (enlarged)").is_none());
+    assert!(h.state().zoomed.is_none());
+    for name in ["Test Golem", "Test Shock"] {
+        h.query_all_by_label_contains(&format!("{name}  "))
+            .next()
+            .unwrap_or_else(|| panic!("no card {name}"))
+            .hover();
+        h.run_ok();
+        assert!(
+            h.query_by_label(&format!("{name} (enlarged)")).is_some(),
+            "{name}"
+        );
+        let zoomed = h.state().zoomed.expect("a card is enlarged");
+        let s = h.state().session.as_ref().unwrap();
+        assert_eq!(s.st.catalog.get(zoomed.card).name, name);
+    }
+    h.get_by_label("Menu").hover();
+    h.run_ok();
+    assert!(h.query_by_label("Test Shock (enlarged)").is_none());
+    assert!(h.state().zoomed.is_none());
+}

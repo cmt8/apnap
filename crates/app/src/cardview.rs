@@ -8,6 +8,7 @@
 
 use crate::art::{Art, Seg, segments};
 use card_model::{CardDef, CardType, Color, describe};
+use eframe::egui::emath::GuiRounding as _;
 use eframe::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, Response, Sense, Stroke, StrokeKind, TextureHandle,
     Vec2, pos2, vec2,
@@ -17,8 +18,21 @@ use std::sync::Arc;
 /// Width / height of a Magic card.
 pub const CARD_ASPECT: f32 = 488.0 / 680.0;
 
-pub fn card_size(height: f32) -> Vec2 {
-    vec2((height * CARD_ASPECT).round(), height.round())
+/// How far each further card of a pile peeks out, as a fraction of a card's width.
+pub const PILE_STEP: f32 = 0.11;
+
+/// The size at which a card about `height` points tall is drawn, and its width in screen
+/// pixels. The size is a whole number of pixels (a multiple of 4 wide, so resizing a window
+/// doesn't ask for a new texture at every step) and the texture is made for exactly that
+/// many, so a card is never resampled on screen.
+pub fn card_size(height: f32, pixels_per_point: f32) -> (Vec2, u32) {
+    let want = (height * CARD_ASPECT * pixels_per_point).floor() as u32;
+    let w = (want / 4 * 4).max(16);
+    let h = w * 680 / 488;
+    (
+        vec2(w as f32 / pixels_per_point, h as f32 / pixels_per_point),
+        w,
+    )
 }
 
 // ---------------------------------------------------------------------------------------
@@ -45,7 +59,9 @@ impl std::fmt::Debug for Rich {
 
 impl Rich {
     pub fn new(ui: &egui::Ui, art: &mut Art, text: &str, font: FontId) -> Rich {
-        let side = (font.size * 1.1).round();
+        let ppp = ui.pixels_per_point();
+        let side_px = (font.size * 1.1 * ppp).round().max(4.0) as u32;
+        let side = side_px as f32 / ppp;
         let mut pieces = Vec::new();
         let mut plain = String::new();
         let flush = |plain: &mut String, pieces: &mut Vec<Piece>| {
@@ -61,7 +77,7 @@ impl Rich {
         for seg in segments(text) {
             match seg {
                 Seg::Text(t) => plain.push_str(t),
-                Seg::Symbol(s) => match art.symbol(ui.ctx(), s) {
+                Seg::Symbol(s) => match art.symbol(ui.ctx(), s, side_px) {
                     Some(tex) => {
                         flush(&mut plain, &mut pieces);
                         pieces.push(Piece::Sym(tex, side));
@@ -348,6 +364,8 @@ pub fn paint_proxy(ui: &egui::Ui, art: &mut Art, rect: Rect, def: &CardDef) {
 
 /// Paint the card image into `rect`, turned a quarter clockwise if `sideways`.
 fn paint_image(painter: &egui::Painter, tex: &TextureHandle, rect: Rect, sideways: bool) {
+    // On whole pixels, so a texture made for this size maps one to one.
+    let rect = rect.round_to_pixels(painter.pixels_per_point());
     if !sideways {
         painter.image(tex.id(), rect, full_uv(), Color32::WHITE);
         return;
@@ -428,14 +446,14 @@ fn paint_badges(
 
 /// Draw a card as a clickable widget.
 pub fn card_widget(ui: &mut egui::Ui, art: &mut Art, look: &CardLook<'_>) -> Response {
-    let upright = card_size(look.height);
+    let (upright, width_px) = card_size(look.height, ui.pixels_per_point());
     let one = if look.tapped {
         vec2(upright.y, upright.x)
     } else {
         upright
     };
     let extra = look.pile.saturating_sub(1).min(4);
-    let step = (upright.x * 0.11).round();
+    let step = (upright.x * PILE_STEP).round();
     let size = one + vec2(extra as f32 * step, 0.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, look.label));
@@ -445,7 +463,7 @@ pub fn card_widget(ui: &mut egui::Ui, art: &mut Art, look: &CardLook<'_>) -> Res
     let tex = if look.def.token {
         None
     } else {
-        art.card(ui.ctx(), &look.def.name)
+        art.card(ui.ctx(), &look.def.name, width_px)
     };
     let front = Rect::from_min_size(rect.min, one);
     // The rest of a pile peeks out to the right, underneath.
@@ -485,9 +503,10 @@ pub fn card_widget(ui: &mut egui::Ui, art: &mut Art, look: &CardLook<'_>) -> Res
     resp
 }
 
-/// The enlarged view of a card: its full-size image, or a full-size proxy.
-pub fn card_large(ui: &mut egui::Ui, art: &mut Art, def: &CardDef, width: f32) -> Response {
-    let size = vec2(width, (width / CARD_ASPECT).round());
+/// The enlarged view of a card, about `height` points tall: its image, or a proxy with the
+/// full rules text.
+pub fn card_large(ui: &mut egui::Ui, art: &mut Art, def: &CardDef, height: f32) -> Response {
+    let (size, width_px) = card_size(height, ui.pixels_per_point());
     let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
     resp.widget_info(|| {
         egui::WidgetInfo::labeled(egui::Role::Image, true, format!("{} (enlarged)", def.name))
@@ -496,7 +515,7 @@ pub fn card_large(ui: &mut egui::Ui, art: &mut Art, def: &CardDef, width: f32) -
         let tex = if def.token {
             None
         } else {
-            art.full(ui.ctx(), &def.name)
+            art.card(ui.ctx(), &def.name, width_px)
         };
         match tex {
             Some(tex) => paint_image(ui.painter(), &tex, rect, false),

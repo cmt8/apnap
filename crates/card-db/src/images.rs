@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 pub enum ImageKind {
     /// The whole card (JPG, 488 x 680).
     Normal,
+    /// The whole card (JPG, 672 x 936).
+    Large,
     /// The illustration only (JPG).
     ArtCrop,
 }
@@ -29,6 +31,7 @@ pub fn image_url(card: &ScryfallCard, kind: ImageKind) -> Option<&str> {
     let uris = card.image_uris.as_ref()?;
     match kind {
         ImageKind::Normal => uris.normal.as_deref(),
+        ImageKind::Large => uris.large.as_deref(),
         ImageKind::ArtCrop => uris.art_crop.as_deref(),
     }
 }
@@ -43,6 +46,7 @@ pub fn image_path(card: &ScryfallCard, kind: ImageKind) -> Option<PathBuf> {
     }
     let dir = match kind {
         ImageKind::Normal => "normal",
+        ImageKind::Large => "large",
         ImageKind::ArtCrop => "art_crop",
     };
     Some(

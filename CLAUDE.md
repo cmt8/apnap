@@ -59,7 +59,7 @@ cargo run --release -p harness -- fuzz --setup cmd-4p --agents h-vs-r --games 20
 cargo run -p harness -- run --seed 42 --save-replay r.json && cargo run -p harness -- replay r.json
 cargo run -p harness -- bless                             # ONLY when a hash change is intended; review why
 cargo run --release -p app                                # the desktop app (you are P0); downloads card images into ~/.cache/apnap
-APNAP_SHOT_DIR=/tmp/shots cargo test -p app --test screenshot -- --ignored   # render the UI to PNGs (APNAP_SHOT_SETUP="<menu label>")
+APNAP_SHOT_DIR=/tmp/shots cargo test -p app --test screenshot -- --ignored   # render the UI to PNGs (APNAP_SHOT_SETUP="<menu label>", APNAP_SHOT_SIZE=2560x1440)
 cargo run --release -p harness -- fuzz --setup real-4p --games 1000 --threads 8      # real-card decks
 cargo run -p harness -- fetch-cards                       # printed data for the precons + basics -> ~/.cache/apnap (tests need it)
 cargo run -p harness -- coverage [--verbose]              # which precon cards are scripted/verified
@@ -87,9 +87,10 @@ cargo run -p harness -- coverage [--verbose]              # which precon cards a
   `--agents random|heuristic|h-vs-r`,
   `script::Script` test driver, determinism/golden/property/rules tests.
 - `crates/app` — the desktop app: `session.rs` (game + AI seats + stops + save/replay, no
-  graphics), `ui.rs` (egui view: layout, decisions, pacing), `cardview.rs` (card widget:
-  image or drawn proxy, badges, mana-symbol text), `art.rs` (Scryfall images/symbols:
-  worker threads + cache; `Art::disabled()` in tests), tests driven headlessly with
+  graphics), `ui.rs` (egui view: layout, decisions, pacing, the enlarged card next to the
+  pointer), `cardview.rs` (card widget: image or drawn proxy, badges, mana-symbol text),
+  `art.rs` (Scryfall images/symbols: worker threads + cache, one texture per exact pixel
+  size; `Art::disabled()` in tests), tests driven headlessly with
   egui_kittest (D-036, D-037). `card-db/src/images.rs` = image/symbol paths + download.
 - `crates/xtask` — check-deps.
 - Engine extras: `stack.rs` (StackObject), `targeting.rs` (choose + 608.2b legality in one
@@ -115,6 +116,11 @@ Real-card scripts hold behaviour only: no Oracle text in them, not even in comme
 Real-card work needs `cargo run -p harness -- fetch-cards` once (network).
 Acceptance (spec §13 M4): coverage 100% verified, each card >= 1 test, 10,000 AI 4-player
 games clean, the app playable by mouse with a widget per ChoiceKind, save/load/replay in app.
+
+### Future scope (not M4)
+The user wants 1v1 Modern, Legacy, Vintage etc. later (D-039): formats are configuration
+(GameConfig + per-format deck legality in card-db), never engine forks; don't hard-code
+Commander or the precon pool anywhere new.
 
 ## Previous milestone: M3 — DONE (2026-11-09).
 M3 delivered: combat keywords (first/double strike, trample + deathtouch, lifelink, vigilance,

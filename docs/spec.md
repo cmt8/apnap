@@ -13,7 +13,7 @@ Build it as a Rust workspace with a pure, deterministic engine crate. Every muta
 ## 1. Goals and Non-Goals
 
 ### Goals
-1. Play 4-player free-for-all Commander: 1 human vs 3 CPU opponents, on Linux (Arch) desktop. Also traditional 60-card 1v1 constructed (20 life). Formats are game configuration (`GameConfig`), not forks of the engine (decisions.md D-004). Windows and macOS targets later.
+1. Play 4-player free-for-all Commander: 1 human vs 3 CPU opponents, on Linux (Arch) desktop. Also traditional 60-card 1v1 constructed (20 life). Future: named 1v1 constructed formats — Modern, Legacy, Vintage, … — as deck-legality configuration (user note 2026-11-09, decisions.md D-039). Formats are game configuration (`GameConfig`), not forks of the engine (decisions.md D-004). Windows and macOS targets later.
 2. A rules engine that is a **pure deterministic state machine**: actions in, new state plus events out, seeded RNG, serializable state, bit-for-bit replays.
 3. **Cloneable state** cheap enough for AI search (thousands of clones per decision).
 4. **Data-driven cards**: most cards are RON data composed from a shared vocabulary of costs, effects, targets, conditions, triggers, statics and replacements.

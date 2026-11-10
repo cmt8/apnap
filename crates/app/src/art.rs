@@ -10,29 +10,36 @@
 use card_db::images::{self, ImageKind};
 use card_db::scryfall::{self, ScryfallData};
 use eframe::egui::{self, ColorImage, TextureHandle};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 
-/// Width of the textures used on the board and in the hand (the full image is only kept
-/// for the cards being looked at closely).
-const BOARD_WIDTH: u32 = 320;
-/// How many full-size card textures are kept.
-const FULL_KEPT: usize = 12;
-const SYMBOL_PX: u32 = 64;
+/// Width of Scryfall's `normal` image; anything shown wider uses `large`.
+const NORMAL_WIDTH: u32 = 488;
+/// A texture nothing has drawn for this many frames is dropped.
+const UNUSED_FRAMES: u64 = 1_500;
 const WORKERS: usize = 3;
 
+/// A texture is made for the exact number of screen pixels it is drawn at (scaled once, with
+/// a good filter, on a worker), so cards and symbols are as sharp as the screen allows.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Key {
-    Board(String),
-    Full(String),
-    Symbol(String),
+    /// Card name, width in pixels.
+    Card(String, u32),
+    /// Symbol code, side in pixels.
+    Symbol(String, u32),
 }
 
-enum Slot {
+enum State {
     Loading,
     Ready(TextureHandle),
     Failed,
+}
+
+struct Slot {
+    state: State,
+    /// The frame it was last asked for.
+    used: u64,
 }
 
 enum Job {
@@ -66,7 +73,7 @@ pub struct Art {
     jobs: Option<mpsc::Sender<Job>>,
     done: Option<mpsc::Receiver<Done>>,
     slots: BTreeMap<Key, Slot>,
-    full_order: VecDeque<String>,
+    frame: u64,
     data_requested: bool,
     /// Files being downloaded or decoded right now.
     pub pending: usize,
@@ -96,7 +103,7 @@ impl Art {
             jobs: None,
             done: None,
             slots: BTreeMap::new(),
-            full_order: VecDeque::new(),
+            frame: 0,
             data_requested: true,
             pending: 0,
             last_error: None,
@@ -131,7 +138,7 @@ impl Art {
             jobs: Some(job_tx),
             done: Some(done_rx),
             slots: BTreeMap::new(),
-            full_order: VecDeque::new(),
+            frame: 0,
             data_requested: false,
             pending: 0,
             last_error: None,
@@ -140,6 +147,14 @@ impl Art {
 
     pub fn enabled(&self) -> bool {
         self.jobs.is_some()
+    }
+
+    /// How many textures are held (for tests and the debug line).
+    pub fn textures(&self) -> usize {
+        self.slots
+            .values()
+            .filter(|s| matches!(s.state, State::Ready(_)))
+            .count()
     }
 
     /// Make sure the printed data (image addresses, artists) for `names` is cached,
@@ -162,8 +177,13 @@ impl Art {
         }
     }
 
-    /// Take finished work from the workers. Call once per frame.
+    /// Take finished work from the workers and drop textures nothing draws any more. Call
+    /// once per frame.
     pub fn poll(&mut self, ctx: &egui::Context) {
+        self.frame += 1;
+        let frame = self.frame;
+        self.slots
+            .retain(|_, s| matches!(s.state, State::Loading) || s.used + UNUSED_FRAMES >= frame);
         let Some(rx) = &self.done else {
             return;
         };
@@ -172,22 +192,22 @@ impl Art {
             self.pending = self.pending.saturating_sub(1);
             match d {
                 Done::Image { key, result } => {
-                    let slot = match result {
+                    let state = match result {
                         Ok(img) => {
                             let name = format!("{key:?}");
-                            Slot::Ready(ctx.load_texture(name, img, texture_options()))
+                            State::Ready(ctx.load_texture(name, img, egui::TextureOptions::LINEAR))
                         }
                         Err(e) => {
                             self.last_error = Some(e);
-                            Slot::Failed
+                            State::Failed
                         }
                     };
-                    self.slots.insert(key, slot);
+                    self.slots.insert(key, Slot { state, used: frame });
                 }
                 Done::Data(Ok(data)) => {
                     self.data = data;
                     // Cards that had no image address may have one now.
-                    self.slots.retain(|_, s| !matches!(s, Slot::Failed));
+                    self.slots.retain(|_, s| !matches!(s.state, State::Failed));
                 }
                 Done::Data(Err(e)) => self.last_error = Some(e),
             }
@@ -195,29 +215,39 @@ impl Art {
     }
 
     fn request(&mut self, ctx: &egui::Context, key: Key) -> Option<TextureHandle> {
-        match self.slots.get(&key) {
-            Some(Slot::Ready(t)) => return Some(t.clone()),
-            Some(Slot::Loading | Slot::Failed) => return None,
-            None => {}
+        if let Some(slot) = self.slots.get_mut(&key) {
+            slot.used = self.frame;
+            return match &slot.state {
+                State::Ready(t) => Some(t.clone()),
+                State::Loading | State::Failed => None,
+            };
         }
+        let failed = Slot {
+            state: State::Failed,
+            used: self.frame,
+        };
         let tx = self.jobs.as_ref()?;
         let (path, url) = match &key {
-            Key::Board(name) | Key::Full(name) => {
+            Key::Card(name, px) => {
                 let Some(card) = self.data.get(name) else {
                     // Not a real card (or its data hasn't arrived yet: `poll` retries).
-                    self.slots.insert(key, Slot::Failed);
+                    self.slots.insert(key, failed);
                     return None;
                 };
-                let Some(path) = images::image_path(card, ImageKind::Normal) else {
-                    self.slots.insert(key, Slot::Failed);
+                // The smallest of Scryfall's sizes that has enough pixels.
+                let kind =
+                    if *px > NORMAL_WIDTH && images::image_url(card, ImageKind::Large).is_some() {
+                        ImageKind::Large
+                    } else {
+                        ImageKind::Normal
+                    };
+                let Some(path) = images::image_path(card, kind) else {
+                    self.slots.insert(key, failed);
                     return None;
                 };
-                (
-                    path,
-                    images::image_url(card, ImageKind::Normal).map(str::to_string),
-                )
+                (path, images::image_url(card, kind).map(str::to_string))
             }
-            Key::Symbol(code) => (images::symbol_path(code), Some(images::symbol_url(code))),
+            Key::Symbol(code, _) => (images::symbol_path(code), Some(images::symbol_url(code))),
         };
         let job = Job::Image {
             key: key.clone(),
@@ -227,35 +257,53 @@ impl Art {
         };
         if tx.send(job).is_ok() {
             self.pending += 1;
-            self.slots.insert(key, Slot::Loading);
+            self.slots.insert(
+                key,
+                Slot {
+                    state: State::Loading,
+                    used: self.frame,
+                },
+            );
         }
         None
     }
 
-    /// The card's image at board size, once it is ready.
-    pub fn card(&mut self, ctx: &egui::Context, name: &str) -> Option<TextureHandle> {
-        self.request(ctx, Key::Board(name.to_string()))
-    }
-
-    /// The card's image at full size (for the enlarged view); falls back to the board
-    /// texture while the full one loads.
-    pub fn full(&mut self, ctx: &egui::Context, name: &str) -> Option<TextureHandle> {
-        let key = Key::Full(name.to_string());
-        if !self.slots.contains_key(&key) {
-            self.full_order.push_back(name.to_string());
-            while self.full_order.len() > FULL_KEPT {
-                if let Some(old) = self.full_order.pop_front() {
-                    self.slots.remove(&Key::Full(old));
-                }
-            }
+    /// The card's image for drawing it `width_px` screen pixels wide. While that exact size
+    /// is being made, the closest size already there is returned instead.
+    pub fn card(
+        &mut self,
+        ctx: &egui::Context,
+        name: &str,
+        width_px: u32,
+    ) -> Option<TextureHandle> {
+        let width_px = width_px.max(1);
+        if let Some(t) = self.request(ctx, Key::Card(name.to_string(), width_px)) {
+            return Some(t);
         }
-        self.request(ctx, key).or_else(|| self.card(ctx, name))
+        let all = Key::Card(name.to_string(), 0)..=Key::Card(name.to_string(), u32::MAX);
+        let frame = self.frame;
+        self.slots
+            .range_mut(all)
+            .filter_map(|(k, s)| match (k, &s.state) {
+                (Key::Card(_, px), State::Ready(t)) => Some((px.abs_diff(width_px), t.clone(), s)),
+                _ => None,
+            })
+            .min_by_key(|(d, _, _)| *d)
+            .map(|(_, t, slot)| {
+                slot.used = frame;
+                t
+            })
     }
 
-    /// The texture for a symbol such as `{G}` or `{T}`.
-    pub fn symbol(&mut self, ctx: &egui::Context, symbol: &str) -> Option<TextureHandle> {
+    /// The texture for a symbol such as `{G}` or `{T}`, `side_px` screen pixels across.
+    pub fn symbol(
+        &mut self,
+        ctx: &egui::Context,
+        symbol: &str,
+        side_px: u32,
+    ) -> Option<TextureHandle> {
         let code = images::symbol_code(symbol)?;
-        self.request(ctx, Key::Symbol(code))
+        self.request(ctx, Key::Symbol(code, side_px.max(1)))
     }
 
     /// "Illustrated by …", for the enlarged view of a real card.
@@ -268,20 +316,6 @@ impl Art {
             }
             _ => format!("Illustrated by {artist}"),
         })
-    }
-
-    /// The printed (Oracle) text of a real card, if its data is cached.
-    pub fn oracle_text(&self, name: &str) -> Option<&str> {
-        self.data.get(name)?.oracle_text.as_deref()
-    }
-}
-
-fn texture_options() -> egui::TextureOptions {
-    egui::TextureOptions {
-        magnification: egui::TextureFilter::Linear,
-        minification: egui::TextureFilter::Linear,
-        wrap_mode: egui::TextureWrapMode::ClampToEdge,
-        mipmap_mode: Some(egui::TextureFilter::Linear),
     }
 }
 
@@ -330,9 +364,8 @@ fn load(key: &Key, path: &Path, url: Option<&str>) -> Result<ColorImage, String>
     }
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let decoded = match key {
-        Key::Board(_) => decode_card(&bytes, Some(BOARD_WIDTH)),
-        Key::Full(_) => decode_card(&bytes, None),
-        Key::Symbol(_) => decode_svg(&bytes, SYMBOL_PX),
+        Key::Card(_, px) => decode_card(&bytes, *px),
+        Key::Symbol(_, px) => decode_svg(&bytes, *px),
     };
     decoded.map_err(|e| {
         // A file that doesn't decode is useless: remove it so it is fetched again.
@@ -341,16 +374,20 @@ fn load(key: &Key, path: &Path, url: Option<&str>) -> Result<ColorImage, String>
     })
 }
 
-/// Decode a card image, optionally scale it to `width`, and cut the corners round (the
-/// JPGs have square, filled corners).
-pub fn decode_card(bytes: &[u8], width: Option<u32>) -> Result<ColorImage, String> {
+/// Decode a card image, scale it down to `width` pixels if it is wider (never up: the
+/// screen does that better), and cut the corners round (the JPGs have square, filled
+/// corners).
+pub fn decode_card(bytes: &[u8], width: u32) -> Result<ColorImage, String> {
     let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
     let mut rgba = img.to_rgba8();
-    if let Some(w) = width
-        && w < rgba.width()
-    {
-        let h = (u64::from(rgba.height()) * u64::from(w) / u64::from(rgba.width())) as u32;
-        rgba = image::imageops::resize(&rgba, w, h.max(1), image::imageops::FilterType::CatmullRom);
+    if width < rgba.width() {
+        let h = (u64::from(rgba.height()) * u64::from(width) / u64::from(rgba.width())) as u32;
+        rgba = image::imageops::resize(
+            &rgba,
+            width.max(1),
+            h.max(1),
+            image::imageops::FilterType::Lanczos3,
+        );
     }
     let (w, h) = (rgba.width() as usize, rgba.height() as usize);
     let mut px = rgba.into_raw();
@@ -491,13 +528,14 @@ mod tests {
                 image::ImageFormat::Jpeg,
             )
             .unwrap();
-        let board = decode_card(&jpg, Some(BOARD_WIDTH)).unwrap();
+        let board = decode_card(&jpg, 320).unwrap();
         assert_eq!(board.size, [320, 445]);
         assert_eq!(board.pixels[0].a(), 0);
         assert!(board.pixels[445 / 2 * 320 + 160].r() > 150);
-        let full = decode_card(&jpg, None).unwrap();
+        // Never scaled up: asking for more pixels than the file has gives the file's size.
+        let full = decode_card(&jpg, 900).unwrap();
         assert_eq!(full.size, [488, 680]);
-        assert!(decode_card(b"not an image", None).is_err());
+        assert!(decode_card(b"not an image", 320).is_err());
     }
 
     #[test]
@@ -536,7 +574,8 @@ mod tests {
             r#"{"cards": {
                 "Forest": {"name": "Forest", "id": "aaaa-1111", "artist": "A. Painter",
                            "set": "tst", "collector_number": "7",
-                           "image_uris": {"normal": "https://cards.scryfall.io/normal/f.jpg"}},
+                           "image_uris": {"normal": "https://cards.scryfall.io/normal/f.jpg",
+                                          "large": "https://cards.scryfall.io/large/f.jpg"}},
                 "Swamp": {"name": "Swamp", "id": "bbbb-2222",
                           "image_uris": {"normal": "https://cards.scryfall.io/normal/s.jpg"}}
             }}"#,
@@ -559,20 +598,36 @@ mod tests {
 
         let ctx = egui::Context::default();
         let mut art = Art::with_cache(root.clone(), data, false);
-        let board = settle(&mut art, &ctx, |a, c| a.card(c, "Forest")).expect("cached");
-        assert_eq!(board.size(), [320, 445]);
-        let full = settle(&mut art, &ctx, |a, c| a.full(c, "Forest")).expect("cached");
+        // Each size asked for is made at exactly that many pixels.
+        let board = settle(&mut art, &ctx, |a, c| a.card(c, "Forest", 160)).expect("cached");
+        assert_eq!(board.size(), [160, 222]);
+        let full = settle(&mut art, &ctx, |a, c| a.card(c, "Forest", 488)).expect("cached");
         assert_eq!(full.size(), [488, 680]);
+        // A size that isn't ready yet is stood in for by the closest one that is.
+        let stand_in = art.card(&ctx, "Forest", 200).expect("a stand-in");
+        assert_eq!(stand_in.size(), [160, 222]);
+        let exact = settle(&mut art, &ctx, |a, c| a.card(c, "Forest", 200)).expect("cached");
+        assert_eq!(exact.size(), [200, 278]);
+        // Wider than `normal`: the `large` file is wanted, and it isn't cached — offline,
+        // the widest size already made stands in and nothing is fetched.
+        let big = settle(&mut art, &ctx, |a, c| a.card(c, "Forest", 600)).expect("a stand-in");
+        assert_eq!(big.size(), [488, 680]);
+        assert!(
+            art.last_error
+                .as_deref()
+                .is_some_and(|e| e.contains("not cached"))
+        );
+        art.last_error = None;
         assert_eq!(
             art.credit("Forest").as_deref(),
             Some("Illustrated by A. Painter · TST #7")
         );
-        let symbol = settle(&mut art, &ctx, |a, c| a.symbol(c, "{G}")).expect("cached");
-        assert_eq!(symbol.size(), [64, 64]);
+        let symbol = settle(&mut art, &ctx, |a, c| a.symbol(c, "{G}", 18)).expect("cached");
+        assert_eq!(symbol.size(), [18, 18]);
         assert!(art.last_error.is_none());
 
         // Offline, an image that isn't cached is simply not shown — and nothing is fetched.
-        assert!(settle(&mut art, &ctx, |a, c| a.card(c, "Swamp")).is_none());
+        assert!(settle(&mut art, &ctx, |a, c| a.card(c, "Swamp", 160)).is_none());
         assert!(
             art.last_error
                 .as_deref()
@@ -580,9 +635,16 @@ mod tests {
         );
         let swamp = images::image_path(art.data.get("Swamp").unwrap(), ImageKind::Normal).unwrap();
         assert!(!root.join(swamp).exists());
-        assert!(settle(&mut art, &ctx, |a, c| a.symbol(c, "{R}")).is_none());
+        assert!(settle(&mut art, &ctx, |a, c| a.symbol(c, "{R}", 18)).is_none());
+        // Textures nothing draws any more are dropped.
+        let held = art.textures();
+        assert!(held >= 4);
+        for _ in 0..=UNUSED_FRAMES {
+            art.poll(&ctx);
+        }
+        assert_eq!(art.textures(), 0);
         // A card Scryfall doesn't know (an invented test card) is never even requested.
-        assert!(art.card(&ctx, "Test Golem").is_none());
+        assert!(art.card(&ctx, "Test Golem", 160).is_none());
         assert_eq!(art.pending, 0);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -591,8 +653,8 @@ mod tests {
     fn without_images_nothing_is_requested() {
         let ctx = egui::Context::default();
         let mut art = Art::disabled();
-        assert!(art.card(&ctx, "Forest").is_none());
-        assert!(art.symbol(&ctx, "{G}").is_none());
+        assert!(art.card(&ctx, "Forest", 160).is_none());
+        assert!(art.symbol(&ctx, "{G}", 18).is_none());
         art.poll(&ctx);
         assert_eq!(art.pending, 0);
         assert!(!art.enabled());

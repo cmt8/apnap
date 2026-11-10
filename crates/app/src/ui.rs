@@ -83,11 +83,11 @@ pub struct App {
     /// Pause after each thing an AI seat visibly does, in milliseconds (0 = no pause).
     pub pace_ms: u64,
     resume_at: Option<Instant>,
-    /// The card shown enlarged: the last one the pointer was over.
-    pub preview: Option<Preview>,
+    /// The card under the pointer, shown enlarged next to it.
+    pub zoomed: Option<Preview>,
 }
 
-/// The card shown enlarged in the side panel.
+/// The card shown enlarged next to the pointer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Preview {
     pub card: CardDefId,
@@ -154,7 +154,7 @@ impl App {
             art,
             pace_ms,
             resume_at: None,
-            preview: None,
+            zoomed: None,
         };
         app.refresh_saves();
         app
@@ -209,7 +209,7 @@ impl App {
         self.screen = Screen::Game;
         self.status.clear();
         self.decision_id = u64::MAX;
-        self.preview = None;
+        self.zoomed = None;
         self.resume_at = None;
     }
 
@@ -463,7 +463,17 @@ impl Ctx<'_> {
 struct Pointer {
     /// The options of the card or player that was clicked.
     clicked: Option<Vec<usize>>,
-    hovered: Option<Preview>,
+    hovered: Option<Hover>,
+}
+
+/// The card under the pointer.
+#[derive(Clone, Copy)]
+struct Hover {
+    card: Preview,
+    /// Where it is drawn.
+    rect: egui::Rect,
+    /// It is in the hand, along the bottom edge: the enlarged view goes above it.
+    in_hand: bool,
 }
 
 /// Where a card is being drawn.
@@ -525,6 +535,19 @@ fn card_text(o: &ObjectView, cat: &CardCatalog) -> String {
         text.push_str(&format!("\n{}", flags.join(" · ")));
     }
     text
+}
+
+/// The colour of a creature's power/toughness badge — or `None` when it has exactly its
+/// printed power and toughness, which the card itself already shows.
+fn pt_badge(printed: (Option<i32>, Option<i32>), now: (i32, i32)) -> Option<Color32> {
+    match printed {
+        (Some(p), Some(t)) if (p, t) == now => None,
+        (Some(p), Some(t)) if now.0 >= p && now.1 >= t => Some(GREEN),
+        (Some(p), Some(t)) if now.0 <= p && now.1 <= t => Some(RED),
+        // Up in one, down in the other — or nothing printed to compare with (an animated
+        // land, a power set by an ability).
+        _ => Some(Color32::WHITE),
+    }
 }
 
 /// The state a printed card can't show, as corner badges.
@@ -597,17 +620,14 @@ fn badges(cx: &Ctx<'_>, o: &ObjectView, place: Place) -> Vec<Badge> {
     }
     if let (true, Some(p), Some(t)) = (creature, o.power, o.toughness) {
         let def = cx.cat.get(o.card);
-        let fg = match (def.power, def.toughness) {
-            (Some(pp), Some(pt)) if p > pp || t > pt => GREEN,
-            (Some(pp), Some(pt)) if p < pp || t < pt => RED,
-            _ => Color32::WHITE,
-        };
-        out.push(Badge::new(
-            Corner::BottomRight,
-            format!("{p}/{t}"),
-            DARK,
-            fg,
-        ));
+        if let Some(fg) = pt_badge((def.power, def.toughness), (p, t)) {
+            out.push(Badge::new(
+                Corner::BottomRight,
+                format!("{p}/{t}"),
+                DARK,
+                fg,
+            ));
+        }
         if o.damage_marked > 0 {
             out.push(Badge::new(
                 Corner::BottomRight,
@@ -663,9 +683,14 @@ fn card(
     };
     let resp = cardview::card_widget(ui, art, &look);
     if resp.hovered() {
-        ptr.hovered = Some(Preview {
+        let pv = Preview {
             card: o.card,
             object: Some(o.id),
+        };
+        ptr.hovered = Some(Hover {
+            card: pv,
+            rect: resp.rect,
+            in_hand: place == Place::Hand,
         });
     }
     if resp.clicked() && !opts.is_empty() {
@@ -711,11 +736,116 @@ fn piles<'a>(cx: &Ctx<'_>, lands: &[&'a ObjectView]) -> Vec<Vec<&'a ObjectView>>
     out
 }
 
+/// What one player has on the table, in drawing order.
+struct Rows<'a> {
+    /// Their cards in the command zone.
+    command: Vec<&'a ObjectView>,
+    /// Nonland permanents (and lands that are creatures), each followed by what is
+    /// attached to it.
+    others: Vec<&'a ObjectView>,
+    /// Lands, identical ones piled.
+    lands: Vec<Vec<&'a ObjectView>>,
+}
+
+fn rows<'a>(cx: &Ctx<'a>, p: PlayerId) -> Rows<'a> {
+    let v = cx.view;
+    let mine = |o: &&ObjectView| o.controller == p;
+    let command: Vec<&ObjectView> = v.command.iter().filter(|o| o.owner == p).collect();
+    let is_plain_land = |o: &&ObjectView| {
+        o.card_types.contains(&CardType::Land) && !o.card_types.contains(&CardType::Creature)
+    };
+    let lands: Vec<&ObjectView> = v
+        .battlefield
+        .iter()
+        .filter(mine)
+        .filter(is_plain_land)
+        .collect();
+    let others: Vec<&ObjectView> = v
+        .battlefield
+        .iter()
+        .filter(mine)
+        .filter(|o| !is_plain_land(o))
+        .collect();
+    // Each permanent is followed by what is attached to it (if that is here too).
+    let mut ordered: Vec<&ObjectView> = Vec::new();
+    for o in &others {
+        let host_here = o
+            .attached_to
+            .is_some_and(|h| others.iter().any(|x| x.id == h));
+        if !host_here {
+            ordered.push(o);
+            ordered.extend(others.iter().filter(|a| a.attached_to == Some(o.id)));
+        }
+    }
+    Rows {
+        command,
+        others: ordered,
+        lands: piles(cx, &lands),
+    }
+}
+
+/// Space between cards in a row.
+const CARD_GAP: f32 = 6.0;
+
+impl Rows<'_> {
+    /// How wide the two rows are: (width in card heights, width that doesn't scale).
+    fn extents(&self) -> [(f32, f32); 2] {
+        let one = |o: &ObjectView| {
+            if o.tapped { 1.0 } else { cardview::CARD_ASPECT }
+        };
+        let mut top = (0.0, 0.0);
+        for _ in &self.command {
+            top.0 += cardview::CARD_ASPECT;
+            top.1 += CARD_GAP;
+        }
+        for o in &self.others {
+            top.0 += one(o);
+            top.1 += CARD_GAP;
+        }
+        let mut lands = (0.0, 0.0);
+        for g in &self.lands {
+            let peek =
+                (g.len() as f32 - 1.0).min(4.0) * cardview::PILE_STEP * cardview::CARD_ASPECT;
+            lands.0 += one(g[0]) + peek;
+            lands.1 += CARD_GAP;
+        }
+        [top, lands]
+    }
+}
+
+/// The tallest card (the viewer's; opponents' are `OPPONENT_SCALE` of it) at which every
+/// player's permanents fit across `width` without wrapping.
+fn height_that_fits(cx: &Ctx<'_>, width: f32) -> f32 {
+    let v = cx.view;
+    let mut best = f32::INFINITY;
+    for (i, pl) in v.players.iter().enumerate() {
+        if pl.has_lost {
+            continue;
+        }
+        let p = PlayerId(i as u8);
+        let [top, lands] = rows(cx, p).extents();
+        // Separators and the frame around the area.
+        let slack = 44.0;
+        let candidates = if p == v.viewer {
+            vec![(top, 1.0), (lands, 1.0)]
+        } else {
+            // Opponents: both in one row, smaller.
+            vec![((top.0 + lands.0, top.1 + lands.1), OPPONENT_SCALE)]
+        };
+        for ((units, fixed), scale) in candidates {
+            if units > 0.0 {
+                best = best.min((width - fixed - slack) / units / scale);
+            }
+        }
+    }
+    best
+}
+
 /// A row of cards that wraps, centred vertically so sideways cards line up.
 fn card_row(ui: &mut egui::Ui, height: f32, add: impl FnOnce(&mut egui::Ui)) {
     let layout = egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true);
     ui.allocate_ui_with_layout(vec2(ui.available_width(), height), layout, |ui| {
-        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+        ui.spacing_mut().item_spacing = vec2(CARD_GAP, CARD_GAP);
         ui.set_min_height(height);
         add(ui);
     });
@@ -807,35 +937,11 @@ fn player_area(
         // CR 800.4a: everything they owned has left the game; only the header remains.
         return;
     }
-    let mine = |o: &&ObjectView| o.controller == p;
-    let command: Vec<&ObjectView> = v.command.iter().filter(|o| o.owner == p).collect();
-    let is_plain_land = |o: &&ObjectView| {
-        o.card_types.contains(&CardType::Land) && !o.card_types.contains(&CardType::Creature)
-    };
-    let lands: Vec<&ObjectView> = v
-        .battlefield
-        .iter()
-        .filter(mine)
-        .filter(is_plain_land)
-        .collect();
-    let others: Vec<&ObjectView> = v
-        .battlefield
-        .iter()
-        .filter(mine)
-        .filter(|o| !is_plain_land(o))
-        .collect();
-    // Each permanent is followed by what is attached to it (if that is here too).
-    let mut ordered: Vec<&ObjectView> = Vec::new();
-    for o in &others {
-        let host_here = o
-            .attached_to
-            .is_some_and(|h| others.iter().any(|x| x.id == h));
-        if !host_here {
-            ordered.push(o);
-            ordered.extend(others.iter().filter(|a| a.attached_to == Some(o.id)));
-        }
-    }
-    let lands = piles(cx, &lands);
+    let Rows {
+        command,
+        others: ordered,
+        lands,
+    } = rows(cx, p);
     let draw_others = |ui: &mut egui::Ui, art: &mut Art, ptr: &mut Pointer| {
         for o in &command {
             card(ui, art, cx, &[*o], Place::Command, height, ptr);
@@ -1051,40 +1157,51 @@ fn top_bar(
     }
 }
 
-/// The enlarged card, with what the game currently says about it.
-fn preview_panel(ui: &mut egui::Ui, art: &mut Art, cx: &Ctx<'_>, preview: Option<Preview>) {
-    let width = ui.available_width().min(300.0);
-    let Some(pv) = preview else {
-        let size = vec2(width, (width / cardview::CARD_ASPECT).round());
-        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-        ui.painter()
-            .rect_filled(rect, width * 0.048, Color32::from_gray(36));
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "Point at a card to see it here",
-            egui::FontId::proportional(13.0),
-            Color32::from_gray(140),
-        );
-        ui.small(" ");
-        ui.small(" ");
-        return;
+/// Where the enlarged card goes: next to the card it enlarges, never over it, and on
+/// screen. A card in the hand gets it above (the hand runs along the bottom, so its
+/// neighbours stay visible); any other card gets it to the right, or to the left if there
+/// is no room.
+fn zoom_position(
+    screen: egui::Rect,
+    near: egui::Rect,
+    size: egui::Vec2,
+    in_hand: bool,
+) -> (f32, f32) {
+    let gap = 10.0;
+    if in_hand && near.top() - gap - size.y >= screen.top() {
+        let x = (near.center().x - size.x / 2.0)
+            .min(screen.right() - size.x - 4.0)
+            .max(screen.left() + 4.0);
+        return (x, near.top() - gap - size.y);
+    }
+    let x = if near.right() + gap + size.x <= screen.right() {
+        near.right() + gap
+    } else if near.left() - gap - size.x >= screen.left() {
+        near.left() - gap - size.x
+    } else {
+        screen.right() - size.x - 4.0
     };
+    let y = (near.center().y - size.y / 2.0)
+        .min(screen.bottom() - size.y - 4.0)
+        .max(screen.top() + 4.0);
+    (x, y)
+}
+
+/// The card under the pointer, enlarged right next to it (never over it), with the artist
+/// credit and what the game currently says about the object.
+fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
+    let (pv, near) = (hover.card, hover.rect);
+    let screen = ctx.content_rect();
+    let ppp = ctx.pixels_per_point();
+    // The image's own size where the screen allows (one image pixel per screen pixel).
+    let height = (680.0 / ppp).max(500.0).min(screen.height() - 70.0);
+    let (card, _) = cardview::card_size(height, ppp);
     let def = cx.cat.get(pv.card);
-    cardview::card_large(ui, art, def, width);
     let credit = if def.token {
         None
     } else {
         art.credit(&def.name)
     };
-    ui.add(
-        egui::Label::new(
-            RichText::new(credit.unwrap_or_else(|| " ".into()))
-                .small()
-                .weak(),
-        )
-        .truncate(),
-    );
     // What the picture can't show: the object's current state.
     let mut now: Vec<String> = Vec::new();
     if let Some(o) = pv.object.and_then(|id| find_object(cx.view, id)) {
@@ -1108,25 +1225,35 @@ fn preview_panel(ui: &mut egui::Ui, art: &mut Art, cx: &Ctx<'_>, preview: Option
             ));
         }
     }
-    let now = if now.is_empty() {
-        " ".to_string()
-    } else {
-        format!("Now: {}", now.join(" · "))
-    };
-    ui.add(egui::Label::new(RichText::new(now).small()).truncate());
+    let lines = usize::from(credit.is_some()) + usize::from(!now.is_empty());
+    let size = card + vec2(12.0, 12.0 + lines as f32 * 18.0);
+    let (x, y) = zoom_position(screen, near, size, hover.in_hand);
+    egui::Area::new(egui::Id::unique("zoomed card"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(egui::pos2(x, y))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(Color32::from_rgb(18, 18, 22))
+                .stroke(Stroke::new(1.0, Color32::from_gray(90)))
+                .corner_radius(10.0)
+                .inner_margin(6.0)
+                .show(ui, |ui| {
+                    ui.set_max_width(card.x);
+                    cardview::card_large(ui, art, def, height);
+                    if let Some(credit) = credit {
+                        ui.add(egui::Label::new(RichText::new(credit).small().weak()).truncate());
+                    }
+                    if !now.is_empty() {
+                        let text = format!("Now: {}", now.join(" · "));
+                        ui.add(egui::Label::new(RichText::new(text).small()).truncate());
+                    }
+                });
+        });
 }
 
-fn side_panel(
-    ui: &mut egui::Ui,
-    art: &mut Art,
-    cx: &Ctx<'_>,
-    s: &Session,
-    preview: Option<Preview>,
-    ptr: &mut Pointer,
-) {
+fn side_panel(ui: &mut egui::Ui, art: &mut Art, cx: &Ctx<'_>, s: &Session, ptr: &mut Pointer) {
     let v = cx.view;
-    preview_panel(ui, art, cx, preview);
-    ui.separator();
     ui.strong("Stack (top first)");
     if v.stack.is_empty() {
         ui.weak("empty");
@@ -1160,7 +1287,7 @@ fn side_panel(
             let look = CardLook {
                 def: cx.cat.get(so.card),
                 label: &format!("on the stack: {line}"),
-                height: 64.0,
+                height: 96.0,
                 tapped: false,
                 pile: 1,
                 outline: (!opts.is_empty()).then_some(Stroke::new(2.5, GOLD)),
@@ -1168,9 +1295,14 @@ fn side_panel(
             };
             let resp = cardview::card_widget(ui, art, &look);
             if resp.hovered() {
-                ptr.hovered = Some(Preview {
+                let pv = Preview {
                     card: so.card,
                     object: None,
+                };
+                ptr.hovered = Some(Hover {
+                    card: pv,
+                    rect: resp.rect,
+                    in_hand: false,
                 });
             }
             if resp.clicked() && !opts.is_empty() {
@@ -1470,9 +1602,9 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
         );
     });
     egui::Panel::right("side")
-        .default_size(316.0)
+        .default_size(280.0)
         .show(ui, |ui| {
-            side_panel(ui, art, &cx, session, app.preview, &mut ptr);
+            side_panel(ui, art, &cx, session, &mut ptr);
         });
     egui::Panel::bottom("bottom").show(ui, |ui| {
         if let Some(result) = &session.st.result {
@@ -1507,9 +1639,9 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
         let hand_h = if n == 0 {
             0.0
         } else {
-            (window.y * 0.19).clamp(120.0, 230.0)
+            (window.y * 0.2).clamp(120.0, 300.0)
         };
-        let w = cardview::card_size(hand_h).x;
+        let w = cardview::card_size(hand_h, ui.pixels_per_point()).0.x;
         let (row, _) =
             ui.allocate_exact_size(vec2(ui.available_width(), hand_h), egui::Sense::hover());
         let step = if n > 1 {
@@ -1540,7 +1672,13 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
             .count();
         let chrome = n as f32 * 48.0;
         let rows = opponents as f32 * OPPONENT_SCALE + 2.0;
-        let height = ((ui.available_height() - chrome) / rows).clamp(84.0, 210.0);
+        // As tall as the panel allows, but not so tall that a row has to wrap — unless
+        // that would make the cards tiny, in which case rows wrap and the board scrolls.
+        let by_height = (ui.available_height() - chrome) / rows;
+        let by_width = height_that_fits(&cx, ui.available_width());
+        let height = by_height
+            .min(by_width.max(MIN_UNWRAPPED_HEIGHT))
+            .clamp(84.0, 380.0);
         egui::ScrollArea::vertical()
             .id_salt("board")
             .auto_shrink([false, false])
@@ -1562,8 +1700,9 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
             });
     });
 
-    if ptr.hovered.is_some() {
-        app.preview = ptr.hovered;
+    app.zoomed = ptr.hovered.map(|h| h.card);
+    if let Some(hover) = ptr.hovered {
+        zoom_popup(ui.ctx(), art, &cx, hover);
     }
     // A click on a card or player: choose its option, or focus it if it has several.
     if let (Some(opts), Some(d)) = (ptr.clicked, decision.as_ref()) {
@@ -1620,6 +1759,9 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
     false
 }
 
+/// Cards aren't shrunk below this just to keep a row from wrapping.
+const MIN_UNWRAPPED_HEIGHT: f32 = 132.0;
+
 /// Opponents' cards are drawn a little smaller than the viewer's.
 const OPPONENT_SCALE: f32 = 0.8;
 
@@ -1640,5 +1782,59 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
 impl eframe::App for App {
     fn ui(&mut self, ui_: &mut egui::Ui, _frame: &mut eframe::Frame) {
         ui(self, ui_);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Rect, pos2};
+
+    #[test]
+    fn power_and_toughness_are_badged_only_when_they_differ_from_the_card() {
+        let printed = (Some(2), Some(3));
+        assert_eq!(pt_badge(printed, (2, 3)), None, "the card already says 2/3");
+        assert_eq!(pt_badge(printed, (3, 4)), Some(GREEN), "+1/+1 counter");
+        assert_eq!(pt_badge(printed, (2, 4)), Some(GREEN));
+        assert_eq!(pt_badge(printed, (1, 2)), Some(RED), "-1/-1");
+        assert_eq!(pt_badge(printed, (2, 1)), Some(RED));
+        assert_eq!(
+            pt_badge(printed, (3, 2)),
+            Some(Color32::WHITE),
+            "up and down"
+        );
+        // Nothing printed to compare with (a land that became a creature).
+        assert_eq!(pt_badge((None, None), (1, 1)), Some(Color32::WHITE));
+    }
+
+    #[test]
+    fn the_enlarged_card_sits_beside_the_card_and_on_screen() {
+        let screen = Rect::from_min_max(pos2(0.0, 0.0), pos2(2560.0, 1440.0));
+        let size = vec2(500.0, 720.0);
+        let overlaps =
+            |near: Rect, (x, y): (f32, f32)| Rect::from_min_size(pos2(x, y), size).intersects(near);
+        let inside =
+            |(x, y): (f32, f32)| screen.contains_rect(Rect::from_min_size(pos2(x, y), size));
+        // A card on the board: to its right.
+        let near = Rect::from_min_size(pos2(300.0, 200.0), vec2(200.0, 280.0));
+        let at = zoom_position(screen, near, size, false);
+        assert!(at.0 >= near.right() && !overlaps(near, at) && inside(at));
+        // No room on the right: to its left.
+        let near = Rect::from_min_size(pos2(2300.0, 200.0), vec2(200.0, 280.0));
+        let at = zoom_position(screen, near, size, false);
+        assert!(at.0 + size.x <= near.left() && !overlaps(near, at) && inside(at));
+        // Near the top or bottom edge it slides to stay on screen.
+        let near = Rect::from_min_size(pos2(300.0, 1200.0), vec2(200.0, 230.0));
+        let at = zoom_position(screen, near, size, false);
+        assert!(!overlaps(near, at) && inside(at));
+        // A card in the hand: above it, so the rest of the hand stays visible.
+        let at = zoom_position(screen, near, size, true);
+        assert!(at.1 + size.y <= near.top() && !overlaps(near, at) && inside(at));
+        // …unless the window is too short for that: then beside it.
+        let short = Rect::from_min_max(pos2(0.0, 0.0), pos2(1280.0, 760.0));
+        let near = Rect::from_min_size(pos2(100.0, 600.0), vec2(110.0, 150.0));
+        let (x, y) = zoom_position(short, near, size, true);
+        assert!(x >= near.right());
+        assert!(short.contains_rect(Rect::from_min_size(pos2(x, y), size)));
     }
 }

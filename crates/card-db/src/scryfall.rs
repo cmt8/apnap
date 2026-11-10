@@ -56,6 +56,9 @@ pub struct ImageUris {
     /// The full card, 488 x 680 JPG.
     #[serde(default)]
     pub normal: Option<String>,
+    /// The full card, 672 x 936 JPG (for when it is shown larger than `normal`).
+    #[serde(default)]
+    pub large: Option<String>,
     /// Just the illustration.
     #[serde(default)]
     pub art_crop: Option<String>,
@@ -64,7 +67,7 @@ pub struct ImageUris {
 impl ScryfallCard {
     /// Cached before the image fields were stored: fetch it again.
     fn is_stale(&self) -> bool {
-        self.id.is_none() || self.image_uris.is_none()
+        self.id.is_none() || self.image_uris.as_ref().is_none_or(|u| u.large.is_none())
     }
 }
 
