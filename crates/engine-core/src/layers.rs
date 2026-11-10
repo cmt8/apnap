@@ -749,6 +749,9 @@ impl Walk<'_> {
                     .map(|(id, _)| *id)
                     .collect()
             }
+            // Only lasting effects are about something; they change no characteristics
+            // (card-db sees to that).
+            Aff::Dynamic(Affected::Remembered) => Vec::new(),
             // CR 303.4m: "enchanted [object]" = whatever the source is attached to.
             Aff::Dynamic(Affected::Enchanted) => self
                 .st
@@ -831,7 +834,7 @@ impl Walk<'_> {
             Aff::Dynamic(Affected::All(sel)) => Some(sel),
             // "This" and "enchanted": the set doesn't look at characteristics. Only the
             // ability's existence can change.
-            Aff::Dynamic(Affected::This | Affected::Enchanted) => None,
+            Aff::Dynamic(Affected::This | Affected::Enchanted | Affected::Remembered) => None,
             Aff::Locked(_) => return false,
         };
         // The permanents an "as long as" condition counts are looked at the same way.

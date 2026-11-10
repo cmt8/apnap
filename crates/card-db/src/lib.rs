@@ -249,6 +249,23 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
             }
         }
     }
+    // The abilities lasting effects carry ("target creature can't be blocked this turn").
+    let mut lasting: Vec<usize> = Vec::new();
+    for list in text.split("Lasting { abilities: [").skip(1) {
+        let list = list.split(']').next().unwrap_or_default();
+        if list.is_empty() {
+            p.push("a lasting effect of nothing".into());
+        }
+        for index in list.split(", ").filter(|i| !i.is_empty()) {
+            match index.parse::<usize>() {
+                Ok(i) if i < c.granted.len() => lasting.push(i),
+                _ => p.push(format!("no granted ability {index}")),
+            }
+        }
+    }
+    if text.contains("while_source: true") && instant_or_sorcery {
+        p.push("an effect of a spell can't last while its source stays".into());
+    }
     let printed = c.abilities.iter().enumerate().map(|(i, a)| (i, a, false));
     let given = c.granted.iter().enumerate().map(|(i, a)| (i, a, true));
     for (i, a, granted) in printed.chain(given) {
@@ -259,10 +276,32 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 format!("ability {i}: {m}")
             }
         };
+        // What a lasting effect carries works on no object: rules about combat and
+        // prevention so far. Only there does anything mean "what the effect is about".
+        let carried = granted && lasting.contains(&i);
+        if carried {
+            let fits = match a {
+                AbilityDef::CombatRule { affected, .. } => {
+                    *affected != card_model::Affected::Enchanted
+                }
+                AbilityDef::Replacement { replaces, with } => {
+                    matches!(replaces, Replaces::Damage { .. }) && *with == ReplaceWith::Prevent
+                }
+                _ => false,
+            };
+            if !fits {
+                p.push(at("not something a lasting effect can carry (yet)".into()));
+                continue;
+            }
+        } else if format!("{a:?}").contains("Remembered") {
+            p.push(at(
+                "only what a lasting effect carries is about something remembered".into(),
+            ));
+        }
         // An ability another object is given works on the battlefield, for whatever has
         // it: nothing about casting, about the card it is written on, or about a layer
         // that is over by the time abilities are given (CR 613.1f).
-        if granted {
+        if granted && !carried {
             let fits = match a {
                 AbilityDef::Spell(_)
                 | AbilityDef::AdditionalCost(_)
@@ -583,6 +622,7 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 let ok = matches!(
                     (replaces, with),
                     (Replaces::CreateTokens, ReplaceWith::Twice)
+                        | (Replaces::Damage { .. }, ReplaceWith::Prevent)
                         | (Replaces::PutCountersOnYourPermanents, ReplaceWith::Twice)
                         | (Replaces::CardToGraveyard, ReplaceWith::Exile)
                         | (
@@ -905,6 +945,11 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         Effect::DamageEachPlayer { amount: a } => amount(a, p),
         Effect::Destroy { what } | Effect::ReturnToHand { what } | Effect::Apply { what, .. } => {
             obj(what, p)
+        }
+        Effect::Lasting { about, .. } => {
+            if let Some(what) = about {
+                obj(what, p);
+            }
         }
         Effect::PutCountersAll { what, count, .. } => {
             selector(what, p);

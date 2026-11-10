@@ -158,6 +158,9 @@ struct Tx<'a> {
     /// Compiling an ability that another object is given (how deep): "this" is whatever
     /// has it, a permanent on the battlefield.
     granting: u8,
+    /// Compiling what an effect object carries: `EffectSource` is "this" (the source of
+    /// the spell or ability that made it) and `IsRemembered` what it is about.
+    in_effect: bool,
 }
 
 /// The kinds of ability a script gives to other objects.
@@ -171,6 +174,81 @@ enum Given {
     Static,
     /// `AddReplacementEffect$` / `Replacements$`
     Replacement,
+}
+
+/// A rule about one creature that Forge writes as a keyword and a card as a sentence:
+/// "can't block", "prevent all damage that would be dealt to [it]". Not an ability of the
+/// creature (CR 113.12).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hidden {
+    CantAttack,
+    CantBlock,
+    /// Prevent all [combat] damage that would be dealt to it, or (`by_it`) by it.
+    Prevent {
+        by_it: bool,
+        combat: Option<bool>,
+    },
+}
+
+/// The rules a keyword text stands for, if it is one of those (with or without Forge's
+/// `HIDDEN` mark, which only keeps it off the card's keyword line).
+fn hidden_rules(text: &str) -> Option<Vec<Hidden>> {
+    let text = text.strip_prefix("HIDDEN ").unwrap_or(text).trim();
+    let text = text.strip_suffix('.').unwrap_or(text);
+    let prevent = |by_it, combat| Hidden::Prevent { by_it, combat };
+    Some(match text {
+        "CARDNAME can't block" => vec![Hidden::CantBlock],
+        "CARDNAME can't attack" => vec![Hidden::CantAttack],
+        "CARDNAME can't attack or block" => vec![Hidden::CantAttack, Hidden::CantBlock],
+        "Prevent all damage that would be dealt to CARDNAME" => vec![prevent(false, None)],
+        "Prevent all damage that would be dealt by CARDNAME" => vec![prevent(true, None)],
+        "Prevent all combat damage that would be dealt to CARDNAME" => {
+            vec![prevent(false, Some(true))]
+        }
+        "Prevent all combat damage that would be dealt by CARDNAME" => {
+            vec![prevent(true, Some(true))]
+        }
+        "Prevent all damage that would be dealt to and dealt by CARDNAME" => {
+            vec![prevent(false, None), prevent(true, None)]
+        }
+        "Prevent all combat damage that would be dealt to and dealt by CARDNAME" => {
+            vec![prevent(false, Some(true)), prevent(true, Some(true))]
+        }
+        _ => return None,
+    })
+}
+
+/// A hidden rule as an ability about `affected`. `None` if these can't be told apart from
+/// other objects in a damage filter (several selectors at once).
+fn hidden_ability(rule: Hidden, affected: &Affected) -> Option<AbilityDef> {
+    let it = || match affected {
+        Affected::This => Some(ObjFilter::This),
+        Affected::Enchanted => Some(ObjFilter::Host),
+        Affected::Remembered => Some(ObjFilter::Remembered),
+        Affected::All(sel) => Some(ObjFilter::Matching(sel.clone())),
+    };
+    Some(match rule {
+        Hidden::CantAttack => AbilityDef::CombatRule {
+            affected: affected.clone(),
+            rule: CombatRule::CantAttack,
+        },
+        Hidden::CantBlock => AbilityDef::CombatRule {
+            affected: affected.clone(),
+            rule: CombatRule::CantBlock,
+        },
+        Hidden::Prevent { by_it, combat } => AbilityDef::Replacement {
+            replaces: Replaces::Damage {
+                by: if by_it { Some(it()?) } else { None },
+                to: if by_it {
+                    DamageTo::Anything
+                } else {
+                    DamageTo::Permanent(it()?)
+                },
+                combat,
+            },
+            with: ReplaceWith::Prevent,
+        },
+    })
 }
 
 /// Script variables that only tell Forge's AI something, by the name a card that is given
@@ -380,7 +458,14 @@ impl Known {
                             w,
                             "Basic" | "Legendary" | "Snow" | "World" | "Ongoing" | "Tribal"
                         );
-                    if !super_or_card {
+                    // Words Forge's filters use for players and for kinds of object are
+                    // never read as subtypes, whatever a joke card's type line says
+                    // ("Planeswalker — You"): "You have hexproof" is not about permanents.
+                    let filter_word = matches!(
+                        w,
+                        "You" | "Opponent" | "Player" | "Card" | "Permanent" | "Spell" | "Emblem"
+                    );
+                    if !super_or_card && !filter_word {
                         subtypes.insert(w.to_string());
                     }
                 }
@@ -721,6 +806,17 @@ impl<'a> Tx<'a> {
     }
 
     fn obj_filter(&mut self, text: &str) -> Option<ObjFilter> {
+        if self.in_effect {
+            match text.split_once('.') {
+                Some(("Card" | "Creature" | "Permanent", "IsRemembered")) => {
+                    return Some(ObjFilter::Remembered);
+                }
+                Some(("Card" | "Creature" | "Permanent", "EffectSource")) => {
+                    return Some(ObjFilter::This);
+                }
+                _ => {}
+            }
+        }
         // "Enchanted creature", "equipped creature": what this is attached to. The type
         // word says nothing more where it is what the card attaches to anyway.
         if let Some((kind, "EquippedBy" | "EnchantedBy" | "AttachedBy")) = text.split_once('.') {
@@ -1839,26 +1935,198 @@ impl<'a> Tx<'a> {
                     }
                 }
             }
+            // An effect object: abilities that work for a while on no permanent.
+            "Effect" => {
+                let own_target = self.target(&rd, chain, false);
+                let last = (chain.targets.len() as u8).checked_sub(1);
+                let about = match rd.get("RememberObjects") {
+                    None if own_target.is_some() => {
+                        self.block("Effect:target not remembered");
+                        return None;
+                    }
+                    None => None,
+                    Some("Self") => Some(ObjRef::This),
+                    Some("ThisTargetedCard") if own_target.is_some() => {
+                        own_target.map(ObjRef::Target)
+                    }
+                    Some("Targeted" | "ParentTarget") if own_target.or(last).is_some() => {
+                        chain.refers_to_targets.set(true);
+                        own_target.or(last).map(ObjRef::Target)
+                    }
+                    Some(name) if triggered && self.trig.named(name).is_some() => {
+                        match self.trig.named(name) {
+                            Some(Named::This) => Some(ObjRef::This),
+                            _ => Some(ObjRef::Triggering),
+                        }
+                    }
+                    Some(other) => {
+                        self.block(format!("Effect:remembers {}", shape(other)));
+                        return None;
+                    }
+                };
+                // Only an object is remembered here (a player would silently be nothing).
+                if let Some(ObjRef::Target(slot)) = about
+                    && !matches!(
+                        chain.targets.get(slot as usize),
+                        Some(TargetFilter::Creature | TargetFilter::Permanent(_))
+                    )
+                {
+                    self.block("Effect:remembers a target that isn't a permanent");
+                    return None;
+                }
+                let (until_end_of_turn, while_source) = match rd.get("Duration") {
+                    None => (true, false),
+                    Some("Permanent") => (false, false),
+                    Some("UntilHostLeavesPlayOrEOT") if !self.in_spell => (true, true),
+                    Some("UntilHostLeavesPlay") if !self.in_spell => (false, true),
+                    Some(other) => {
+                        self.block(format!("Effect:duration {other}"));
+                        return None;
+                    }
+                };
+                // "Forget it when it leaves the battlefield": a permanent that leaves is
+                // a new object anyway (CR 400.7), so this says nothing more here.
+                for key in ["ExileOnMoved", "ForgetOnMoved"] {
+                    match rd.get(key) {
+                        None => {}
+                        Some("Battlefield") if about.is_some() => {}
+                        Some(zone) => {
+                            self.block(format!("Effect:{key} {zone}"));
+                            return None;
+                        }
+                    }
+                }
+                // What it carries. Each kind of rule has to be one a lasting effect can
+                // carry in the engine: named here, so that what is missing can be ranked.
+                let mut abilities = Vec::new();
+                let was = std::mem::replace(&mut self.in_effect, true);
+                let mut carried = Some(());
+                for (key, kind) in [
+                    ("StaticAbilities", Given::Static),
+                    ("ReplacementEffects", Given::Replacement),
+                ] {
+                    let Some(names) = rd.get(key) else { continue };
+                    for name in names.split(',').map(str::trim) {
+                        let what = self
+                            .records
+                            .iter()
+                            .find(|(n, _)| n == name)
+                            .and_then(|(_, r)| r.get("Mode").or(r.get("Event")));
+                        let known = matches!(
+                            (kind, what),
+                            (
+                                Given::Static,
+                                Some(
+                                    "CantBlockBy"
+                                        | "CantAttack"
+                                        | "CantBlock"
+                                        | "CantAttack,CantBlock"
+                                        // (Only one whose "keywords" are rules: see below.)
+                                        | "Continuous"
+                                )
+                            ) | (Given::Replacement, Some("DamageDone"))
+                        );
+                        if !known {
+                            self.block(format!(
+                                "Effect:{} {}",
+                                if kind == Given::Static {
+                                    "static"
+                                } else {
+                                    "repl"
+                                },
+                                what.unwrap_or("?")
+                            ));
+                            carried = None;
+                            continue;
+                        }
+                        match self.grant(kind, name, ',') {
+                            // A static ability that changes characteristics is not
+                            // something a lasting effect carries.
+                            Some(given)
+                                if given.iter().any(|i| {
+                                    matches!(self.granted[*i as usize], AbilityDef::Static { .. })
+                                }) =>
+                            {
+                                self.block("Effect:static Continuous");
+                                carried = None;
+                            }
+                            Some(given) => abilities.extend(given),
+                            None => carried = None,
+                        }
+                    }
+                }
+                self.in_effect = was;
+                for key in ["Triggers", "Abilities"] {
+                    if rd.get(key).is_some() {
+                        self.block(format!("Effect:{key}"));
+                        carried = None;
+                    }
+                }
+                // (The effect's name is shown nowhere.)
+                rd.get("Name");
+                carried?;
+                if abilities.is_empty() {
+                    self.block("Effect:nothing");
+                    return None;
+                }
+                Effect::Lasting {
+                    abilities,
+                    about,
+                    until_end_of_turn,
+                    while_source,
+                }
+            }
             "Pump" | "PumpAll" => {
-                let effects = self.pump_effects(&rd, chain)?;
+                let (effects, rules) = self.pump_effects(&rd, chain)?;
+                // The rules are no change to the creatures (CR 113.12): they hold for
+                // the turn as a lasting effect — about the one creature, or (CR 611.2c:
+                // a rule isn't locked in) about whatever matches meanwhile.
+                let mut parts = Vec::new();
                 if api == "PumpAll" {
-                    let sel = self.valid_cards(&rd, api);
-                    Effect::ApplyAll {
-                        affected: sel?,
-                        effects,
-                        until_end_of_turn: true,
+                    let sel = self.valid_cards(&rd, api)?;
+                    if !effects.is_empty() {
+                        parts.push(Effect::ApplyAll {
+                            affected: sel.clone(),
+                            effects,
+                            until_end_of_turn: true,
+                        });
+                    }
+                    if !rules.is_empty() {
+                        let abilities = self.carry(&rules, &Affected::All(sel))?;
+                        parts.push(Effect::Lasting {
+                            abilities,
+                            about: None,
+                            until_end_of_turn: true,
+                            while_source: false,
+                        });
                     }
                 } else {
                     let slot = self.target(&rd, chain, false);
                     let what = match slot {
                         Some(i) => Some(ObjRef::Target(i)),
                         None => self.object(&rd, chain, triggered),
-                    };
-                    Effect::Apply {
-                        what: what?,
-                        effects,
-                        until_end_of_turn: true,
+                    }?;
+                    if !effects.is_empty() {
+                        parts.push(Effect::Apply {
+                            what,
+                            effects,
+                            until_end_of_turn: true,
+                        });
                     }
+                    if !rules.is_empty() {
+                        let abilities = self.carry(&rules, &Affected::Remembered)?;
+                        parts.push(Effect::Lasting {
+                            abilities,
+                            about: Some(what),
+                            until_end_of_turn: true,
+                            while_source: false,
+                        });
+                    }
+                }
+                if parts.len() == 1 {
+                    parts.remove(0)
+                } else {
+                    Effect::Seq(parts)
                 }
             }
             "Sacrifice" => {
@@ -2232,8 +2500,14 @@ impl<'a> Tx<'a> {
         })
     }
 
-    /// `NumAtt$` / `NumDef$` / `KW$` of Pump and PumpAll (which last until end of turn).
-    fn pump_effects(&mut self, rd: &Rd<'a>, chain: &mut Chain) -> Option<Vec<ContinuousEffect>> {
+    /// `NumAtt$` / `NumDef$` / `KW$` of Pump and PumpAll (which last until end of turn):
+    /// what changes about the creatures, and the rules that hold for them meanwhile
+    /// ("can't block this turn").
+    fn pump_effects(
+        &mut self,
+        rd: &Rd<'a>,
+        chain: &mut Chain,
+    ) -> Option<(Vec<ContinuousEffect>, Vec<Hidden>)> {
         let int =
             |t: Option<&str>| t.map_or(Some(0), |t| t.trim_start_matches('+').parse::<i32>().ok());
         let (att, def) = (rd.get("NumAtt"), rd.get("NumDef"));
@@ -2259,24 +2533,28 @@ impl<'a> Tx<'a> {
                 });
             }
         }
+        let mut rules = Vec::new();
         if let Some(kw) = rd.get("KW") {
             let mut ks = Vec::new();
             for k in kw.split('&').map(str::trim) {
-                match keyword(k) {
-                    Some(k) => ks.push(k),
-                    None => {
+                match (keyword(k), hidden_rules(k)) {
+                    (Some(k), _) => ks.push(k),
+                    (None, Some(hidden)) => rules.extend(hidden),
+                    (None, None) => {
                         self.block(format!("kw:{k}"));
                         return None;
                     }
                 }
             }
-            effects.push(ContinuousEffect::AddKeywords(ks));
+            if !ks.is_empty() {
+                effects.push(ContinuousEffect::AddKeywords(ks));
+            }
         }
-        if effects.is_empty() {
+        if effects.is_empty() && rules.is_empty() {
             self.block("Pump:nothing");
             return None;
         }
-        Some(effects)
+        Some((effects, rules))
     }
 
     /// A whole chain (an ability and its `SubAbility$` descendants) as one mode.
@@ -3444,6 +3722,21 @@ impl<'a> Tx<'a> {
         }
     }
 
+    /// Rules about `affected` for a lasting effect to carry: added to the card's `granted`
+    /// list. Returns their places in it.
+    fn carry(&mut self, rules: &[Hidden], affected: &Affected) -> Option<Vec<u16>> {
+        let mut out = Vec::new();
+        for rule in rules {
+            let Some(a) = hidden_ability(*rule, affected) else {
+                self.block("rule:about several kinds of object");
+                return None;
+            };
+            out.push(self.granted.len() as u16);
+            self.granted.push(a);
+        }
+        Some(out)
+    }
+
     /// Abilities other objects are given ("has \"…\""): each named script variable,
     /// compiled as an ability of whatever gets it and added to the card's `granted`
     /// list. Returns their places in that list.
@@ -3666,18 +3959,25 @@ impl<'a> Tx<'a> {
                 }
                 // What one ability both takes away and gives is given ("loses all other
                 // abilities and has flying"): Forge removes first.
-                if let Some(kw) = rd.get("AddKeyword") {
+                // (Some "keywords" are rules about the creatures, not abilities they have:
+                // "can't block", "prevent all damage that would be dealt to [them]".)
+                let mut rules = Vec::new();
+                for key in ["AddKeyword", "AddHiddenKeyword"] {
+                    let Some(kw) = rd.get(key) else { continue };
                     let mut ks = Vec::new();
                     for k in kw.split('&').map(str::trim) {
-                        match keyword(k) {
-                            Some(k) => ks.push(k),
-                            None => {
+                        match (keyword(k), hidden_rules(k)) {
+                            (Some(k), _) if key == "AddKeyword" => ks.push(k),
+                            (_, Some(hidden)) => rules.extend(hidden),
+                            _ => {
                                 self.block(format!("kw:{k}"));
                                 return None;
                             }
                         }
                     }
-                    effects.push(ContinuousEffect::AddKeywords(ks));
+                    if !ks.is_empty() {
+                        effects.push(ContinuousEffect::AddKeywords(ks));
+                    }
                 }
                 // "Has \"[ability]\"" (CR 113.2c): script variables holding the abilities,
                 // read as abilities of whatever is affected.
@@ -3734,16 +4034,37 @@ impl<'a> Tx<'a> {
                         return None;
                     }
                 }
-                if effects.is_empty() {
+                if effects.is_empty() && rules.is_empty() {
                     self.block("static:Continuous-nothing");
                     return None;
                 }
                 let only_if = self.static_condition(&rd)?;
-                affected.map(|affected| AbilityDef::Static {
-                    affected,
-                    effects,
-                    only_if,
-                })
+                let affected = affected?;
+                // The rules are abilities of their own, about the same permanents.
+                let mut out = Vec::new();
+                if !effects.is_empty() {
+                    out.push(AbilityDef::Static {
+                        affected: affected.clone(),
+                        effects,
+                        only_if: only_if.clone(),
+                    });
+                }
+                if !rules.is_empty() && only_if.is_some() {
+                    self.block("static:a rule under a condition");
+                    return None;
+                }
+                for rule in rules {
+                    match hidden_ability(rule, &affected) {
+                        Some(a) => out.push(a),
+                        None => {
+                            self.block("rule:about several kinds of object");
+                            return None;
+                        }
+                    }
+                }
+                let first = out.remove(0);
+                self.additional.extend(out);
+                Some(first)
             }
             // Combat restrictions (CR 508.1c, 509.1b). One Forge line may carry several
             // modes ("can't attack or block").
@@ -3775,7 +4096,22 @@ impl<'a> Tx<'a> {
             "CantBlockBy" => {
                 let (attacker, blocker) = (rd.get("ValidAttacker"), rd.get("ValidBlocker"));
                 let is_self = |f: &str| matches!(f, "Card.Self" | "Creature.Self");
+                let source = |f: &str| {
+                    matches!(
+                        f,
+                        "Card.EffectSource" | "Creature.EffectSource" | "Permanent.EffectSource"
+                    )
+                };
                 match (attacker, blocker) {
+                    // "[Those] can't block this creature" — in an effect object, whose
+                    // source "this creature" is.
+                    (Some(a), Some(b)) if self.in_effect && source(a) => {
+                        let affected = self.affected(b);
+                        Some(AbilityDef::CombatRule {
+                            affected: affected?,
+                            rule: CombatRule::CantBlockSource,
+                        })
+                    }
                     // "This can't block [those attackers]."
                     (Some(a), Some(b)) if is_self(b) && !is_self(a) => {
                         let sel = self.selector(a)?;
@@ -3849,6 +4185,17 @@ impl<'a> Tx<'a> {
     /// Who a static rule is about: the card itself, what it is attached to, or everything
     /// matching a filter.
     fn affected(&mut self, text: &str) -> Option<Affected> {
+        if self.in_effect {
+            match text.split_once('.') {
+                Some(("Card" | "Creature" | "Permanent", "IsRemembered")) => {
+                    return Some(Affected::Remembered);
+                }
+                Some(("Card" | "Creature" | "Permanent", "EffectSource")) => {
+                    return Some(Affected::This);
+                }
+                _ => {}
+            }
+        }
         match text {
             "Card.Self" | "Creature.Self" => Some(Affected::This),
             "Creature.EquippedBy" | "Card.EquippedBy" if self.equipment => {
@@ -3873,6 +4220,55 @@ impl<'a> Tx<'a> {
     fn replacement(&mut self, rec: &'a Record) -> Option<AbilityDef> {
         let event = rec.get("Event").unwrap_or("?");
         let rd = Rd::new(rec, format!("repl {event}"));
+        // CR 615.1a: "Prevent all [combat] damage that would be dealt [to …] [by …]."
+        if event == "DamageDone" && rd.rec.get("Prevent") == Some("True") {
+            rd.get("Prevent");
+            // ("Secondary": this line shares its printed sentence with another one.)
+            rd.get("Secondary");
+            // An effect object is in the command zone; a permanent's ability works on
+            // the battlefield.
+            let zone = match rd.get("ActiveZones") {
+                None => true,
+                Some("Command") => self.in_effect,
+                Some("Battlefield") => !self.in_effect,
+                Some(_) => false,
+            };
+            if !zone {
+                self.block("repl:DamageDone zone");
+            }
+            let by = match rd.get("ValidSource") {
+                None => Some(None),
+                Some(f) => self.obj_filter(f).map(Some),
+            };
+            let to = match rd.get("ValidTarget") {
+                None => Some(DamageTo::Anything),
+                Some("Player") => Some(DamageTo::Player(Who::Any)),
+                Some("You") => Some(DamageTo::Player(Who::You)),
+                Some("Opponent" | "Player.Opponent") => Some(DamageTo::Player(Who::Opponent)),
+                Some(f) => self.obj_filter(f).map(DamageTo::Permanent),
+            };
+            let combat = match rd.get("IsCombat") {
+                None => Some(None),
+                Some("True") => Some(Some(true)),
+                Some("False") => Some(Some(false)),
+                Some(_) => {
+                    self.block("param:repl DamageDone.IsCombat value");
+                    None
+                }
+            };
+            rd.finish(&mut self.blockers);
+            if !zone {
+                return None;
+            }
+            return Some(AbilityDef::Replacement {
+                replaces: Replaces::Damage {
+                    by: by?,
+                    to: to?,
+                    combat: combat?,
+                },
+                with: ReplaceWith::Prevent,
+            });
+        }
         // "This permanent enters tapped."
         let shape = (
             event,
@@ -4007,6 +4403,7 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
         known,
         granted: Vec::new(),
         granting: 0,
+        in_effect: false,
     };
     let mut def = CardDef {
         name: face.name.clone(),
@@ -4384,6 +4781,16 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
             }
             continue;
         }
+        // "This creature can't block.", "Prevent all damage that would be dealt to this
+        // creature.": rules about the card, written as keywords.
+        if let Some(rules) = hidden_rules(k) {
+            for rule in rules {
+                if let Some(a) = hidden_ability(rule, &Affected::This) {
+                    abilities.push((0, a));
+                }
+            }
+            continue;
+        }
         match keyword(k) {
             Some(k) => def.keywords.push(k),
             None => {
@@ -4524,6 +4931,18 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
     compare(&plain, &compiled);
     if !def.granted.is_empty() {
         compare(&quoted, &compiled_quoted);
+    }
+    // "Target creature you control" where the card says "target creature": some scripts
+    // narrow a target to what Forge's AI should pick. (Equip is a keyword: its "target
+    // creature you control" is reminder text.)
+    let aimed = compiled.replace("attach this permanent to target creature you control", "");
+    let narrowed = aimed.split("target ").skip(1).any(|rest| {
+        rest.split(['.', ':', '•', '/'])
+            .next()
+            .is_some_and(|phrase| phrase.contains("you control"))
+    });
+    if narrowed && !plain.contains("you control") && !plain.contains("your") {
+        missing.push("target you control");
     }
     // "Is put into your graveyard from the battlefield" is about whose card it is; the
     // script may say whose creature it was.

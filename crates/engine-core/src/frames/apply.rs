@@ -89,6 +89,9 @@ impl ApplyFrame {
                     },
                 ),
                 Some(OptionDesc::Shield { id }) => self.apply_front(st, RepKey::Shield(id)),
+                Some(OptionDesc::Lasting { id, index }) => {
+                    self.apply_front(st, RepKey::Lasting { id, index })
+                }
                 Some(OptionDesc::Accept) => self.apply_front(st, RepKey::CommanderReturn),
                 // Declining an optional effect: it won't be offered again for this event.
                 Some(OptionDesc::Decline) => self.queue[0].applied.push(RepKey::CommanderReturn),
@@ -120,6 +123,7 @@ impl ApplyFrame {
                                 nth,
                             },
                             RepKey::Shield(id) => OptionDesc::Shield { id },
+                            RepKey::Lasting { id, index } => OptionDesc::Lasting { id, index },
                             RepKey::CommanderReturn => OptionDesc::Accept,
                         })
                         .collect();

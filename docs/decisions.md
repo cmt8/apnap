@@ -1197,6 +1197,53 @@ Rules text: docs/rules-notes/113-abilities-given.md.
   mana — the payment feasibility rework of D-021), `ChangeZone` rest 350, tokens 218,
   Sagas 185, regeneration 182.
 
+## D-065 Effects that last on no object (Forge's effect objects); "prevent all damage" (2026-11-10)
+Rules text: docs/rules-notes/611.2-lasting-effects-615-prevention.md.
+- **`effects::Lasting`** / **`Effect::Lasting`**: abilities that work for a while without
+  being on any permanent — "target creature can't be blocked this turn", "prevent all
+  combat damage that would be dealt this turn". This is the engine's form of Forge's
+  `Effect` API (an invisible card in the command zone carrying static abilities,
+  replacement effects and triggers, with "remembered" objects). The carried abilities are
+  entries of the card's `granted` list (D-064); in them "this" is the source of the spell
+  or ability that made the effect and `Affected::Remembered` / `ObjFilter::Remembered` the
+  object it is about.
+- **Why not a granted ability:** CR 113.12 — "can't be blocked" on a creature "is neither
+  granting an ability nor setting a characteristic". As a granted ability it would be
+  lost with "loses all abilities"; as a lasting effect it isn't.
+- **What a lasting effect can carry so far:** combat rules (`CombatRule`, plus the new
+  `CantBlockSource`) and prevention (`Replaces::Damage` with `ReplaceWith::Prevent`).
+  card-db refuses anything else; the compiler names each missing kind (`Effect:Triggers`,
+  `Effect:static <mode>`, `Effect:repl <event>`) so they can be ranked.
+- **Rules, not characteristics, aren't locked in** (CR 611.2c): "creatures without flying
+  can't block this turn" also holds for a creature that arrives later. Forge's `PumpAll`
+  with a hidden keyword locks the set in; here it is compiled as a lasting rule about
+  whatever matches.
+- **"Prevent all damage"** also as a permanent's own ability (`R:Event$ DamageDone |
+  Prevent$ True`), and as Forge's keyword-shaped rules: `K:Prevent all damage that would
+  be dealt to CARDNAME.`, `KW$ HIDDEN CARDNAME can't block.`, `AddHiddenKeyword$ …`.
+- **Mis-compilation found by reading the sample (older than this batch):** "You have
+  hexproof" / "You have shroud" (five cards) compiled to an ability that did nothing —
+  a joke card's type line ("Planeswalker — You") had made "You" a known subtype, so
+  `Affected$ You` read as "permanents of subtype You". Forge's filter words for players
+  and kinds of object are never subtypes now; those cards are blocked (`filter:You`).
+- **New Oracle guard:** `oracle:target you control` — the compiled card says "target …
+  you control" and the card never says "you control" or "your". Two cards whose script
+  narrows the target for Forge's AI (Konstrari Charm, Firefright Mage) are blocked by it.
+  Equip is exempt (its restriction is in reminder text).
+- The views list the lasting effects in force (`PlayerView::lasting`); the app shows the
+  ones about a permanent under its enlarged card and labels the choice between
+  prevention effects. Effects about nothing in particular ("prevent all combat damage
+  this turn") are not shown anywhere yet.
+- The heuristic agent has no preference where to point a lasting effect (it doesn't see
+  what the effect carries).
+- State hashes changed (`GameState::lasting`); all 15 event logs unchanged. Re-blessed.
+- 9,115 → 9,305 of 34,463 scripts (27.0%); precons 149 of 275 deck slots. The `Effect`
+  family fell from 419 cards blocked by it alone to 207. All 197 newly compiled cards
+  were read against their Oracle text.
+- **Next for effect objects:** triggers they carry — "whenever … this turn", "at the
+  beginning of the next end step" (46 alone, 169 in all); then must-attack and
+  can-attack-as-though rules, and effects about players.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

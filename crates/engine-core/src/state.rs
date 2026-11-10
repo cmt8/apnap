@@ -133,6 +133,9 @@ pub struct GameState {
     /// Events emitted during the current `step` call. Always empty at a suspension point.
     #[serde(skip)]
     pub(crate) out: Vec<Event>,
+    /// Abilities that work for a while on no object (CR 611.2): see [`Lasting`].
+    #[serde(default)]
+    pub lasting: Vec<crate::effects::Lasting>,
 }
 
 impl GameState {

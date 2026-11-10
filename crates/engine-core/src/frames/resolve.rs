@@ -1408,6 +1408,37 @@ impl ResolveFrame {
                 }],
                 None => Vec::new(),
             },
+            Effect::Lasting {
+                abilities,
+                about,
+                until_end_of_turn,
+                while_source,
+            } => {
+                // An effect about something that is gone doesn't begin.
+                let object = about.map(|what| self.obj(st, k, what));
+                if object != Some(None) {
+                    let card = self.card;
+                    execute(
+                        st,
+                        GameAction::AddLasting {
+                            source: self.source,
+                            controller: self.controller,
+                            abilities: abilities
+                                .into_iter()
+                                .map(|index| card_model::AbilityId {
+                                    card,
+                                    index,
+                                    granted: true,
+                                })
+                                .collect(),
+                            about: object.flatten(),
+                            until_end_of_turn,
+                            while_source,
+                        },
+                    );
+                }
+                Vec::new()
+            }
             Effect::Apply {
                 what,
                 effects,

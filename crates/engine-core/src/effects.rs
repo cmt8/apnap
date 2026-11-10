@@ -33,3 +33,61 @@ pub struct Shield {
     pub target: Target,
     pub remaining: u32,
 }
+
+/// What a resolved spell or ability leaves behind that isn't a change of characteristics
+/// (CR 611.2): abilities that work for a while without being on any object — "target
+/// creature can't be blocked this turn", "prevent all combat damage that would be dealt
+/// this turn". In them "this" is `source`, "you" is `controller`, and `Remembered` is
+/// `about`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lasting {
+    pub id: u32,
+    pub timestamp: Timestamp,
+    /// The source of the spell or ability that made it.
+    pub source: ObjectId,
+    pub controller: PlayerId,
+    pub abilities: Vec<card_model::AbilityId>,
+    /// The object the effect is about ("target creature …"). A new object (CR 400.7)
+    /// isn't it: the effect is over when this one is gone.
+    pub about: Option<ObjectId>,
+    /// Ends at cleanup (CR 514.2).
+    pub until_end_of_turn: bool,
+    /// Ends when `source` leaves the battlefield.
+    pub while_source: bool,
+}
+
+impl Lasting {
+    /// Is it still in force?
+    pub fn live(&self, st: &crate::state::GameState) -> bool {
+        self.about.is_none_or(|o| st.objects.contains_key(&o))
+            && (!self.while_source
+                || st
+                    .objects
+                    .get(&self.source)
+                    .is_some_and(|o| o.zone == crate::zones::Zone::Battlefield))
+    }
+}
+
+/// Who an ability is being read for: an object that has it, or a lasting effect that
+/// carries it.
+#[derive(Clone, Copy, Debug)]
+pub struct Bearer<'a> {
+    /// "This": the object with the ability, or the source of the lasting effect.
+    pub source: ObjectId,
+    /// "You".
+    pub controller: PlayerId,
+    /// What a lasting effect is about (`Remembered`); nothing for an object's own ability.
+    pub about: &'a [ObjectId],
+}
+
+/// The lasting effects in force, with each ability they carry.
+pub fn lasting_abilities(
+    st: &crate::state::GameState,
+) -> impl Iterator<Item = (&Lasting, usize, &card_model::AbilityDef)> {
+    st.lasting.iter().filter(|e| e.live(st)).flat_map(move |e| {
+        e.abilities
+            .iter()
+            .enumerate()
+            .map(move |(i, a)| (e, i, st.catalog.ability(*a)))
+    })
+}

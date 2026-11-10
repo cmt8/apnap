@@ -26,53 +26,80 @@ fn creatures_controlled_by(st: &GameState, p: PlayerId) -> Vec<ObjectId> {
         .collect()
 }
 
+/// A combat restriction in force, and whose it is.
+struct Rule<'a> {
+    who: crate::effects::Bearer<'a>,
+    affected: &'a Affected,
+    rule: &'a CombatRule,
+}
+
 /// Every combat restriction in force (CR 508.1c, 509.1b): the static abilities permanents
-/// currently have (CLAUDE.md invariant 4), with their source and its controller.
-fn combat_rules(st: &GameState) -> Vec<(ObjectId, PlayerId, &Affected, &CombatRule)> {
+/// currently have (CLAUDE.md invariant 4), and the ones lasting effects carry ("target
+/// creature can't be blocked this turn", CR 611.2).
+fn combat_rules(st: &GameState) -> Vec<Rule<'_>> {
     let mut out = Vec::new();
     for &id in &st.zones.battlefield {
         for (_, a) in crate::layers::abilities(st, id) {
             if let AbilityDef::CombatRule { affected, rule } = a {
-                out.push((id, crate::layers::controller_of(st, id), affected, rule));
+                out.push(Rule {
+                    who: crate::effects::Bearer {
+                        source: id,
+                        controller: crate::layers::controller_of(st, id),
+                        about: &[],
+                    },
+                    affected,
+                    rule,
+                });
             }
+        }
+    }
+    for (e, _, a) in crate::effects::lasting_abilities(st) {
+        if let AbilityDef::CombatRule { affected, rule } = a {
+            out.push(Rule {
+                who: crate::effects::Bearer {
+                    source: e.source,
+                    controller: e.controller,
+                    about: e.about.as_slice(),
+                },
+                affected,
+                rule,
+            });
         }
     }
     out
 }
 
-/// Is `obj` one of the permanents a rule of `source` applies to?
-fn rule_affects(
-    st: &GameState,
-    source: ObjectId,
-    controller: PlayerId,
-    affected: &Affected,
-    obj: ObjectId,
-) -> bool {
-    match affected {
-        Affected::This => obj == source,
-        Affected::Enchanted => st.object(source).attached_to == Some(obj),
-        Affected::All(sel) => {
-            crate::layers::matches(st, sel, &chars(st, obj), st.object(obj), source, controller)
+/// Is `obj` one of the permanents the rule applies to?
+fn rule_affects(st: &GameState, r: &Rule<'_>, obj: ObjectId) -> bool {
+    match r.affected {
+        Affected::This => obj == r.who.source,
+        Affected::Remembered => r.who.about.contains(&obj),
+        Affected::Enchanted => {
+            st.objects.get(&r.who.source).and_then(|o| o.attached_to) == Some(obj)
         }
+        Affected::All(sel) => crate::layers::matches(
+            st,
+            sel,
+            &chars(st, obj),
+            st.object(obj),
+            r.who.source,
+            r.who.controller,
+        ),
     }
 }
 
 /// CR 508.1c: is `creature` forbidden to attack ("can't attack")?
 fn cant_attack(st: &GameState, creature: ObjectId) -> bool {
     combat_rules(st)
-        .into_iter()
-        .any(|(src, ctl, affected, rule)| {
-            matches!(rule, CombatRule::CantAttack) && rule_affects(st, src, ctl, affected, creature)
-        })
+        .iter()
+        .any(|r| matches!(r.rule, CombatRule::CantAttack) && rule_affects(st, r, creature))
 }
 
 /// CR 509.1b: is `creature` forbidden to block at all ("can't block")?
 fn cant_block(st: &GameState, creature: ObjectId) -> bool {
     combat_rules(st)
-        .into_iter()
-        .any(|(src, ctl, affected, rule)| {
-            matches!(rule, CombatRule::CantBlock) && rule_affects(st, src, ctl, affected, creature)
-        })
+        .iter()
+        .any(|r| matches!(r.rule, CombatRule::CantBlock) && rule_affects(st, r, creature))
 }
 
 /// CR 509.1b: may `blocker` block `attacker` (which attacks `defender`), as far as evasion
@@ -107,17 +134,27 @@ pub(crate) fn can_block(
         return false;
     }
     // "Can't be blocked [by …]" and "can't block [creatures …]".
-    for (src, ctl, affected, rule) in combat_rules(st) {
+    for r in combat_rules(st) {
         let matches = |sel: &card_model::Selector, obj: ObjectId| {
-            crate::layers::matches(st, sel, &chars(st, obj), st.object(obj), src, ctl)
+            crate::layers::matches(
+                st,
+                sel,
+                &chars(st, obj),
+                st.object(obj),
+                r.who.source,
+                r.who.controller,
+            )
         };
-        let forbidden = match rule {
+        let forbidden = match r.rule {
             CombatRule::CantBeBlocked { by } => {
-                rule_affects(st, src, ctl, affected, attacker)
+                rule_affects(st, &r, attacker)
                     && by.as_ref().is_none_or(|sel| matches(sel, blocker))
             }
             CombatRule::CantBlockAttackers(sel) => {
-                rule_affects(st, src, ctl, affected, blocker) && matches(sel, attacker)
+                rule_affects(st, &r, blocker) && matches(sel, attacker)
+            }
+            CombatRule::CantBlockSource => {
+                rule_affects(st, &r, blocker) && attacker == r.who.source
             }
             CombatRule::CantAttack | CombatRule::CantBlock => false,
         };

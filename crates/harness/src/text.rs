@@ -396,6 +396,7 @@ pub fn option_line(v: &PlayerView, o: &OptionDesc) -> String {
             )
         }
         OptionDesc::Shield { id } => format!("prevention shield #{id}"),
+        OptionDesc::Lasting { id, index } => format!("lasting effect #{id} (part {index})"),
         OptionDesc::Accept => "yes".into(),
         OptionDesc::Decline => "no".into(),
         OptionDesc::Trigger { source, ability } => {

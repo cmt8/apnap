@@ -285,9 +285,11 @@ pub struct CardDef {
     /// What effects call this definition when its name isn't unique: several different
     /// tokens are all named "Dragon" (CR 111.4), so they are told apart by key.
     pub key: Option<String>,
-    /// Abilities this card gives to other objects (or to itself) rather than has: the
-    /// quoted text in "enchanted creature has \"{T}: …\"". Referred to by index from
-    /// [`ContinuousEffect::GrantAbilities`]; the object that gets one is its source.
+    /// Abilities written on this card that it doesn't have itself. Ones it gives to
+    /// other objects (or to itself): the quoted text in "enchanted creature has
+    /// \"{T}: …\"", referred to by index from [`ContinuousEffect::GrantAbilities`]; the
+    /// object that gets one is its source. And ones that work for a while on no object at
+    /// all ([`Effect::Lasting`]): "target creature can't be blocked this turn".
     pub granted: Vec<AbilityDef>,
 }
 
@@ -487,6 +489,9 @@ pub enum CombatRule {
     /// "can't block [attackers matching]" ("can block only creatures with flying" is
     /// "can't block creatures without flying").
     CantBlockAttackers(Selector),
+    /// "can't block this creature": the source of the ability, or of the lasting effect
+    /// that carries the rule ("target creature can't block this creature this turn").
+    CantBlockSource,
 }
 
 /// Whose / which player, relative to the ability's controller.
@@ -575,6 +580,8 @@ pub enum ObjFilter {
     ThisOr(Selector),
     /// "Enchanted creature", "equipped creature": the permanent the source is attached to.
     Host,
+    /// One of the objects a lasting effect is about ([`Effect::Lasting`]).
+    Remembered,
 }
 
 /// Trigger conditions (CR 603.1). M2 vocabulary.
@@ -783,6 +790,9 @@ pub enum Affected {
     Enchanted,
     /// Every permanent matching the selector (re-evaluated continuously, CR 611.3a).
     All(Selector),
+    /// The objects a lasting effect is about ([`Effect::Lasting`]): "target creature can't
+    /// be blocked this turn".
+    Remembered,
 }
 
 /// The parts of a continuous effect, each applied in its own layer (CR 613.1, 613.6).
@@ -855,6 +865,13 @@ pub enum Replaces {
     /// selector — as it would exist on the battlefield (CR 614.12), relative to this
     /// ability's source and controller — would enter the battlefield.
     OtherEnters(Selector),
+    /// "If [a source] would deal [combat] damage [to …]" (CR 614.1a, 615.1a). `by: None` =
+    /// any source; `combat: None` = any damage.
+    Damage {
+        by: Option<ObjFilter>,
+        to: DamageTo,
+        combat: Option<bool>,
+    },
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -875,6 +892,8 @@ pub enum ReplaceWith {
     /// the ability's source. For the permanent itself, `Amount::X` is the X it was cast
     /// with (CR 107.3m).
     EntersWithCounted { kind: CounterKind, amount: Amount },
+    /// "Prevent that damage" (CR 615.1a): all of it.
+    Prevent,
 }
 
 /// An amount with a sign: "+X" or "-X".
@@ -1368,6 +1387,20 @@ pub enum Effect {
         cost: Cost,
         paid: Box<Effect>,
         unpaid: Box<Effect>,
+    },
+    /// CR 611.2: for a while, abilities work without being on any object — "target
+    /// creature can't be blocked this turn", "prevent all combat damage that would be
+    /// dealt this turn". `abilities` are indices into [`CardDef::granted`] of this card;
+    /// in them "this" is the source of the spell or ability that made the effect, "you"
+    /// its controller, and `Remembered` what the effect is `about`.
+    Lasting {
+        abilities: Vec<u16>,
+        /// The object the effect is about; the effect ends when it leaves the battlefield.
+        about: Option<ObjRef>,
+        /// Ends at cleanup (CR 514.2); otherwise it lasts.
+        until_end_of_turn: bool,
+        /// Ends when its source leaves the battlefield ("for as long as …").
+        while_source: bool,
     },
 }
 

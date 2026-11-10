@@ -52,6 +52,10 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
   never by a bare index into its object's card: an object can have abilities of other
   cards (`CardDef::granted`, `ContinuousEffect::GrantAbilities`, D-064), and have one twice.
   Read abilities through `layers::abilities(st, id)` and `st.catalog.ability(id)`.
+- A rule that holds for a while on no permanent ("can't be blocked this turn", "prevent all
+  combat damage this turn") is an `effects::Lasting`, never an ability given to the
+  creature (CR 113.12). Whatever reads abilities of permanents for combat rules or
+  replacement effects reads `effects::lasting_abilities(st)` too.
 - New dependency in engine-core/card-model ⇒ add to `PURE_ALLOWLIST` in `crates/xtask` AND
   log a decision. Must be `no_std`-capable with `default-features = false`.
 
@@ -134,14 +138,14 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-064): 9,115 of 34,463 scripts compile (26.4%); about 10,500 more are one feature
+Status (D-065): 9,305 of 34,463 scripts compile (27.0%); about 10,500 more are one feature
 away. Precons: `harness coverage --verbose` lists what blocks the rest. Feature tests live in `crates/harness/tests/forge_features.rs`: invented cards written
 in Forge's format, compiled by `harness::forge_test_catalog` and played (`forge_test_blockers`
 for "this must not compile"). Four guards catch compiler holes — keep them: a line that
 yields nothing without a named blocker is `unexplained:*`; every compiled card goes through
 `card_db::validate` (`invalid:*`); the compiled card is read back against its Oracle text
-for words Forge scripts leave out (`oracle:*`: "may", "another target"); and the `forge-Np`
-soak plays random decks of all of them.
+for words Forge scripts leave out or add (`oracle:*`: "may", "another target", a target
+narrowed to "you control"); and the `forge-Np` soak plays random decks of all of them.
 References written from Forge's sources: `docs/forge/script-format.md` (file format, costs,
 filters, `Defined$`, expressions), `effects.md` (every effect API), and
 `triggers-statics-replacements-keywords.md`. Read the relevant section before compiling a
@@ -152,8 +156,10 @@ Not built yet: the full generated-text-vs-Oracle round trip (a word-level guard 
 multi-face cards, searching another player's library, "X target creatures", mana abilities
 that cost mana (signets) or make different mana at once, counters other than +1/+1 and
 -1/-1, "as this enters, choose …", regeneration, abilities given to cards that aren't on
-the battlefield, "becomes tapped" and "becomes the target" triggers, protection, Forge's
-"Effect" objects, Sagas (the end of D-064 ranks them). `forge-coverage --families` ranks what is left by kind of feature.
+the battlefield, "becomes tapped" and "becomes the target" triggers, protection, Sagas,
+and of Forge's "Effect" objects everything but combat rules and "prevent all damage"
+(`effects::Lasting`, D-065: no triggers, no characteristic changes, nothing about
+players yet). `forge-coverage --families` ranks what is left by kind of feature.
 
 ## Current milestone: M4 — IN PROGRESS (started 2026-11-09), on `main` (`m4-wip` merged 2026-11-10)
 Decisions: D-034 (precons: Calling All Angels, Wretched Ranks, Reign of Dragons,

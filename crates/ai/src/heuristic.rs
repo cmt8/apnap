@@ -68,6 +68,8 @@ fn effect_polarity(e: &Effect) -> Polarity {
             CounterKind::MinusOne => Polarity::Harm,
         },
         Effect::Apply { effects, .. } => continuous_polarity(effects),
+        // What it does is in abilities written elsewhere on the card: no preference.
+        Effect::Lasting { .. } => Polarity::Neutral,
         Effect::May(inner) => effect_polarity(inner),
         // What happens either way: paying, or not paying.
         Effect::Pay { paid, unpaid, .. } => match effect_polarity(unpaid) {

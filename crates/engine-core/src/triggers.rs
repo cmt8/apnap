@@ -112,6 +112,8 @@ fn filter_hit(
         // "This or another X": the source whatever it is, or a different object that is X.
         ObjFilter::ThisOr(sel) => id == source || matches(sel),
         ObjFilter::Host => host == Some(id),
+        // Only a lasting effect is about something, and they carry no triggers yet.
+        ObjFilter::Remembered => false,
     }
 }
 
@@ -742,7 +744,7 @@ fn object_hit(
         return match filter {
             ObjFilter::This | ObjFilter::ThisOr(_) => id == src.id,
             ObjFilter::Host => src.host == Some(id),
-            ObjFilter::Matching(_) => false,
+            ObjFilter::Matching(_) | ObjFilter::Remembered => false,
         };
     };
     // Only a permanent is "a creature you control" (a creature spell deals no damage, but

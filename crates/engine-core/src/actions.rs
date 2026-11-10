@@ -70,6 +70,15 @@ pub enum GameAction {
         target: Target,
         amount: u32,
     },
+    /// CR 611.2: abilities begin to work for a while on no object.
+    AddLasting {
+        source: ObjectId,
+        controller: PlayerId,
+        abilities: Vec<AbilityId>,
+        about: Option<ObjectId>,
+        until_end_of_turn: bool,
+        while_source: bool,
+    },
     /// Use up `n` of a shield's remaining prevention.
     ConsumeShield {
         id: u32,
@@ -334,6 +343,30 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             st.emit(Event::ContinuousEffectBegan { id, source });
             ActionResult::Done
         }
+        GameAction::AddLasting {
+            source,
+            controller,
+            abilities,
+            about,
+            until_end_of_turn,
+            while_source,
+        } => {
+            let id = st.next_effect_id;
+            st.next_effect_id += 1;
+            let timestamp = st.alloc_timestamp();
+            st.lasting.push(crate::effects::Lasting {
+                id,
+                timestamp,
+                source,
+                controller,
+                abilities,
+                about,
+                until_end_of_turn,
+                while_source,
+            });
+            st.emit(Event::ContinuousEffectBegan { id, source });
+            ActionResult::Done
+        }
         GameAction::AddShield { target, amount } => {
             let id = st.next_effect_id;
             st.next_effect_id += 1;
@@ -406,6 +439,14 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
         GameAction::ExpireEndOfTurn => {
             st.continuous.retain(|c| !c.until_end_of_turn);
             st.shields.clear();
+            // (And the ones that are over because what they were about is gone.)
+            let over: Vec<u32> = st
+                .lasting
+                .iter()
+                .filter(|e| e.until_end_of_turn || !e.live(st))
+                .map(|e| e.id)
+                .collect();
+            st.lasting.retain(|e| !over.contains(&e.id));
             ActionResult::Done
         }
         GameAction::Draw { player } => {

@@ -3650,7 +3650,7 @@ fn another_target_is_not_the_abilitys_source() {
             "Soldier",
             "2/2",
             "T:Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield | ValidCard$ Card.Self | Execute$ TrigCounter | TriggerDescription$ Text.\n\
-             SVar:TrigCounter:DB$ PutCounter | ValidTgts$ Creature.Other+YouCtrl | CounterType$ P1P1 | CounterNum$ 2",
+             SVar:TrigCounter:DB$ PutCounter | ValidTgts$ Creature.Other | CounterType$ P1P1 | CounterNum$ 2",
         ),
         creature(
             "Test Soultender",
@@ -4246,6 +4246,24 @@ fn words_of_the_oracle_text_the_script_leaves_out() {
         forge_test_blockers(&card(
             "Sacrifice Test Oddity: Another target creature gets +1/+0 until end of turn.",
             &pump.replace("ValidTgts$ Creature", "ValidTgts$ Creature.Other")
+        ))
+        .is_empty()
+    );
+
+    // "Target creature" on the card, "target creature you control" in the script (a hint
+    // for Forge's AI that became a rule).
+    let own = pump.replace("ValidTgts$ Creature", "ValidTgts$ Creature.YouCtrl+Other");
+    assert_eq!(
+        forge_test_blockers(&card(
+            "Sacrifice Test Oddity: Another target creature gets +1/+0 until end of turn.",
+            &own
+        )),
+        ["oracle:target you control"]
+    );
+    assert!(
+        forge_test_blockers(&card(
+            "Sacrifice Test Oddity: Another target creature you control gets +1/+0 until end of turn.",
+            &own
         ))
         .is_empty()
     );
@@ -5688,4 +5706,486 @@ fn abilities_that_cant_be_given() {
         )),
         ["granted:nested too deep"]
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// Effects that last on no object (Forge's effect objects, D-065).
+
+const SLIPSTREAM: &str = "Name:Test Slipstream\nManaCost:U\nTypes:Instant\n\
+    A:SP$ Effect | ValidTgts$ Creature | RememberObjects$ Targeted | ExileOnMoved$ Battlefield | StaticAbilities$ Unblockable | SpellDescription$ Text.\n\
+    SVar:Unblockable:Mode$ CantBlockBy | ValidAttacker$ Card.IsRemembered | Description$ Text.\nOracle:Text.";
+
+// CR 611.2a–b, 509.1b, 514.2 (2026-11-06): "Target creature can't be blocked this turn" —
+// a rule for a while, about that creature. CR 113.12: it "is neither granting an ability
+// nor setting a characteristic", so losing all abilities doesn't end it. Forge: `Effect`
+// with `RememberObjects$ Targeted` and a `StaticAbilities$` of `Mode$ CantBlockBy |
+// ValidAttacker$ Card.IsRemembered`.
+#[test]
+fn target_creature_cant_be_blocked_this_turn() {
+    let hush = aura(
+        "Test Hush",
+        "U",
+        "Creature",
+        "S:Mode$ Continuous | AffectedDefined$ Enchanted | Affected$ Creature | RemoveAllAbilities$ True | Description$ Text.",
+    );
+    let cards = [SLIPSTREAM, &hush, SMITE];
+    let build = || {
+        let mut sc = scenario(&cards);
+        sc.cards(P0, Zone::Battlefield, &["Island", "Island", "Swamp"]);
+        let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+        let giant = sc.card(P0, Zone::Battlefield, "Test Giant");
+        sc.card(P1, Zone::Battlefield, "Test Golem");
+        sc.cards(
+            P0,
+            Zone::Hand,
+            &["Test Slipstream", "Test Hush", "Test Smiting"],
+        );
+        let mut s = Script::new(sc.build());
+        s.cast("Test Slipstream")
+            .target_object(golem)
+            .pay()
+            .pass_all();
+        (s, golem, giant)
+    };
+    // The Golem can't be blocked; the Giant, which the effect isn't about, can.
+    let (mut s, golem, giant) = build();
+    assert_eq!(given(&s, golem), 0, "not an ability of the creature");
+    s.cast("Test Hush").target_object(golem).pay().pass_all();
+    attack_with(&mut s, &[golem, giant]);
+    assert_eq!(offered_blockers(&mut s, golem), [] as [&str; 0]);
+    let (mut s, golem, giant) = build();
+    attack_with(&mut s, &[golem, giant]);
+    assert_eq!(offered_blockers(&mut s, giant), ["Test Golem"]);
+    // It lasts until the turn ends.
+    assert_eq!(engine_core::view::player_view(&s.st, P1).lasting.len(), 1);
+    drive_until(&mut s, |s| s.st.turn.active == P1);
+    assert!(s.st.lasting.is_empty());
+    // And it is over when the creature it is about is gone (CR 400.7).
+    let (mut s, golem, _) = build();
+    s.cast("Test Smiting").target_object(golem).pay().pass_all();
+    assert!(engine_core::view::player_view(&s.st, P0).lasting.is_empty());
+}
+
+// Forge: `ValidBlocker$ <filter>` — "can't be blocked by creatures with power 2 or less";
+// `ValidAttacker$ Creature.EffectSource | ValidBlocker$ Creature.IsRemembered` — "target
+// creature can't block this creature this turn"; `RememberObjects$ Self` — "this creature
+// can't be blocked this turn"; `Duration$ UntilHostLeavesPlayOrEOT`.
+#[test]
+fn cant_be_blocked_by_some_creatures_and_cant_block_this_creature() {
+    let cards = [
+        creature(
+            "Test Tunnel Guide",
+            "1 G",
+            "Dwarf",
+            "1/1",
+            "A:AB$ Effect | Cost$ 1 | ValidTgts$ Creature | RememberObjects$ Targeted | StaticAbilities$ Low | SpellDescription$ Text.\n\
+             SVar:Low:Mode$ CantBlockBy | ValidAttacker$ Creature.IsRemembered | ValidBlocker$ Creature.powerLE2 | Description$ Text.",
+        ),
+        creature(
+            "Test Skitterer",
+            "1 R",
+            "Insect",
+            "2/1",
+            "A:AB$ Effect | Cost$ R | ValidTgts$ Creature | RememberObjects$ Targeted | ExileOnMoved$ Battlefield | StaticAbilities$ NotMe | Duration$ UntilHostLeavesPlayOrEOT | SpellDescription$ Text.\n\
+             SVar:NotMe:Mode$ CantBlockBy | ValidAttacker$ Creature.EffectSource | ValidBlocker$ Creature.IsRemembered | Description$ Text.",
+        ),
+        creature(
+            "Test Shade Runner",
+            "1 U",
+            "Rogue",
+            "1/1",
+            "A:AB$ Effect | Cost$ U | RememberObjects$ Self | ExileOnMoved$ Battlefield | StaticAbilities$ Unblockable | SpellDescription$ Text.\n\
+             SVar:Unblockable:Mode$ CantBlockBy | ValidAttacker$ Card.IsRemembered | Description$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let build = || {
+        let mut sc = scenario(&cards);
+        sc.cards(P0, Zone::Battlefield, &["Mountain", "Island", "Forest"]);
+        let mine = sc.cards(
+            P0,
+            Zone::Battlefield,
+            &[
+                "Test Tunnel Guide",
+                "Test Skitterer",
+                "Test Shade Runner",
+                "Test Golem",
+            ],
+        );
+        let theirs = sc.cards(P1, Zone::Battlefield, &["Test Golem", "Test Giant"]);
+        (Script::new(sc.build()), mine, theirs)
+    };
+    // The Golem (power 2) can't block the guided creature; the Giant can.
+    let (mut s, mine, _) = build();
+    s.activate("Test Tunnel Guide")
+        .target_object(mine[3])
+        .pay()
+        .pass_all();
+    attack_with(&mut s, &mine);
+    assert_eq!(offered_blockers(&mut s, mine[3]), ["Test Giant"]);
+    // The Giant can't block the Skitterer — but it can block anything else.
+    let (mut s, mine, theirs) = build();
+    s.activate("Test Skitterer")
+        .target_object(theirs[1])
+        .pay()
+        .pass_all();
+    attack_with(&mut s, &mine);
+    assert_eq!(offered_blockers(&mut s, mine[1]), ["Test Golem"]);
+    let (mut s, mine, theirs) = build();
+    s.activate("Test Skitterer")
+        .target_object(theirs[1])
+        .pay()
+        .pass_all();
+    attack_with(&mut s, &mine);
+    assert_eq!(
+        offered_blockers(&mut s, mine[3]),
+        ["Test Golem", "Test Giant"]
+    );
+    // "This creature can't be blocked this turn."
+    let (mut s, mine, _) = build();
+    s.activate("Test Shade Runner").pay().pass_all();
+    attack_with(&mut s, &mine);
+    assert_eq!(offered_blockers(&mut s, mine[2]), [] as [&str; 0]);
+}
+
+fn prevented(s: &Script) -> u32 {
+    s.events
+        .iter()
+        .filter_map(|e| match e {
+            Event::DamagePrevented { amount, .. } => Some(*amount),
+            _ => None,
+        })
+        .sum()
+}
+
+// CR 615.1a, 611.2c (2026-11-06): "Prevent all combat damage that would be dealt this
+// turn" — a prevention effect for a while, about no object in particular; damage that
+// isn't combat damage is dealt. Forge: `Effect | ReplacementEffects$ <SVar>` with
+// `Event$ DamageDone | Prevent$ True | IsCombat$ True | ActiveZones$ Command`.
+#[test]
+fn prevent_all_combat_damage_this_turn() {
+    let cards = [
+        spell(
+            "Test Haze",
+            "G",
+            "Instant",
+            "A:SP$ Effect | ReplacementEffects$ RPrevent | SpellDescription$ Text.\n\
+             SVar:RPrevent:Event$ DamageDone | Prevent$ True | IsCombat$ True | ActiveZones$ Command | Description$ Text.",
+        ),
+        ZAP.to_string(),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Forest", "Mountain"]);
+    let giant = sc.card(P0, Zone::Battlefield, "Test Giant"); // 5/4
+    sc.cards(P0, Zone::Hand, &["Test Haze", "Test Zapping"]);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Haze").pay().pass_all();
+    s.cast("Test Zapping").target_player(P1).pay().pass_all();
+    assert_eq!(life(&s, P1), 37, "not combat damage");
+    attack_with(&mut s, &[giant]);
+    drive_until(&mut s, |s| s.st.turn.step == Step::PostcombatMain);
+    assert_eq!(life(&s, P1), 37, "the Giant's 5 combat damage is prevented");
+    assert_eq!(prevented(&s), 5);
+    drive_until(&mut s, |s| s.st.turn.active == P1);
+    assert!(s.st.lasting.is_empty());
+}
+
+// CR 615.1a (2026-11-06). Forge: `ValidSource$ Card.IsRemembered` — "prevent all combat
+// damage that would be dealt by target creature this turn"; `ValidTarget$
+// Card.IsRemembered` — "prevent all damage that would be dealt to target creature this
+// turn".
+#[test]
+fn prevent_damage_by_or_to_a_target_creature() {
+    let cards = [
+        spell(
+            "Test Muzzling",
+            "W",
+            "Instant",
+            "A:SP$ Effect | ValidTgts$ Creature | RememberObjects$ Targeted | ExileOnMoved$ Battlefield | ReplacementEffects$ RPrevent | SpellDescription$ Text.\n\
+             SVar:RPrevent:Event$ DamageDone | Prevent$ True | IsCombat$ True | ValidSource$ Card.IsRemembered | Description$ Text.",
+        ),
+        spell(
+            "Test Sheltering",
+            "W",
+            "Instant",
+            "A:SP$ Effect | ValidTgts$ Creature | RememberObjects$ Targeted | ExileOnMoved$ Battlefield | ReplacementEffects$ RPrevent | SpellDescription$ Text.\n\
+             SVar:RPrevent:Event$ DamageDone | Prevent$ True | ValidTarget$ Card.IsRemembered | Description$ Text.",
+        ),
+        ZAP.to_string(),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Plains", "Plains", "Mountain", "Mountain"],
+    );
+    let giant = sc.card(P0, Zone::Battlefield, "Test Giant"); // 5/4
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem"); // 2/3
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Golem");
+    sc.cards(
+        P0,
+        Zone::Hand,
+        &[
+            "Test Muzzling",
+            "Test Sheltering",
+            "Test Zapping",
+            "Test Zapping",
+        ],
+    );
+    let mut s = Script::new(sc.build());
+    s.cast("Test Sheltering")
+        .target_object(golem)
+        .pay()
+        .pass_all();
+    s.cast("Test Zapping").target_object(golem).pay().pass_all();
+    assert!(on_battlefield(&s, golem));
+    assert_eq!(s.st.object(golem).damage_marked, 0);
+    assert_eq!(prevented(&s), 3);
+    // Only that creature: the other Golem takes its 3 and dies.
+    s.cast("Test Zapping")
+        .target_object(theirs)
+        .pay()
+        .pass_all();
+    assert!(!on_battlefield(&s, theirs));
+    // The muzzled Giant deals no combat damage; the Golem beside it deals its 2.
+    s.cast("Test Muzzling")
+        .target_object(giant)
+        .pay()
+        .pass_all();
+    attack_with(&mut s, &[giant, golem]);
+    drive_until(&mut s, |s| s.st.turn.step == Step::PostcombatMain);
+    assert_eq!(life(&s, P1), 38);
+    assert_eq!(prevented(&s), 3 + 5);
+}
+
+// CR 615.1a, 614.1a (2026-11-06): a permanent's own prevention effect. Forge: an `R:` line
+// `Event$ DamageDone | Prevent$ True` with `ValidTarget$` / `ValidSource$` / `IsCombat$` —
+// "Prevent all noncombat damage that would be dealt to creatures you control", "Prevent
+// all damage that would be dealt by enchanted creature."
+#[test]
+fn permanents_that_prevent_damage() {
+    let cards = [
+        "Name:Test Idol\nManaCost:2\nTypes:Artifact\n\
+         R:Event$ DamageDone | ActiveZones$ Battlefield | Prevent$ True | ValidTarget$ Creature.YouCtrl | IsCombat$ False | Description$ Text.\nOracle:Text."
+            .to_string(),
+        aura(
+            "Test Pacifism",
+            "W",
+            "Creature",
+            "R:Event$ DamageDone | ActiveZones$ Battlefield | Prevent$ True | ValidSource$ Creature.EnchantedBy | Description$ Text.",
+        ),
+        ZAP.to_string(),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Plains", "Mountain", "Mountain"]);
+    sc.card(P0, Zone::Battlefield, "Test Idol");
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    let giant = sc.card(P0, Zone::Battlefield, "Test Giant");
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Golem");
+    sc.cards(
+        P0,
+        Zone::Hand,
+        &["Test Pacifism", "Test Zapping", "Test Zapping"],
+    );
+    let mut s = Script::new(sc.build());
+    // Noncombat damage to my creatures is prevented; to another player's, it isn't.
+    s.cast("Test Zapping").target_object(golem).pay().pass_all();
+    assert_eq!(s.st.object(golem).damage_marked, 0);
+    s.cast("Test Zapping")
+        .target_object(theirs)
+        .pay()
+        .pass_all();
+    assert!(!on_battlefield(&s, theirs));
+    // The enchanted Giant deals no damage; the Golem does.
+    s.cast("Test Pacifism")
+        .target_object(giant)
+        .pay()
+        .pass_all();
+    attack_with(&mut s, &[giant, golem]);
+    drive_until(&mut s, |s| s.st.turn.step == Step::PostcombatMain);
+    assert_eq!(life(&s, P1), 38);
+}
+
+// What an effect object can't carry yet is named, kind by kind; and what an effect is
+// about has to be a permanent.
+#[test]
+fn effect_objects_not_compiled() {
+    let with = |effect: &str, svar: &str| {
+        spell(
+            "Test Oddment",
+            "U",
+            "Instant",
+            &format!("A:SP$ Effect | {effect} | SpellDescription$ Text.\n{svar}"),
+        )
+    };
+    assert_eq!(
+        forge_test_blockers(&with(
+            "Triggers$ Later",
+            "SVar:Later:Mode$ Phase | Phase$ Upkeep | Execute$ TrigDraw | TriggerDescription$ Text.\nSVar:TrigDraw:DB$ Draw"
+        )),
+        ["Effect:Triggers"]
+    );
+    assert_eq!(
+        forge_test_blockers(&with(
+            "StaticAbilities$ Big",
+            "SVar:Big:Mode$ Continuous | Affected$ Creature.YouCtrl | AddPower$ 1 | Description$ Text."
+        )),
+        ["Effect:static Continuous"]
+    );
+    assert_eq!(
+        forge_test_blockers(&with(
+            "ValidTgts$ Player | RememberObjects$ Targeted | StaticAbilities$ No",
+            "SVar:No:Mode$ CantAttack | ValidCard$ Creature | Description$ Text."
+        )),
+        ["Effect:remembers a target that isn't a permanent"]
+    );
+    assert_eq!(
+        forge_test_blockers(&with(
+            "StaticAbilities$ No | Duration$ UntilEndOfCombat",
+            "SVar:No:Mode$ CantAttack | ValidCard$ Creature | Description$ Text."
+        )),
+        ["Effect:duration UntilEndOfCombat"]
+    );
+    // "You have hexproof" is about a player: "You" is never a subtype of permanents.
+    let b = forge_test_blockers(
+        "Name:Test Warding Mask\nManaCost:2 W\nTypes:Enchantment\n\
+         S:Mode$ Continuous | Affected$ You | AddKeyword$ Hexproof | Description$ Text.\nOracle:Text.",
+    );
+    assert_eq!(b, ["filter:You"]);
+}
+
+// CR 113.12, 611.2c (2026-11-06): "can't block" is a rule about a creature, not an ability
+// it has. Forge writes such rules as keywords: Pump with `KW$ HIDDEN CARDNAME can't
+// block.` — "target creature can't block this turn"; PumpAll — "creatures without flying
+// can't block this turn", which, being a rule and no change of characteristics, also holds
+// for a creature that arrives afterwards.
+#[test]
+fn creatures_that_cant_block_this_turn() {
+    let cards = [
+        spell(
+            "Test Stunning",
+            "R",
+            "Instant",
+            "A:SP$ Pump | ValidTgts$ Creature | KW$ HIDDEN CARDNAME can't block. | IsCurse$ True | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Tremor",
+            "R",
+            "Sorcery",
+            "A:SP$ PumpAll | ValidCards$ Creature.withoutFlying | KW$ HIDDEN CARDNAME can't block. | IsCurse$ True | SpellDescription$ Text.",
+        ),
+        creature("Test Ambusher", "G", "Cat", "1/1", "K:Flash"),
+        creature("Test Gull", "U", "Bird", "1/1", "K:Flying"),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let build = |hand: &[&str]| {
+        let mut sc = scenario(&cards);
+        sc.cards(P0, Zone::Battlefield, &["Mountain", "Mountain"]);
+        let giant = sc.card(P0, Zone::Battlefield, "Test Giant");
+        sc.cards(
+            P1,
+            Zone::Battlefield,
+            &["Forest", "Test Golem", "Test Gull"],
+        );
+        sc.card(P1, Zone::Hand, "Test Ambusher");
+        sc.cards(P0, Zone::Hand, hand);
+        (Script::new(sc.build()), giant)
+    };
+    // One creature: the others may block.
+    let (mut s, giant) = build(&["Test Stunning"]);
+    let golem = s.find(P1, Zone::Battlefield, "Test Golem").unwrap();
+    s.cast("Test Stunning")
+        .target_object(golem)
+        .pay()
+        .pass_all();
+    assert_eq!(given(&s, golem), 0);
+    attack_with(&mut s, &[giant]);
+    assert_eq!(offered_blockers(&mut s, giant), ["Test Gull"]);
+    // Every creature without flying — also the one that comes in at the beginning of
+    // combat, after the spell has resolved.
+    let (mut s, giant) = build(&["Test Tremor"]);
+    s.cast("Test Tremor").pay().pass_all();
+    drive_until(&mut s, |s| {
+        s.st.turn.step == Step::BeginningOfCombat
+            && s.who() == P1
+            && s.kind() == ChoiceKind::Priority
+    });
+    s.cast("Test Ambusher").pay().pass_all();
+    assert!(s.find(P1, Zone::Battlefield, "Test Ambusher").is_some());
+    attack_with(&mut s, &[giant]);
+    assert_eq!(offered_blockers(&mut s, giant), ["Test Gull"]);
+}
+
+// Forge writes rules about a card as keyword lines — `K:CARDNAME can't block.`,
+// `K:Prevent all combat damage that would be dealt to and dealt by CARDNAME.` — and
+// about other permanents as `AddHiddenKeyword$` on a static ability ("enchanted creature
+// can't attack or block").
+#[test]
+fn rules_written_as_keywords() {
+    let cards = [
+        creature(
+            "Test Mistform",
+            "1 U",
+            "Illusion",
+            "0/2",
+            "K:Prevent all combat damage that would be dealt to and dealt by CARDNAME.",
+        ),
+        creature("Test Craven", "B", "Rat", "3/1", "K:CARDNAME can't block."),
+        aura(
+            "Test Shackles",
+            "W",
+            "Creature",
+            "S:Mode$ Continuous | AffectedDefined$ Enchanted | Affected$ Creature | AddHiddenKeyword$ CARDNAME can't attack or block. | Description$ Text.",
+        ),
+        ZAP.to_string(),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Plains", "Mountain"]);
+    let giant = sc.card(P0, Zone::Battlefield, "Test Giant");
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    let mist = sc.card(P1, Zone::Battlefield, "Test Mistform");
+    sc.card(P1, Zone::Battlefield, "Test Craven");
+    sc.cards(P0, Zone::Hand, &["Test Shackles", "Test Zapping"]);
+    let mut s = Script::new(sc.build());
+    assert_eq!(chars(&s.st, mist).keywords, [] as [Keyword; 0]);
+    // Not combat damage: the Mistform takes it.
+    s.cast("Test Zapping").target_object(mist).pay().pass_all();
+    assert!(!on_battlefield(&s, mist));
+
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Plains", "Mountain"]);
+    let giant2 = sc.card(P0, Zone::Battlefield, "Test Giant");
+    let golem2 = sc.card(P0, Zone::Battlefield, "Test Golem");
+    let mist = sc.card(P1, Zone::Battlefield, "Test Mistform");
+    sc.card(P1, Zone::Battlefield, "Test Craven");
+    sc.card(P0, Zone::Hand, "Test Shackles");
+    let mut s = Script::new(sc.build());
+    let _ = (giant, golem);
+    // The shackled Golem isn't asked to attack; the Craven isn't offered as a blocker.
+    s.cast("Test Shackles")
+        .target_object(golem2)
+        .pay()
+        .pass_all();
+    let asked = attack_with(&mut s, &[giant2]);
+    assert_eq!(asked, [giant2]);
+    // The Mistform blocks the Giant: no combat damage either way.
+    drive_until(&mut s, |s| s.kind() == ChoiceKind::DeclareBlockers);
+    let offered: Vec<String> = s
+        .options()
+        .iter()
+        .filter_map(|o| match o {
+            OptionDesc::Block { blocker, .. } => Some(s.name(*blocker)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(offered, ["Test Mistform"]);
+    block_with(&mut s, &[(mist, giant2)]);
+    fight(&mut s);
+    drive_until(&mut s, |s| s.st.turn.step == Step::PostcombatMain);
+    assert!(on_battlefield(&s, mist) && life(&s, P1) == 40);
+    assert_eq!(s.st.object(giant2).damage_marked, 0);
 }

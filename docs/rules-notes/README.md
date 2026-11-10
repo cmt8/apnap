@@ -23,6 +23,7 @@ One file per rules area, written **before** that area is implemented (CLAUDE.md 
 | 303.4 Auras, layer 2 control | [303-auras-613-control.md](303-auras-613-control.md) | M3 |
 | 702.29 Cycling, 113.6 ability zones | [702.29-cycling-113.6-ability-zones.md](702.29-cycling-113.6-ability-zones.md) | M4 |
 | 113 Abilities an object is given (+305.6, 613.1f, 613.7a) | [113-abilities-given.md](113-abilities-given.md) | M4 |
+| 611.2 Effects that last on no object, 615.1 prevention | [611.2-lasting-effects-615-prevention.md](611.2-lasting-effects-615-prevention.md) | M4 |
 
 Excerpts are committed verbatim by explicit decision (D-012). If the repo is ever
 published, revisit that decision first (Fan Content Policy, spec §12).

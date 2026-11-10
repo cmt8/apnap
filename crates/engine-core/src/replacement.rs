@@ -7,6 +7,7 @@
 //! each effect applies at most once per event (CR 614.5), applicability is re-evaluated after
 //! every application (CR 616.1f, 616.2), and only then is the (modified) event performed.
 
+use crate::effects::Bearer;
 use crate::events::{DamageTarget, LossReason};
 use crate::ids::{ObjectId, PlayerId};
 use crate::layers::abilities;
@@ -14,7 +15,9 @@ use crate::stack::Target;
 use crate::state::GameState;
 use crate::zones::{LibraryPosition, Zone};
 use alloc::vec::Vec;
-use card_model::{AbilityDef, AbilityId, CardDefId, CounterKind, ReplaceWith, Replaces};
+use card_model::{
+    AbilityDef, AbilityId, CardDefId, CounterKind, DamageTo, ObjFilter, ReplaceWith, Replaces,
+};
 use serde::{Deserialize, Serialize};
 
 /// Why an object is moving (for events and for "destroy" vs other moves, CR 701.8b).
@@ -134,6 +137,8 @@ pub enum RepKey {
     },
     /// A prevention shield (CR 615.7).
     Shield(u32),
+    /// Ability `index` of lasting effect `id` (CR 611.2).
+    Lasting { id: u32, index: u8 },
     /// CR 903.9b: "If a commander would be put into its owner's hand or library from
     /// anywhere, its owner may put it into the command zone instead." Optional; a rule, not an
     /// ability of any object.
@@ -192,8 +197,13 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
         // CLAUDE.md invariant 4: only abilities the source currently has.
         let has = abilities(st, source);
         for (k, (ability, a)) in has.iter().enumerate() {
+            let who = Bearer {
+                source,
+                controller: crate::layers::controller_of(st, source),
+                about: &[],
+            };
             if let AbilityDef::Replacement { replaces, .. } = a
-                && applies(st, source, replaces, &p.event)
+                && applies(st, who, replaces, &p.event)
             {
                 // An ability the source was given twice is two effects.
                 let nth = has[..k].iter().filter(|(b, _)| b == ability).count() as u8;
@@ -203,6 +213,22 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
                     nth,
                 });
             }
+        }
+    }
+    // What lasting effects carry: "prevent all combat damage that would be dealt this turn".
+    for (e, index, a) in crate::effects::lasting_abilities(st) {
+        let who = Bearer {
+            source: e.source,
+            controller: e.controller,
+            about: e.about.as_slice(),
+        };
+        if let AbilityDef::Replacement { replaces, .. } = a
+            && applies(st, who, replaces, &p.event)
+        {
+            out.push(RepKey::Lasting {
+                id: e.id,
+                index: index as u8,
+            });
         }
     }
     // CR 614.12: an entering permanent's own "enters …" replacement effects apply too,
@@ -258,9 +284,89 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
     out
 }
 
-fn applies(st: &GameState, source: ObjectId, replaces: &Replaces, ev: &Proposed) -> bool {
-    let you = crate::layers::controller_of(st, source);
+/// Is `id` — something that deals or is dealt damage — what `filter` says, for `who`?
+/// A source that has left is judged as it last existed, if the ability dealing the damage
+/// remembers it (CR 608.2h).
+fn damage_object_hit(st: &GameState, filter: &ObjFilter, id: ObjectId, who: Bearer<'_>) -> bool {
+    let sel = match filter {
+        ObjFilter::This => return id == who.source,
+        ObjFilter::Remembered => return who.about.contains(&id),
+        ObjFilter::Host => {
+            return st.objects.get(&who.source).and_then(|o| o.attached_to) == Some(id);
+        }
+        ObjFilter::ThisOr(_) if id == who.source => return true,
+        ObjFilter::Matching(sel) | ObjFilter::ThisOr(sel) => sel,
+    };
+    let (c, facts) = match st.objects.get(&id) {
+        Some(o) => {
+            let c = crate::layers::chars(st, id);
+            let (attacking, blocking) = crate::layers::combat_role(st, id);
+            let facts = crate::layers::Facts {
+                id,
+                controller: c.controller,
+                owner: o.owner,
+                is_token: o.is_token,
+                tapped: o.tapped,
+                attacking,
+                blocking,
+            };
+            (c, facts)
+        }
+        None => {
+            let lki = st.stack.last().and_then(|top| match &top.kind {
+                crate::stack::StackKind::Ability { source, .. } if *source == id => {
+                    top.source_lki.clone()
+                }
+                _ => None,
+            });
+            let Some(c) = lki else { return false };
+            let facts = crate::layers::Facts {
+                id,
+                controller: c.controller,
+                owner: c.controller,
+                is_token: false,
+                tapped: false,
+                attacking: false,
+                blocking: false,
+            };
+            (c, facts)
+        }
+    };
+    crate::layers::matches_parts(sel, &c, facts, who.source, who.controller)
+}
+
+fn applies(st: &GameState, who: Bearer<'_>, replaces: &Replaces, ev: &Proposed) -> bool {
+    let (source, you) = (who.source, who.controller);
     match (replaces, ev) {
+        // CR 615.1a: "prevent all [combat] damage that would be dealt [to …] [by …]".
+        (
+            Replaces::Damage { by, to, combat },
+            Proposed::Damage {
+                source: dealer,
+                target,
+                amount,
+                combat: in_combat,
+                ..
+            },
+        ) => {
+            *amount > 0
+                && combat.is_none_or(|c| c == *in_combat)
+                && by
+                    .as_ref()
+                    .is_none_or(|f| damage_object_hit(st, f, *dealer, who))
+                && match (to, target) {
+                    (DamageTo::Anything, _) => true,
+                    (DamageTo::Player(w), DamageTarget::Player(p)) => match w {
+                        card_model::Who::Any => true,
+                        card_model::Who::You => *p == you,
+                        card_model::Who::Opponent => *p != you,
+                    },
+                    (DamageTo::Permanent(f), DamageTarget::Object(o)) => {
+                        damage_object_hit(st, f, *o, who)
+                    }
+                    _ => false,
+                }
+        }
         (
             Replaces::CreateTokens,
             Proposed::CreateTokens {
@@ -386,6 +492,22 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
             }
             Some(ev)
         }
+        RepKey::Lasting { id, index } => {
+            let e = st
+                .lasting
+                .iter()
+                .find(|e| e.id == id)
+                .expect("a lasting effect in force");
+            let source = e.source;
+            let AbilityDef::Replacement { with, .. } =
+                st.catalog.ability(e.abilities[index as usize])
+            else {
+                unreachable!()
+            };
+            let with = with.clone();
+            st.emit(crate::events::Event::Replaced { source });
+            replace(st, ev, with)
+        }
         RepKey::Static {
             source, ability, ..
         } => {
@@ -412,9 +534,24 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
                 with = ReplaceWith::EntersWithCounters { kind: *kind, n };
             }
             st.emit(crate::events::Event::Replaced { source });
-            Some(modify(ev, with))
+            replace(st, ev, with)
         }
     }
+}
+
+/// The event as `with` changes it; `None` if it no longer happens (CR 615.1a: prevented
+/// damage isn't dealt).
+fn replace(st: &mut GameState, ev: Proposed, with: ReplaceWith) -> Option<Proposed> {
+    if with == ReplaceWith::Prevent {
+        if let Proposed::Damage { target, amount, .. } = &ev {
+            st.emit(crate::events::Event::DamagePrevented {
+                target: *target,
+                amount: *amount,
+            });
+        }
+        return None;
+    }
+    Some(modify(ev, with))
 }
 
 fn modify(mut ev: Proposed, with: ReplaceWith) -> Proposed {

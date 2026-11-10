@@ -163,6 +163,12 @@ pub enum OptionDesc {
     Shield {
         id: u32,
     },
+    /// A replacement or prevention effect a lasting effect carries (CR 611.2, 616.1):
+    /// ability `index` of `GameState::lasting` entry `id`.
+    Lasting {
+        id: u32,
+        index: u8,
+    },
     /// "Yes" for an optional choice (e.g. CR 903.9a/b: put the commander into the command
     /// zone).
     Accept,

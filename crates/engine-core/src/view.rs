@@ -90,6 +90,19 @@ pub struct PlayerPublic {
     pub commander_casts: Vec<(CardInstanceId, u32)>,
 }
 
+/// An effect that holds for a while without being on any object (CR 611.2; public):
+/// "target creature can't be blocked this turn".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastingView {
+    pub id: u32,
+    pub controller: PlayerId,
+    /// What it does: abilities written on the card that made it.
+    pub abilities: Vec<card_model::AbilityId>,
+    /// The object it is about, if it is about one.
+    pub about: Option<ObjectId>,
+    pub until_end_of_turn: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayerView {
     pub viewer: PlayerId,
@@ -116,6 +129,9 @@ pub struct PlayerView {
     /// cards a scry looks at. Empty unless the decision is the viewer's.
     #[serde(default)]
     pub revealed: Vec<ObjectView>,
+    /// The effects in force that are on no object (CR 611.2).
+    #[serde(default)]
+    pub lasting: Vec<LastingView>,
 }
 
 fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
@@ -234,6 +250,18 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
         combat: st.combat.clone(),
         decision: st.pending.clone().filter(|d| d.player == viewer),
         revealed: views(st, &shown_to(st, viewer)),
+        lasting: st
+            .lasting
+            .iter()
+            .filter(|e| e.live(st))
+            .map(|e| LastingView {
+                id: e.id,
+                controller: e.controller,
+                abilities: e.abilities.clone(),
+                about: e.about,
+                until_end_of_turn: e.until_end_of_turn,
+            })
+            .collect(),
     }
 }
 

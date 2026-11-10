@@ -403,7 +403,8 @@ pub fn anchor(o: &OptionDesc) -> Option<Anchor> {
             Target::Player(p) => Anchor::Player(*p),
         },
         OptionDesc::Player { player } => Anchor::Player(*player),
-        OptionDesc::Pass
+        OptionDesc::Lasting { .. }
+        | OptionDesc::Pass
         | OptionDesc::Keep
         | OptionDesc::Mulligan
         | OptionDesc::Mode { .. }
@@ -479,6 +480,21 @@ pub fn option_label(
                 (None, _) => harness::text::option_line(v, o),
             }
         }
+        // An effect in force on no object: what it says.
+        OptionDesc::Lasting { id, index } => v
+            .lasting
+            .iter()
+            .find(|e| e.id == *id)
+            .and_then(|e| e.abilities.get(*index as usize))
+            .map(|a| {
+                let def = cat.get(a.card);
+                format!(
+                    "{}: {}",
+                    def.name,
+                    describe::ability_text(def, cat.ability(*a))
+                )
+            })
+            .unwrap_or_else(|| harness::text::option_line(v, o)),
         // The ability itself, so that two abilities of one card (or casting it and
         // cycling it) can be told apart.
         OptionDesc::ActivateAbility { source, ability } => {
@@ -1647,7 +1663,7 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
             now.push(format!("commander tax: {{{tax}}} more to cast"));
         }
     }
-    let gained: Vec<String> = gained
+    let mut gained: Vec<String> = gained
         .iter()
         .map(|(a, n)| {
             let text = describe::ability_text(cx.cat.get(a.card), cx.cat.ability(*a));
@@ -1658,6 +1674,21 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
             }
         })
         .collect();
+    // Effects in force that are about this object ("can't be blocked this turn").
+    for e in &cx.view.lasting {
+        if e.about.is_some() && e.about == pv.object {
+            for a in &e.abilities {
+                let def = cx.cat.get(a.card);
+                let text = describe::ability_text(def, cx.cat.ability(*a));
+                let text = text.replace("That permanent", "It");
+                gained.push(if e.until_end_of_turn {
+                    format!("This turn ({}): {text}", def.name)
+                } else {
+                    format!("{}: {text}", def.name)
+                });
+            }
+        }
+    }
     let lines = usize::from(credit.is_some()) + usize::from(!now.is_empty()) + gained.len();
     let size = card + vec2(12.0, 12.0 + lines as f32 * 18.0);
     let (x, y) = zoom_position(screen, near, size, hover.in_hand);

@@ -468,10 +468,45 @@ fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
 
 /// Brackets the index of a granted ability until its text is filled in.
 const GRANTED: char = '\u{1}';
+/// Brackets "index|what it is about" of an ability a lasting effect carries.
+const LASTING: char = '\u{2}';
 
 /// Replace each marker `continuous` left with the quoted text of that ability of
 /// `def.granted` (which can quote others in turn).
 fn quote_granted(def: &CardDef, text: &str) -> String {
+    // The abilities of lasting effects first, said outright: "target creature can't be
+    // blocked" for "That permanent can't be blocked."
+    let mut said = String::new();
+    let mut parts = text.split(LASTING);
+    while let Some(plain) = parts.next() {
+        said.push_str(plain);
+        let Some(marker) = parts.next() else { break };
+        let (index, about) = marker.split_once('|').unwrap_or((marker, ""));
+        match index.parse::<usize>().ok().and_then(|i| def.granted.get(i)) {
+            Some(a) => {
+                let mut text = ability(a);
+                if !about.is_empty() {
+                    text = text
+                        .replace("That permanent", about)
+                        .replace("that permanent", about);
+                }
+                let text = text.trim_end_matches('.');
+                // (Lower case inside a sentence: "…. Then target creature can't …".)
+                let starts = said.is_empty() || said.ends_with(": ") || said.ends_with("• ");
+                let mut chars = text.chars();
+                if let Some(first) = chars.next() {
+                    if starts {
+                        said.extend(first.to_uppercase());
+                    } else {
+                        said.extend(first.to_lowercase());
+                    }
+                    said.push_str(chars.as_str());
+                }
+            }
+            None => said.push_str("[a missing ability]"),
+        }
+    }
+    let text = said.as_str();
     let mut out = String::new();
     let mut parts = text.split(GRANTED);
     // A quotation that ends a sentence ends it with its own full stop.
@@ -498,6 +533,21 @@ fn quote_granted(def: &CardDef, text: &str) -> String {
 
 fn effect(mode: &Mode, e: &Effect) -> String {
     match e {
+        // The abilities' texts are filled in by `quote_granted`, which has the card.
+        Effect::Lasting {
+            abilities,
+            about,
+            until_end_of_turn,
+            ..
+        } => {
+            let about = about.map(|r| obj(mode, r)).unwrap_or_default();
+            let parts = abilities
+                .iter()
+                .map(|i| format!("{LASTING}{i}|{about}{LASTING}"))
+                .collect();
+            let turn = if *until_end_of_turn { " this turn" } else { "" };
+            format!("{}{turn}", join(parts, "and"))
+        }
         Effect::Seq(v) => v
             .iter()
             .map(|x| effect(mode, x))
@@ -1180,6 +1230,7 @@ fn obj_filter(f: &ObjFilter) -> String {
         }
         ObjFilter::ThisOr(s) => format!("this permanent or another {}", selector(s, false)),
         ObjFilter::Host => "enchanted or equipped permanent".into(),
+        ObjFilter::Remembered => "that permanent".into(),
     }
 }
 
@@ -1560,6 +1611,7 @@ fn ability(a: &AbilityDef) -> String {
             });
             let (subject, plural) = match affected {
                 Affected::This => ("This permanent".to_string(), false),
+                Affected::Remembered => ("That permanent".to_string(), false),
                 Affected::Enchanted => ("Enchanted creature".to_string(), false),
                 Affected::All(s) => (
                     sentence(selector(s, true))
@@ -1573,6 +1625,37 @@ fn ability(a: &AbilityDef) -> String {
                 return format!("You control {}{when}.", subject.to_lowercase());
             }
             format!("{subject} {}{when}.", continuous(effects, plural))
+        }
+        AbilityDef::Replacement {
+            replaces: Replaces::Damage { by, to, combat },
+            with,
+        } => {
+            let kind = match combat {
+                Some(true) => "combat damage",
+                Some(false) => "noncombat damage",
+                None => "damage",
+            };
+            let to = match to {
+                DamageTo::Anything => String::new(),
+                DamageTo::Player(Who::Any) => " to players".to_string(),
+                DamageTo::Player(Who::You) => " to you".to_string(),
+                DamageTo::Player(Who::Opponent) => " to your opponents".to_string(),
+                DamageTo::Permanent(ObjFilter::Matching(s)) => {
+                    format!(" to {}", selector(s, true))
+                }
+                DamageTo::Permanent(f) => format!(" to {}", obj_filter(f)),
+            };
+            let by = match by {
+                None => String::new(),
+                Some(ObjFilter::Matching(s)) => format!(" by {}", selector(s, true)),
+                Some(f) => format!(" by {}", obj_filter(f)),
+            };
+            match with {
+                ReplaceWith::Prevent => {
+                    format!("Prevent all {kind} that would be dealt{to}{by}.")
+                }
+                other => format!("If {kind} would be dealt{to}{by}: {other:?}."),
+            }
         }
         AbilityDef::Replacement { replaces, with } => {
             let others;
@@ -1590,6 +1673,8 @@ fn ability(a: &AbilityDef) -> String {
                 }
                 Replaces::ThisDies => "If this creature would die",
                 Replaces::ThisEnters => "This permanent",
+                // Written out by the arm above.
+                Replaces::Damage { .. } => "If damage would be dealt",
             };
             match with {
                 ReplaceWith::Twice => format!("{what}, it does so twice as many instead."),
@@ -1597,6 +1682,7 @@ fn ability(a: &AbilityDef) -> String {
                 ReplaceWith::ShuffleIntoLibrary => {
                     format!("{what}, shuffle it into its owner's library instead.")
                 }
+                ReplaceWith::Prevent => format!("{what}, prevent it."),
                 ReplaceWith::EntersTapped => format!("{what} enters tapped."),
                 ReplaceWith::EntersWithCounters { kind, n } => {
                     format!(
@@ -1620,6 +1706,7 @@ fn ability(a: &AbilityDef) -> String {
         AbilityDef::CombatRule { affected, rule } => {
             let (subject, plural) = match affected {
                 Affected::This => ("This creature".to_string(), false),
+                Affected::Remembered => ("That permanent".to_string(), false),
                 Affected::Enchanted => ("Enchanted creature".to_string(), false),
                 Affected::All(s) => (
                     sentence(selector(s, true))
@@ -1639,6 +1726,7 @@ fn ability(a: &AbilityDef) -> String {
                 CombatRule::CantBlockAttackers(s) => {
                     format!("{subject} can't block {}.", selector(s, true))
                 }
+                CombatRule::CantBlockSource => format!("{subject} can't block this creature."),
             }
         }
         AbilityDef::AdditionalCost(c) => {
