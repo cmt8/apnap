@@ -389,6 +389,10 @@ pub enum AbilityDef {
     Static {
         affected: Affected,
         effects: Vec<ContinuousEffect>,
+        /// "… as long as [condition]" / "during your turn, …": the effect exists only
+        /// while this holds for the source's controller.
+        #[serde(default)]
+        only_if: Option<Condition>,
     },
     /// A static ability generating a replacement effect (CR 614).
     Replacement {
@@ -514,6 +518,17 @@ pub enum Condition {
         cards: Selector,
         at_least: u32,
     },
+    /// "during your turn" / "during turns other than yours".
+    YourTurn,
+    NotYourTurn,
+    /// "as long as there are N or fewer [selector]" on the battlefield ("you control no
+    /// untapped lands" is `at_most: 0`).
+    ControlAtMost {
+        what: Selector,
+        at_most: u32,
+    },
+    /// "as long as you have N or fewer cards in hand" (hellbent is `0`).
+    HandAtMost(u32),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

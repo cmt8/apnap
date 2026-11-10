@@ -1146,3 +1146,201 @@ fn a_creature_that_changes_controller_leaves_combat() {
     drive_until(&mut s, |s| s.st.turn.step == Step::PostcombatMain);
     assert_eq!((life(&s, P0), life(&s, P1)), (40, 40));
 }
+
+// ---------------------------------------------------------------------------------------
+// Static abilities with a condition, and "+N for each".
+
+fn has(s: &Script, id: ObjectId, k: Keyword) -> bool {
+    chars(&s.st, id).has(k)
+}
+
+// CR 604.2, 611.3a (2026-11-06): a static ability's effect applies while its condition is
+// true, and is not locked in. Forge: `IsPresent$ <filter>` ("as long as you control …"),
+// with `PresentCompare$ EQ0` "as long as you control no …".
+#[test]
+fn a_static_ability_as_long_as_something_is_present_or_absent() {
+    let cards = [
+        creature(
+            "Test Tinkerer",
+            "1 U",
+            "Vedalken",
+            "2/2",
+            "S:Mode$ Continuous | AffectedDefined$ Self | AddPower$ 1 | AddToughness$ 1 | IsPresent$ Artifact.YouCtrl | Description$ Text.",
+        ),
+        creature(
+            "Test Luddite",
+            "1 R",
+            "Goblin",
+            "2/2",
+            "S:Mode$ Continuous | AffectedDefined$ Self | AddKeyword$ Haste | IsPresent$ Artifact.YouCtrl | PresentCompare$ EQ0 | Description$ Text.",
+        ),
+        "Name:Test Automaton\nManaCost:2\nTypes:Artifact Creature Construct\nPT:1/1\nOracle:"
+            .to_string(),
+        SMITE.to_string(),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Island", "Island", "Swamp"]);
+    let tinkerer = sc.card(P0, Zone::Battlefield, "Test Tinkerer");
+    let luddite = sc.card(P0, Zone::Battlefield, "Test Luddite");
+    // An opponent's artifact doesn't count for "you control".
+    sc.card(P1, Zone::Battlefield, "Test Automaton");
+    sc.cards(P0, Zone::Hand, &["Test Automaton", "Test Smiting"]);
+    let mut s = Script::new(sc.build());
+    assert_eq!(pt(&s, tinkerer), (2, 2));
+    assert!(has(&s, luddite, Keyword::Haste));
+    s.cast("Test Automaton").pay().pass_all();
+    assert_eq!(pt(&s, tinkerer), (3, 3));
+    assert!(!has(&s, luddite, Keyword::Haste));
+    // The artifact leaves: both go back.
+    let mine = s.find(P0, Zone::Battlefield, "Test Automaton").unwrap();
+    s.cast("Test Smiting").target_object(mine).pay().pass_all();
+    assert_eq!(pt(&s, tinkerer), (2, 2));
+    assert!(has(&s, luddite, Keyword::Haste));
+}
+
+// Forge's named conditions on statics: `PlayerTurn` ("during your turn"), `NotPlayerTurn`,
+// `Threshold` (seven or more cards in your graveyard), `Metalcraft` (three or more
+// artifacts), `Hellbent` (no cards in hand).
+#[test]
+fn named_conditions_on_static_abilities() {
+    let with = |name: &str, cond: &str| {
+        creature(
+            name,
+            "1 W",
+            "Human",
+            "2/2",
+            &format!(
+                "S:Mode$ Continuous | AffectedDefined$ Self | AddPower$ 2 | Condition$ {cond} | Description$ Text."
+            ),
+        )
+    };
+    let cards = [
+        with("Test Dayguard", "PlayerTurn"),
+        with("Test Nightguard", "NotPlayerTurn"),
+        with("Test Elder", "Threshold"),
+        with("Test Smith", "Metalcraft"),
+        with("Test Gambler", "Hellbent"),
+        "Name:Test Trinket\nManaCost:1\nTypes:Artifact\nOracle:".to_string(),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let power = |s: &Script, id: ObjectId| chars(&s.st, id).power.unwrap();
+    let mut sc = scenario(&cards);
+    let day = sc.card(P0, Zone::Battlefield, "Test Dayguard");
+    let night = sc.card(P0, Zone::Battlefield, "Test Nightguard");
+    let elder = sc.card(P0, Zone::Battlefield, "Test Elder");
+    let smith = sc.card(P0, Zone::Battlefield, "Test Smith");
+    let gambler = sc.card(P0, Zone::Battlefield, "Test Gambler");
+    sc.cards(P0, Zone::Graveyard, &["Forest"; 6]);
+    sc.cards(P0, Zone::Battlefield, &["Test Trinket"; 2]);
+    let mut s = Script::new(sc.build());
+    // P0's turn, six cards in the graveyard, two artifacts, an empty hand.
+    assert_eq!(
+        [day, night, elder, smith, gambler].map(|c| power(&s, c)),
+        [4, 2, 2, 2, 4]
+    );
+    // On P1's turn (P0 has drawn nothing new yet: still hellbent).
+    drive_until(&mut s, |s| s.st.turn.active == P1);
+    assert_eq!([day, night].map(|c| power(&s, c)), [2, 4]);
+    // A seventh card in the graveyard, a third artifact, a card in hand.
+    let mut sc = scenario(&cards);
+    let elder = sc.card(P0, Zone::Battlefield, "Test Elder");
+    let smith = sc.card(P0, Zone::Battlefield, "Test Smith");
+    let gambler = sc.card(P0, Zone::Battlefield, "Test Gambler");
+    sc.cards(P0, Zone::Graveyard, &["Forest"; 7]);
+    sc.cards(P0, Zone::Battlefield, &["Test Trinket"; 3]);
+    sc.card(P0, Zone::Hand, "Forest");
+    let s = Script::new(sc.build());
+    assert_eq!([elder, smith, gambler].map(|c| power(&s, c)), [4, 4, 2]);
+}
+
+// CR 611.3a (2026-11-06): a static "+1/+1 for each …" is re-counted all the time (unlike a
+// resolved "+X/+X until end of turn", CR 608.2h). Forge: `AddPower$ X` with
+// `SVar:X:Count$Valid …`.
+#[test]
+fn a_static_bonus_for_each_permanent_is_counted_continuously() {
+    let lord = "Name:Test Packleader\nManaCost:2 G\nTypes:Creature Wolf\nPT:1/1\n\
+        S:Mode$ Continuous | AffectedDefined$ Self | AddPower$ X | AddToughness$ X | Description$ Text.\n\
+        SVar:X:Count$Valid Creature.Other+YouCtrl\nOracle:Text.";
+    let mut sc = scenario(&[lord, SMITE]);
+    sc.cards(P0, Zone::Battlefield, &["Forest", "Swamp"]);
+    let lord = sc.card(P0, Zone::Battlefield, "Test Packleader");
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    sc.card(P1, Zone::Battlefield, "Test Golem");
+    sc.cards(P0, Zone::Hand, &["Test Elf", "Test Smiting"]);
+    let mut s = Script::new(sc.build());
+    assert_eq!(pt(&s, lord), (2, 2), "one other creature of mine");
+    s.cast("Test Elf").pay().pass_all();
+    assert_eq!(pt(&s, lord), (3, 3));
+    s.cast("Test Smiting").target_object(golem).pay().pass_all();
+    assert_eq!(pt(&s, lord), (2, 2));
+}
+
+// CR 613.8 (2026-11-06): an effect depends on another in the same layer if applying the
+// other first would change whether it exists; then the other is applied first, whatever
+// their timestamps. Here the static ability is older than the resolved "gains reach", and
+// by timestamps alone it would apply before its condition turned false.
+#[test]
+fn a_condition_can_depend_on_another_effect_in_the_same_layer() {
+    let cards = [
+        creature(
+            "Test Skymaster",
+            "2 U",
+            "Wizard",
+            "1/1",
+            "S:Mode$ Continuous | Affected$ Creature.YouCtrl | AddKeyword$ Flying | IsPresent$ Creature.YouCtrl+withReach | PresentCompare$ EQ0 | Description$ Text.",
+        ),
+        spell(
+            "Test Stretch",
+            "G",
+            "Instant",
+            "A:SP$ Pump | ValidTgts$ Creature | KW$ Reach | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Forest"]);
+    let master = sc.card(P0, Zone::Battlefield, "Test Skymaster");
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    sc.card(P0, Zone::Hand, "Test Stretch");
+    let mut s = Script::new(sc.build());
+    // "…as long as you control no creature with reach."
+    assert!(has(&s, master, Keyword::Flying) && has(&s, golem, Keyword::Flying));
+    s.cast("Test Stretch").target_object(golem).pay().pass_all();
+    assert!(has(&s, golem, Keyword::Reach));
+    assert!(!has(&s, golem, Keyword::Flying) && !has(&s, master, Keyword::Flying));
+}
+
+// CR 110.4a (2026-11-06): off the battlefield, "permanent" means a permanent *card* — not an
+// instant or sorcery. Forge writes it with the same word (`Permanent`) as "any permanent".
+#[test]
+fn permanent_cards_in_a_graveyard_are_not_instants_or_sorceries() {
+    let cards = [
+        creature(
+            "Test Delver",
+            "1 B",
+            "Zombie",
+            "2/2",
+            "S:Mode$ Continuous | AffectedDefined$ Self | AddPower$ 1 | IsPresent$ Permanent.YouOwn | PresentZone$ Graveyard | PresentCompare$ GE2 | Description$ Text.",
+        ),
+        spell(
+            "Test Unearthing",
+            "B",
+            "Sorcery",
+            "A:SP$ ChangeZone | Origin$ Graveyard | Destination$ Hand | ValidTgts$ Permanent.YouOwn | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.card(P0, Zone::Battlefield, "Swamp");
+    let delver = sc.card(P0, Zone::Battlefield, "Test Delver");
+    // A land card, and two sorceries: one permanent card.
+    let forest = sc.card(P0, Zone::Graveyard, "Forest");
+    let sorceries = sc.cards(P0, Zone::Graveyard, &["Test Unearthing"; 2]);
+    sc.card(P0, Zone::Hand, "Test Unearthing");
+    let mut s = Script::new(sc.build());
+    assert_eq!(pt(&s, delver), (2, 2), "one permanent card isn't two");
+    s.cast("Test Unearthing");
+    assert!(can_target(&s, forest));
+    assert!(!can_target(&s, sorceries[0]));
+}

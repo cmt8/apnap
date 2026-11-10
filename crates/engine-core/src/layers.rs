@@ -30,8 +30,8 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use card_model::{
-    AbilityDef, Affected, BasicLandType, CardDef, CardType, Color, ContinuousEffect, CounterKind,
-    Keyword, ManaCost, Selector, Supertype, Who,
+    AbilityDef, Affected, Amount, BasicLandType, CardDef, CardType, Color, Condition,
+    ContinuousEffect, CounterKind, Keyword, ManaCost, Selector, Supertype, Who,
 };
 use core::cell::RefCell;
 use core::fmt;
@@ -367,6 +367,8 @@ struct Eff<'a> {
     controller: PlayerId,
     parts: &'a [ContinuousEffect],
     affected: Aff<'a>,
+    /// "as long as …": a static effect exists only while this holds.
+    cond: Option<&'a Condition>,
 }
 
 enum Aff<'a> {
@@ -388,10 +390,59 @@ impl Walk<'_> {
             Key::Resolved(_) => true,
             Key::Static { source, index } => {
                 self.started.contains_key(&e.key)
-                    || view
+                    || (view
                         .get(&source)
                         .is_some_and(|c| c.abilities.contains(&index))
+                        && self.holds(e, view))
             }
+        }
+    }
+
+    /// Does the effect's "as long as" condition hold, judged by the view as computed so
+    /// far? (Never through `chars`: that would be this computation calling itself.)
+    fn holds(&self, e: &Eff<'_>, view: &View) -> bool {
+        let Some(cond) = e.cond else {
+            return true;
+        };
+        let you = self.you(e, view);
+        let count = |sel: &Selector| {
+            view.iter()
+                .filter(|(id, c)| matches(self.st, sel, c, self.st.object(**id), e.source, you))
+                .count()
+        };
+        match cond {
+            Condition::LifeAtMost(n) => self.st.player(you).life <= *n,
+            Condition::LifeAtLeast(n) => self.st.player(you).life >= *n,
+            Condition::Control { what, at_least } => count(what) >= *at_least as usize,
+            Condition::ControlAtMost { what, at_most } => count(what) <= *at_most as usize,
+            // Cards in a graveyard have their printed characteristics.
+            Condition::CardsInGraveyard { cards, at_least } => {
+                self.st
+                    .zones
+                    .list(Zone::Graveyard, you)
+                    .iter()
+                    .filter(|&&id| crate::targeting::card_matches(self.st, id, cards))
+                    .count()
+                    >= *at_least as usize
+            }
+            Condition::YourTurn => self.st.turn.active == you,
+            Condition::NotYourTurn => self.st.turn.active != you,
+            Condition::HandAtMost(n) => self.st.zones.hands[you.index()].len() <= *n as usize,
+        }
+    }
+
+    /// The value of "+N" in a static "+N/+N for each …" right now.
+    fn amount(&self, a: &Amount, e: &Eff<'_>, view: &View) -> i32 {
+        match a {
+            Amount::Fixed(n) => *n as i32,
+            Amount::Count(sel) => {
+                let you = self.you(e, view);
+                view.iter()
+                    .filter(|(id, c)| matches(self.st, sel, c, self.st.object(**id), e.source, you))
+                    .count() as i32
+            }
+            // card-db rejects anything else in a static ability.
+            _ => 0,
         }
     }
 
@@ -447,6 +498,20 @@ impl Walk<'_> {
     fn apply(&self, e: &Eff<'_>, layer: Layer, set: &[ObjectId], view: &mut View) {
         let you = self.you(e, view);
         for part in e.parts.iter().filter(|p| layer_of(p) == layer) {
+            // "+X/+X for each …" in a static ability: counted now (CR 611.3a: it isn't
+            // locked in), before anything is changed.
+            let counted;
+            let part = match part {
+                ContinuousEffect::ModifyPTBy { power, toughness } => {
+                    let value = |s: &card_model::Signed| {
+                        let n = self.amount(&s.amount, e, view);
+                        if s.negative { -n } else { n }
+                    };
+                    counted = ContinuousEffect::ModifyPT(value(power), value(toughness));
+                    &counted
+                }
+                other => other,
+            };
             for id in set {
                 if let Some(c) = view.get_mut(id) {
                     apply_part(c, part, you);
@@ -467,33 +532,38 @@ impl Walk<'_> {
     /// certainly can't — then the full comparison (which copies the whole view) is skipped.
     /// Without this, many effects in one layer cost a copy of the view per pair of them.
     fn could_matter(a: &Eff<'_>, b: &Eff<'_>, layer: Layer) -> bool {
-        let sel = match a.affected {
+        let affected = match a.affected {
             Aff::Dynamic(Affected::All(sel)) => Some(sel),
             // "This" and "enchanted": the set doesn't look at characteristics. Only the
             // ability's existence can change.
             Aff::Dynamic(Affected::This | Affected::Enchanted) => None,
             Aff::Locked(_) => return false,
         };
-        b.parts
-            .iter()
-            .filter(|p| layer_of(p) == layer)
-            .any(|p| match p {
-                // The ability itself can be removed.
-                ContinuousEffect::LoseAllAbilities => true,
-                // Whose it is changes "you" and "you control".
-                ContinuousEffect::GainControl => true,
-                ContinuousEffect::AddTypes { .. } => sel.is_some(),
-                ContinuousEffect::SetColors(_) => sel.is_some_and(|s| !s.colors.is_empty()),
+        // The permanents an "as long as" condition counts are looked at the same way.
+        let counted = match a.cond {
+            Some(Condition::Control { what, .. } | Condition::ControlAtMost { what, .. }) => {
+                Some(what)
+            }
+            _ => None,
+        };
+        b.parts.iter().filter(|p| layer_of(p) == layer).any(|p| {
+            [affected, counted].into_iter().flatten().any(|s| match p {
+                ContinuousEffect::AddTypes { .. } => true,
+                ContinuousEffect::SetColors(_) => !s.colors.is_empty(),
                 ContinuousEffect::AddKeywords(_) | ContinuousEffect::LoseKeywords(_) => {
-                    sel.is_some_and(|s| !s.keywords.is_empty())
+                    !s.keywords.is_empty()
                 }
                 ContinuousEffect::SetPT(..)
                 | ContinuousEffect::ModifyPT(..)
                 | ContinuousEffect::ModifyPTBy { .. }
-                | ContinuousEffect::SwitchPT => {
-                    sel.is_some_and(|s| s.power_min.is_some() || s.toughness_min.is_some())
-                }
-            })
+                | ContinuousEffect::SwitchPT => s.power_min.is_some() || s.toughness_min.is_some(),
+                ContinuousEffect::LoseAllAbilities | ContinuousEffect::GainControl => true,
+            }) || matches!(
+                p,
+                // The ability itself can be removed; whose it is changes "you".
+                ContinuousEffect::LoseAllAbilities | ContinuousEffect::GainControl
+            )
+        })
     }
 
     /// CR 613.8a: does `a` depend on `b`? (Same layer is given.) Applying `b` would change
@@ -582,8 +652,14 @@ fn compute(st: &GameState) -> View {
     for &id in &st.zones.battlefield {
         let o = st.object(id);
         for (i, a) in st.card_def(id).abilities.iter().enumerate() {
-            if let AbilityDef::Static { affected, effects } = a {
+            if let AbilityDef::Static {
+                affected,
+                effects,
+                only_if,
+            } = a
+            {
                 effs.push(Eff {
+                    cond: only_if.as_ref(),
                     key: Key::Static {
                         source: id,
                         index: i as u16,
@@ -672,6 +748,7 @@ fn resolved(ci: &ContinuousInstance) -> Eff<'_> {
         controller: ci.controller,
         parts: &ci.effects,
         affected: Aff::Locked(&ci.affected),
+        cond: None,
     }
 }
 

@@ -652,17 +652,40 @@ fn condition(c: &Condition) -> String {
             "if you have {at_least} or more {}s in your graveyard",
             card_noun(cards)
         ),
-        Condition::Control { what, at_least } => {
-            if *at_least == 1 {
-                format!(
-                    "if you control a {}",
-                    selector(what, false).replace(" you control", "")
-                )
+        Condition::YourTurn => "if it's your turn".to_string(),
+        Condition::NotYourTurn => "if it's not your turn".to_string(),
+        Condition::ControlAtMost { what, at_most } => {
+            let there = if what.controller == Who::You {
+                "you control"
             } else {
-                format!(
-                    "if you control {at_least} or more {}",
-                    selector(what, true).replace(" you control", "")
+                "there are"
+            };
+            let things = selector(what, true).replace(" you control", "");
+            if *at_most == 0 {
+                format!("if {there} no {things}")
+            } else {
+                format!("if {there} {at_most} or fewer {things}")
+            }
+        }
+        Condition::HandAtMost(0) => "if you have no cards in hand".to_string(),
+        Condition::HandAtMost(n) => format!("if you have {n} or fewer cards in hand"),
+        Condition::Control { what, at_least } => {
+            // "you control a Swamp" / "an opponent controls an Island" / "there is a Wall".
+            let mut bare = what.clone();
+            bare.controller = Who::Any;
+            let (things, plural) = if *at_least == 1 {
+                (with_article(&selector(&bare, false)), false)
+            } else {
+                (
+                    format!("{at_least} or more {}", selector(&bare, true)),
+                    true,
                 )
+            };
+            match what.controller {
+                Who::You => format!("if you control {things}"),
+                Who::Opponent => format!("if an opponent controls {things}"),
+                Who::Any if plural => format!("if there are {things} on the battlefield"),
+                Who::Any => format!("if there is {things} on the battlefield"),
             }
         }
     }
@@ -713,7 +736,16 @@ fn ability(a: &AbilityDef) -> String {
             }
             format!("{}{cond}, {lower}", trigger(when))
         }
-        AbilityDef::Static { affected, effects } => {
+        AbilityDef::Static {
+            affected,
+            effects,
+            only_if,
+        } => {
+            // "… as long as you control a Swamp."
+            let when = only_if.as_ref().map_or(String::new(), |c| {
+                let c = condition(c);
+                format!(" as long as {}", c.strip_prefix("if ").unwrap_or(&c))
+            });
             let (subject, plural) = match affected {
                 Affected::This => ("This permanent".to_string(), false),
                 Affected::Enchanted => ("Enchanted creature".to_string(), false),
@@ -726,9 +758,9 @@ fn ability(a: &AbilityDef) -> String {
             };
             // "You control enchanted creature." reads better than "is under your control".
             if matches!(effects.as_slice(), [ContinuousEffect::GainControl]) {
-                return format!("You control {}.", subject.to_lowercase());
+                return format!("You control {}{when}.", subject.to_lowercase());
             }
-            format!("{subject} {}.", continuous(effects, plural))
+            format!("{subject} {}{when}.", continuous(effects, plural))
         }
         AbilityDef::Replacement { replaces, with } => {
             let what = match replaces {

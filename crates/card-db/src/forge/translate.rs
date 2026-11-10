@@ -388,6 +388,29 @@ impl<'a> Tx<'a> {
         })
     }
 
+    /// A filter for cards that aren't on the battlefield (in a graveyard, a hand…). There
+    /// "Permanent" is not "anything": it is a *permanent card* — not an instant or sorcery
+    /// (CR 110.4a).
+    fn card_selector(&mut self, text: &str) -> Option<Selector> {
+        let mut s = self.selector(text)?;
+        let heads: Vec<&str> = text
+            .split(',')
+            .map(|a| a.trim().split('.').next().unwrap_or(""))
+            .collect();
+        if heads.contains(&"Permanent") {
+            if heads.iter().any(|h| *h != "Permanent") {
+                self.block("filter:Permanent-card-alternatives");
+                return None;
+            }
+            for t in [CardType::Instant, CardType::Sorcery] {
+                if !s.not_types.contains(&t) {
+                    s.not_types.push(t);
+                }
+            }
+        }
+        Some(s)
+    }
+
     /// The filter of a trigger's `ValidCard$`.
     fn obj_filter(&mut self, text: &str) -> Option<ObjFilter> {
         let alts = self.alts(text)?;
@@ -566,7 +589,7 @@ impl<'a> Tx<'a> {
             }
         }
         let filter = if graveyard {
-            let mut s = self.selector(text)?;
+            let mut s = self.card_selector(text)?;
             let whose = std::mem::take(&mut s.controller);
             TargetFilter::CardInGraveyard { cards: s, whose }
         } else {
@@ -719,7 +742,7 @@ impl<'a> Tx<'a> {
                 let filter = match rd.get("ValidTgts") {
                     Some("Card") => TargetFilter::Spell,
                     Some(text) => {
-                        let s = self.selector(text)?;
+                        let s = self.card_selector(text)?;
                         // What a spell can be asked: its types and colors.
                         let asked = Selector {
                             types: s.types.clone(),
@@ -1129,6 +1152,55 @@ impl<'a> Tx<'a> {
 
     // ------------------------------------------------------------------ conditions, costs
 
+    /// "As long as …" on a static ability: `IsPresent$` (also "no …": `PresentCompare$
+    /// EQ0`, `LE<n>`), or one of Forge's named conditions.
+    fn static_condition(&mut self, rd: &Rd<'a>) -> Option<Option<Condition>> {
+        let named = match rd.get("Condition") {
+            None => None,
+            Some("PlayerTurn") => Some(Condition::YourTurn),
+            Some("NotPlayerTurn") => Some(Condition::NotYourTurn),
+            // CR 702 ability words, by their definitions.
+            Some("Threshold") => Some(Condition::CardsInGraveyard {
+                cards: Selector::default(),
+                at_least: 7,
+            }),
+            Some("Metalcraft") => Some(Condition::Control {
+                what: Selector {
+                    types: vec![CardType::Artifact],
+                    controller: Who::You,
+                    ..Selector::default()
+                },
+                at_least: 3,
+            }),
+            Some("Hellbent") => Some(Condition::HandAtMost(0)),
+            Some(other) => {
+                self.block(format!("condition:{other}"));
+                return None;
+            }
+        };
+        // "N or fewer": only for permanents on the battlefield.
+        let at_most = match (rd.rec.get("IsPresent"), rd.rec.get("PresentCompare")) {
+            (Some(_), Some("EQ0")) => Some(0),
+            (Some(_), Some(c)) => c.strip_prefix("LE").and_then(|n| n.parse::<u32>().ok()),
+            _ => None,
+        };
+        let present = match at_most {
+            Some(at_most) if rd.rec.get("PresentZone").is_none() => {
+                rd.get("PresentCompare");
+                let what = rd.get("IsPresent").and_then(|f| self.selector(f))?;
+                Some(Condition::ControlAtMost { what, at_most })
+            }
+            _ => self.condition(rd)?,
+        };
+        match (named, present) {
+            (Some(_), Some(_)) => {
+                self.block("condition:two");
+                None
+            }
+            (a, b) => Some(a.or(b)),
+        }
+    }
+
     /// `IsPresent$ <filter>` (+ `PresentCompare$ GE<n>`, `PresentZone$ Graveyard`).
     fn condition(&mut self, rd: &Rd<'a>) -> Option<Option<Condition>> {
         let Some(filter) = rd.get("IsPresent") else {
@@ -1139,7 +1211,10 @@ impl<'a> Tx<'a> {
             Some(c) => c.strip_prefix("GE").and_then(|n| n.parse::<u32>().ok()),
         };
         let zone = rd.get("PresentZone");
-        let sel = self.selector(filter);
+        let sel = match zone {
+            None => self.selector(filter),
+            Some(_) => self.card_selector(filter),
+        };
         let (Some(at_least), Some(mut sel)) = (at_least, sel) else {
             self.block("condition:compare");
             return None;
@@ -1552,14 +1627,42 @@ impl<'a> Tx<'a> {
                 let int = |t: Option<&str>| {
                     t.map_or(Some(0), |t| t.trim_start_matches('+').parse::<i32>().ok())
                 };
-                let (p, t) = (int(rd.get("AddPower")), int(rd.get("AddToughness")));
-                let (Some(p), Some(t)) = (p, t) else {
-                    self.block("static:variable-pt");
-                    return None;
-                };
+                let (att, def) = (rd.get("AddPower"), rd.get("AddToughness"));
                 let mut effects = Vec::new();
-                if (p, t) != (0, 0) {
-                    effects.push(ContinuousEffect::ModifyPT(p, t));
+                match (int(att), int(def)) {
+                    (Some(p), Some(t)) => {
+                        if (p, t) != (0, 0) {
+                            effects.push(ContinuousEffect::ModifyPT(p, t));
+                        }
+                    }
+                    // "+1/+1 for each [permanent]": counted continuously. Only counts of
+                    // permanents — the layer walk can't evaluate anything else in place.
+                    _ => {
+                        let mut part = |text: Option<&str>| -> Option<Signed> {
+                            let text = text.unwrap_or("0");
+                            let negative = text.starts_with('-');
+                            let name = text.trim_start_matches(['+', '-']);
+                            let amount = match name.parse::<u32>() {
+                                Ok(n) => Amount::Fixed(n),
+                                Err(_) => self.expr(name)?,
+                            };
+                            match &amount {
+                                Amount::Fixed(_) => {}
+                                Amount::Count(s)
+                                    if s.power_min.is_none() && s.toughness_min.is_none() => {}
+                                _ => {
+                                    self.block("static:variable-pt");
+                                    return None;
+                                }
+                            }
+                            Some(Signed { negative, amount })
+                        };
+                        let (power, toughness) = (part(att), part(def));
+                        effects.push(ContinuousEffect::ModifyPTBy {
+                            power: Box::new(power?),
+                            toughness: Box::new(toughness?),
+                        });
+                    }
                 }
                 if let Some(kw) = rd.get("AddKeyword") {
                     let mut ks = Vec::new();
@@ -1587,7 +1690,12 @@ impl<'a> Tx<'a> {
                     self.block("static:Continuous-nothing");
                     return None;
                 }
-                affected.map(|affected| AbilityDef::Static { affected, effects })
+                let only_if = self.static_condition(&rd)?;
+                affected.map(|affected| AbilityDef::Static {
+                    affected,
+                    effects,
+                    only_if,
+                })
             }
             "ReduceCost" => {
                 if rd.get("Type") != Some("Spell") {
@@ -1608,7 +1716,7 @@ impl<'a> Tx<'a> {
                     .map(AbilityDef::SelfCostReduction),
                     // "[These] spells you cast cost {N} less to cast."
                     (Some(f), None | Some("Battlefield"), Some("You")) => {
-                        let spells = self.selector(f);
+                        let spells = self.card_selector(f);
                         let n = amount.parse::<u32>().ok().or_else(|| {
                             self.block("static:ReduceCost-variable");
                             None

@@ -271,17 +271,32 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
             AbilityDef::Triggered { body, .. } => {
                 check_body(body, false, &mut |m| p.push(at(m)));
             }
-            AbilityDef::Static { affected, effects } => {
+            AbilityDef::Static {
+                affected, effects, ..
+            } => {
                 if effects.is_empty() {
                     p.push(at("a static ability needs at least one effect".into()));
                 }
-                if effects
-                    .iter()
-                    .any(|e| matches!(e, card_model::ContinuousEffect::ModifyPTBy { .. }))
-                {
-                    p.push(at(
-                        "ModifyPTBy is for one-shot effects; a static ability can't use it".into(),
-                    ));
+                // "+1/+1 for each [selector]" is re-counted inside the layer walk: only a
+                // count of permanents that doesn't look at power or toughness can be
+                // (CR 613.4c; anything else would depend on the order of other effects).
+                for e in effects {
+                    if let card_model::ContinuousEffect::ModifyPTBy { power, toughness } = e {
+                        for a in [&power.amount, &toughness.amount] {
+                            let ok = match a {
+                                Amount::Fixed(_) => true,
+                                Amount::Count(s) => {
+                                    s.power_min.is_none() && s.toughness_min.is_none()
+                                }
+                                _ => false,
+                            };
+                            if !ok {
+                                p.push(at("a static ModifyPTBy can only count permanents \
+                                           (not by power or toughness)"
+                                    .into()));
+                            }
+                        }
+                    }
                 }
                 // The affected set is worked out inside the layer walk, before power and
                 // toughness are final (CR 613.4): it can't depend on them.

@@ -115,6 +115,12 @@ pub(crate) fn condition_holds(
                 .count()
                 >= *at_least as usize
         }
+        Some(Condition::YourTurn) => st.turn.active == controller,
+        Some(Condition::NotYourTurn) => st.turn.active != controller,
+        Some(Condition::ControlAtMost { what, at_most }) => {
+            matching(st, what, source, controller).len() <= *at_most as usize
+        }
+        Some(Condition::HandAtMost(n)) => st.zones.hands[controller.index()].len() <= *n as usize,
     }
 }
 
