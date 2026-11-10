@@ -55,8 +55,25 @@ pub fn printed_mismatch(def: &CardDef, card: &ScryfallCard) -> Vec<String> {
         }
         Err(_) => out.push("printed:type line unreadable".to_string()),
     }
-    let pt = |n: Option<i32>| n.map(|n| n.to_string());
-    if pt(def.power) != card.power || pt(def.toughness) != card.toughness {
+    // A printed "*" (or "1+*") is defined by a characteristic-defining ability: the card
+    // must have one for that characteristic, and then its own number doesn't matter.
+    let defined = def.abilities.iter().fold((false, false), |acc, a| match a {
+        card_model::AbilityDef::Static { effects, .. } => {
+            effects.iter().fold(acc, |acc, e| match e {
+                card_model::ContinuousEffect::SetPTBy { power, toughness } => {
+                    (acc.0 || power.is_some(), acc.1 || toughness.is_some())
+                }
+                _ => acc,
+            })
+        }
+        _ => acc,
+    });
+    let same = |ours: Option<i32>, printed: &Option<String>, defined: bool| match printed {
+        Some(p) if p.contains('*') => defined && ours.is_some(),
+        printed => !defined && ours.map(|n| n.to_string()) == *printed,
+    };
+    if !same(def.power, &card.power, defined.0) || !same(def.toughness, &card.toughness, defined.1)
+    {
         out.push("printed:power/toughness".to_string());
     }
     out

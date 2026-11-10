@@ -115,7 +115,9 @@ fn continuous_polarity(effects: &[ContinuousEffect]) -> Polarity {
             ContinuousEffect::AddKeywords(_) | ContinuousEffect::AddTypes { .. } => {
                 return Polarity::Help;
             }
-            ContinuousEffect::SetColors(_) | ContinuousEffect::SwitchPT => {}
+            ContinuousEffect::SetColors(_)
+            | ContinuousEffect::SwitchPT
+            | ContinuousEffect::SetPTBy { .. } => {}
         }
     }
     Polarity::Neutral

@@ -345,7 +345,9 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 check_body(body, false, &mut |m| p.push(at(m)));
             }
             AbilityDef::Static {
-                affected, effects, ..
+                affected,
+                effects,
+                only_if,
             } => {
                 if effects.is_empty() {
                     p.push(at("a static ability needs at least one effect".into()));
@@ -354,6 +356,36 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 // count of permanents that doesn't look at power or toughness can be
                 // (CR 613.4c; anything else would depend on the order of other effects).
                 for e in effects {
+                    // CR 604.3: a characteristic-defining ability defines its own card.
+                    if let card_model::ContinuousEffect::SetPTBy { power, toughness } = e {
+                        if *affected != card_model::Affected::This || only_if.is_some() {
+                            p.push(at(
+                                "a characteristic-defining ability is about its own card, \
+                                 unconditionally"
+                                    .into(),
+                            ));
+                        }
+                        if power.is_none() && toughness.is_none() {
+                            p.push(at(
+                                "a characteristic-defining ability that defines nothing".into()
+                            ));
+                        }
+                        if [power, toughness]
+                            .into_iter()
+                            .flatten()
+                            .any(|a| !a.countable_in_layers())
+                        {
+                            p.push(at(
+                                "a characteristic-defining ability can't count that (CR 613.4a)"
+                                    .into(),
+                            ));
+                        }
+                        if c.power.is_none() || c.toughness.is_none() {
+                            p.push(at(
+                                "defines the power or toughness of a card without them".into()
+                            ));
+                        }
+                    }
                     if let card_model::ContinuousEffect::ModifyPTBy { power, toughness } = e {
                         for a in [&power.amount, &toughness.amount] {
                             if !a.countable_in_layers() {

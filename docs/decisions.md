@@ -921,6 +921,18 @@ The user's direction from here: the biggest blockers across all cards, not the p
     instruction that needs it is applied, so "draw a card, then deal damage equal to the
     number of cards in your hand" was off by the draw. `SetX` is now placed in front of
     the first instruction that uses X (`Chain::x_at`).
+- **Characteristic-defining power/toughness** ("*/*, equal to the number of …"; CR 604.3,
+  613.4a): `ContinuousEffect::SetPTBy` in a static ability on its own card, applied in
+  layer 7a against the view in progress, and — because such an ability functions in every
+  zone — by `layers::chars` for a card anywhere else. A printed "*" needs such an ability
+  (else `pt:variable`), and the cross-check against Scryfall's printed P/T accepts "*"
+  exactly then. +76 cards.
+  - *Found by the soak (four of 250 random-deck games overflowed the stack):* a static
+    ability's graveyard condition looked at a graveyard card whose "*" counts permanents,
+    which asked for the layered view while it was being built. The walk now marks itself
+    as running (`LayerCache`), and a card that isn't on the battlefield is looked at as
+    printed from inside it; card-db already keeps anything evaluated there from looking
+    at power or toughness. Regression test, mutation-checked.
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may

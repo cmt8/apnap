@@ -114,9 +114,11 @@ impl Characteristics {
 
 type View = BTreeMap<ObjectId, Characteristics>;
 
-/// Memo of the layered battlefield view, keyed by `GameState::generation`.
+/// Memo of the layered battlefield view, keyed by `GameState::generation`. The flag says
+/// the view is being worked out right now: nothing asked from inside the layer walk may
+/// need the finished view (see [`chars`]).
 #[derive(Clone, Default)]
-pub struct LayerCache(RefCell<Option<(u64, Arc<View>)>>);
+pub struct LayerCache(RefCell<Option<(u64, Arc<View>)>>, core::cell::Cell<bool>);
 
 impl fmt::Debug for LayerCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -131,7 +133,41 @@ pub fn chars(st: &GameState, id: ObjectId) -> Characteristics {
     {
         return c.clone();
     }
-    Characteristics::printed(st.card_def(id), st.object(id).controller)
+    let o = st.object(id);
+    let def = st.card_def(id);
+    let mut c = Characteristics::printed(def, o.controller);
+    // Inside the layer walk only what is printed is looked at for a card that isn't on
+    // the battlefield (its types — never its power or toughness: card-db sees to that), and
+    // working out its "*" could need the very view being built.
+    if st.layer_cache.1.get() {
+        return c;
+    }
+    // CR 604.3: characteristic-defining abilities function in every zone.
+    for a in &def.abilities {
+        if let AbilityDef::Static {
+            affected: Affected::This,
+            effects,
+            ..
+        } = a
+        {
+            for e in effects {
+                if let ContinuousEffect::SetPTBy { power, toughness } = e {
+                    let you = if o.zone == Zone::Stack {
+                        o.controller
+                    } else {
+                        o.owner
+                    };
+                    if let Some(p) = power {
+                        c.power = Some(count_amount(st, p, id, you) as i32);
+                    }
+                    if let Some(t) = toughness {
+                        c.toughness = Some(count_amount(st, t, id, you) as i32);
+                    }
+                }
+            }
+        }
+    }
+    c
 }
 
 /// Notice permanents whose layered controller changed since the engine last looked, and
@@ -180,7 +216,13 @@ pub fn view(st: &GameState) -> Arc<View> {
     {
         return v.clone();
     }
+    debug_assert!(
+        !st.layer_cache.1.get(),
+        "the layered view was asked for while it was being worked out"
+    );
+    st.layer_cache.1.set(true);
     let v = Arc::new(compute(st));
+    st.layer_cache.1.set(false);
     *st.layer_cache.0.borrow_mut() = Some((st.generation, v.clone()));
     v
 }
@@ -246,9 +288,20 @@ pub fn count_amount(
             .map(|id| chars(st, id).power.unwrap_or(0).max(0) as u32)
             .sum(),
         Amount::CardsIn { zone, cards } => {
+            // A card outside the battlefield is looked at as printed unless its power or
+            // toughness is asked about (then a characteristic-defining ability counts,
+            // CR 604.3). The layer walk only ever gets here the first way.
+            let by_pt = cards.iter().any(|s| {
+                s.power_min.is_some() || s.toughness_min.is_some() || s.power_max.is_some()
+            });
             let fits = |id: &ObjectId| {
                 cards.is_empty() || {
-                    let c = chars(st, *id);
+                    let o = st.object(*id);
+                    let c = if by_pt || o.zone == Zone::Battlefield {
+                        chars(st, *id)
+                    } else {
+                        Characteristics::printed(st.card_def(*id), o.owner)
+                    };
                     cards
                         .iter()
                         .any(|s| matches(st, s, &c, st.object(*id), source, controller))
@@ -454,6 +507,7 @@ fn layer_of(e: &ContinuousEffect) -> Layer {
         ContinuousEffect::AddKeywords(_)
         | ContinuousEffect::LoseKeywords(_)
         | ContinuousEffect::LoseAllAbilities => Layer::L6,
+        ContinuousEffect::SetPTBy { .. } => Layer::L7a,
         ContinuousEffect::SetPT(..) => Layer::L7b,
         ContinuousEffect::ModifyPT(..) | ContinuousEffect::ModifyPTBy { .. } => Layer::L7c,
         ContinuousEffect::SwitchPT => Layer::L7d,
@@ -548,6 +602,38 @@ impl Walk<'_> {
                     .filter(|(id, c)| matches(self.st, sel, c, self.st.object(**id), e.source, you))
                     .count() as i32
             }
+            // Lands' types are settled in layer 4, mana costs are never changed.
+            Amount::Domain => {
+                let you = self.you(e, view);
+                let mut types: Vec<card_model::BasicLandType> = Vec::new();
+                for c in view.values() {
+                    if c.controller == you && c.is(CardType::Land) {
+                        for t in &c.land_types {
+                            if !types.contains(t) {
+                                types.push(*t);
+                            }
+                        }
+                    }
+                }
+                types.len() as i32
+            }
+            Amount::Devotion(colors) => {
+                let you = self.you(e, view);
+                view.values()
+                    .filter(|c| c.controller == you)
+                    .map(|c| {
+                        c.mana_cost.as_ref().map_or(0, |m| {
+                            m.symbols
+                                .iter()
+                                .filter(|s| {
+                                    matches!(s, card_model::ManaSymbol::Colored(x)
+                                        if colors.contains(x))
+                                })
+                                .count() as i32
+                        })
+                    })
+                    .sum()
+            }
             // Nothing the walk is working out: cards in other zones, hands, life totals.
             Amount::CardsIn { .. } | Amount::HandSize | Amount::LifeTotal => {
                 count_amount(self.st, a, e.source, self.you(e, view)) as i32
@@ -627,6 +713,22 @@ impl Walk<'_> {
             // locked in), before anything is changed.
             let counted;
             let part = match part {
+                // CR 613.4a: a characteristic-defining ability sets power and/or toughness.
+                ContinuousEffect::SetPTBy { power, toughness } => {
+                    let p = power.as_ref().map(|a| self.amount(a, e, view));
+                    let t = toughness.as_ref().map(|a| self.amount(a, e, view));
+                    for id in set {
+                        if let Some(c) = view.get_mut(id) {
+                            if let Some(p) = p {
+                                c.power = Some(p);
+                            }
+                            if let Some(t) = t {
+                                c.toughness = Some(t);
+                            }
+                        }
+                    }
+                    continue;
+                }
                 ContinuousEffect::ModifyPTBy { power, toughness } => {
                     let value = |s: &card_model::Signed| {
                         let n = self.amount(&s.amount, e, view);
@@ -679,6 +781,7 @@ impl Walk<'_> {
                     !s.keywords.is_empty() || !s.not_keywords.is_empty()
                 }
                 ContinuousEffect::SetPT(..)
+                | ContinuousEffect::SetPTBy { .. }
                 | ContinuousEffect::ModifyPT(..)
                 | ContinuousEffect::ModifyPTBy { .. }
                 | ContinuousEffect::SwitchPT => {
@@ -751,6 +854,8 @@ fn apply_part(c: &mut Characteristics, part: &ContinuousEffect, you: PlayerId) {
         }
         // Fixed into a `ModifyPT` when the effect began (frames::resolve); never stored.
         ContinuousEffect::ModifyPTBy { .. } => {}
+        // Counted by the walk (`Walk::apply`).
+        ContinuousEffect::SetPTBy { .. } => {}
         ContinuousEffect::SwitchPT => {
             if let (Some(p), Some(t)) = (c.power, c.toughness) {
                 c.power = Some(t);

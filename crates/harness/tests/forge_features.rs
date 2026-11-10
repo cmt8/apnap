@@ -2960,3 +2960,145 @@ fn devotion_domain_and_the_greatest_power() {
     assert_eq!(gained("Test Dominion"), 3);
     assert_eq!(gained("Test Prowess"), 4);
 }
+
+// ---------------------------------------------------------------------------------------
+// Characteristic-defining abilities (D-055).
+
+// CR 604.3, 613.4a, 208.2a (2026-11-06). Forge: `PT:*/*` with `S:Mode$ Continuous |
+// CharacteristicDefining$ True | SetPower$ X | SetToughness$ X` — "this creature's power
+// and toughness are each equal to the number of lands you control".
+#[test]
+fn power_and_toughness_defined_by_a_count() {
+    let cda = |name: &str, pt: &str, set: &str, x: &str| {
+        format!(
+            "Name:{name}\nManaCost:G\nTypes:Creature Elemental\nPT:{pt}\n\
+             S:Mode$ Continuous | CharacteristicDefining$ True | {set} | Description$ Text.\n\
+             SVar:X:{x}\nOracle:Text."
+        )
+    };
+    let cards = [
+        cda(
+            "Test Landwarden",
+            "*/*",
+            "SetPower$ X | SetToughness$ X",
+            "Count$Valid Land.YouCtrl",
+        ),
+        // "*/3": only the power is defined.
+        cda(
+            "Test Handreader",
+            "*/3",
+            "SetPower$ X",
+            "Count$CardsInYourHand",
+        ),
+        // Counts creature cards in all graveyards — where the Landwarden may be lying.
+        cda(
+            "Test Gravefeeder",
+            "*/*",
+            "SetPower$ X | SetToughness$ X",
+            "Count$ValidGraveyard Creature",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Forest", "Forest"]);
+    sc.cards(P1, Zone::Battlefield, &["Forest", "Forest", "Forest"]);
+    let warden = sc.card(P0, Zone::Battlefield, "Test Landwarden");
+    let reader = sc.card(P0, Zone::Battlefield, "Test Handreader");
+    let feeder = sc.card(P0, Zone::Battlefield, "Test Gravefeeder");
+    let in_hand = sc.card(P0, Zone::Hand, "Test Landwarden");
+    sc.card(P0, Zone::Hand, "Forest");
+    // A Landwarden in a graveyard is a creature card there (and has its own count).
+    let dead = sc.card(P1, Zone::Graveyard, "Test Landwarden");
+    sc.card(P1, Zone::Graveyard, "Test Elf");
+    let mut s = Script::new(sc.build());
+    // On the battlefield: my two lands, not the opponent's three.
+    assert_eq!(pt(&s, warden), (2, 2));
+    // It works in every zone: in my hand it counts my lands, in the opponent's graveyard
+    // the opponent's.
+    assert_eq!(chars(&s.st, in_hand).power, Some(2));
+    assert_eq!(chars(&s.st, dead).power, Some(3));
+    // Two cards in hand; toughness as printed.
+    assert_eq!(pt(&s, reader), (2, 3));
+    // Two creature cards in graveyards.
+    assert_eq!(pt(&s, feeder), (2, 2));
+    // Playing a land: the Landwarden grows, the Handreader shrinks — continuously.
+    s.pick("play the Forest", |_, o| {
+        matches!(o, OptionDesc::PlayLand { .. })
+    });
+    assert_eq!(pt(&s, warden), (3, 3));
+    assert_eq!(pt(&s, reader), (1, 3));
+    assert_eq!(chars(&s.st, in_hand).power, Some(3));
+    // What it can't be: a "*" nothing defines, and a count the layers can't make.
+    let undefined = "Name:Test Riddle\nManaCost:G\nTypes:Creature Elemental\nPT:*/*\nOracle:Text.";
+    assert_eq!(forge_test_blockers(undefined), ["pt:variable"]);
+    let by_x = cda(
+        "Test Riddle",
+        "*/*",
+        "SetPower$ X | SetToughness$ X",
+        "Count$Valid Creature.powerGE4",
+    );
+    let b = forge_test_blockers(&by_x);
+    assert!(
+        b.iter()
+            .any(|x| x == "static:characteristic-defining amount"),
+        "{b:?}"
+    );
+}
+
+// CR 704.5f (2026-11-06): a creature whose toughness is defined as 0 dies.
+#[test]
+fn a_creature_defined_as_zero_toughness_dies() {
+    let cards = [
+        "Name:Test Landwarden\nManaCost:G\nTypes:Creature Elemental\nPT:*/*\n\
+         S:Mode$ Continuous | CharacteristicDefining$ True | SetPower$ X | SetToughness$ X | Description$ Text.\n\
+         SVar:X:Count$Valid Land.YouCtrl\nOracle:Text.",
+    ];
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Forest"]);
+    sc.card(P0, Zone::Hand, "Test Landwarden");
+    // The opponent casts it with no land of their own... P0 has one Forest: a 1/1.
+    let mut s = Script::new(sc.build());
+    s.cast("Test Landwarden").pay().pass_all();
+    let warden = s.find(P0, Zone::Battlefield, "Test Landwarden").unwrap();
+    assert_eq!(pt(&s, warden), (1, 1));
+    // Without the Forest it would be 0/0: a fresh game where it is put onto the
+    // battlefield with no lands at all.
+    let mut sc = scenario(&cards);
+    let doomed = sc.card(P0, Zone::Battlefield, "Test Landwarden");
+    let s = Script::new(sc.build());
+    assert!(
+        !on_battlefield(&s, doomed),
+        "0 toughness: put into the graveyard"
+    );
+    assert!(s.find(P0, Zone::Graveyard, "Test Landwarden").is_some());
+}
+
+// Found by the soak: a static ability's condition looked at the cards in a graveyard, one
+// of them had a "*" defined by counting permanents, and working that out asked for the very
+// layered view that was being built — without end. Inside the layer walk a card that isn't
+// on the battlefield is looked at as printed.
+#[test]
+fn a_condition_on_graveyard_cards_meets_a_card_with_a_defined_power() {
+    let cards = [
+        "Name:Test Landwarden\nManaCost:G\nTypes:Creature Elemental\nPT:*/*\n\
+         S:Mode$ Continuous | CharacteristicDefining$ True | SetPower$ X | SetToughness$ X | Description$ Text.\n\
+         SVar:X:Count$Valid Land.YouCtrl\nOracle:Text."
+            .to_string(),
+        creature(
+            "Test Sage",
+            "G",
+            "Druid",
+            "1/1",
+            "S:Mode$ Continuous | Affected$ Card.Self | AddPower$ 2 | AddToughness$ 2 | IsPresent$ Creature.YouOwn | PresentZone$ Graveyard | PresentCompare$ GE2 | Description$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Forest"]);
+    let sage = sc.card(P0, Zone::Battlefield, "Test Sage");
+    let warden = sc.card(P0, Zone::Battlefield, "Test Landwarden");
+    sc.cards(P0, Zone::Graveyard, &["Test Landwarden", "Test Landwarden"]);
+    let s = Script::new(sc.build());
+    assert_eq!(pt(&s, sage), (3, 3), "two creature cards in the graveyard");
+    assert_eq!(pt(&s, warden), (1, 1));
+}

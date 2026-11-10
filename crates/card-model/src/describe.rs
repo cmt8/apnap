@@ -395,6 +395,19 @@ fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
                 }
             }
             ContinuousEffect::SwitchPT => format!("{become_} power-and-toughness switched"),
+            ContinuousEffect::SetPTBy { power, toughness } => match (power, toughness) {
+                (Some(p), Some(t)) if p == t => {
+                    format!("{have} power and toughness each equal to {}", amount(p))
+                }
+                (Some(p), Some(t)) => format!(
+                    "{have} power equal to {} and toughness equal to {}",
+                    amount(p),
+                    amount(t)
+                ),
+                (Some(p), None) => format!("{have} power equal to {}", amount(p)),
+                (None, Some(t)) => format!("{have} toughness equal to {}", amount(t)),
+                (None, None) => String::new(),
+            },
         })
         .collect();
     join(parts, "and")

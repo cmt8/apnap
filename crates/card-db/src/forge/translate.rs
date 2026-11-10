@@ -128,6 +128,8 @@ struct Tx<'a> {
     used_svars: BTreeSet<String>,
     tokens: BTreeSet<String>,
     has_x_cost: bool,
+    /// A characteristic-defining ability defines the card's (power, toughness).
+    defines_pt: (bool, bool),
     /// Compiling the body of a triggered ability (where "X" is not the X being paid).
     in_trigger: bool,
     /// Additional costs of the spell, found on its `SP$` line.
@@ -2372,6 +2374,10 @@ impl<'a> Tx<'a> {
                         None
                     }
                     (None, Some(f)) => self.selector(f).map(Affected::All),
+                    // A characteristic-defining ability is about its own card.
+                    (None, None) if rd.rec.get("CharacteristicDefining").is_some() => {
+                        Some(Affected::This)
+                    }
                     (None, None) => {
                         self.block("static:no-Affected");
                         None
@@ -2382,6 +2388,33 @@ impl<'a> Tx<'a> {
                 };
                 let (att, def) = (rd.get("AddPower"), rd.get("AddToughness"));
                 let mut effects = Vec::new();
+                // "This creature's power and toughness are each equal to …" (CR 604.3).
+                if rd.get("CharacteristicDefining").is_some() {
+                    // It works everywhere, whatever zone the script names.
+                    rd.get("EffectZone");
+                    let part = |tx: &mut Self, key: &'a str| -> Option<Option<Box<Amount>>> {
+                        let Some(text) = rd.get(key) else {
+                            return Some(None);
+                        };
+                        let amount = match text.parse::<u32>() {
+                            Ok(n) => Amount::Fixed(n),
+                            Err(_) => tx.expr(text)?,
+                        };
+                        if !amount.countable_in_layers() {
+                            tx.block("static:characteristic-defining amount");
+                            return None;
+                        }
+                        Some(Some(Box::new(amount)))
+                    };
+                    let (power, toughness) = (part(self, "SetPower"), part(self, "SetToughness"));
+                    if affected != Some(Affected::This) {
+                        self.block("static:characteristic-defining not Self");
+                        return None;
+                    }
+                    let (power, toughness) = (power?, toughness?);
+                    self.defines_pt = (power.is_some(), toughness.is_some());
+                    effects.push(ContinuousEffect::SetPTBy { power, toughness });
+                }
                 match (int(att), int(def)) {
                     (Some(p), Some(t)) => {
                         if (p, t) != (0, 0) {
@@ -2699,6 +2732,7 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
         used_svars: BTreeSet::new(),
         tokens: BTreeSet::new(),
         has_x_cost: false,
+        defines_pt: (false, false),
         in_trigger: false,
         additional: Vec::new(),
         enchant: None,
@@ -2757,9 +2791,20 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
             other => def.creature_types.push(other.to_string()),
         }
     }
+    // "*" (also "1+*"): defined by a characteristic-defining ability, checked once the
+    // abilities are compiled. Until then — and in a zone-less context — it is 0 (CR 208.2a).
+    let mut starred = (false, false);
     if let Some((p, t)) = &face.pt {
-        match (p.parse::<i32>(), t.parse::<i32>()) {
-            (Ok(p), Ok(t)) => {
+        let value = |text: &str, starred: &mut bool| match text.parse::<i32>() {
+            Ok(n) => Some(n),
+            Err(_) if text.contains('*') => {
+                *starred = true;
+                Some(0)
+            }
+            Err(_) => None,
+        };
+        match (value(p, &mut starred.0), value(t, &mut starred.1)) {
+            (Some(p), Some(t)) => {
                 def.power = Some(p);
                 def.toughness = Some(t);
             }
@@ -2915,6 +2960,9 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
             Some(a) => abilities.push((order.replacements[i], a)),
             None => tx.explained(before, "replacement"),
         }
+    }
+    if (starred.0 && !tx.defines_pt.0) || (starred.1 && !tx.defines_pt.1) {
+        tx.block("pt:variable");
     }
     abilities.extend(equips.into_iter().map(|a| (usize::MAX, a)));
     abilities.sort_by_key(|(i, _)| *i);

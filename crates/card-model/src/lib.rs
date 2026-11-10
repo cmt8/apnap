@@ -619,6 +619,14 @@ pub enum ContinuousEffect {
         power: Box<Signed>,
         toughness: Box<Signed>,
     },
+    /// Layer 7a: a characteristic-defining ability (CR 604.3, 613.4a) — "this creature's
+    /// power and toughness are each equal to the number of …". Only in a static ability
+    /// that affects its own source; it functions in every zone. `None` leaves that
+    /// characteristic as printed ("*/4").
+    SetPTBy {
+        power: Option<Box<Amount>>,
+        toughness: Option<Box<Amount>>,
+    },
 }
 
 /// Events a static replacement effect watches for (CR 614). M2 vocabulary.
@@ -1298,11 +1306,20 @@ impl Amount {
     /// hand sizes and life totals, and arithmetic on those.
     pub fn countable_in_layers(&self) -> bool {
         match self {
-            Amount::Fixed(_) | Amount::HandSize | Amount::LifeTotal => true,
+            Amount::Fixed(_)
+            | Amount::HandSize
+            | Amount::LifeTotal
+            | Amount::Domain
+            | Amount::Devotion(_) => true,
             Amount::Count(s) => {
                 s.power_min.is_none() && s.toughness_min.is_none() && s.power_max.is_none()
             }
-            Amount::CardsIn { zone, .. } => *zone != CardZone::Battlefield,
+            Amount::CardsIn { zone, cards } => {
+                *zone != CardZone::Battlefield
+                    && cards.iter().all(|s| {
+                        s.power_min.is_none() && s.toughness_min.is_none() && s.power_max.is_none()
+                    })
+            }
             Amount::Calc(base, _) => base.countable_in_layers(),
             Amount::IfAtLeast { test, .. } => test.countable_in_layers(),
             _ => false,
