@@ -34,6 +34,12 @@ pub struct PendingTrigger {
     /// The source as it last existed, if it had already left the battlefield (look-back
     /// triggers, CR 603.10a; LKI for "its power", CR 608.2h).
     pub source_lki: Option<Characteristics>,
+    /// The object whose event triggered it (what entered, died or attacked), and — if it
+    /// had already left the battlefield — that object as it last existed.
+    #[serde(default)]
+    pub subject: Option<ObjectId>,
+    #[serde(default)]
+    pub subject_lki: Option<Characteristics>,
 }
 
 /// Last known information about an object that left the battlefield (CR 113.7a, 608.2h),
@@ -212,6 +218,8 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                                 source_card: src.card,
                                 index,
                                 source_lki: None,
+                                subject: Some(e),
+                                subject_lki: None,
                             });
                             conds.push(intervening_if.clone());
                         }
@@ -267,6 +275,8 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                                 source_card: src.card,
                                 index,
                                 source_lki: src.lki.clone(),
+                                subject: Some(*d),
+                                subject_lki: Some(l.chars.clone()),
                             });
                             conds.push(intervening_if.clone());
                         }
@@ -310,6 +320,8 @@ pub(crate) fn detect_step(st: &mut GameState, step: Step) {
                         source_card: src.card,
                         index,
                         source_lki: None,
+                        subject: None,
+                        subject_lki: None,
                     });
                     conds.push(intervening_if.clone());
                 }
@@ -356,6 +368,8 @@ pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
                             source_card: src.card,
                             index,
                             source_lki: None,
+                            subject: Some(attacker),
+                            subject_lki: None,
                         });
                         conds.push(intervening_if.clone());
                     }
@@ -392,6 +406,8 @@ pub(crate) fn detect_cast(st: &mut GameState, caster: PlayerId, spell: ObjectId)
                         source_card: src.card,
                         index,
                         source_lki: None,
+                        subject: None,
+                        subject_lki: None,
                     });
                     conds.push(intervening_if.clone());
                 }

@@ -213,7 +213,9 @@ pub fn count_amount(
             .into_iter()
             .map(|id| chars(st, id).power.unwrap_or(0).max(0) as u32)
             .sum(),
-        Amount::X | Amount::SourcePower => 0,
+        Amount::X | Amount::SourcePower | Amount::TriggeringPower | Amount::TriggeringToughness => {
+            0
+        }
     }
 }
 
@@ -259,6 +261,7 @@ pub fn matches_parts(
             .toughness_min
             .is_none_or(|n| c.toughness.is_some_and(|t| t >= n))
         && sel.tapped.is_none_or(|t| tapped == t)
+        && sel.keywords.iter().all(|k| c.has(*k))
         && match sel.controller {
             Who::Any => true,
             Who::You => object_controller == controller,

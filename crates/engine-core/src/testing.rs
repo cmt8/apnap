@@ -75,6 +75,8 @@ impl Scenario {
                 controller: owner,
                 kind: StackKind::Spell,
                 source_lki: None,
+                subject: None,
+                subject_lki: None,
                 modes: Vec::new(),
                 x: 0,
                 targets: Vec::new(),

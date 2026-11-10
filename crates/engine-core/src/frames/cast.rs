@@ -395,6 +395,8 @@ impl CastFrame {
                                     index: *index,
                                     triggered: false,
                                     source_lki: None,
+                                    subject: None,
+                                    subject_lki: None,
                                 },
                             )
                         }
@@ -408,6 +410,8 @@ impl CastFrame {
                                 index: t.index,
                                 triggered: true,
                                 source_lki: t.source_lki.clone(),
+                                subject: t.subject,
+                                subject_lki: t.subject_lki.clone(),
                             },
                         ),
                     });

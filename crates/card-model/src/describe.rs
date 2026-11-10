@@ -5,8 +5,8 @@
 
 use crate::{
     AbilityDef, Affected, Amount, Body, CardDef, CardType, Color, Condition, ContinuousEffect,
-    Cost, CounterKind, EachPlayerAction, Effect, Keyword, ManaProduce, Mode, ObjFilter, ObjRef,
-    PlayerRef, ReplaceWith, Replaces, Selector, TargetFilter, TargetRef, Timing, Trigger,
+    Cost, CounterKind, DamageBy, EachPlayerAction, Effect, Keyword, ManaProduce, Mode, ObjFilter,
+    ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, TargetFilter, TargetRef, Timing, Trigger,
     TriggerStep, Who,
 };
 use alloc::format;
@@ -72,6 +72,8 @@ fn amount(a: &Amount) -> String {
         Amount::SourcePower => "its power".into(),
         Amount::Count(s) => format!("the number of {}", selector(s, true)),
         Amount::TotalPower(s) => format!("the total power of {}", selector(s, true)),
+        Amount::TriggeringPower => "its power".into(),
+        Amount::TriggeringToughness => "its toughness".into(),
     }
 }
 
@@ -109,6 +111,7 @@ fn obj(mode: &Mode, r: ObjRef) -> String {
     match r {
         ObjRef::Target(i) => target(mode, TargetRef::Target(i)),
         ObjRef::This => "this permanent".into(),
+        ObjRef::Triggering => "it".into(),
     }
 }
 
@@ -168,6 +171,9 @@ fn selector(s: &Selector, plural: bool) -> String {
     }
     if s.token == Some(true) {
         out.push_str(if plural { " tokens" } else { " token" });
+    }
+    for k in &s.keywords {
+        out.push_str(&format!(" with {}", keyword(*k)));
     }
     match (s.power_min, s.toughness_min) {
         (Some(p), _) => out.push_str(&format!(" with power {p} or greater")),
@@ -256,8 +262,12 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join(". Then "),
-        Effect::DealDamage { to, amount: a } => {
-            format!("this deals {} damage to {}", amount(a), target(mode, *to))
+        Effect::DealDamage { to, amount: a, by } => {
+            let who = match by {
+                DamageBy::This => "this",
+                DamageBy::Triggering => "it",
+            };
+            format!("{who} deals {} damage to {}", amount(a), target(mode, *to))
         }
         Effect::DamageEachPlayer { amount: a } => {
             format!("this deals {} damage to each player", amount(a))

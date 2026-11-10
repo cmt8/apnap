@@ -135,6 +135,24 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
             lki.insert(*object, snapshot(st, *object));
         }
     }
+    // CR 608.2h: …and the object that triggered them ("it", "that creature").
+    for (id, l) in &lki {
+        let abilities: Vec<ObjectId> = st
+            .stack
+            .iter()
+            .filter(|s| s.subject == Some(*id) && s.subject_lki.is_none())
+            .map(|s| s.id)
+            .collect();
+        for ability in abilities {
+            execute(
+                st,
+                GameAction::RecordSubjectLki {
+                    ability,
+                    chars: l.chars.clone(),
+                },
+            );
+        }
+    }
     // CR 113.7a: abilities on the stack remember a source that is leaving.
     for (id, l) in &lki {
         let sources: Vec<ObjectId> = st

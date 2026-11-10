@@ -1,0 +1,15 @@
+RealCard(
+    oracle_id: "42fb1a1c-ab3d-4cdc-a6ff-a591f7481583",
+    name: "Warstorm Surge",
+    verified: true,
+    tests: ["warstorm_surge_makes_creatures_deal_their_power"],
+    abilities: [
+        Triggered(
+            when: Enters(Matching((types: [Creature], controller: You))),
+            body: Effect((
+                targets: [AnyTarget],
+                effect: DealDamage(to: Target(0), amount: TriggeringPower, by: Triggering),
+            )),
+        ),
+    ],
+)

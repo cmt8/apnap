@@ -415,6 +415,8 @@ pub struct Selector {
     pub toughness_min: Option<i32>,
     /// `Some(true)` = tapped only, `Some(false)` = untapped only.
     pub tapped: Option<bool>,
+    /// Must have all of these keywords ("with flying").
+    pub keywords: Vec<Keyword>,
     pub controller: Who,
     /// "another" / "other": excludes the ability's own source.
     pub other: bool,
@@ -699,6 +701,8 @@ pub enum Effect {
     DealDamage {
         to: TargetRef,
         amount: Amount,
+        #[serde(default)]
+        by: DamageBy,
     },
     Draw {
         who: PlayerRef,
@@ -802,6 +806,19 @@ pub enum ObjRef {
     Target(u8),
     /// The ability's source ("this creature").
     This,
+    /// The object whose event triggered the ability ("it", "that creature"): the creature
+    /// that entered, died or attacked.
+    Triggering,
+}
+
+/// Which object deals the damage of a `DealDamage`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DamageBy {
+    /// The spell, or the ability's source.
+    #[default]
+    This,
+    /// The object whose event triggered the ability ("it deals damage …").
+    Triggering,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -838,6 +855,10 @@ pub enum Amount {
     Count(Selector),
     /// "the total power of [selector]" (negative powers count as 0).
     TotalPower(Selector),
+    /// The power / toughness of the object whose event triggered the ability ("its power",
+    /// "that creature's toughness"): current, or last known if it has left (CR 608.2h).
+    TriggeringPower,
+    TriggeringToughness,
     /// The announced value of X (CR 107.3a).
     X,
     /// The source's power: current if it's still on the battlefield, otherwise as it last
@@ -919,8 +940,12 @@ mod tests {
         let e = Effect::DealDamage {
             to: TargetRef::Target(0),
             amount: Amount::X,
+            by: DamageBy::This,
         };
         let s = serde_json::to_string(&e).unwrap();
-        assert_eq!(s, r#"{"DealDamage":{"to":{"Target":0},"amount":"X"}}"#);
+        assert_eq!(
+            s,
+            r#"{"DealDamage":{"to":{"Target":0},"amount":"X","by":"This"}}"#
+        );
     }
 }

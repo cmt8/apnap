@@ -105,7 +105,7 @@ fn every_verified_real_card_names_existing_tests() {
             script.name
         );
     }
-    assert!(verified >= 83);
+    assert!(verified >= 88);
 }
 
 #[test]
@@ -1907,4 +1907,184 @@ fn garruks_packleader_may_draw_for_big_creatures() {
     no(&mut s);
     assert_eq!(hand(&s, P0), 1);
     assert_eq!(triggers(&s), 2);
+}
+
+// ------------------------------------------------------------------------------------------
+// Batch 6: "it" — the object that triggered the ability (CR 608.2h) (D-045)
+// ------------------------------------------------------------------------------------------
+
+/// (source, amount) of every instance of noncombat damage dealt so far.
+fn damage_dealt(s: &Script) -> Vec<(ObjectId, u32)> {
+    s.events
+        .iter()
+        .filter_map(|e| match e {
+            Event::DamageDealt {
+                source,
+                amount,
+                combat: false,
+                ..
+            } => Some((*source, *amount)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn warstorm_surge_makes_creatures_deal_their_power() {
+    let mut sc = scenario();
+    let surge = sc.card(P0, Zone::Battlefield, "Warstorm Surge");
+    sc.cards(P0, Zone::Battlefield, &["Forest"; 3]);
+    sc.card(P0, Zone::Hand, "Regal Imperiosaur"); // 5/4
+    sc.card(P1, Zone::Battlefield, "Forest");
+    sc.card(P1, Zone::Hand, "Llanowar Elves");
+    let mut s = Script::new(sc.build());
+    s.cast("Regal Imperiosaur").pay().pass_all();
+    assert_eq!(s.kind(), ChoiceKind::ChooseTargets { slot: 0 });
+    s.target_player(P1);
+    resolve_all(&mut s);
+    assert_eq!(life(&s, P1), 35);
+    // "It deals damage": the creature is the source, not the enchantment.
+    let dino = named(&s, "Regal Imperiosaur")[0];
+    assert_eq!(damage_dealt(&s), [(dino, 5)]);
+    assert_ne!(dino, surge);
+    assert_eq!(triggers(&s), 1);
+}
+
+#[test]
+fn scourge_of_valkas_burns_for_each_dragon() {
+    let mut sc = scenario();
+    sc.cards(P0, Zone::Battlefield, &["Mountain"; 8]);
+    sc.card(P0, Zone::Battlefield, "Test Wyrmling"); // a Dragon already there
+    sc.cards(P0, Zone::Hand, &["Scourge of Valkas", "Test Wyrmling"]);
+    let mut s = Script::new(sc.build());
+    // It enters: X = 2 Dragons.
+    s.cast("Scourge of Valkas").pay().pass_all();
+    s.target_player(P1);
+    resolve_all(&mut s);
+    assert_eq!(life(&s, P1), 38);
+    let scourge = named(&s, "Scourge of Valkas")[0];
+    assert_eq!(pt(&s, scourge), (4, 4));
+    assert!(has(&s, scourge, Keyword::Flying));
+    // Another Dragon: X = 3, dealt by that Dragon.
+    s.cast("Test Wyrmling").pay().pass_all();
+    s.target_player(P1);
+    resolve_all(&mut s);
+    assert_eq!(life(&s, P1), 35);
+    let dealt = damage_dealt(&s);
+    assert_eq!(dealt.len(), 2);
+    assert_eq!(dealt[0], (scourge, 2));
+    assert_ne!(dealt[1].0, scourge);
+    assert_eq!(dealt[1].1, 3);
+    // {R}: +1/+0 until end of turn.
+    s.activate("Scourge of Valkas").pay().pass_all();
+    assert_eq!(pt(&s, scourge), (5, 4));
+}
+
+#[test]
+fn dragon_tempest_hastes_fliers_and_burns_for_dragons() {
+    let mut sc = scenario();
+    sc.card(P0, Zone::Battlefield, "Dragon Tempest");
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Plains", "Mountain", "Mountain", "Forest"],
+    );
+    sc.cards(
+        P0,
+        Zone::Hand,
+        &["Segovian Angel", "Test Wyrmling", "Llanowar Elves"],
+    );
+    let mut s = Script::new(sc.build());
+    // A flier: haste, and (not a Dragon) no damage.
+    s.cast("Segovian Angel").pay();
+    resolve_all(&mut s);
+    let angel = named(&s, "Segovian Angel")[0];
+    assert!(has(&s, angel, Keyword::Haste));
+    assert_eq!(triggers(&s), 1);
+    // A Dragon without flying: X = 1 damage, no haste.
+    s.cast("Test Wyrmling").pay().pass_all();
+    s.target_player(P1);
+    resolve_all(&mut s);
+    let wyrmling = named(&s, "Test Wyrmling")[0];
+    assert!(!has(&s, wyrmling, Keyword::Haste));
+    assert_eq!(life(&s, P1), 39);
+    assert_eq!(damage_dealt(&s), [(wyrmling, 1)]);
+    // Neither.
+    s.cast("Llanowar Elves").pay();
+    resolve_all(&mut s);
+    assert_eq!(triggers(&s), 2);
+    drive_until(&mut s, |s| s.st.turn.active == P1);
+    assert!(!has(&s, angel, Keyword::Haste), "until end of turn");
+}
+
+#[test]
+fn verdant_suns_avatar_gains_life_equal_to_toughness() {
+    let mut sc = scenario();
+    sc.cards(P0, Zone::Battlefield, &["Forest"; 12]);
+    sc.cards(P0, Zone::Hand, &["Verdant Sun's Avatar", "Test Golem"]);
+    sc.card(P1, Zone::Battlefield, "Forest");
+    let mut s = Script::new(sc.build());
+    // "This creature or another creature you control": itself, a 5/5.
+    s.cast("Verdant Sun's Avatar").pay();
+    resolve_all(&mut s);
+    assert_eq!(life(&s, P0), 45);
+    // A 2/3.
+    s.cast("Test Golem").pay();
+    resolve_all(&mut s);
+    assert_eq!(life(&s, P0), 48);
+    assert_eq!(triggers(&s), 2);
+}
+
+#[test]
+fn surrak_and_goreclaw_welcome_new_creatures() {
+    let mut sc = scenario();
+    let pair = sc.card(P0, Zone::Battlefield, "Surrak and Goreclaw");
+    sc.card(P0, Zone::Battlefield, "Open the Graves");
+    sc.card(P0, Zone::Battlefield, "Test Sprout");
+    sc.cards(P0, Zone::Battlefield, &["Mountain"; 6]);
+    sc.cards(P0, Zone::Hand, &["Test Golem", "Lightning Bolt"]);
+    let mut s = Script::new(sc.build());
+    assert_eq!(pt(&s, pair), (6, 5));
+    assert!(has(&s, pair, Keyword::Trample));
+    s.cast("Test Golem").pay();
+    resolve_all(&mut s);
+    let golem = named(&s, "Test Golem")[0];
+    assert_eq!(pt(&s, golem), (3, 4), "a +1/+1 counter");
+    assert!(has(&s, golem, Keyword::Haste) && has(&s, golem, Keyword::Trample));
+    assert!(!has(&s, pair, Keyword::Haste));
+    // A token entering (Open the Graves replaces the Sprout): "nontoken" — nothing.
+    let before = triggers(&s);
+    s.cast("Lightning Bolt").target("Test Sprout").pay();
+    resolve_all(&mut s);
+    let zombie = named(&s, "Zombie Token")[0];
+    assert_eq!(pt(&s, zombie), (2, 2));
+    assert!(has(&s, zombie, Keyword::Trample) && !has(&s, zombie, Keyword::Haste));
+    // Only Open the Graves triggered since.
+    assert_eq!(triggers(&s), before + 1);
+}
+
+/// CR 608.2h: if the creature that triggered the ability has left the battlefield, its last
+/// known information is used — and it, as it last existed, is still what deals the damage.
+#[test]
+fn warstorm_surge_uses_last_known_power_if_the_creature_is_gone() {
+    let mut sc = scenario();
+    sc.card(P0, Zone::Battlefield, "Warstorm Surge");
+    sc.card(P0, Zone::Battlefield, "Always Watching"); // nontoken creatures you control +1/+1
+    sc.card(P0, Zone::Battlefield, "Forest");
+    sc.card(P0, Zone::Hand, "Llanowar Elves"); // 1/1, so 2/2 here
+    sc.card(P1, Zone::Battlefield, "Mountain");
+    sc.card(P1, Zone::Hand, "Lightning Bolt");
+    let mut s = Script::new(sc.build());
+    s.cast("Llanowar Elves").pay().pass_all();
+    s.target_player(P1);
+    let elves = named(&s, "Llanowar Elves")[0];
+    // In response, the opponent kills the Elves.
+    s.pass();
+    assert_eq!(s.who(), P1);
+    s.cast("Lightning Bolt").target_object(elves).pay();
+    resolve_all(&mut s);
+    assert!(named(&s, "Llanowar Elves").is_empty());
+    // Its power when it was last on the battlefield was 2.
+    assert_eq!(life(&s, P1), 38);
+    assert!(damage_dealt(&s).contains(&(elves, 2)));
 }

@@ -111,12 +111,11 @@ Tokens are named per CR 111.4 ("Zombie Token") and referenced from scripts by `k
 Order: groundwork (DONE: frozen decklists, `harness fetch-cards`, `harness coverage`,
 real-card script format) → egui app (DONE: D-036; mouse-only, save/load/replay; card
 images + mana symbols + paced AI turns: D-037; Arena-style combat + table grid: D-040) → cards deck by deck until `harness
-coverage` is 100% (IN PROGRESS: 83 of 254 real cards verified; three of the four
+coverage` is 100% (IN PROGRESS: 88 of 254 real cards verified; three of the four
 commanders (Lathliss, Ghalta, and Giada/Gisa still missing); playable now as the three
-`real-Np` decks; batches logged as D-038, D-041..D-044. NEXT,
+`real-Np` decks; batches logged as D-038, D-041..D-045. NEXT,
 in order of cards unlocked: costs that need a choice (sacrifice another creature, discard,
-pay life) and additional costs on spells, with Treasure/Clue tokens; effects that refer to the triggering
-object; "may"; damage and combat-damage triggers; hexproof/indestructible/ward; multi-mana
+pay life) and additional costs on spells, with Treasure/Clue tokens; "may"; damage and combat-damage triggers; hexproof/indestructible/ward; multi-mana
 abilities (payment feasibility rework, D-021); graveyard targets; equipment; cycling and
 flashback; monarch; the one-off cards. Each card needs a script, a test, and never an
 approximation) → precon setups in the app menu, 10,000-game soak.

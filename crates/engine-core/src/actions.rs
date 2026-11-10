@@ -17,6 +17,9 @@ use crate::zones::{LibraryPosition, Zone};
 use alloc::vec::Vec;
 use card_model::{CardDefId, ContinuousEffect, CounterKind};
 
+// An action is built and executed on the spot, never stored: the size of the largest
+// variant (the one that carries last known information) doesn't matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GameAction {
     /// CR 400.7: the moved object becomes a new object.
@@ -153,6 +156,15 @@ pub enum GameAction {
         index: u16,
         triggered: bool,
         source_lki: Option<Characteristics>,
+        /// The object whose event triggered the ability, and its last known information.
+        subject: Option<ObjectId>,
+        subject_lki: Option<Characteristics>,
+    },
+    /// CR 608.2h: an ability on the stack remembers the triggering object as it last
+    /// existed, once that object leaves the battlefield.
+    RecordSubjectLki {
+        ability: ObjectId,
+        chars: Characteristics,
     },
     /// CR 601.2b–c: record the announced modes, X and targets of a stack object.
     SetStackChoices {
@@ -322,6 +334,12 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             }
             ActionResult::Done
         }
+        GameAction::RecordSubjectLki { ability, chars } => {
+            if let Some(so) = st.stack.iter_mut().find(|s| s.id == ability) {
+                so.subject_lki = Some(chars);
+            }
+            ActionResult::Done
+        }
         GameAction::ExpireEndOfTurn => {
             st.continuous.retain(|c| !c.until_end_of_turn);
             st.shields.clear();
@@ -446,6 +464,8 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             index,
             triggered,
             source_lki,
+            subject,
+            subject_lki,
         } => {
             let id = st.alloc_object_id();
             st.stack.push(StackObject {
@@ -458,6 +478,8 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                     triggered,
                 },
                 source_lki,
+                subject,
+                subject_lki,
                 modes: Vec::new(),
                 x: 0,
                 targets: Vec::new(),
@@ -602,6 +624,8 @@ fn perform_move(
             controller,
             kind: StackKind::Spell,
             source_lki: None,
+            subject: None,
+            subject_lki: None,
             modes: Vec::new(),
             x: 0,
             targets: Vec::new(),

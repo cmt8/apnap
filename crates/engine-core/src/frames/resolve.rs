@@ -23,8 +23,8 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use card_model::{
-    AbilityDef, Amount, Body, CardType, EachPlayerAction, Effect, Keyword, ObjRef, PlayerRef,
-    TargetFilter, TargetRef,
+    AbilityDef, Amount, Body, CardType, DamageBy, EachPlayerAction, Effect, Keyword, ObjRef,
+    PlayerRef, TargetFilter, TargetRef,
 };
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +53,11 @@ pub struct ResolveFrame {
     pub source: ObjectId,
     /// The ability's source as it last existed, if it has left the battlefield.
     pub source_lki: Option<Characteristics>,
+    /// The object whose event triggered this ability, and its last known information.
+    #[serde(default)]
+    pub subject: Option<ObjectId>,
+    #[serde(default)]
+    pub subject_lki: Option<Characteristics>,
     pub x: u32,
     pub targets: Vec<Vec<Target>>,
     pub filters: Vec<Vec<TargetFilter>>,
@@ -67,6 +72,8 @@ impl ResolveFrame {
             controller: PlayerId(0),
             source: ObjectId(0),
             source_lki: None,
+            subject: None,
+            subject_lki: None,
             x: 0,
             targets: Vec::new(),
             filters: Vec::new(),
@@ -122,6 +129,12 @@ impl ResolveFrame {
                 .get(&self.source)
                 .is_some_and(|o| o.zone == Zone::Battlefield)
                 .then_some(self.source),
+            // "It": only while it is still the object that triggered this (CR 400.7).
+            ObjRef::Triggering => self.subject.filter(|id| {
+                st.objects
+                    .get(id)
+                    .is_some_and(|o| o.zone == Zone::Battlefield)
+            }),
         }
     }
 
@@ -134,8 +147,33 @@ impl ResolveFrame {
         }
     }
 
+    /// The triggering object's current characteristics, or its last known ones.
+    fn subject_chars(&self, st: &GameState) -> Option<Characteristics> {
+        match self.subject {
+            Some(id)
+                if st
+                    .objects
+                    .get(&id)
+                    .is_some_and(|o| o.zone == Zone::Battlefield) =>
+            {
+                Some(chars(st, id))
+            }
+            _ => self.subject_lki.clone(),
+        }
+    }
+
     fn amount(&self, st: &GameState, a: &Amount) -> u32 {
         match a {
+            Amount::TriggeringPower => self
+                .subject_chars(st)
+                .and_then(|c| c.power)
+                .unwrap_or(0)
+                .max(0) as u32,
+            Amount::TriggeringToughness => self
+                .subject_chars(st)
+                .and_then(|c| c.toughness)
+                .unwrap_or(0)
+                .max(0) as u32,
             Amount::Fixed(n) => *n,
             Amount::X => self.x,
             Amount::Count(_) | Amount::TotalPower(_) => {
@@ -150,9 +188,24 @@ impl ResolveFrame {
     }
 
     fn damage(&self, st: &GameState, target: DamageTarget, amount: u32) -> Proposed {
-        let c = self.source_chars(st);
+        self.damage_by(st, DamageBy::This, target, amount)
+    }
+
+    /// CR 608.2h: "If an ability states that an object does something, it's the object as
+    /// it exists — or as it most recently existed — that does it, not the ability."
+    fn damage_by(
+        &self,
+        st: &GameState,
+        by: DamageBy,
+        target: DamageTarget,
+        amount: u32,
+    ) -> Proposed {
+        let (source, c) = match (by, self.subject) {
+            (DamageBy::Triggering, Some(subject)) => (subject, self.subject_chars(st)),
+            _ => (self.source, self.source_chars(st)),
+        };
         Proposed::Damage {
-            source: self.source,
+            source,
             deathtouch: c.as_ref().is_some_and(|c| c.has(Keyword::Deathtouch)),
             lifelink: c.as_ref().is_some_and(|c| c.has(Keyword::Lifelink)),
             target,
@@ -272,6 +325,8 @@ impl ResolveFrame {
         self.x = top.x;
         self.targets = top.targets.clone();
         self.source_lki = top.source_lki.clone();
+        self.subject = top.subject;
+        self.subject_lki = top.subject_lki.clone();
         let body: Body = match &top.kind {
             StackKind::Spell => {
                 self.source = top.id;
@@ -378,14 +433,14 @@ impl ResolveFrame {
                 }
                 Vec::new()
             }
-            Effect::DealDamage { to, amount } => {
+            Effect::DealDamage { to, amount, by } => {
                 let amount = self.amount(st, &amount);
                 match self.target(st, k, to) {
                     Some(Target::Player(p)) => {
-                        vec![self.damage(st, DamageTarget::Player(p), amount)]
+                        vec![self.damage_by(st, by, DamageTarget::Player(p), amount)]
                     }
                     Some(Target::Object(o)) => {
-                        vec![self.damage(st, DamageTarget::Object(o), amount)]
+                        vec![self.damage_by(st, by, DamageTarget::Object(o), amount)]
                     }
                     None => Vec::new(),
                 }

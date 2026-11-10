@@ -38,6 +38,12 @@ pub struct StackObject {
     /// For abilities: the source as it last existed on the battlefield, once it has left
     /// (CR 113.7a, 608.2h). `None` while the source is still there.
     pub source_lki: Option<Characteristics>,
+    /// For triggered abilities: the object whose event triggered it ("it", "that
+    /// creature"), and that object as it last existed once it has left the battlefield.
+    #[serde(default)]
+    pub subject: Option<ObjectId>,
+    #[serde(default)]
+    pub subject_lki: Option<Characteristics>,
     /// Chosen mode indices, ascending (non-modal bodies: `[0]`). Empty for permanent spells.
     pub modes: Vec<u8>,
     /// Announced X (CR 107.3a); 0 if none.

@@ -538,6 +538,12 @@ appended to `docs/rules-notes/508-701-attack-triggers-keyword-actions.md`.
 - Not yet: effects that depend on what the targeted card is ("if it's a Zombie card, draw
   a card"), which need a conditional on the target.
 
+## D-045 M4 card batch 6: the object that triggered the ability
+5 more cards (88 of 254 unique). A triggered ability carries its triggering object from
+detection to the stack to resolution (with last known information once that object leaves,
+CR 608.2h): `ObjRef::Triggering`, `Amount::TriggeringPower` / `TriggeringToughness`,
+`DealDamage { by: Triggering }`. Selectors can also require keywords ("with flying").
+
 ## D-039 Future scope: other 1v1 constructed formats (user note 2026-11-09)
 The user wants 1v1 **Modern, Legacy, Vintage, etc.** supported in future. Nothing is built
 for this yet; it is recorded so current work doesn't close the door:

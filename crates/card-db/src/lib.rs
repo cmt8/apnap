@@ -405,7 +405,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
                 p("ApplyAll needs at least one effect".into());
             }
         }
-        Effect::DealDamage { to, amount: a } => {
+        Effect::DealDamage { to, amount: a, .. } => {
             match slot(to) {
                 None => p(format!("{to:?} has no target slot")),
                 Some(TargetFilter::Spell) => p("can't deal damage to a spell".into()),

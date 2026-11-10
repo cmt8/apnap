@@ -91,3 +91,19 @@ the spell or ability was put on the stack, CR 601.2c / 603.3d — a "may" doesn'
 targeting optional). `TargetFilter::CardInGraveyard` targets a card by what it is
 everywhere (its card types and subtypes); it becomes an illegal target if it leaves that
 graveyard (it would be a new object, CR 400.7).
+
+## "It" — the object that triggered the ability (CR 608.2h) — D-045
+> 608.2h […] If the effect requires information from a specific object, including the
+> source of the ability itself, the effect uses the current information of that object if
+> it’s in the public zone it was expected to be in; if it’s no longer in that zone, or if
+> the effect has moved it from a public zone to a hidden zone, the effect uses the object’s
+> last known information. See rule 113.7a. If an ability states that an object does
+> something, it’s the object as it exists—or as it most recently existed—that does it, not
+> the ability.
+
+A triggered ability remembers the object whose event triggered it (`PendingTrigger::subject`
+→ `StackObject::subject`). `ObjRef::Triggering` is that object while it is still on the
+battlefield; `Amount::TriggeringPower` / `TriggeringToughness` read it now or as it last
+existed; `DealDamage { by: Triggering }` makes it — not the ability's source — the source of
+the damage (Warstorm Surge: the creature deals the damage, so its lifelink or deathtouch
+would apply, and it still deals it if it has died in response).
