@@ -715,6 +715,30 @@ pub struct Mode {
     #[serde(default)]
     pub targets: Vec<TargetFilter>,
     pub effect: Effect,
+    /// One "target" word that takes several targets ("two target creatures", "up to two
+    /// target creatures"): see [`TargetGroup`].
+    #[serde(default)]
+    pub groups: Vec<TargetGroup>,
+}
+
+/// The slots `first .. first + count` of a mode's targets are one instance of the word
+/// "target" (CR 115.3): they have the same filter, must be different objects or players,
+/// and at least `min` of them are chosen. A group with `min < count` ("up to …") must be
+/// the mode's last slots: slots left empty are simply not there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TargetGroup {
+    pub first: u8,
+    pub count: u8,
+    pub min: u8,
+}
+
+impl Mode {
+    /// The group slot `i` belongs to, if any.
+    pub fn group_of(&self, i: usize) -> Option<&TargetGroup> {
+        self.groups
+            .iter()
+            .find(|g| (g.first as usize..g.first as usize + g.count as usize).contains(&i))
+    }
 }
 
 /// What a single target may be (CR 115).
@@ -1087,6 +1111,10 @@ pub enum Effect {
         mana: ManaType,
         amount: Amount,
     },
+    /// Several instructions that happen at the same time: "destroy two target creatures"
+    /// is one event, not one after the other. Only for instructions that are a single
+    /// event or change each (no choices, nothing done in steps).
+    Together(Vec<Effect>),
 }
 
 /// A zone an effect takes cards out of as it resolves.

@@ -895,6 +895,20 @@ The user's direction from here: the biggest blockers across all cards, not the p
     Anchor, Sarkhan's Dragonfire).
 - `harness forge-coverage --sample N --with TEXT` reads over just the cards whose compiled
   text contains TEXT.
+- **One "target" word with several targets** (`TargetMin$`/`TargetMax$`: "two target
+  creatures", "up to two target creatures", "one or two"): `Mode::groups` (`TargetGroup
+  { first, count, min }`) — the group's slots share a filter, take different targets (CR
+  115.3), and those past `min` may be left empty. An "up to" group must be the mode's
+  last slots, so targets that weren't chosen are simply missing from the end of the list
+  and nothing else in the engine changes shape (`CastFrame::targets_closed` remembers that
+  the player stopped). A spell with no targets chosen still resolves (CR 608.2b is about
+  spells that *have* targets). The instruction is copied per slot and wrapped in
+  `Effect::Together`: one event, so two creatures destroyed this way die together.
+  Compiled only for instructions that are one event each (damage, destroy, exile, return
+  to hand, tap/untap, counters, pump, life, draw, mill); "X target creatures" and an "up
+  to" group followed by other targets are blockers. +131 cards.
+  State hashes changed (`Mode` gained a field, and modes are part of the catalog in the
+  state); event-log hashes did not. Golden file re-blessed.
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may

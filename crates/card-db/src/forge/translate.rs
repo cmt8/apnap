@@ -15,7 +15,7 @@ use card_model::{
     Color, CombatRule, Condition, ContinuousEffect, Cost, CostChoice, CounterKind, DamageBy,
     EachPlayerAction, Effect, Keyword, ManaCost, ManaProduce, ManaRestriction, ManaType, Mode,
     ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, Signed, Supertype, Take,
-    TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
+    TargetFilter, TargetGroup, TargetRef, Timing, Trigger, TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -112,6 +112,10 @@ struct Chain {
     x: Option<(String, Amount)>,
     /// Some link said `Defined$ Targeted` — in Forge, every target of the whole chain.
     refers_to_targets: std::cell::Cell<bool>,
+    /// "Two target creatures", "up to two target creatures": slots that are one "target".
+    groups: Vec<TargetGroup>,
+    /// The group the record being compiled has just made: (first slot, slots).
+    fresh_group: Option<(u8, u8)>,
 }
 
 struct Tx<'a> {
@@ -607,12 +611,22 @@ impl<'a> Tx<'a> {
             self.block("param:target+Defined");
             return None;
         }
-        for k in ["TargetMin", "TargetMax", "TargetUnique", "TargetType"] {
+        for k in ["TargetUnique", "TargetType"] {
             if rd.rec.get(k).is_some() {
                 self.block(format!("param:target.{k}"));
                 return None;
             }
         }
+        // "Two target creatures" (2, 2), "up to two target creatures" (0, 2). Numbers
+        // only: "X target creatures" is not compiled.
+        let count = |t: Option<&str>| t.map_or(Some(1), |t| t.parse::<u8>().ok());
+        let (min, max) = match (count(rd.get("TargetMin")), count(rd.get("TargetMax"))) {
+            (Some(min), Some(max)) if min <= max && (1..=6).contains(&max) => (min, max),
+            _ => {
+                self.block("param:target.TargetMin");
+                return None;
+            }
+        };
         let filter = if graveyard {
             let mut s = self.card_selector(text)?;
             let whose = std::mem::take(&mut s.controller);
@@ -640,8 +654,42 @@ impl<'a> Tx<'a> {
                 }
             }
         };
-        chain.targets.push(filter);
-        Some(chain.targets.len() as u8 - 1)
+        let first = chain.targets.len() as u8;
+        for _ in 0..max {
+            chain.targets.push(filter.clone());
+        }
+        if (min, max) != (1, 1) {
+            chain.groups.push(TargetGroup {
+                first,
+                count: max,
+                min,
+            });
+            chain.fresh_group = Some((first, max));
+        }
+        Some(first)
+    }
+
+    /// `e` with every reference to target slot `from` pointing at slot `to` instead.
+    fn retarget(e: &Effect, from: u8, to: u8) -> Option<Effect> {
+        use serde_json::Value;
+        fn walk(v: &mut Value, from: u8, to: u8) {
+            match v {
+                // `ObjRef`, `PlayerRef` and `TargetRef` all write a slot as {"Target": n}.
+                Value::Object(m) => {
+                    if m.len() == 1 && m.get("Target").and_then(Value::as_u64) == Some(from as u64)
+                    {
+                        m.insert("Target".to_string(), Value::from(to));
+                        return;
+                    }
+                    m.values_mut().for_each(|x| walk(x, from, to));
+                }
+                Value::Array(a) => a.iter_mut().for_each(|x| walk(x, from, to)),
+                _ => {}
+            }
+        }
+        let mut v = serde_json::to_value(e).ok()?;
+        walk(&mut v, from, to);
+        serde_json::from_value(v).ok()
     }
 
     // ------------------------------------------------------------------ effects
@@ -667,6 +715,7 @@ impl<'a> Tx<'a> {
         let rd = Rd::new(rec, api);
         rd.get("SubAbility");
         rd.get("Cost");
+        chain.fresh_group = None;
         if rec.head().map(|h| h.0) == Some("AB") {
             // Read by `ability`: when and whether the ability can be activated.
             for k in ["IsPresent", "PresentCompare", "PresentZone", "SorcerySpeed"] {
@@ -1235,6 +1284,38 @@ impl<'a> Tx<'a> {
             }
         };
         rd.finish(&mut self.blockers);
+        // One "target" word with several targets: the instruction is done to each of
+        // them, at the same time. Only for instructions that are one event each.
+        let out = match chain.fresh_group.take() {
+            Some((first, count)) if count > 1 => {
+                let single = matches!(
+                    out,
+                    Effect::DealDamage { .. }
+                        | Effect::Destroy { .. }
+                        | Effect::Exile { .. }
+                        | Effect::ReturnToHand { .. }
+                        | Effect::Tap { .. }
+                        | Effect::Untap { .. }
+                        | Effect::PutCounters { .. }
+                        | Effect::Apply { .. }
+                        | Effect::GainLife { .. }
+                        | Effect::LoseLife { .. }
+                        | Effect::Draw { .. }
+                        | Effect::Mill { .. }
+                );
+                let copies: Option<Vec<Effect>> = (0..count)
+                    .map(|j| Self::retarget(&out, first, first + j))
+                    .collect();
+                match copies {
+                    Some(copies) if single && copies[0] != copies[1] => Effect::Together(copies),
+                    _ => {
+                        self.block(format!("targets:several for {api}"));
+                        return None;
+                    }
+                }
+            }
+            _ => out,
+        };
         Some(out)
     }
 
@@ -1451,9 +1532,20 @@ impl<'a> Tx<'a> {
         } else {
             Effect::Seq(effects)
         };
+        // Slots left empty are simply missing from the end of the chosen targets.
+        let slots = chain.targets.len() as u8;
+        if chain
+            .groups
+            .iter()
+            .any(|g| g.min < g.count && g.first + g.count != slots)
+        {
+            self.block("targets:up-to group before other targets");
+            return None;
+        }
         Some(Mode {
             targets: chain.targets,
             effect,
+            groups: chain.groups,
         })
     }
 
@@ -2099,6 +2191,7 @@ impl<'a> Tx<'a> {
                     Body::Effect(m) => Body::Effect(Mode {
                         targets: m.targets,
                         effect: Effect::May(Box::new(m.effect)),
+                        groups: m.groups,
                     }),
                     modal => {
                         self.block("trig:optional-modal");
@@ -2628,6 +2721,7 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
                         effect: Effect::AttachThis {
                             to: ObjRef::Target(0),
                         },
+                        groups: Vec::new(),
                     }),
                 });
             }

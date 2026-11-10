@@ -68,6 +68,7 @@ fn effect_polarity(e: &Effect) -> Polarity {
         },
         Effect::Apply { effects, .. } => continuous_polarity(effects),
         Effect::May(inner) => effect_polarity(inner),
+        Effect::Together(v) => v.first().map_or(Polarity::Neutral, effect_polarity),
         Effect::GainLife { .. }
         | Effect::AddMana { .. }
         | Effect::ReturnToBattlefield { .. }
@@ -269,6 +270,7 @@ impl HeuristicAgent {
                         .unwrap_or_default();
                     Body::Effect(card_model::Mode {
                         targets: vec![f],
+                        groups: Vec::new(),
                         effect: Effect::Apply {
                             what: card_model::ObjRef::Target(0),
                             effects,

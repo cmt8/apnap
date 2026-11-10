@@ -279,7 +279,13 @@ fn main() -> ExitCode {
                     .iter()
                     .filter(|(_, b)| b.iter().any(|x| x.contains(text.as_str())))
                     .collect();
-                for (name, b) in hits.iter().take(60) {
+                // The first 60, or with `--all` every one.
+                let limit = if args.iter().any(|a| a == "--all") {
+                    usize::MAX
+                } else {
+                    60
+                };
+                for (name, b) in hits.iter().take(limit) {
                     let all: Vec<&str> = b.iter().map(String::as_str).collect();
                     println!("{name}: {}", all.join(" | "));
                 }

@@ -1064,6 +1064,8 @@ impl ResolveFrame {
                 }
                 Vec::new()
             }
+            // One event: what each instruction would do, all at once.
+            Effect::Together(v) => v.into_iter().flat_map(|e| self.eval(st, k, e)).collect(),
             Effect::DealDamage { to, amount, by } => {
                 let amount = self.amount(st, &amount);
                 // Several recipients ("to each opponent") are dealt damage at once.

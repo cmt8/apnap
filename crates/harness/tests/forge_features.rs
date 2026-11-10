@@ -2677,3 +2677,151 @@ fn each_player_reveals_and_keeps_the_lands() {
         ["Dig:order of the rest differs from the card"]
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// One "target" word with several targets (D-055).
+
+// CR 115.3, 601.2c (2026-11-06). Forge: `TargetMin$ 2 | TargetMax$ 2` — "destroy two target
+// creatures": two different creatures, destroyed at the same time.
+#[test]
+fn two_target_creatures() {
+    let cards = [
+        spell(
+            "Test Twin Doom",
+            "B",
+            "Sorcery",
+            "A:SP$ Destroy | ValidTgts$ Creature | TargetMin$ 2 | TargetMax$ 2 | SpellDescription$ Text.",
+        ),
+        // "Whenever another creature dies, you gain 1 life."
+        creature(
+            "Test Mourner",
+            "B",
+            "Cleric",
+            "1/1",
+            "T:Mode$ ChangesZone | Origin$ Battlefield | Destination$ Graveyard | ValidCard$ Creature.Other | TriggerZones$ Battlefield | Execute$ TrigGain | TriggerDescription$ Text.\n\
+             SVar:TrigGain:DB$ GainLife | LifeAmount$ 1",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    // One creature on the battlefield: there aren't two different targets.
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Swamp"]);
+    sc.card(P1, Zone::Battlefield, "Test Golem");
+    sc.card(P0, Zone::Hand, "Test Twin Doom");
+    let s = Script::new(sc.build());
+    assert!(!s.can_cast("Test Twin Doom"));
+    // Two Mourners of the opponent's: each sees the other die (they die together), so
+    // their controller gains 2 life.
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Swamp"]);
+    let a = sc.card(P1, Zone::Battlefield, "Test Mourner");
+    let b = sc.card(P1, Zone::Battlefield, "Test Mourner");
+    sc.card(P0, Zone::Hand, "Test Twin Doom");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Twin Doom");
+    assert_eq!(s.kind(), ChoiceKind::ChooseTargets { slot: 0 });
+    assert_eq!(s.decision().prim, Primitive::PickN { min: 1, max: 1 });
+    assert_eq!(s.options().len(), 2);
+    s.target_object(a);
+    // The second target must be another creature.
+    assert_eq!(s.kind(), ChoiceKind::ChooseTargets { slot: 1 });
+    assert_eq!(s.options().len(), 1);
+    s.target_object(b).pay().pass_all();
+    assert!(!on_battlefield(&s, a) && !on_battlefield(&s, b));
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+    });
+    assert_eq!(life(&s, P1), 42, "each Mourner saw the other die");
+}
+
+// CR 115.3, 601.2c, 608.2b (2026-11-06). Forge: `TargetMin$ 0 | TargetMax$ 2` — "up to two
+// target creatures each get +2/+2 until end of turn".
+#[test]
+fn up_to_two_target_creatures() {
+    let cards = [spell(
+        "Test Rally",
+        "G",
+        "Instant",
+        "A:SP$ Pump | ValidTgts$ Creature | TargetMin$ 0 | TargetMax$ 2 | NumAtt$ +2 | NumDef$ +2 | SpellDescription$ Text.",
+    )];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let build = || {
+        let mut sc = scenario(&cards);
+        sc.cards(P0, Zone::Battlefield, &["Forest"]);
+        let elf = sc.card(P0, Zone::Battlefield, "Test Elf");
+        let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+        sc.card(P0, Zone::Hand, "Test Rally");
+        (Script::new(sc.build()), elf, golem)
+    };
+    // Both.
+    let (mut s, elf, golem) = build();
+    let (elf_pt, golem_pt) = (pt(&s, elf), pt(&s, golem));
+    s.cast("Test Rally");
+    assert_eq!(s.decision().prim, Primitive::PickN { min: 0, max: 1 });
+    s.target_object(elf).target_object(golem).pay().pass_all();
+    assert_eq!(pt(&s, elf), (elf_pt.0 + 2, elf_pt.1 + 2));
+    assert_eq!(pt(&s, golem), (golem_pt.0 + 2, golem_pt.1 + 2));
+    // One, then "no more".
+    let (mut s, elf, golem) = build();
+    s.cast("Test Rally").target_object(golem);
+    assert_eq!(s.kind(), ChoiceKind::ChooseTargets { slot: 1 });
+    s.respond(Response::Pick(vec![])).pay().pass_all();
+    assert_eq!(pt(&s, golem), (golem_pt.0 + 2, golem_pt.1 + 2));
+    assert_eq!(pt(&s, elf), elf_pt);
+    // None at all: the spell is still cast, and resolves doing nothing (it has no
+    // targets, so CR 608.2b doesn't stop it).
+    let (mut s, elf, golem) = build();
+    s.cast("Test Rally").respond(Response::Pick(vec![])).pay();
+    assert_eq!(s.st.stack.len(), 1);
+    s.pass_all();
+    assert!(s.st.stack.is_empty());
+    assert_eq!((pt(&s, elf), pt(&s, golem)), (elf_pt, golem_pt));
+    assert_eq!(s.count(|e| matches!(e, Event::Fizzled { .. })), 0);
+    // With no creature anywhere it can be cast all the same.
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Forest"]);
+    sc.card(P0, Zone::Hand, "Test Rally");
+    let mut s = Script::new(sc.build());
+    assert!(s.can_cast("Test Rally"));
+    s.cast("Test Rally").pay();
+    assert_eq!(s.st.stack.len(), 1);
+}
+
+// What isn't compiled: several targets for an instruction that isn't a single event, a
+// number of targets that isn't a number, and an "up to" group followed by other targets
+// (unchosen targets are simply missing from the end of the list).
+#[test]
+fn target_groups_not_compiled() {
+    let several = spell(
+        "Test Regrowth",
+        "G",
+        "Sorcery",
+        "A:SP$ ChangeZone | Origin$ Graveyard | Destination$ Battlefield | ValidTgts$ Creature.YouOwn | TargetMin$ 2 | TargetMax$ 2 | SpellDescription$ Text.",
+    );
+    assert_eq!(
+        forge_test_blockers(&several),
+        ["targets:several for ChangeZone"]
+    );
+    let variable = spell(
+        "Test Hail",
+        "X R",
+        "Sorcery",
+        "A:SP$ DealDamage | ValidTgts$ Creature | TargetMin$ X | TargetMax$ X | NumDmg$ 1 | SpellDescription$ Text.\nSVar:X:Count$xPaid",
+    );
+    assert!(
+        forge_test_blockers(&variable)
+            .iter()
+            .any(|b| b == "param:target.TargetMin")
+    );
+    let before = spell(
+        "Test Tangle",
+        "G",
+        "Sorcery",
+        "A:SP$ Tap | ValidTgts$ Creature | TargetMin$ 0 | TargetMax$ 2 | SubAbility$ DBDmg | SpellDescription$ Text.\n\
+         SVar:DBDmg:DB$ DealDamage | ValidTgts$ Player | NumDmg$ 1",
+    );
+    assert_eq!(
+        forge_test_blockers(&before),
+        ["targets:up-to group before other targets"]
+    );
+}

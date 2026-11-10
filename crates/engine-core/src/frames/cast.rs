@@ -78,6 +78,10 @@ pub struct CastFrame {
     /// Which mana in the pool pays the generic part of the cost (per mana type).
     #[serde(default)]
     pub generic: [u32; 6],
+    /// Per chosen mode: no more targets will be chosen for it ("up to two targets": the
+    /// player stopped, or nothing else can be targeted).
+    #[serde(default)]
+    pub targets_closed: Vec<bool>,
 }
 
 /// CR 903.8: the commander tax `p` would pay to cast `card` from the command zone now.
@@ -187,6 +191,7 @@ fn proposal(st: &GameState, source: &CastSource) -> Proposal {
                 st.card_def(*card).enchant().map(|f| {
                     Body::Effect(card_model::Mode {
                         targets: vec![f],
+                        groups: Vec::new(),
                         effect: card_model::Effect::Seq(Vec::new()),
                     })
                 })
@@ -654,9 +659,15 @@ fn legal_modes(st: &GameState, body: &Body, p: PlayerId, this: Option<ObjectId>)
         .iter()
         .enumerate()
         .filter(|(_, m)| {
-            m.targets
-                .iter()
-                .all(|f| !candidates(st, f, p, this).is_empty())
+            m.targets.iter().enumerate().all(|(i, f)| {
+                match m.group_of(i) {
+                    None => !candidates(st, f, p, this).is_empty(),
+                    // CR 115.3: a group needs `min` different targets (checked once).
+                    Some(g) => {
+                        i != g.first as usize || candidates(st, f, p, this).len() >= g.min as usize
+                    }
+                }
+            })
         })
         .map(|(i, _)| i as u8)
         .collect()
@@ -765,6 +776,7 @@ impl CastFrame {
             pay_sacrifice: Vec::new(),
             pay_discard: Vec::new(),
             generic: [0; 6],
+            targets_closed: Vec::new(),
         }
     }
 
@@ -949,44 +961,65 @@ impl CastFrame {
                 }
                 CastStage::Targets => {
                     // CR 601.2c: one target per target slot of each chosen mode, in order.
+                    // The slots of a target group take different targets, and those beyond
+                    // its minimum may be left empty ("up to two target creatures").
                     let body = self.proposal(st).body;
-                    let slots: Vec<(usize, card_model::TargetFilter)> = self
+                    let modes: Vec<card_model::Mode> = self
                         .modes
                         .iter()
-                        .enumerate()
-                        .flat_map(|(k, &m)| {
-                            body.as_ref().unwrap().modes()[m as usize]
-                                .targets
-                                .iter()
-                                .map(move |f| (k, f.clone()))
-                        })
+                        .map(|&m| body.as_ref().unwrap().modes()[m as usize].clone())
                         .collect();
-                    let filled: usize = self.targets.iter().map(Vec::len).sum();
+                    if self.targets_closed.len() != modes.len() {
+                        self.targets_closed = vec![false; modes.len()];
+                    }
+                    let next = (0..modes.len()).find(|&k| {
+                        !self.targets_closed[k] && self.targets[k].len() < modes[k].targets.len()
+                    });
                     if let Some(inp) = input.take() {
-                        let Some(OptionDesc::Target { target }) = inp.picked_one().cloned() else {
-                            unreachable!()
-                        };
-                        self.targets[slots[filled].0].push(target);
+                        let k = next.expect("asked about a target slot");
+                        match inp.picked_one().cloned() {
+                            Some(OptionDesc::Target { target }) => self.targets[k].push(target),
+                            None => self.targets_closed[k] = true,
+                            Some(other) => unreachable!("{other:?}"),
+                        }
                         continue;
                     }
-                    if let Some((_, filter)) = slots.get(filled) {
-                        let options: Vec<OptionDesc> = candidates(st, filter, p, self.object)
-                            .into_iter()
-                            .map(|target| OptionDesc::Target { target })
-                            .collect();
+                    if let Some(k) = next {
+                        let i = self.targets[k].len();
+                        let mode = &modes[k];
+                        let group = mode.group_of(i);
+                        let optional = group.is_some_and(|g| i >= (g.first + g.min) as usize);
+                        let taken: &[Target] = match group {
+                            Some(g) => &self.targets[k][g.first as usize..],
+                            None => &[],
+                        };
+                        let options: Vec<OptionDesc> =
+                            candidates(st, &mode.targets[i], p, self.object)
+                                .into_iter()
+                                .filter(|t| !taken.contains(t))
+                                .map(|target| OptionDesc::Target { target })
+                                .collect();
                         if options.is_empty() {
+                            if optional {
+                                self.targets_closed[k] = true;
+                                continue;
+                            }
                             // CR 603.3d (only triggers can get here, D-019).
                             debug_assert!(self.is_trigger());
                             return self.remove_trigger(st);
                         }
+                        let slot = modes[..k].iter().map(|m| m.targets.len()).sum::<usize>() + i;
                         return self.ask(
-                            ChoiceKind::ChooseTargets { slot: filled as u8 },
-                            Primitive::PickN { min: 1, max: 1 },
+                            ChoiceKind::ChooseTargets { slot: slot as u8 },
+                            Primitive::PickN {
+                                min: usize::from(!optional),
+                                max: 1,
+                            },
                             options,
                         );
                     }
                     let object = self.object.unwrap();
-                    if !slots.is_empty() {
+                    if modes.iter().any(|m| !m.targets.is_empty()) {
                         st.emit(Event::TargetsChosen {
                             object,
                             targets: self.targets.iter().flatten().copied().collect(),

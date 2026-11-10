@@ -515,6 +515,23 @@ fn effect(mode: &Mode, e: &Effect) -> String {
         Effect::SacrificeThis => "sacrifice this permanent".to_string(),
         Effect::AttachThis { to } => format!("attach this permanent to {}", obj(mode, *to)),
         Effect::May(inner) => format!("you may {}", effect(mode, inner)),
+        // The same instruction for each target of one "target" word.
+        Effect::Together(v) => {
+            let parts: Vec<String> = v.iter().map(|e| effect(mode, e)).collect();
+            // One "target" word with several targets reads the same for each of them.
+            let group = mode.groups.iter().find(|g| g.count as usize == v.len());
+            match (parts.windows(2).all(|w| w[0] == w[1]), group) {
+                (true, Some(g)) => {
+                    let n = match (g.min, g.count) {
+                        (0, n) => format!("up to {n}"),
+                        (m, n) if m == n => n.to_string(),
+                        (m, n) => format!("{m} to {n}"),
+                    };
+                    format!("{}, for each of {n} targets", parts[0])
+                }
+                _ => join(parts, "and"),
+            }
+        }
         Effect::ReturnToBattlefield { what } => {
             format!("return {} to the battlefield", obj(mode, *what))
         }

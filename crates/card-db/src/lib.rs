@@ -466,6 +466,37 @@ fn check_body(body: &Body, has_x: bool, p: &mut dyn FnMut(String)) {
         check_effect(&mode.effect, mode, has_x, &mut |m| {
             p(format!("mode {mi}: {m}"))
         });
+        // CR 115.3: the slots of a target group.
+        let n = mode.targets.len();
+        for g in &mode.groups {
+            let (first, end) = (g.first as usize, g.first as usize + g.count as usize);
+            if g.count == 0 || g.min > g.count || end > n || (g.count == 1 && g.min == 1) {
+                p(format!("mode {mi}: bad target group {g:?}"));
+                continue;
+            }
+            if mode.targets[first..end]
+                .iter()
+                .any(|f| *f != mode.targets[first])
+            {
+                p(format!(
+                    "mode {mi}: a target group's slots must have one filter"
+                ));
+            }
+            if g.min < g.count && end != n {
+                p(format!(
+                    "mode {mi}: an \"up to\" target group must be the last targets"
+                ));
+            }
+            if mode
+                .groups
+                .iter()
+                .filter(|o| (o.first..o.first + o.count).contains(&g.first))
+                .count()
+                != 1
+            {
+                p(format!("mode {mi}: overlapping target groups"));
+            }
+        }
     }
 }
 
@@ -542,6 +573,17 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         }
         Effect::SetX(a) => amount(a, p),
         Effect::May(inner) => check_effect(inner, mode, has_x, p),
+        Effect::Together(v) => {
+            for x in v {
+                if matches!(
+                    x,
+                    Effect::Seq(_) | Effect::May(_) | Effect::Together(_) | Effect::SetX(_)
+                ) {
+                    p("Together holds single instructions only".into());
+                }
+                check_effect(x, mode, has_x, p);
+            }
+        }
         Effect::ReturnToBattlefield { what } => match what {
             ObjRef::Target(i)
                 if matches!(
