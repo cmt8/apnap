@@ -130,7 +130,7 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-061): 8,528 of 34,463 scripts compile (24.7%); about 10,500 more are one feature
+Status (D-062): 8,668 of 34,463 scripts compile (25.2%); about 10,500 more are one feature
 away. Precons: `harness coverage --verbose` lists what blocks the rest. Feature tests live in `crates/harness/tests/forge_features.rs`: invented cards written
 in Forge's format, compiled by `harness::forge_test_catalog` and played (`forge_test_blockers`
 for "this must not compile"). Four guards catch compiler holes — keep them: a line that
@@ -144,12 +144,14 @@ filters, `Defined$`, expressions), `effects.md` (every effect API), and
 feature: Forge's defaults are often not what the key names suggest (flags are tested for
 presence, `Defined$ Targeted` means every target of the chain, a trigger that runs an
 `AB$` with a cost is "you may pay", triggers without `TriggerZones$` work from any zone).
-Not built yet: the generated-text-vs-Oracle round trip, multi-face cards, searching
-another player's library, "X target creatures", mana abilities that cost mana
-(signets) or make different mana at once, two mana abilities of one permanent that make the
-same type in different amounts, counters other than +1/+1 and -1/-1, "as this enters,
-choose …", "you may pay" triggers, regeneration, statics that grant
-abilities or types or set P/T, Forge's "Effect" objects, Sagas.
+Not built yet: the full generated-text-vs-Oracle round trip (a word-level guard exists),
+multi-face cards, searching another player's library, "X target creatures", mana abilities
+that cost mana (signets) or make different mana at once, two mana abilities of one
+permanent that make the same type in different amounts, counters other than +1/+1 and
+-1/-1, "as this enters, choose …", costs paid during resolution ("you may pay", "unless
+you pay"), regeneration, statics and effects that grant abilities (see the end of D-062),
+"becomes tapped" and "becomes the target" triggers, protection, Forge's "Effect" objects,
+Sagas. `forge-coverage --families` ranks what is left by kind of feature.
 
 ## Current milestone: M4 — IN PROGRESS (started 2026-11-09), branch `m4-wip`
 Decisions: D-034 (precons: Calling All Angels, Wretched Ranks, Reign of Dragons,

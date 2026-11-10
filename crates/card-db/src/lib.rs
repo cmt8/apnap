@@ -426,11 +426,17 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 }
             }
             AbilityDef::CombatRule { affected, .. } => {
-                // "Enchanted creature can't attack": only on an Aura.
+                // "Enchanted creature can't attack", "equipped creature can't be blocked":
+                // only on something that is attached to a creature.
                 if matches!(affected, card_model::Affected::Enchanted)
-                    && !c.creature_types.iter().any(|t| t == "Aura")
+                    && !c
+                        .creature_types
+                        .iter()
+                        .any(|t| t == "Aura" || t == "Equipment")
                 {
-                    p.push(at("only an Aura has an enchanted creature".into()));
+                    p.push(at(
+                        "only an Aura or Equipment has an enchanted or equipped creature".into(),
+                    ));
                 }
             }
             AbilityDef::AdditionalCost(cost) => {

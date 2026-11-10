@@ -155,3 +155,21 @@ card's owner (or, on the stack, its controller) as "you". If the permanent loses
 ability (layer 6), the "*" is not defined and stays 0 (208.2a). Tests:
 `power_and_toughness_defined_by_a_count`, `a_creature_defined_as_zero_toughness_dies`,
 `a_condition_on_graveyard_cards_meets_a_card_with_a_defined_power`.
+
+## Becoming a creature; types, colors and base power/toughness from effects (D-062)
+
+The layer rules these effects apply in are quoted above (613.1d–f, 613.4b). What is new is
+only where they come from:
+
+- Forge's `Animate`/`AnimateAll` compile to `Effect::Apply`/`ApplyAll` with `AddTypes`
+  (layer 4), `SetColors` (5), `AddKeywords`/`LoseAllAbilities` (6) and `SetPT` (7b), until
+  end of turn or — `Duration$ Permanent` — indefinitely. Types "instead of" the others,
+  colors "in addition", single-sided base power or toughness, and durations tied to
+  something else are not compiled.
+- `S:Mode$ Continuous` gains `AddType$`, `SetColor$`, `RemoveKeyword$`,
+  `RemoveAllAbilities$` and `SetPower$`/`SetToughness$` (both).
+
+| Rule | Test (`crates/harness/tests/forge_features.rs`) |
+|---|---|
+| 613.1d–f, 613.4b, 611.2a–b | `becoming_a_creature_for_a_turn_or_for_good` |
+| 613.1d–f, 613.4b | `statics_that_change_types_colors_and_base_power` |

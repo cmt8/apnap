@@ -1684,6 +1684,95 @@ impl<'a> Tx<'a> {
                     count: count?,
                 }
             }
+            // "Becomes a 3/3 green Ape creature with trample until end of turn", "is an
+            // artifact in addition to its other types": types, colors, base power and
+            // toughness, keywords — for a turn, or for good (docs/forge/effects.md §17).
+            "Animate" | "AnimateAll" => {
+                let mut effects = Vec::new();
+                // Layer 4: types added (nothing is removed: the `Remove…` keys are not
+                // read, so a script that has them is not compiled).
+                if let Some(types) = rd.get("Types") {
+                    effects.push(self.added_types(types.split(','))?);
+                }
+                // Layer 5: only "becomes [these colors]", not "in addition".
+                if let Some(colors) = rd.get("Colors") {
+                    if rd.get("OverwriteColors") != Some("True") {
+                        self.block("Animate:colors added");
+                        return None;
+                    }
+                    let mut cs = Vec::new();
+                    for c in colors.split(',').map(str::trim) {
+                        match color(c) {
+                            Some(c) => cs.push(c),
+                            None if c == "Colorless" => {}
+                            None => {
+                                self.block(format!("Animate:color {}", shape(c)));
+                                return None;
+                            }
+                        }
+                    }
+                    cs.sort();
+                    effects.push(ContinuousEffect::SetColors(cs));
+                }
+                // Layer 6.
+                if rd.get("RemoveAllAbilities").is_some() {
+                    effects.push(ContinuousEffect::LoseAllAbilities);
+                }
+                if let Some(kw) = rd.get("Keywords") {
+                    let mut ks = Vec::new();
+                    for k in kw.split('&').map(str::trim) {
+                        match keyword(k) {
+                            Some(k) => ks.push(k),
+                            None => {
+                                self.block(format!("kw:{k}"));
+                                return None;
+                            }
+                        }
+                    }
+                    effects.push(ContinuousEffect::AddKeywords(ks));
+                }
+                // Layer 7b: base power and toughness, both or neither.
+                let number = |t: Option<&str>| t.map(|t| t.parse::<i32>().ok());
+                match (number(rd.get("Power")), number(rd.get("Toughness"))) {
+                    (None, None) => {}
+                    (Some(Some(p)), Some(Some(t))) => effects.push(ContinuousEffect::SetPT(p, t)),
+                    _ => {
+                        self.block("Animate:power and toughness");
+                        return None;
+                    }
+                }
+                if effects.is_empty() {
+                    self.block("Animate:nothing");
+                    return None;
+                }
+                let until_end_of_turn = match rd.get("Duration") {
+                    None => true,
+                    Some("Permanent") => false,
+                    Some(other) => {
+                        self.block(format!("Animate:duration {other}"));
+                        return None;
+                    }
+                };
+                if api == "AnimateAll" {
+                    let sel = self.valid_cards(&rd, api);
+                    Effect::ApplyAll {
+                        affected: sel?,
+                        effects,
+                        until_end_of_turn,
+                    }
+                } else {
+                    let slot = self.target(&rd, chain, false);
+                    let what = match slot {
+                        Some(i) => Some(ObjRef::Target(i)),
+                        None => self.object(&rd, chain, triggered),
+                    };
+                    Effect::Apply {
+                        what: what?,
+                        effects,
+                        until_end_of_turn,
+                    }
+                }
+            }
             "Pump" | "PumpAll" => {
                 let effects = self.pump_effects(&rd, chain)?;
                 if api == "PumpAll" {
@@ -1987,6 +2076,38 @@ impl<'a> Tx<'a> {
             self.block("ChangeZone:optional search differs from the card");
             None
         }
+    }
+
+    /// Types an effect adds ("is a creature in addition to its other types"): card types,
+    /// basic land types and known subtypes. Supertypes are not added by anything yet.
+    fn added_types<'t>(
+        &mut self,
+        words: impl Iterator<Item = &'t str>,
+    ) -> Option<ContinuousEffect> {
+        let (mut card_types, mut subtypes, mut land_types) = (Vec::new(), Vec::new(), Vec::new());
+        for word in words.map(str::trim) {
+            if let Some(t) = card_type(word) {
+                card_types.push(t);
+                continue;
+            }
+            match word {
+                "Plains" => land_types.push(BasicLandType::Plains),
+                "Island" => land_types.push(BasicLandType::Island),
+                "Swamp" => land_types.push(BasicLandType::Swamp),
+                "Mountain" => land_types.push(BasicLandType::Mountain),
+                "Forest" => land_types.push(BasicLandType::Forest),
+                w if self.known.subtypes.contains(w) => subtypes.push(w.to_string()),
+                w => {
+                    self.block(format!("type added:{}", shape(w)));
+                    return None;
+                }
+            }
+        }
+        Some(ContinuousEffect::AddTypes {
+            card_types,
+            subtypes,
+            land_types,
+        })
     }
 
     /// `NumAtt$` / `NumDef$` / `KW$` of Pump and PumpAll (which last until end of turn).
@@ -3270,6 +3391,57 @@ impl<'a> Tx<'a> {
                         }
                     }
                     effects.push(ContinuousEffect::AddKeywords(ks));
+                }
+                // Layer 4: "are [types] in addition to their other types".
+                if let Some(types) = rd.get("AddType") {
+                    effects.insert(0, self.added_types(types.split('&'))?);
+                }
+                // Layer 5: "is [color]" (not "in addition").
+                if let Some(colors) = rd.get("SetColor") {
+                    let mut cs = Vec::new();
+                    for c in colors.split(',').map(str::trim) {
+                        match color(c) {
+                            Some(c) => cs.push(c),
+                            None => {
+                                self.block(format!("static:color {}", shape(c)));
+                                return None;
+                            }
+                        }
+                    }
+                    cs.sort();
+                    effects.push(ContinuousEffect::SetColors(cs));
+                }
+                // Layer 6: "lose [keyword]", "lose all abilities".
+                if let Some(kw) = rd.get("RemoveKeyword") {
+                    let mut ks = Vec::new();
+                    for k in kw.split('&').map(str::trim) {
+                        match keyword(k) {
+                            Some(k) => ks.push(k),
+                            None => {
+                                self.block(format!("kw:{k}"));
+                                return None;
+                            }
+                        }
+                    }
+                    effects.push(ContinuousEffect::LoseKeywords(ks));
+                }
+                if rd.get("RemoveAllAbilities").is_some() {
+                    effects.push(ContinuousEffect::LoseAllAbilities);
+                }
+                // Layer 7b: "have base power and toughness N/N" (not a
+                // characteristic-defining ability, which is read above).
+                if rd.rec.get("CharacteristicDefining").is_none() {
+                    let number = |t: Option<&str>| t.map(|t| t.parse::<i32>().ok());
+                    match (number(rd.get("SetPower")), number(rd.get("SetToughness"))) {
+                        (None, None) => {}
+                        (Some(Some(p)), Some(Some(t))) => {
+                            effects.push(ContinuousEffect::SetPT(p, t))
+                        }
+                        _ => {
+                            self.block("static:base power and toughness");
+                            return None;
+                        }
+                    }
                 }
                 // "You control [it]" (layer 2).
                 match rd.get("GainControl") {

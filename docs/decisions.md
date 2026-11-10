@@ -1089,6 +1089,32 @@ Rules text: docs/rules-notes/603-triggered-abilities.md (last section).
 - Golden state hashes re-blessed (`PlayerState` gained a field); event-log hashes unchanged.
 - 8,237 → 8,528 of 34,463 scripts (24.7%).
 
+## D-062 Compiler batch 11 (breadth): Animate; statics that change types, colors, base P/T (2026-11-10)
+Rules notes: docs/rules-notes/613-layers.md (last section).
+- **`Animate` / `AnimateAll`** compile to `Apply` / `ApplyAll` with the continuous effects
+  the engine already had (types added, colors set, keywords, "loses all abilities", base
+  power and toughness), for a turn or indefinitely. Man-lands, "becomes an artifact in
+  addition to its other types", Humble. Anything that removes types, adds colors, sets
+  only one of power and toughness, or lasts "for as long as …" stays a blocker.
+- **`S:Mode$ Continuous`** reads `AddType$`, `SetColor$`, `RemoveKeyword$`,
+  `RemoveAllAbilities$`, `SetPower$`/`SetToughness$` (Humility, Living Lands, Ensoul
+  Artifact).
+- Validation let only Auras carry a combat rule about "the enchanted creature"; Equipment
+  may too (Whispersilk Cloak).
+- 8,528 → 8,668 of 34,463 scripts (25.2%). Golden hashes unchanged.
+- **Where this run ended.** The largest family left is still static abilities that grant
+  abilities (`AddAbility$`/`AddTrigger$`, ~170 cards alone; the same is needed by the rest
+  of Animate and by many Pump and Effect scripts). It needs an ability to be addressable
+  as (card definition, index) everywhere an index into the permanent's own card is used
+  now: `Characteristics::abilities`, `OptionDesc::ActivateAbility`, `CastSource::Ability`,
+  mana sources, trigger sources, replacement and static keys. `StackKind::Ability` and
+  `PendingTrigger` already carry the definition. The granted definitions would live in the
+  granting card (a `granted` list beside `abilities`). After that, by family (cards blocked
+  by it alone): `Mana` 345 (mana abilities that cost mana, two abilities making the same
+  type), costs paid during resolution — "you may pay", "unless you pay" — 281,
+  double-faced cards 399, Forge's `Effect` objects 376, Sagas 185, protection 141,
+  flashback 103.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

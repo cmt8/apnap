@@ -4843,3 +4843,184 @@ fn blocking_triggers() {
     ));
     assert_eq!(b, ["kw:Flanking"]);
 }
+
+// ---------------------------------------------------------------------------------------
+// Animate: types, colors, keywords and base power/toughness for a turn or for good (D-062).
+
+// CR 613.1d–f, 613.4b, 611.2a–b (2026-11-06). Forge: `Animate` with `Types$`, `Colors$` +
+// `OverwriteColors$`, `Keywords$`, `Power$`/`Toughness$`, `RemoveAllAbilities$`, and
+// `Duration$ Permanent`; `AnimateAll`.
+#[test]
+fn becoming_a_creature_for_a_turn_or_for_good() {
+    let cards = [
+        "Name:Test Thicket\nManaCost:no cost\nTypes:Land\n\
+         A:AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Text.\n\
+         A:AB$ Animate | Cost$ 1 | Defined$ Self | Power$ 3 | Toughness$ 3 | Types$ Creature,Ape | Colors$ Green | OverwriteColors$ True | Keywords$ Trample | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+        "Name:Test Idol\nManaCost:2\nTypes:Artifact\n\
+         A:AB$ Animate | Cost$ 2 | Defined$ Self | Power$ 4 | Toughness$ 4 | Types$ Creature,Ape | Duration$ Permanent | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+        spell(
+            "Test Humbling",
+            "W",
+            "Instant",
+            "A:SP$ Animate | ValidTgts$ Creature | Power$ 0 | Toughness$ 1 | RemoveAllAbilities$ True | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Flatlining",
+            "B",
+            "Instant",
+            "A:SP$ AnimateAll | ValidCards$ Creature.OppCtrl | Power$ 0 | Toughness$ 1 | SpellDescription$ Text.",
+        ),
+        creature("Test Wind Drake", "U", "Drake", "2/2", "K:Flying"),
+        creature("Test Ape Lord", "G", "Ape", "1/1", ""),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Forest", "Forest", "Forest", "Plains", "Swamp"],
+    );
+    let thicket = sc.card(P0, Zone::Battlefield, "Test Thicket");
+    let idol = sc.card(P0, Zone::Battlefield, "Test Idol");
+    let drake = sc.card(P1, Zone::Battlefield, "Test Wind Drake");
+    let golem = sc.card(P1, Zone::Battlefield, "Test Golem");
+    sc.cards(P0, Zone::Hand, &["Test Humbling", "Test Flatlining"]);
+    let mut s = Script::new(sc.build());
+    use card_model::{CardType, Color};
+    let click = |s: &mut Script, id: ObjectId| {
+        s.pick(
+            "activate",
+            |_, o| matches!(o, OptionDesc::ActivateAbility { source, .. } if *source == id),
+        );
+    };
+    // The land becomes a 3/3 green Ape creature with trample — and is still a land.
+    click(&mut s, thicket);
+    s.pay().pass_all();
+    let c = chars(&s.st, thicket);
+    assert!(c.is(CardType::Creature) && c.is(CardType::Land) && c.has_subtype("Ape"));
+    assert_eq!(
+        (c.colors.clone(), pt(&s, thicket)),
+        (vec![Color::Green], (3, 3))
+    );
+    assert!(c.has(Keyword::Trample));
+    // The artifact becomes a 4/4 Ape creature for good.
+    click(&mut s, idol);
+    s.pay().pass_all();
+    assert_eq!(pt(&s, idol), (4, 4));
+    // "Loses all abilities and has base power and toughness 0/1" for the Drake; then every
+    // creature the opponent controls is 0/1 (the Golem too), mine aren't.
+    s.cast("Test Humbling")
+        .target_object(drake)
+        .pay()
+        .pass_all();
+    assert_eq!(pt(&s, drake), (0, 1));
+    assert!(!chars(&s.st, drake).has(Keyword::Flying));
+    s.cast("Test Flatlining").pay().pass_all();
+    assert_eq!((pt(&s, golem), pt(&s, idol)), ((0, 1), (4, 4)));
+    // Next turn: the land is only a land again, the Idol is still a creature, the
+    // opponent's creatures are themselves.
+    drive_until(&mut s, |s| at(s, P1, Step::Upkeep));
+    let c = chars(&s.st, thicket);
+    assert!(!c.is(CardType::Creature) && c.is(CardType::Land) && c.power.is_none());
+    assert!(c.colors.is_empty());
+    assert_eq!(pt(&s, idol), (4, 4));
+    assert_eq!((pt(&s, golem), pt(&s, drake)), ((2, 3), (2, 2)));
+    assert!(chars(&s.st, drake).has(Keyword::Flying));
+
+    // What isn't understood isn't compiled: types "instead of" the others, colors "in
+    // addition", a duration tied to something else.
+    for (script, blocker) in [
+        (
+            "A:SP$ Animate | ValidTgts$ Creature | Types$ Ape | RemoveCreatureTypes$ True | SpellDescription$ Text.",
+            "param:Animate.RemoveCreatureTypes",
+        ),
+        (
+            "A:SP$ Animate | ValidTgts$ Creature | Colors$ Green | SpellDescription$ Text.",
+            "Animate:colors added",
+        ),
+        (
+            "A:SP$ Animate | ValidTgts$ Creature | Types$ Ape | Duration$ UntilHostLeavesPlay | SpellDescription$ Text.",
+            "Animate:duration UntilHostLeavesPlay",
+        ),
+    ] {
+        // (With a card that makes "Ape" a known subtype.)
+        let lib = card_db::forge::Library::build(
+            &[
+                (
+                    "a".to_string(),
+                    spell("Test Oddment", "G", "Instant", script),
+                ),
+                (
+                    "b".to_string(),
+                    creature("Test Ape Lord", "G", "Ape", "1/1", ""),
+                ),
+            ],
+            &[],
+            None,
+        );
+        assert_eq!(
+            lib.blocked
+                .get("Test Oddment")
+                .map(|b| b.iter().cloned().collect::<Vec<_>>()),
+            Some(vec![blocker.to_string()]),
+            "{script}"
+        );
+    }
+}
+
+// CR 613.1d–f, 613.4b (2026-11-06). Forge: `S:Mode$ Continuous` with `AddType$`, `SetPower$`
+// / `SetToughness$`, `SetColor$`, `RemoveKeyword$`, `RemoveAllAbilities$`; an Equipment's
+// `CantBlockBy` about the equipped creature.
+#[test]
+fn statics_that_change_types_colors_and_base_power() {
+    let cards = [
+        "Name:Test Emergence\nManaCost:G\nTypes:Enchantment\n\
+         S:Mode$ Continuous | Affected$ Land.YouCtrl | SetPower$ 2 | SetToughness$ 2 | AddType$ Creature | AddKeyword$ First Strike | Description$ Text.\nOracle:Text."
+            .to_string(),
+        "Name:Test Humbler\nManaCost:W\nTypes:Enchantment\n\
+         S:Mode$ Continuous | Affected$ Creature.OppCtrl+nonLand | RemoveAllAbilities$ True | SetPower$ 1 | SetToughness$ 1 | Description$ Text.\nOracle:Text."
+            .to_string(),
+        "Name:Test Leaden Boots\nManaCost:B\nTypes:Enchantment Aura\nK:Enchant:Creature\n\
+         S:Mode$ Continuous | AffectedDefined$ Enchanted | Affected$ Creature | RemoveKeyword$ Flying | SetColor$ Black | Description$ Text.\nOracle:Text."
+            .to_string(),
+        "Name:Test Silk Cloak\nManaCost:3\nTypes:Artifact Equipment\nK:Equip:2\n\
+         S:Mode$ CantBlockBy | ValidAttacker$ Creature.EquippedBy | Description$ Text.\nOracle:Text."
+            .to_string(),
+        creature("Test Wind Drake", "U", "Drake", "2/2", "K:Flying"),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    use card_model::{CardType, Color};
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Test Emergence", "Test Humbler"]);
+    let forest = sc.card(P0, Zone::Battlefield, "Forest");
+    let their_forest = sc.card(P1, Zone::Battlefield, "Forest");
+    let mine = sc.card(P0, Zone::Battlefield, "Test Wind Drake");
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Wind Drake");
+    let boots = sc.card(P0, Zone::Battlefield, "Test Leaden Boots");
+    sc.attach(boots, mine);
+    let cloak = sc.card(P0, Zone::Battlefield, "Test Silk Cloak");
+    sc.attach(cloak, forest);
+    let s = Script::new(sc.build());
+    // My lands are 2/2 creatures with first strike, still lands; the opponent's aren't.
+    let c = chars(&s.st, forest);
+    assert!(c.is(CardType::Creature) && c.is(CardType::Land) && c.has(Keyword::FirstStrike));
+    assert_eq!(pt(&s, forest), (2, 2));
+    assert!(!chars(&s.st, their_forest).is(CardType::Creature));
+    // Their creatures lose all abilities and are 1/1; mine keeps its size, but the Boots
+    // take its flying and make it black.
+    let c = chars(&s.st, theirs);
+    assert!(!c.has(Keyword::Flying));
+    assert_eq!(pt(&s, theirs), (1, 1));
+    let c = chars(&s.st, mine);
+    assert!(!c.has(Keyword::Flying));
+    assert_eq!(
+        (c.colors.clone(), pt(&s, mine)),
+        (vec![Color::Black], (2, 2))
+    );
+    // The equipped creature (the animated Forest) can't be blocked; the Drake can.
+    let mut s = s;
+    attack_with(&mut s, &[forest, mine]);
+    assert!(offered_blockers(&mut s, forest).is_empty());
+}
