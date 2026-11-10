@@ -3701,3 +3701,322 @@ fn another_target_is_not_the_abilitys_source() {
     s.activate("Test Soultender");
     assert_eq!(target_names(&s), ["Test Elf"]);
 }
+
+// ---------------------------------------------------------------------------------------
+// More trigger events and counted conditions (D-057).
+// Text: docs/rules-notes/603-triggered-abilities.md.
+
+fn bell(name: &str, trigger: &str, gain: u32) -> String {
+    format!(
+        "Name:{name}\nManaCost:1\nTypes:Enchantment\n\
+         T:Mode$ {trigger} | TriggerZones$ Battlefield | Execute$ TrigGain | TriggerDescription$ Text.\n\
+         SVar:TrigGain:DB$ GainLife | LifeAmount$ {gain}\nOracle:Text."
+    )
+}
+
+fn at(s: &Script, p: PlayerId, step: Step) -> bool {
+    s.st.turn.active == p && s.st.turn.step == step
+}
+
+// CR 603.2b, 505.1, 507.2, 511.2, 513.1a (2026-11-06). Forge: `Mode$ Phase` with `Phase$
+// Main1 | BeginCombat | EndCombat | End of Turn` and `ValidPlayer$ You | Opponent | Player`.
+#[test]
+fn step_triggers_at_main_phase_combat_and_end_step() {
+    let cards = [
+        bell(
+            "Test Dawn Chime",
+            "Phase | Phase$ Main1 | ValidPlayer$ You",
+            1000,
+        ),
+        bell(
+            "Test War Drum",
+            "Phase | Phase$ BeginCombat | ValidPlayer$ You",
+            1,
+        ),
+        bell(
+            "Test Truce Bell",
+            "Phase | Phase$ EndCombat | ValidPlayer$ Player",
+            10,
+        ),
+        bell(
+            "Test Vesper",
+            "Phase | Phase$ End of Turn | ValidPlayer$ Opponent",
+            100,
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &[
+            "Test Dawn Chime",
+            "Test War Drum",
+            "Test Truce Bell",
+            "Test Vesper",
+        ],
+    );
+    sc.turn(P0, Step::Upkeep);
+    let mut s = Script::new(sc.build());
+    // My precombat main phase, then the beginning of my combat. (A trigger is on the
+    // stack before anyone gets priority in the step.)
+    drive_until(&mut s, |s| {
+        at(s, P0, Step::PrecombatMain) && s.st.stack.is_empty()
+    });
+    assert_eq!(life(&s, P0), 1040);
+    drive_until(&mut s, |s| {
+        at(s, P0, Step::BeginningOfCombat) && s.st.stack.is_empty()
+    });
+    assert_eq!(life(&s, P0), 1041);
+    // "At end of combat": there was no attack, the step still happens (CR 508.8 skips
+    // only the declare blockers and combat damage steps).
+    drive_until(&mut s, |s| at(s, P0, Step::PostcombatMain));
+    assert_eq!(life(&s, P0), 1051);
+    // My own end step isn't "each opponent's end step".
+    drive_until(&mut s, |s| at(s, P1, Step::Upkeep));
+    assert_eq!(life(&s, P0), 1051);
+    // The opponent's turn: no main-phase or combat trigger of mine, but each end of combat
+    // and their end step.
+    drive_until(&mut s, |s| at(s, P0, Step::Upkeep));
+    assert_eq!(life(&s, P0), 1161);
+}
+
+// CR 603.6c, 603.10a (2026-11-06). Forge: `Mode$ ChangesZone | Origin$ Battlefield` with
+// `Destination$ Any` or none — "leaves the battlefield", for any zone, looking back.
+#[test]
+fn leaves_the_battlefield_triggers_for_any_zone() {
+    let mover = |name: &str, dest: &str| {
+        spell(
+            name,
+            "U",
+            "Instant",
+            &format!(
+                "A:SP$ ChangeZone | ValidTgts$ Creature | Origin$ Battlefield | Destination$ {dest} | SpellDescription$ Text."
+            ),
+        )
+    };
+    let cards = [
+        creature(
+            "Test Departing Spirit",
+            "U",
+            "Spirit",
+            "1/1",
+            "T:Mode$ ChangesZone | Origin$ Battlefield | Destination$ Any | ValidCard$ Card.Self | Execute$ TrigDraw | TriggerDescription$ Text.\n\
+             SVar:TrigDraw:DB$ Draw | NumCards$ 1",
+        ),
+        bell(
+            "Test Mourner",
+            "ChangesZone | Origin$ Battlefield | ValidCard$ Creature.YouCtrl",
+            1,
+        ),
+        mover("Test Unsummoning", "Hand"),
+        mover("Test Banishing", "Exile"),
+        spell(
+            "Test Drowning",
+            "U",
+            "Instant",
+            "A:SP$ Destroy | ValidTgts$ Creature | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Island"; 4]);
+    sc.card(P0, Zone::Battlefield, "Test Mourner");
+    let spirits = sc.cards(P0, Zone::Battlefield, &["Test Departing Spirit"; 3]);
+    let golem = sc.card(P1, Zone::Battlefield, "Test Golem");
+    sc.cards(
+        P0,
+        Zone::Hand,
+        &[
+            "Test Unsummoning",
+            "Test Banishing",
+            "Test Drowning",
+            "Test Unsummoning",
+        ],
+    );
+    let mut s = Script::new(sc.build());
+    let draws = |s: &Script| s.count(|e| matches!(e, Event::Drew { player, .. } if *player == P0));
+    for (i, (spell, to)) in [
+        ("Test Unsummoning", Zone::Hand),
+        ("Test Banishing", Zone::Exile),
+        ("Test Drowning", Zone::Graveyard),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        s.cast(spell).target_object(spirits[i]).pay();
+        drive_until(&mut s, |s| {
+            s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+        });
+        assert!(s.find(P0, to, "Test Departing Spirit").is_some(), "{spell}");
+        // The Spirit's own trigger (it looks back: the Spirit is gone) and the Mourner's.
+        assert_eq!((draws(&s), life(&s, P0)), (i + 1, 41 + i as i32), "{spell}");
+    }
+    // An opponent's creature leaving isn't "a creature you control".
+    s.cast("Test Unsummoning").target_object(golem).pay();
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+    });
+    assert_eq!((draws(&s), life(&s, P0)), (3, 43));
+}
+
+// CR 601.2i (2026-11-06). Forge: `Mode$ SpellCast` with `ValidCard$ Card.nonCreature`,
+// `Elf,Goblin`, `Card.cmcGE4`, `Card.Blue`: what the spell is; `ValidActivatingPlayer$`:
+// whose it is.
+#[test]
+fn cast_triggers_ask_what_the_spell_is() {
+    let cards = [
+        bell(
+            "Test Chanter",
+            "SpellCast | ValidCard$ Card.nonCreature | ValidActivatingPlayer$ You",
+            1,
+        ),
+        bell("Test Kindred Bell", "SpellCast | ValidCard$ Elf,Goblin", 10),
+        bell(
+            "Test Weighty Bell",
+            "SpellCast | ValidCard$ Card.cmcGE4 | ValidActivatingPlayer$ You",
+            100,
+        ),
+        bell(
+            "Test Azure Bell",
+            "SpellCast | ValidCard$ Card.Blue | ValidActivatingPlayer$ Opponent",
+            1000,
+        ),
+        creature("Test Sproutling", "G", "Elf", "1/1", ""),
+        creature("Test Cave Sneak", "R", "Goblin", "1/1", ""),
+        creature("Test Colossus", "4", "Golem", "4/4", ""),
+        spell(
+            "Test Pondering",
+            "U",
+            "Instant",
+            "A:SP$ Draw | NumCards$ 1 | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &[
+            "Test Chanter",
+            "Test Kindred Bell",
+            "Test Weighty Bell",
+            "Test Azure Bell",
+        ],
+    );
+    sc.cards(P0, Zone::Battlefield, &["Forest", "Island"]);
+    sc.cards(P0, Zone::Battlefield, &["Mountain"; 4]);
+    sc.card(P1, Zone::Battlefield, "Island");
+    sc.cards(
+        P0,
+        Zone::Hand,
+        &["Test Sproutling", "Test Pondering", "Test Colossus"],
+    );
+    sc.card(P1, Zone::Hand, "Test Pondering");
+    let mut s = Script::new(sc.build());
+    let settle = |s: &mut Script| {
+        drive_until(s, |s| {
+            s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+        })
+    };
+    // An Elf creature spell: the Kindred Bell only.
+    s.cast("Test Sproutling").pay();
+    settle(&mut s);
+    assert_eq!(life(&s, P0), 50);
+    // My blue instant: noncreature (+1); blue, but not an opponent's.
+    s.cast("Test Pondering").pay();
+    // In response the opponent casts theirs: the Azure Bell (+1000), not the Chanter.
+    // (The Chanter's trigger is still on the stack, above my spell.)
+    drive_until(&mut s, |s| {
+        s.who() == P1 && s.kind() == ChoiceKind::Priority
+    });
+    assert_eq!((life(&s, P0), s.st.stack.len()), (50, 2));
+    s.cast("Test Pondering").pay();
+    settle(&mut s);
+    assert_eq!(life(&s, P0), 1051);
+    // Mana value 4, a creature that is neither Elf nor Goblin.
+    s.cast("Test Colossus").pay();
+    settle(&mut s);
+    assert_eq!(life(&s, P0), 1151);
+}
+
+// CR 603.4 (2026-11-06). Forge: `IsPresent$ … | PresentCompare$ EQ1` and `CheckSVar$ X |
+// SVarCompare$ GE3` — "if [something counted] is exactly / at least N", asked when the
+// event happens and again as the ability resolves; on a static ability, "as long as".
+#[test]
+fn conditions_that_compare_a_count() {
+    let cards = [
+        bell(
+            "Test Lone Vigil",
+            "Phase | Phase$ BeginCombat | ValidPlayer$ You | IsPresent$ Creature.YouCtrl | PresentCompare$ EQ1",
+            5,
+        ),
+        format!(
+            "{}\nSVar:X:Count$Valid Land.YouCtrl",
+            bell(
+                "Test Land Census",
+                "Phase | Phase$ BeginCombat | ValidPlayer$ You | CheckSVar$ X | SVarCompare$ GE3",
+                100,
+            )
+            .replace("\nOracle:Text.", "")
+        ) + "\nOracle:Text.",
+        creature(
+            "Test Scholar",
+            "U",
+            "Wizard",
+            "1/1",
+            "S:Mode$ Continuous | Affected$ Card.Self | AddPower$ 2 | AddToughness$ 2 | CheckSVar$ X | SVarCompare$ LT2 | Description$ Text.\n\
+             SVar:X:Count$CardsInYourHand",
+        ),
+        SMITE.to_string(),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let build = |creatures: usize, lands: usize| {
+        let mut sc = scenario(&cards);
+        sc.cards(
+            P0,
+            Zone::Battlefield,
+            &["Test Lone Vigil", "Test Land Census"],
+        );
+        sc.cards(P0, Zone::Battlefield, &vec!["Test Golem"; creatures]);
+        sc.cards(P0, Zone::Battlefield, &vec!["Forest"; lands]);
+        sc.card(P1, Zone::Battlefield, "Swamp");
+        sc.card(P1, Zone::Hand, "Test Smiting");
+        Script::new(sc.build())
+    };
+    let combat = |s: &mut Script| {
+        drive_until(s, |s| {
+            at(s, P0, Step::DeclareAttackers) || at(s, P0, Step::PostcombatMain)
+        })
+    };
+    // Exactly one creature, three lands: both.
+    let mut s = build(1, 3);
+    combat(&mut s);
+    assert_eq!(life(&s, P0), 145);
+    // Two creatures, two lands: neither.
+    let mut s = build(2, 2);
+    combat(&mut s);
+    assert_eq!(life(&s, P0), 40);
+    // No creature: "exactly one" is not "at most one".
+    let mut s = build(0, 3);
+    combat(&mut s);
+    assert_eq!(life(&s, P0), 140);
+    // The one creature dies in response to the trigger: asked again on resolution, the
+    // condition fails and the ability does nothing.
+    let mut s = build(1, 0);
+    drive_until(&mut s, |s| {
+        s.who() == P1 && s.kind() == ChoiceKind::Priority && !s.st.stack.is_empty()
+    });
+    s.cast("Test Smiting").target("Test Golem").pay();
+    combat(&mut s);
+    assert_eq!(life(&s, P0), 40);
+
+    // "As long as you have fewer than two cards in hand, this gets +2/+2."
+    let mut sc = scenario(&cards);
+    let scholar = sc.card(P0, Zone::Battlefield, "Test Scholar");
+    sc.cards(P0, Zone::Hand, &["Forest", "Forest"]);
+    let mut s = Script::new(sc.build());
+    assert_eq!(pt(&s, scholar), (1, 1));
+    s.pick("a land", |_, o| matches!(o, OptionDesc::PlayLand { .. }));
+    assert_eq!(pt(&s, scholar), (3, 3));
+}

@@ -271,6 +271,18 @@ pub struct Facts {
     pub blocking: bool,
 }
 
+/// The permanents an amount counts, if it counts permanents ("the number of …", possibly
+/// with arithmetic on it).
+fn counted_selector(a: &card_model::Amount) -> Option<&Selector> {
+    use card_model::Amount;
+    match a {
+        Amount::Count(s) => Some(s),
+        Amount::Calc(base, _) => counted_selector(base),
+        Amount::IfAtLeast { test, .. } => counted_selector(test),
+        _ => None,
+    }
+}
+
 /// An amount read off the battlefield ("the number of …", "the total power of …"); 0 for
 /// amounts that depend on a resolving spell or ability.
 pub fn count_amount(
@@ -592,6 +604,10 @@ impl Walk<'_> {
             Condition::YourTurn => self.st.turn.active == you,
             Condition::NotYourTurn => self.st.turn.active != you,
             Condition::HandAtMost(n) => self.st.zones.hands[you.index()].len() <= *n as usize,
+            // (card-db: only amounts the walk can count in place.)
+            Condition::Compare { amount, cmp, n } => {
+                cmp.holds(self.amount(amount, e, view).max(0) as u32, *n)
+            }
         }
     }
 
@@ -774,6 +790,7 @@ impl Walk<'_> {
             Some(Condition::Control { what, .. } | Condition::ControlAtMost { what, .. }) => {
                 Some(what)
             }
+            Some(Condition::Compare { amount, .. }) => counted_selector(amount),
             _ => None,
         };
         b.parts.iter().filter(|p| layer_of(p) == layer).any(|p| {

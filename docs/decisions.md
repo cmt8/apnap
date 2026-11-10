@@ -993,6 +993,26 @@ Rules text: docs/rules-notes/702.29-cycling-113.6-ability-zones.md.
   unchanged.
 - 7,125 → 7,467 of 34,463 scripts (21.7%).
 
+## D-057 Compiler batch 6 (breadth): more trigger events, counted conditions (2026-11-10)
+Rules text: docs/rules-notes/603-triggered-abilities.md (last section).
+- **Steps**: `TriggerStep` gains the beginning of combat, end of combat, and the two main
+  phases; Forge's `End of Turn` (the end step, CR 513.1a) and `Draw` were simply not mapped
+  (925 scripts use the former). `ValidPlayer$ Player` is "each player's".
+- **`Trigger::Leaves`** ("leaves the battlefield", any destination): found like "dies",
+  looking back (CR 603.10a).
+- **`Trigger::Cast::spells`**: what the spell has to be, as selectors ("noncreature",
+  "Spirit or Arcane", "multicolored", "mana value 4 or greater"), matched against the spell
+  on the stack. Card types alone still compile to `types` (the hand-scripted cards are
+  unchanged).
+- **`Condition::Compare { amount, cmp, n }`**: Forge's `CheckSVar$`/`SVarCompare$` and
+  every `PresentCompare$` operator (only `GE` compiled before). The amount must stand
+  alone; on a static ability it must be countable inside the layer walk. A condition that
+  counts permanents takes part in the dependency check like `Control` does.
+- Text: a single optional target reads "up to one target …".
+- Golden state hashes re-blessed (`Trigger::Cast` gained a field); event-log hashes
+  unchanged.
+- 7,467 → 7,716 of 34,463 scripts (22.4%).
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

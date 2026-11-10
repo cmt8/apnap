@@ -251,6 +251,28 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 ));
             }
         }
+        // "If [something counted] is N or more" is asked with no spell or ability
+        // resolving, and for a static ability inside the layer walk.
+        let (cond, in_static) = match a {
+            AbilityDef::Activated { only_if, .. } | AbilityDef::Mana { only_if, .. } => {
+                (only_if.as_ref(), false)
+            }
+            AbilityDef::Triggered { intervening_if, .. } => (intervening_if.as_ref(), false),
+            AbilityDef::Static { only_if, .. } => (only_if.as_ref(), true),
+            _ => (None, false),
+        };
+        if let Some(card_model::Condition::Compare { amount, .. }) = cond {
+            if !amount.stands_alone() {
+                p.push(at(
+                    "a condition can't count something that needs the ability to resolve".into(),
+                ));
+            }
+            if in_static && !amount.countable_in_layers() {
+                p.push(at(
+                    "a static ability's condition can't count that (CR 613.4c)".into(),
+                ));
+            }
+        }
         // "This card" (off the battlefield) means something only where the ability works
         // from a hand or graveyard, or triggers on the card being cycled.
         if format!("{a:?}").contains("ThisCard") {

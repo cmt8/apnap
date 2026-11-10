@@ -5,7 +5,7 @@
 
 use crate::{
     AbilityDef, ActivationZone, Affected, Amount, Body, Calc, CardDef, CardDest, CardType,
-    CardZone, Color, CombatRule, Condition, ContinuousEffect, Cost, CounterKind, DamageBy,
+    CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost, CounterKind, DamageBy,
     EachPlayerAction, Effect, Keyword, ManaProduce, Measure, Mode, ObjFilter, ObjRef, PlayerRef,
     ReplaceWith, Replaces, Selector, Take, TargetFilter, TargetRef, Timing, Trigger, TriggerStep,
     Who,
@@ -198,10 +198,17 @@ fn spell_kind(s: &Selector) -> String {
 
 fn target(mode: &Mode, r: TargetRef) -> String {
     match r {
-        TargetRef::Target(i) => mode
-            .targets
-            .get(i as usize)
-            .map_or("the target".to_string(), target_filter),
+        TargetRef::Target(i) => {
+            let text = mode
+                .targets
+                .get(i as usize)
+                .map_or("the target".to_string(), target_filter);
+            // A slot that may stay empty (CR 115.3: "up to one target …").
+            match mode.group_of(i as usize) {
+                Some(g) if g.count == 1 && g.min == 0 => format!("up to one {text}"),
+                _ => text,
+            }
+        }
         TargetRef::Players(p) => player(mode, p),
         TargetRef::Object(o) => obj(mode, o),
     }
@@ -1076,6 +1083,24 @@ fn trigger(t: &Trigger) -> String {
         }
         Trigger::Enters(f) => format!("Whenever {} enters", obj_filter(f)),
         Trigger::Dies(f) => format!("Whenever {} dies", obj_filter(f)),
+        Trigger::Leaves(f) => format!("Whenever {} leaves the battlefield", obj_filter(f)),
+        // CR 511.2: "at end of combat" (as the end of combat step begins).
+        Trigger::BeginningOf {
+            step: TriggerStep::EndCombat,
+            whose,
+        } => match whose {
+            Who::Any => "At end of combat".to_string(),
+            Who::You => "At end of combat on your turn".to_string(),
+            Who::Opponent => "At end of combat on each opponent's turn".to_string(),
+        },
+        Trigger::BeginningOf {
+            step: TriggerStep::BeginCombat,
+            whose,
+        } => match whose {
+            Who::Any => "At the beginning of each combat".to_string(),
+            Who::You => "At the beginning of combat on your turn".to_string(),
+            Who::Opponent => "At the beginning of combat on each opponent's turn".to_string(),
+        },
         Trigger::BeginningOf { step, whose } => format!(
             "At the beginning of {} {}",
             who_possessive(*whose),
@@ -1083,27 +1108,44 @@ fn trigger(t: &Trigger) -> String {
                 TriggerStep::Upkeep => "upkeep",
                 TriggerStep::DrawStep => "draw step",
                 TriggerStep::EndStep => "end step",
+                TriggerStep::PrecombatMain => "precombat main phase",
+                TriggerStep::PostcombatMain => "postcombat main phase",
+                TriggerStep::BeginCombat | TriggerStep::EndCombat => "combat",
             }
         ),
-        Trigger::Cast { by, types: ts } => {
-            let kinds = types(ts, "or");
-            let article = if kinds.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        Trigger::Cast {
+            by,
+            types: ts,
+            spells,
+        } => {
+            // "a creature or artifact spell", "a noncreature spell", "a Spirit spell".
+            let mut kinds: Vec<String> = Vec::new();
+            if !ts.is_empty() {
+                kinds.push(types(ts, "or"));
+            }
+            kinds.extend(
+                spells.iter().map(|s| {
+                    card_list(core::slice::from_ref(s), false).replacen("card", "spell", 1)
+                }),
+            );
+            let what = match kinds.as_slice() {
+                [] => "spell".to_string(),
+                _ if spells.is_empty() => format!("{} spell", kinds[0]),
+                _ if ts.is_empty() => join(kinds, "or"),
+                _ => format!("{} spell or {}", kinds[0], join(kinds[1..].to_vec(), "or")),
+            };
+            let article = if what.starts_with(['a', 'e', 'i', 'o', 'u']) {
                 "an"
             } else {
                 "a"
             };
             format!(
-                "Whenever {} {article} {}spell",
+                "Whenever {} {article} {what}",
                 match by {
                     Who::Any => "a player casts",
                     Who::You => "you cast",
                     Who::Opponent => "an opponent casts",
                 },
-                if kinds.is_empty() {
-                    String::new()
-                } else {
-                    format!("{kinds} ")
-                }
             )
         }
     }
@@ -1111,6 +1153,16 @@ fn trigger(t: &Trigger) -> String {
 
 fn condition(c: &Condition) -> String {
     match c {
+        Condition::Compare { amount: a, cmp, n } => {
+            let what = amount(a);
+            match cmp {
+                Cmp::AtLeast => format!("if {what} is {n} or more"),
+                Cmp::AtMost if *n == 0 => format!("if {what} is 0"),
+                Cmp::AtMost => format!("if {what} is {n} or less"),
+                Cmp::Exactly => format!("if {what} is exactly {n}"),
+                Cmp::Not => format!("if {what} is not {n}"),
+            }
+        }
         Condition::LifeAtMost(n) => format!("if you have {n} or less life"),
         Condition::LifeAtLeast(n) => format!("if you have {n} or more life"),
         Condition::CardsInGraveyard { cards, at_least } => format!(

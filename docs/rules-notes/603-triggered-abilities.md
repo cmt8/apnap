@@ -117,3 +117,41 @@
 
 ## Tests
 `crates/harness/tests/rules_m2.rs`: `cr_603_*`.
+
+## Steps abilities trigger at; counted conditions (D-057)
+
+> 505.1. There are two main phases in a turn. In each turn, the first main phase (also known as the precombat main phase) and the second main phase (also known as the postcombat main phase) are separated by the combat phase (see rule 506, “Combat Phase”). The precombat and postcombat main phases are individually and collectively known as the main phase.
+>
+> 507.2. Second, the active player gets priority. (See rule 117, “Timing and Priority.”)
+>
+> 508.8. If no creatures are declared as attackers or put onto the battlefield attacking, skip the declare blockers and combat damage steps.
+>
+> 511.1. The end of combat step has no turn-based actions. Once it begins, the active player gets priority. (See rule 117, “Timing and Priority.”)
+>
+> 511.2. Abilities that trigger “at end of combat” trigger as the end of combat step begins. Effects that last “until end of combat” expire at the end of the combat phase.
+>
+> 513.1. The end step has no turn-based actions. Once it begins, the active player gets priority. (See rule 117, “Timing and Priority.”)
+>
+> 513.1a Previously, abilities that triggered at the beginning of the end step were printed with the trigger condition “at end of turn.” Cards that were printed with that text have received errata in the Oracle card reference to say “at the beginning of the end step” or “at the beginning of the next end step.”
+>
+> 601.2i Once the steps described in 601.2a–h are completed, effects that modify the characteristics of the spell as it’s cast are applied, then the spell becomes cast. Any abilities that trigger when a spell is cast or put onto the stack trigger at this time. If the spell’s controller had priority before casting it, they get priority.
+
+- `TriggerStep` has the beginning of combat step, the end of combat step ("at end of
+  combat", 511.2), the precombat and postcombat main phases, besides upkeep, draw step and
+  end step. Forge writes the end step `End of Turn` (513.1a).
+- "Leaves the battlefield" (`Trigger::Leaves`, 603.6c) is found the way "dies" is: among
+  the permanents there now and everything that left in the same batch, as it last
+  existed (603.10a).
+- "Whenever [a player] casts a [noncreature / Spirit / blue / mana value 4 or greater]
+  spell" compares the spell as it is on the stack when it becomes cast (601.2i).
+- `Condition::Compare` — "if [something counted] is N or more / N or less / exactly N" —
+  is an intervening "if" on a triggered ability (603.4: asked when the event happens and
+  again on resolution) and "as long as" on a static ability, where it is counted inside
+  the layer walk and so may only count what the walk can (card-db validation).
+
+| Rule | Test (`crates/harness/tests/forge_features.rs`) |
+|---|---|
+| 603.2b, 505.1, 507.2, 511.2, 513.1a, 508.8 | `step_triggers_at_main_phase_combat_and_end_step` |
+| 603.6c, 603.10a | `leaves_the_battlefield_triggers_for_any_zone` |
+| 601.2i | `cast_triggers_ask_what_the_spell_is` |
+| 603.4 | `conditions_that_compare_a_count` |

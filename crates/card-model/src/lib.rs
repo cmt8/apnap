@@ -542,6 +542,11 @@ pub enum Trigger {
         by: Who,
         #[serde(default)]
         types: Vec<CardType>,
+        /// "… a noncreature spell", "a Spirit or Arcane spell", "a multicolored spell":
+        /// the spell is one of `types` or matches one of these (both empty = any spell).
+        /// What the spell is on the stack is compared; who controls it is `by`.
+        #[serde(default)]
+        spells: Vec<Selector>,
     },
     /// CR 508.1m: "Whenever [filter] attacks" — it is declared as an attacker.
     Attacks(ObjFilter),
@@ -550,6 +555,9 @@ pub enum Trigger {
     /// CR 702.29c: "When you cycle this card" (`this`) — it triggers from wherever the card
     /// went — or "Whenever [who] cycles a card", watched from the battlefield.
     Cycles { by: Who, this: bool },
+    /// CR 603.6c: "When/Whenever [filter] leaves the battlefield" — for any zone; looks
+    /// back in time (CR 603.10a).
+    Leaves(ObjFilter),
 }
 
 impl Trigger {
@@ -567,6 +575,14 @@ pub enum TriggerStep {
     Upkeep,
     DrawStep,
     EndStep,
+    /// "At the beginning of combat" (the beginning of combat step, CR 507).
+    BeginCombat,
+    /// "At end of combat" (as the end of combat step begins, CR 511.2).
+    EndCombat,
+    /// "At the beginning of [the] precombat main phase" (CR 505.1).
+    PrecombatMain,
+    /// "At the beginning of [the] postcombat main phase".
+    PostcombatMain,
 }
 
 /// An intervening "if" clause (CR 603.4), evaluated for the ability's controller.
@@ -596,6 +612,35 @@ pub enum Condition {
     },
     /// "as long as you have N or fewer cards in hand" (hellbent is `0`).
     HandAtMost(u32),
+    /// "if [something counted] is N or more / N or less / exactly N / not N": "if you
+    /// control exactly one creature", "if there are four or more card types among …".
+    /// The amount must stand alone (`Amount::stands_alone`); in a static ability it must
+    /// be countable inside the layer walk (`Amount::countable_in_layers`).
+    Compare {
+        amount: Amount,
+        cmp: Cmp,
+        n: u32,
+    },
+}
+
+/// How a counted amount is compared with a number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Cmp {
+    AtLeast,
+    AtMost,
+    Exactly,
+    Not,
+}
+
+impl Cmp {
+    pub fn holds(self, value: u32, n: u32) -> bool {
+        match self {
+            Cmp::AtLeast => value >= n,
+            Cmp::AtMost => value <= n,
+            Cmp::Exactly => value == n,
+            Cmp::Not => value != n,
+        }
+    }
 }
 
 // Built once when the catalog loads, then only read (as `AbilityDef`).

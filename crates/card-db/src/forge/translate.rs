@@ -12,7 +12,7 @@
 use super::parse::{Face, Record, Script};
 use card_model::{
     AbilityDef, ActivationZone, Affected, Amount, BasicLandType, Body, Calc, CardDef, CardDest,
-    CardType, CardZone, Color, CombatRule, Condition, ContinuousEffect, Cost, CostChoice,
+    CardType, CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost, CostChoice,
     CounterKind, DamageBy, EachPlayerAction, Effect, Keyword, ManaCost, ManaProduce,
     ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces,
     Selector, Signed, Supertype, Take, TargetFilter, TargetGroup, TargetRef, Timing, Trigger,
@@ -1890,6 +1890,13 @@ impl<'a> Tx<'a> {
             }
             _ => self.condition(rd)?,
         };
+        // A static ability's condition is asked inside the layer walk.
+        if let Some(Condition::Compare { amount, .. }) = &present
+            && !amount.countable_in_layers()
+        {
+            self.block("condition:not countable by a static ability");
+            return None;
+        }
         match (named, present) {
             (Some(_), Some(_)) => {
                 self.block("condition:two");
@@ -1899,37 +1906,105 @@ impl<'a> Tx<'a> {
         }
     }
 
-    /// `IsPresent$ <filter>` (+ `PresentCompare$ GE<n>`, `PresentZone$ Graveyard`).
+    /// `GE3`, `EQ0`, `LT2`… against a number (Forge's default is `GE1`).
+    fn compare(&mut self, text: &str) -> Option<(Cmp, u32)> {
+        let parsed = text.split_at_checked(2).and_then(|(op, n)| {
+            let n = n.parse::<u32>().ok()?;
+            match op {
+                "GE" => Some((Cmp::AtLeast, n)),
+                "GT" => Some((Cmp::AtLeast, n + 1)),
+                "LE" => Some((Cmp::AtMost, n)),
+                "LT" => Some((Cmp::AtMost, n.checked_sub(1)?)),
+                "EQ" => Some((Cmp::Exactly, n)),
+                "NE" => Some((Cmp::Not, n)),
+                _ => None,
+            }
+        });
+        if parsed.is_none() {
+            self.block("condition:compare");
+        }
+        parsed
+    }
+
+    /// When an ability works at all: `IsPresent$ <filter>` (+ `PresentCompare$`,
+    /// `PresentZone$ Graveyard`) — "if you control …" — or `CheckSVar$ <amount>`
+    /// (+ `SVarCompare$`) — "if [something counted] is N or more".
     fn condition(&mut self, rd: &Rd<'a>) -> Option<Option<Condition>> {
-        let Some(filter) = rd.get("IsPresent") else {
-            return Some(None);
+        let present = match rd.get("IsPresent") {
+            None => None,
+            Some(filter) => Some(self.present(rd, filter)?),
         };
-        let at_least = match rd.get("PresentCompare") {
-            None => Some(1),
-            Some(c) => c.strip_prefix("GE").and_then(|n| n.parse::<u32>().ok()),
+        let checked = match rd.get("CheckSVar") {
+            None => None,
+            Some(name) => {
+                let cmp = self.compare(rd.get("SVarCompare").unwrap_or("GE1"));
+                let amount = match name.parse::<u32>() {
+                    Ok(n) => Some(Amount::Fixed(n)),
+                    Err(_) => self.expr(name),
+                };
+                let ((cmp, n), amount) = (cmp?, amount?);
+                // It is asked before anything resolves: nothing about a spell, a source
+                // or a triggering object can be in it.
+                if !amount.stands_alone() {
+                    self.block("condition:amount needs the ability");
+                    return None;
+                }
+                Some(Condition::Compare { amount, cmp, n })
+            }
         };
+        match (present, checked) {
+            (Some(_), Some(_)) => {
+                self.block("condition:two");
+                None
+            }
+            (a, b) => Some(a.or(b)),
+        }
+    }
+
+    fn present(&mut self, rd: &Rd<'a>, filter: &'a str) -> Option<Condition> {
+        let cmp = self.compare(rd.get("PresentCompare").unwrap_or("GE1"));
         let zone = rd.get("PresentZone");
         let sel = match zone {
             None => self.selector(filter),
             Some(_) => self.card_selector(filter),
         };
-        let (Some(at_least), Some(mut sel)) = (at_least, sel) else {
-            self.block("condition:compare");
-            return None;
-        };
-        match zone {
-            None => Some(Some(Condition::Control {
+        let ((cmp, n), mut sel) = (cmp?, sel?);
+        match (zone, cmp) {
+            (None, Cmp::AtLeast) => Some(Condition::Control {
                 what: sel,
-                at_least,
-            })),
-            Some("Graveyard") if sel.controller == Who::You => {
-                sel.controller = Who::Any;
-                Some(Some(Condition::CardsInGraveyard {
-                    cards: sel,
-                    at_least,
-                }))
-            }
-            Some(z) => {
+                at_least: n,
+            }),
+            (None, Cmp::AtMost) => Some(Condition::ControlAtMost {
+                what: sel,
+                at_most: n,
+            }),
+            (None, Cmp::Exactly) if n == 0 => Some(Condition::ControlAtMost {
+                what: sel,
+                at_most: 0,
+            }),
+            (None, _) => Some(Condition::Compare {
+                amount: Amount::Count(sel),
+                cmp,
+                n,
+            }),
+            (Some("Graveyard"), _) if sel.controller == Who::You => match cmp {
+                Cmp::AtLeast => {
+                    sel.controller = Who::Any;
+                    Some(Condition::CardsInGraveyard {
+                        cards: sel,
+                        at_least: n,
+                    })
+                }
+                _ => Some(Condition::Compare {
+                    amount: Amount::CardsIn {
+                        zone: CardZone::Graveyard,
+                        cards: vec![sel],
+                    },
+                    cmp,
+                    n,
+                }),
+            },
+            (Some(z), _) => {
                 self.block(format!("condition:zone {z}"));
                 None
             }
@@ -2323,6 +2398,8 @@ impl<'a> Tx<'a> {
                 match (origin, dest) {
                     ("Any", Some("Battlefield")) => filter.map(Trigger::Enters),
                     ("Battlefield", Some("Graveyard")) => filter.map(Trigger::Dies),
+                    // "Leaves the battlefield": for anywhere (CR 603.6c).
+                    ("Battlefield", None | Some("Any")) => filter.map(Trigger::Leaves),
                     (o, d) => {
                         self.block(format!("trig:ChangesZone {o}->{}", d.unwrap_or("?")));
                         None
@@ -2332,13 +2409,20 @@ impl<'a> Tx<'a> {
             "Phase" => {
                 let step = match rd.get("Phase") {
                     Some("Upkeep") => Some(TriggerStep::Upkeep),
+                    Some("Draw") => Some(TriggerStep::DrawStep),
+                    // CR 513.1a: "at end of turn" is "at the beginning of the end step".
+                    Some("End of Turn" | "End Of Turn") => Some(TriggerStep::EndStep),
+                    Some("BeginCombat") => Some(TriggerStep::BeginCombat),
+                    Some("EndCombat") => Some(TriggerStep::EndCombat),
+                    Some("Main1") => Some(TriggerStep::PrecombatMain),
+                    Some("Main2") => Some(TriggerStep::PostcombatMain),
                     other => {
                         self.block(format!("trig:Phase {}", other.unwrap_or("?")));
                         None
                     }
                 };
                 let whose = match rd.get("ValidPlayer") {
-                    None => Some(Who::Any),
+                    None | Some("Player") => Some(Who::Any),
                     Some("You") => Some(Who::You),
                     Some("Opponent" | "Player.Opponent") => Some(Who::Opponent),
                     Some(other) => {
@@ -2361,19 +2445,41 @@ impl<'a> Tx<'a> {
                         None
                     }
                 };
-                // Only card types: "Creature", "Instant,Sorcery", or any "Card".
+                // Card types alone ("Creature", "Instant,Sorcery"), any "Card", or what the
+                // spell has to be ("Card.nonCreature", "Spirit", "Card.MultiColor").
                 let mut types = Vec::new();
+                let mut spells = Vec::new();
+                let mut any = false;
                 for word in rd.get("ValidCard").unwrap_or("Card").split(',') {
                     match (word.trim(), card_type(word.trim())) {
-                        ("Card", _) => {}
+                        ("Card", _) => any = true,
                         (_, Some(t)) => types.push(t),
                         (w, None) => {
-                            self.block(format!("trig:SpellCast card {}", shape(w)));
-                            return None;
+                            let saved = self.blockers.clone();
+                            match self.alt(w) {
+                                // Whose spell it is, is `ValidActivatingPlayer$`.
+                                Some(Alt::Sel(s)) if s.controller == Who::Any && !s.other => {
+                                    spells.push(s)
+                                }
+                                _ => {
+                                    self.blockers = saved;
+                                    self.block(format!("trig:SpellCast card {}", shape(w)));
+                                    return None;
+                                }
+                            }
                         }
                     }
                 }
-                Some(Trigger::Cast { by: by?, types })
+                if any {
+                    // "Card" among the alternatives: any spell.
+                    types.clear();
+                    spells.clear();
+                }
+                Some(Trigger::Cast {
+                    by: by?,
+                    types,
+                    spells,
+                })
             }
             "Attacks" => rd
                 .get("ValidCard")

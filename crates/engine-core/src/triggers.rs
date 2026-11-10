@@ -121,6 +121,10 @@ pub(crate) fn condition_holds(
             matching(st, what, source, controller).len() <= *at_most as usize
         }
         Some(Condition::HandAtMost(n)) => st.zones.hands[controller.index()].len() <= *n as usize,
+        Some(Condition::Compare { amount, cmp, n }) => cmp.holds(
+            crate::layers::count_amount(st, amount, source, controller),
+            *n,
+        ),
     }
 }
 
@@ -179,7 +183,18 @@ fn queue_matching(st: &mut GameState, found: Vec<PendingTrigger>, conds: Vec<Opt
 pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap<ObjectId, Lki>) {
     let mut entered: Vec<ObjectId> = Vec::new();
     let mut died: Vec<ObjectId> = Vec::new();
+    // Everything that left the battlefield, for any zone (CR 603.6c).
+    let mut left: Vec<ObjectId> = Vec::new();
     for e in events {
+        if let Event::ZoneChange {
+            old,
+            from: crate::zones::Zone::Battlefield,
+            ..
+        } = e
+            && lki.contains_key(old)
+        {
+            left.push(*old);
+        }
         if let Event::Cycled { player, card } = e {
             detect_cycled(st, *player, *card);
         }
@@ -251,7 +266,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
             }
         }
     }
-    if !died.is_empty() {
+    if !left.is_empty() {
         // CR 603.10a: look back in time — current permanents plus everything that left in
         // this batch, as it last existed.
         let mut sources = battlefield_sources(st);
@@ -279,11 +294,12 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                 else {
                     continue;
                 };
-                for filter in when.events().into_iter().filter_map(|t| match t {
-                    Trigger::Dies(f) => Some(f),
+                for (filter, gone) in when.events().into_iter().filter_map(|t| match t {
+                    Trigger::Dies(f) => Some((f, &died)),
+                    Trigger::Leaves(f) => Some((f, &left)),
                     _ => None,
                 }) {
-                    for d in &died {
+                    for d in gone {
                         let l = &lki[d];
                         let facts = Facts {
                             id: *d,
@@ -337,6 +353,10 @@ pub(crate) fn detect_step(st: &mut GameState, step: Step) {
                     (TriggerStep::Upkeep, Step::Upkeep)
                         | (TriggerStep::DrawStep, Step::Draw)
                         | (TriggerStep::EndStep, Step::End)
+                        | (TriggerStep::BeginCombat, Step::BeginningOfCombat)
+                        | (TriggerStep::EndCombat, Step::EndOfCombat)
+                        | (TriggerStep::PrecombatMain, Step::PrecombatMain)
+                        | (TriggerStep::PostcombatMain, Step::PostcombatMain)
                 );
                 if step_matches && who_matches(*whose, active, src.controller) {
                     found.push(PendingTrigger {
@@ -475,9 +495,13 @@ pub(crate) fn detect_cast(st: &mut GameState, caster: PlayerId, spell: ObjectId)
                 continue;
             };
             for t in when.events() {
-                if let Trigger::Cast { by, types } = t
+                if let Trigger::Cast { by, types, spells } = t
                     && who_matches(*by, caster, src.controller)
-                    && (types.is_empty() || types.iter().any(|t| spell_chars.is(*t)))
+                    && ((types.is_empty() && spells.is_empty())
+                        || types.iter().any(|t| spell_chars.is(*t))
+                        || spells
+                            .iter()
+                            .any(|s| crate::targeting::card_matches(st, spell, s)))
                 {
                     found.push(PendingTrigger {
                         controller: src.controller,
