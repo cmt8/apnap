@@ -963,6 +963,36 @@ The user's direction from here: the biggest blockers across all cards, not the p
   during resolution (`UnlessCost`); Sagas 185; Adventure 151; Regenerate 146; Cycling 140
   (+65 typecycling; needs abilities activated from the hand); `repl:Moved` 132.
 
+## D-056 Compiler batch 5 (breadth): abilities off the battlefield, cycling (2026-11-10)
+Rules text: docs/rules-notes/702.29-cycling-113.6-ability-zones.md.
+- **Where an activated ability works from** (CR 113.6): `AbilityDef::Activated::from`
+  (`ActivationZone`: battlefield, hand, graveyard; Forge's `ActivationZone$`). Off the
+  battlefield the card's owner activates it. Costs "discard this card"
+  (`Cost::discard_self`) and "exile this card from your graveyard" (`Cost::exile_self`);
+  a cost that uses the card in a zone the ability doesn't work from is rejected by
+  validation and is a compiler blocker. Activating from the hand reveals the card
+  (CR 602.2a).
+- **Cycling and typecycling** (CR 702.29): the keyword compiles to that kind of ability
+  with `cycling: true` ("basic landcycling" is Forge's `TypeCycling:Basic`). The discard
+  that pays for it is `MoveCause::Cycle`: `Event::Discarded` then `Event::Cycled` (appended
+  to the enum). `Trigger::Cycles` — "when you cycle this card" is found on the card where
+  the discard put it; "whenever [a player] cycles a card" on permanents.
+- **"This card"** (`ObjRef::ThisCard`): the source of such an ability while it is still the
+  same object (CR 400.7) — "{2}{B}: Return this card from your graveyard to your hand".
+- **Bug found by reading the sample, older than this batch: "another target …" could
+  target the ability's own source.** The target filter kept `other`, but targeting matched
+  it against no object at all. `targeting::{is_legal, describes, candidates}` now take the
+  ability's source. Every compiled card with "another target" was affected (an ability
+  could put its counters on its own source).
+- `forge-coverage --families`: ranks kinds of feature, counting a trigger mode, effect or
+  keyword together with its own parameters. The plain ranking shows a new trigger mode as
+  blocking nothing alone, because its parameters are separate blockers.
+- The app labels an ability option with the ability's text (casting a card and cycling it
+  were "cast X" and "activate X (ability 0)").
+- Golden state hashes re-blessed (`Cost` and `Activated` gained fields); event-log hashes
+  unchanged.
+- 7,125 → 7,467 of 34,463 scripts (21.7%).
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

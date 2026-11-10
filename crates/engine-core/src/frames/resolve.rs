@@ -203,6 +203,7 @@ impl ResolveFrame {
             t,
             self.controller,
             self.object,
+            self.ability_source(),
         )
         .then_some(t)
     }
@@ -248,6 +249,13 @@ impl ResolveFrame {
                 .get(&self.source)
                 .is_some_and(|o| o.zone == Zone::Battlefield)
                 .then_some(self.source),
+            // "This card", off the battlefield: while it is still the same object there
+            // (CR 400.7).
+            ObjRef::ThisCard => st
+                .objects
+                .get(&self.source)
+                .is_some_and(|o| !matches!(o.zone, Zone::Battlefield | Zone::Stack))
+                .then_some(self.source),
             // "It": only while it is still the object that triggered this (CR 400.7).
             ObjRef::Triggering => self.subject.filter(|id| {
                 st.objects
@@ -255,6 +263,11 @@ impl ResolveFrame {
                     .is_some_and(|o| o.zone == Zone::Battlefield)
             }),
         }
+    }
+
+    /// For an ability: the object it is on ("another target …" is other than it).
+    fn ability_source(&self) -> Option<ObjectId> {
+        (self.object != Some(self.source)).then_some(self.source)
     }
 
     /// The source's current characteristics, or its last known ones (CR 608.2h, 113.7a).
@@ -993,7 +1006,7 @@ impl ResolveFrame {
                         let target = top.targets.first().and_then(|t| t.first()).copied();
                         match target {
                             Some(t @ Target::Object(o))
-                                if is_legal(st, &filter, t, top.controller, Some(top.id)) =>
+                                if is_legal(st, &filter, t, top.controller, Some(top.id), None) =>
                             {
                                 attach = Some(o)
                             }
@@ -1059,7 +1072,14 @@ impl ResolveFrame {
         for (k, ts) in self.targets.iter().enumerate() {
             for (i, &t) in ts.iter().enumerate() {
                 any = true;
-                any_legal |= is_legal(st, &self.filters[k][i], t, self.controller, Some(top.id));
+                any_legal |= is_legal(
+                    st,
+                    &self.filters[k][i],
+                    t,
+                    self.controller,
+                    Some(top.id),
+                    self.ability_source(),
+                );
             }
         }
         if any && !any_legal {
@@ -1708,7 +1728,9 @@ fn aura_hosts(st: &GameState, mv: &Proposed) -> Option<(PlayerId, Vec<ObjectId>)
         .battlefield
         .iter()
         .copied()
-        .filter(|&id| crate::targeting::describes(st, &filter, Target::Object(id), chooser, None))
+        .filter(|&id| {
+            crate::targeting::describes(st, &filter, Target::Object(id), chooser, None, None)
+        })
         .collect();
     Some((chooser, hosts))
 }

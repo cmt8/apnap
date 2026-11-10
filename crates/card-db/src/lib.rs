@@ -12,8 +12,9 @@ pub mod real;
 pub mod scryfall;
 
 use card_model::{
-    AbilityDef, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript, CardType, Cost, Effect,
-    ManaType, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces, Supertype, TargetFilter, TargetRef,
+    AbilityDef, ActivationZone, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript,
+    CardType, Cost, Effect, ManaType, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces, Supertype,
+    TargetFilter, TargetRef, Trigger,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -250,9 +251,50 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 ));
             }
         }
+        // "This card" (off the battlefield) means something only where the ability works
+        // from a hand or graveyard, or triggers on the card being cycled.
+        if format!("{a:?}").contains("ThisCard") {
+            let off_battlefield = match a {
+                AbilityDef::Activated { from, .. } => *from != ActivationZone::Battlefield,
+                AbilityDef::Triggered { when, .. } => when
+                    .events()
+                    .iter()
+                    .all(|t| matches!(t, Trigger::Cycles { this: true, .. })),
+                _ => false,
+            };
+            if !off_battlefield {
+                p.push(at(
+                    "\"this card\" in an ability that works on the battlefield".into(),
+                ));
+            }
+        }
         match a {
             AbilityDef::Spell(body) => check_body(body, card_has_x, &mut |m| p.push(at(m))),
-            AbilityDef::Activated { cost, body, .. } => {
+            AbilityDef::Activated {
+                cost,
+                body,
+                from,
+                cycling,
+                ..
+            } => {
+                // CR 113.6: the cost can name the card only where the ability works from.
+                let on_battlefield = cost.tap || cost.sacrifice_self;
+                let fits = match from {
+                    ActivationZone::Battlefield => !cost.discard_self && !cost.exile_self,
+                    ActivationZone::Hand => !on_battlefield && !cost.exile_self,
+                    ActivationZone::Graveyard => !on_battlefield && !cost.discard_self,
+                };
+                if !fits {
+                    p.push(at(
+                        "the cost uses the card in a zone the ability doesn't work from".into(),
+                    ));
+                }
+                if *cycling && !(*from == ActivationZone::Hand && cost.discard_self) {
+                    p.push(at(
+                        "cycling is \"[cost], discard this card\" from the hand (CR 702.29a)"
+                            .into(),
+                    ));
+                }
                 let has_x = cost.mana.as_ref().is_some_and(|m| m.has_x());
                 if *cost == Cost::default() {
                     p.push(at("activated ability with no cost".into()));
@@ -328,7 +370,12 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 }
             }
             AbilityDef::AdditionalCost(cost) => {
-                if cost.mana.is_some() || cost.tap || cost.sacrifice_self {
+                if cost.mana.is_some()
+                    || cost.tap
+                    || cost.sacrifice_self
+                    || cost.discard_self
+                    || cost.exile_self
+                {
                     p.push(at(
                         "an additional cost is a sacrifice, a discard or life, nothing else".into(),
                     ));

@@ -11,11 +11,12 @@
 
 use super::parse::{Face, Record, Script};
 use card_model::{
-    AbilityDef, Affected, Amount, BasicLandType, Body, Calc, CardDef, CardDest, CardType, CardZone,
-    Color, CombatRule, Condition, ContinuousEffect, Cost, CostChoice, CounterKind, DamageBy,
-    EachPlayerAction, Effect, Keyword, ManaCost, ManaProduce, ManaRestriction, ManaType, Measure,
-    Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, Signed, Supertype, Take,
-    TargetFilter, TargetGroup, TargetRef, Timing, Trigger, TriggerStep, Who,
+    AbilityDef, ActivationZone, Affected, Amount, BasicLandType, Body, Calc, CardDef, CardDest,
+    CardType, CardZone, Color, CombatRule, Condition, ContinuousEffect, Cost, CostChoice,
+    CounterKind, DamageBy, EachPlayerAction, Effect, Keyword, ManaCost, ManaProduce,
+    ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces,
+    Selector, Signed, Supertype, Take, TargetFilter, TargetGroup, TargetRef, Timing, Trigger,
+    TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -132,6 +133,9 @@ struct Tx<'a> {
     defines_pt: (bool, bool),
     /// Compiling the body of a triggered ability (where "X" is not the X being paid).
     in_trigger: bool,
+    /// The zone the activated ability being compiled works from ("this card" is then the
+    /// card in that hand or graveyard).
+    from_zone: ActivationZone,
     /// Additional costs of the spell, found on its `SP$` line.
     additional: Vec<AbilityDef>,
     /// The filter of the card's `K:Enchant:<filter>` line, if it is an Aura.
@@ -141,6 +145,18 @@ struct Tx<'a> {
     /// The script variables that hold abilities, parsed.
     records: &'a [(String, Record)],
     known: &'a Known,
+}
+
+/// A cost names the card only where the ability works from: `{T}` and "sacrifice this" on
+/// the battlefield, "discard this card" in the hand, "exile this card from your graveyard"
+/// in the graveyard.
+fn zone_cost_fits(cost: &Cost, from: ActivationZone) -> bool {
+    let on_battlefield = cost.tap || cost.sacrifice_self;
+    match from {
+        ActivationZone::Battlefield => !cost.discard_self && !cost.exile_self,
+        ActivationZone::Hand => !on_battlefield && !cost.exile_self,
+        ActivationZone::Graveyard => !on_battlefield && !cost.discard_self,
+    }
 }
 
 /// What the compiler needs to know about the whole card pool.
@@ -897,7 +913,13 @@ impl<'a> Tx<'a> {
         chain.fresh_group = None;
         if rec.head().map(|h| h.0) == Some("AB") {
             // Read by `ability`: when and whether the ability can be activated.
-            for k in ["IsPresent", "PresentCompare", "PresentZone", "SorcerySpeed"] {
+            for k in [
+                "IsPresent",
+                "PresentCompare",
+                "PresentZone",
+                "SorcerySpeed",
+                "ActivationZone",
+            ] {
                 rd.get(k);
             }
         }
@@ -1217,6 +1239,15 @@ impl<'a> Tx<'a> {
                     // A permanent named some other way: "return this to its owner's hand"
                     // (the card itself is Forge's default).
                     None if origin == "Battlefield" => self.object(&rd, chain, triggered)?,
+                    // "Return this card from your graveyard …", in an ability that works
+                    // from the graveyard and has not moved the card to pay for itself.
+                    None if origin == "Graveyard"
+                        && self.from_zone == ActivationZone::Graveyard
+                        && chain.effects.is_empty()
+                        && matches!(rd.get("Defined"), None | Some("Self")) =>
+                    {
+                        ObjRef::ThisCard
+                    }
                     None => {
                         self.block("ChangeZone:no-target");
                         return None;
@@ -1225,7 +1256,16 @@ impl<'a> Tx<'a> {
                 match (origin, dest) {
                     ("Battlefield" | "Graveyard", Some("Exile")) => Effect::Exile { what },
                     ("Battlefield" | "Graveyard", Some("Hand")) => Effect::ReturnToHand { what },
-                    ("Graveyard", Some("Battlefield")) => Effect::ReturnToBattlefield { what },
+                    ("Graveyard", Some("Battlefield")) if rd.rec.get("Tapped").is_none() => {
+                        Effect::ReturnToBattlefield { what }
+                    }
+                    ("Graveyard", Some("Battlefield")) if rd.get("Tapped") == Some("True") => {
+                        Effect::PutInto {
+                            what,
+                            to: CardDest::Battlefield { tapped: true },
+                            shuffle: false,
+                        }
+                    }
                     // "Put target creature on top of its owner's library", "shuffle it
                     // into its owner's library".
                     ("Battlefield", Some("Library")) => {
@@ -2030,6 +2070,20 @@ impl<'a> Tx<'a> {
                 ("Sac", true) if args.get(1) == Some(&"CARDNAME") && count == Some(1) => {
                     cost.sacrifice_self = true
                 }
+                // "Discard this card" (from the hand), "exile this card from your
+                // graveyard": costs of abilities that work from those zones.
+                ("Discard", true)
+                    if matches!(args.get(1), Some(&"CARDNAME" | &"NICKNAME"))
+                        && count == Some(1) =>
+                {
+                    cost.discard_self = true
+                }
+                ("ExileFromGrave", true)
+                    if matches!(args.get(1), Some(&"CARDNAME" | &"NICKNAME"))
+                        && count == Some(1) =>
+                {
+                    cost.exile_self = true
+                }
                 ("Sac" | "Discard", true) => {
                     let (Some(count), Some(types)) = (count.filter(|n| *n > 0), args.get(1)) else {
                         self.block(format!("cost:{kind}-amount"));
@@ -2226,12 +2280,31 @@ impl<'a> Tx<'a> {
                         return None;
                     }
                 };
+                // Where the card must be (CR 113.6); the battlefield unless stated.
+                let from = match rd.get("ActivationZone") {
+                    None | Some("Battlefield") => Some(ActivationZone::Battlefield),
+                    Some("Hand") => Some(ActivationZone::Hand),
+                    Some("Graveyard") => Some(ActivationZone::Graveyard),
+                    Some(other) => {
+                        self.block(format!("activated:zone {other}"));
+                        None
+                    }
+                };
+                self.from_zone = from.unwrap_or_default();
                 let body = self.body(rec, false, "AB");
+                self.from_zone = ActivationZone::Battlefield;
+                let (cost, from) = (cost?, from?);
+                if !zone_cost_fits(&cost, from) {
+                    self.block("activated:cost does not fit the zone");
+                    return None;
+                }
                 Some(AbilityDef::Activated {
-                    cost: cost?,
+                    cost,
                     timing,
                     only_if: only_if?,
                     body: body?,
+                    from,
+                    cycling: false,
                 })
             }
             _ => {
@@ -2306,6 +2379,31 @@ impl<'a> Tx<'a> {
                 .get("ValidCard")
                 .and_then(|f| self.obj_filter(f))
                 .map(Trigger::Attacks),
+            // CR 702.29c: "when you cycle this card"; "whenever [a player] cycles a card",
+            // which a permanent watches for (the cycled card is never that permanent, so
+            // "another card" says nothing more).
+            "Cycled" => {
+                let player = rd.get("ValidPlayer");
+                match (rd.get("ValidCard"), player) {
+                    (Some("Card.Self"), None) => Some(Trigger::Cycles {
+                        by: Who::You,
+                        this: true,
+                    }),
+                    (Some("Card" | "Card.Other"), None) => Some(Trigger::Cycles {
+                        by: Who::Any,
+                        this: false,
+                    }),
+                    (Some("Card.YouOwn" | "Card.YouCtrl" | "Card.Other+YouOwn"), None)
+                    | (Some("Card" | "Card.Other"), Some("You")) => Some(Trigger::Cycles {
+                        by: Who::You,
+                        this: false,
+                    }),
+                    (card, _) => {
+                        self.block(format!("trig:Cycled card {}", card.unwrap_or("?")));
+                        None
+                    }
+                }
+            }
             other => {
                 self.block(format!("trig:{other}"));
                 None
@@ -2338,6 +2436,8 @@ impl<'a> Tx<'a> {
                 }
                 // An attacking creature is on the battlefield.
                 (Some("Attacks"), _) => rec.get("ValidCard") == Some("Card.Self"),
+                // "When you cycle this card": from wherever the card went.
+                (Some("Cycled"), _) => rec.get("ValidCard") == Some("Card.Self"),
                 _ => false,
             };
             match rd.get("TriggerZones") {
@@ -2814,6 +2914,7 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
         has_x_cost: false,
         defines_pt: (false, false),
         in_trigger: false,
+        from_zone: ActivationZone::Battlefield,
         additional: Vec::new(),
         enchant: None,
         equipment: face.types.iter().any(|t| t == "Equipment"),
@@ -2967,6 +3068,8 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
             };
             if let Some(cost) = cost {
                 equips.push(AbilityDef::Activated {
+                    from: ActivationZone::Battlefield,
+                    cycling: false,
                     cost,
                     timing: Timing::Sorcery,
                     only_if: None,
@@ -2982,6 +3085,71 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
                         groups: Vec::new(),
                     }),
                 });
+            }
+            continue;
+        }
+        // `Cycling:<cost>` (CR 702.29a): "[cost], discard this card: Draw a card", from the
+        // hand. `TypeCycling:<type>:<cost>[:<words>]` (CR 702.29e): "… Search your library
+        // for a [type] card, reveal it, put it into your hand, then shuffle."
+        let cycling = k
+            .strip_prefix("Cycling:")
+            .map(|cost| (None, cost))
+            .or_else(|| {
+                let mut parts = k.strip_prefix("TypeCycling:")?.splitn(3, ':');
+                Some((Some(parts.next()?), parts.next()?))
+            });
+        if let Some((what, cost)) = cycling {
+            let before = tx.blockers.len();
+            let cost = tx.cost(cost).map(|c| Cost {
+                discard_self: true,
+                ..c
+            });
+            let effect = match what {
+                None => Some(Effect::Draw {
+                    who: PlayerRef::You,
+                    amount: Amount::Fixed(1),
+                }),
+                Some(what) => {
+                    // "Basic landcycling" is written `Basic`.
+                    let cards = match what {
+                        "Basic" => Some(vec![Selector {
+                            types: vec![CardType::Land],
+                            supertypes: vec![Supertype::Basic],
+                            ..Selector::default()
+                        }]),
+                        other => tx.card_alts(other, true),
+                    };
+                    cards.map(|cards| Effect::ChooseCards {
+                        who: PlayerRef::You,
+                        from: CardZone::Library,
+                        cards,
+                        count: Amount::Fixed(1),
+                        must: false,
+                        to: CardDest::Hand,
+                        reveal: true,
+                        shuffle: true,
+                    })
+                }
+            };
+            match (cost, effect) {
+                (Some(cost), Some(effect)) if cost.discard.is_none() => {
+                    abilities.push((
+                        0,
+                        AbilityDef::Activated {
+                            cost,
+                            timing: Timing::Instant,
+                            only_if: None,
+                            body: Body::Effect(Mode {
+                                targets: Vec::new(),
+                                effect,
+                                groups: Vec::new(),
+                            }),
+                            from: ActivationZone::Hand,
+                            cycling: true,
+                        },
+                    ));
+                }
+                _ => tx.explained(before, "keyword"),
             }
             continue;
         }

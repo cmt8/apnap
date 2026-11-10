@@ -156,6 +156,17 @@ fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
             }
         }
     }
+    // CR 113.6: abilities that work from the hand (cycling, CR 702.29a) or the graveyard.
+    let graveyard = &st.zones.graveyards[p.index()];
+    for &source in hand.iter().chain(graveyard) {
+        for (index, a) in abilities(st, source) {
+            if matches!(a, AbilityDef::Activated { .. })
+                && can_begin(st, p, CastSource::Ability { source, index })
+            {
+                opts.push(OptionDesc::ActivateAbility { source, index });
+            }
+        }
+    }
     for src in mana_sources(st, p, None, None) {
         for mana in types_in(src.mask) {
             let option = OptionDesc::TapForMana {

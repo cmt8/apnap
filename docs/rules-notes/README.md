@@ -21,6 +21,7 @@ One file per rules area, written **before** that area is implemented (CLAUDE.md 
 | 903 Commander (incl. 903.9) | [903-commander.md](903-commander.md) | M3 |
 | 506–511 Combat + combat keywords | [506-511-combat-keywords.md](506-511-combat-keywords.md) | M3 |
 | 303.4 Auras, layer 2 control | [303-auras-613-control.md](303-auras-613-control.md) | M3 |
+| 702.29 Cycling, 113.6 ability zones | [702.29-cycling-113.6-ability-zones.md](702.29-cycling-113.6-ability-zones.md) | M4 |
 
 Excerpts are committed verbatim by explicit decision (D-012). If the repo is ever
 published, revisit that decision first (Fan Content Policy, spec §12).

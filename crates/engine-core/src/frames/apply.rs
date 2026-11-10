@@ -220,6 +220,17 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
                         player: owner,
                         card: new,
                     }),
+                    // CR 702.29c–d: cycling a card is discarding it.
+                    MoveCause::Cycle => {
+                        st.emit(Event::Discarded {
+                            player: owner,
+                            card: new,
+                        });
+                        st.emit(Event::Cycled {
+                            player: owner,
+                            card: new,
+                        });
+                    }
                     MoveCause::Sacrifice => st.emit(Event::Sacrificed {
                         player: was_controller,
                         object: new,

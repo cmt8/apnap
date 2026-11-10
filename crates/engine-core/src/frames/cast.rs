@@ -166,6 +166,16 @@ fn cost_source(source: &CastSource) -> ObjectId {
     }
 }
 
+/// The object an ability is on: what its "another target …" is other than. A spell has
+/// none (it can't target itself, CR 115.5).
+fn ability_source(source: &CastSource) -> Option<ObjectId> {
+    match source {
+        CastSource::Card(_) => None,
+        CastSource::Ability { source, .. } => Some(*source),
+        CastSource::Trigger(t) => Some(t.source),
+    }
+}
+
 /// CR 601.2h / 119.4: can `p` pay the non-mana parts of the cost at all?
 fn extra_payable(st: &GameState, p: PlayerId, source: &CastSource, prop: &Proposal) -> bool {
     let this = cost_source(source);
@@ -173,6 +183,8 @@ fn extra_payable(st: &GameState, p: PlayerId, source: &CastSource, prop: &Propos
         CastSource::Card(card) => Some(*card),
         _ => None,
     };
+    // The card that is itself discarded for the cost can't also be the chosen discard.
+    let card = card.or(prop.extra.discard_self.then_some(this));
     prop.extra.sacrifice.as_ref().is_none_or(|ch| {
         sacrifice_candidates(st, p, ch, this, prop.sacrifice).len() >= ch.count as usize
     }) && prop
@@ -654,17 +666,24 @@ fn feasible(
 }
 
 /// Mode indices whose every target slot has at least one legal choice (CR 700.2a).
-fn legal_modes(st: &GameState, body: &Body, p: PlayerId, this: Option<ObjectId>) -> Vec<u8> {
+fn legal_modes(
+    st: &GameState,
+    body: &Body,
+    p: PlayerId,
+    this: Option<ObjectId>,
+    source: Option<ObjectId>,
+) -> Vec<u8> {
     body.modes()
         .iter()
         .enumerate()
         .filter(|(_, m)| {
             m.targets.iter().enumerate().all(|(i, f)| {
                 match m.group_of(i) {
-                    None => !candidates(st, f, p, this).is_empty(),
+                    None => !candidates(st, f, p, this, source).is_empty(),
                     // CR 115.3: a group needs `min` different targets (checked once).
                     Some(g) => {
-                        i != g.first as usize || candidates(st, f, p, this).len() >= g.min as usize
+                        i != g.first as usize
+                            || candidates(st, f, p, this, source).len() >= g.min as usize
                     }
                 }
             })
@@ -673,8 +692,8 @@ fn legal_modes(st: &GameState, body: &Body, p: PlayerId, this: Option<ObjectId>)
         .collect()
 }
 
-fn body_possible(st: &GameState, body: &Body, p: PlayerId) -> bool {
-    let n = legal_modes(st, body, p, None).len();
+fn body_possible(st: &GameState, body: &Body, p: PlayerId, source: Option<ObjectId>) -> bool {
+    let n = legal_modes(st, body, p, None, source).len();
     match body {
         Body::Effect(_) => n == 1,
         Body::Modal { min, .. } => n >= *min as usize,
@@ -708,22 +727,32 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
         CastSource::Ability { source, index } => {
             let (source, index) = (*source, *index);
             let o = st.object(source);
-            if o.zone != Zone::Battlefield || controller_of(st, source) != p {
-                return false;
-            }
-            // CLAUDE.md invariant 4: only abilities the permanent currently has.
+            // CLAUDE.md invariant 4: only abilities the object currently has.
             let Some((
                 _,
                 AbilityDef::Activated {
                     cost,
                     timing,
                     only_if,
+                    from,
                     ..
                 },
             )) = abilities(st, source).into_iter().find(|(i, _)| *i == index)
             else {
                 return false;
             };
+            // CR 113.6: the zone the ability works from. Off the battlefield a card is
+            // its owner's to use.
+            let here = match from {
+                card_model::ActivationZone::Battlefield => {
+                    o.zone == Zone::Battlefield && controller_of(st, source) == p
+                }
+                card_model::ActivationZone::Hand => o.zone == Zone::Hand && o.owner == p,
+                card_model::ActivationZone::Graveyard => o.zone == Zone::Graveyard && o.owner == p,
+            };
+            if !here {
+                return false;
+            }
             // "Activate only if …" (CR 602.5b).
             if !triggers::condition_holds(st, only_if.as_ref(), p, source) {
                 return false;
@@ -738,7 +767,7 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
     }
     let prop = proposal(st, &source);
     if let Some(b) = &prop.body
-        && !body_possible(st, b, p)
+        && !body_possible(st, b, p, ability_source(&source))
     {
         return false;
     }
@@ -846,6 +875,14 @@ impl CastFrame {
                         // CR 602.2a: the ability is created on the stack.
                         CastSource::Ability { source, index } => {
                             let source_card = st.object(*source).card;
+                            // CR 602.2a: a card whose ability is activated from a hidden
+                            // zone is revealed.
+                            if st.object(*source).zone == Zone::Hand {
+                                st.emit(Event::Revealed {
+                                    player: p,
+                                    cards: vec![*source],
+                                });
+                            }
                             put(
                                 st,
                                 GameAction::PutAbilityOnStack {
@@ -899,7 +936,13 @@ impl CastFrame {
                                 });
                                 self.modes = modes;
                             } else {
-                                let legal = legal_modes(st, &body, p, self.object);
+                                let legal = legal_modes(
+                                    st,
+                                    &body,
+                                    p,
+                                    self.object,
+                                    ability_source(&self.source),
+                                );
                                 if legal.len() < min as usize {
                                     // CR 603.3c (only triggers can get here, D-019).
                                     debug_assert!(self.is_trigger());
@@ -993,12 +1036,17 @@ impl CastFrame {
                             Some(g) => &self.targets[k][g.first as usize..],
                             None => &[],
                         };
-                        let options: Vec<OptionDesc> =
-                            candidates(st, &mode.targets[i], p, self.object)
-                                .into_iter()
-                                .filter(|t| !taken.contains(t))
-                                .map(|target| OptionDesc::Target { target })
-                                .collect();
+                        let options: Vec<OptionDesc> = candidates(
+                            st,
+                            &mode.targets[i],
+                            p,
+                            self.object,
+                            ability_source(&self.source),
+                        )
+                        .into_iter()
+                        .filter(|t| !taken.contains(t))
+                        .map(|target| OptionDesc::Target { target })
+                        .collect();
                         if options.is_empty() {
                             if optional {
                                 self.targets_closed[k] = true;
@@ -1290,6 +1338,28 @@ impl CastFrame {
                 .filter(|id| st.objects.get(id).is_some_and(|o| o.zone == Zone::Hand))
                 .map(|&id| Proposed::moving(id, Zone::Graveyard, MoveCause::Discard)),
         );
+        // "Discard this card" / "exile this card from your graveyard": the card the
+        // ability is on, where the ability works from.
+        if let CastSource::Ability { source, index } = &self.source
+            && let Some(o) = st.objects.get(source)
+        {
+            if prop.extra.discard_self && o.zone == Zone::Hand {
+                // CR 702.29c: discarding it for its cycling ability is cycling it.
+                let cycling = matches!(
+                    st.card_def(*source).abilities.get(*index as usize),
+                    Some(AbilityDef::Activated { cycling: true, .. })
+                );
+                let cause = if cycling {
+                    MoveCause::Cycle
+                } else {
+                    MoveCause::Discard
+                };
+                events.push(Proposed::moving(*source, Zone::Graveyard, cause));
+            }
+            if prop.extra.exile_self && o.zone == Zone::Graveyard {
+                events.push(Proposed::moving(*source, Zone::Exile, MoveCause::Rule));
+            }
+        }
         if life > 0 {
             // CR 119.4: paying life is losing that much life.
             events.push(Proposed::LoseLife {

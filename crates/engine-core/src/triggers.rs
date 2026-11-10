@@ -180,6 +180,11 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
     let mut entered: Vec<ObjectId> = Vec::new();
     let mut died: Vec<ObjectId> = Vec::new();
     for e in events {
+        if let Event::Cycled { player, card } = e {
+            detect_cycled(st, *player, *card);
+        }
+    }
+    for e in events {
         match e {
             Event::ZoneChange {
                 new,
@@ -395,6 +400,58 @@ pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
                         });
                         conds.push(intervening_if.clone());
                     }
+                }
+            }
+        }
+    }
+    queue_matching(st, found, conds);
+}
+
+/// CR 702.29c: `player` cycled `card` (now wherever the discard put it). "Whenever [a
+/// player] cycles a card" is watched from the battlefield; "when you cycle this card"
+/// triggers from the zone the card went to.
+fn detect_cycled(st: &mut GameState, player: PlayerId, card: ObjectId) {
+    let mut sources = battlefield_sources(st);
+    if st.objects.contains_key(&card) {
+        sources.push(Source {
+            id: card,
+            card: st.object(card).card,
+            controller: player,
+            abilities: abilities(st, card),
+            lki: None,
+        });
+    }
+    let mut found = Vec::new();
+    let mut conds = Vec::new();
+    for src in sources {
+        for &(index, a) in &src.abilities {
+            let AbilityDef::Triggered {
+                when,
+                intervening_if,
+                ..
+            } = a
+            else {
+                continue;
+            };
+            for t in when.events() {
+                let hit = match t {
+                    Trigger::Cycles { this: true, .. } => src.id == card,
+                    Trigger::Cycles { by, this: false } => {
+                        src.id != card && who_matches(*by, player, src.controller)
+                    }
+                    _ => false,
+                };
+                if hit {
+                    found.push(PendingTrigger {
+                        controller: src.controller,
+                        source: src.id,
+                        source_card: src.card,
+                        index,
+                        source_lki: None,
+                        subject: Some(card),
+                        subject_lki: None,
+                    });
+                    conds.push(intervening_if.clone());
                 }
             }
         }

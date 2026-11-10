@@ -72,7 +72,7 @@ cargo run --release -p harness -- fuzz --setup precon-4p --games 200 --threads 8
 cargo run -p harness -- fetch-cards                       # printed data for the precons + basics -> ~/.cache/apnap (tests need it)
 cargo run -p harness -- coverage [--verbose]              # which precon cards are scripted/verified
 cargo run --release -p harness -- fetch-forge             # Forge's card scripts (pinned commit) -> ~/.cache/apnap/forge (git, network)
-cargo run --release -p harness -- forge-coverage [--top N] [--sample N] [--why TEXT]   # how many of ALL cards compile; what blocks the rest; --why lists the cards behind a blocker
+cargo run --release -p harness -- forge-coverage [--top N] [--families] [--sample N [--with TEXT]] [--why TEXT [--all]]   # how many of ALL cards compile; what blocks the rest (--families: by kind of feature); --why lists the cards behind a blocker
 cargo run --release -p harness -- fuzz --setup forge-4p --games 400 --threads 8      # random decks drawn from EVERY compiled card (finds what precon decks never reach)
 APNAP_TRACE=1 cargo run --release -p harness -- run --seed N --setup forge-4p        # a game that doesn't end: where it is, every 2,000 decisions
 ```
@@ -130,7 +130,7 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-055): 7,125 of 34,463 scripts compile (20.7%); about 10,500 more are one feature
+Status (D-056): 7,467 of 34,463 scripts compile (21.7%); about 10,500 more are one feature
 away. Precons: `harness coverage --verbose` lists what blocks the rest. Feature tests live in `crates/harness/tests/forge_features.rs`: invented cards written
 in Forge's format, compiled by `harness::forge_test_catalog` and played (`forge_test_blockers`
 for "this must not compile"). Three guards catch compiler holes — keep them: a line that

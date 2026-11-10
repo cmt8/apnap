@@ -36,6 +36,8 @@ pub enum MoveCause {
     Fizzled,
     /// CR 305.1
     PlayLand,
+    /// CR 702.29c: discarded to pay the cost of its own cycling ability.
+    Cycle,
 }
 
 /// A game event that hasn't happened yet (CR 614.1: replacement effects watch for events

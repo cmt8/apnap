@@ -3362,3 +3362,342 @@ fn counters_on_each_creature_you_control() {
     );
     assert_eq!(forge_test_blockers(&other), ["counter:CHARGE"]);
 }
+
+// ---------------------------------------------------------------------------------------
+// Abilities that work from the hand or the graveyard; cycling (D-056).
+// Text: docs/rules-notes/702.29-cycling-113.6-ability-zones.md.
+
+fn can_activate(s: &Script, id: ObjectId) -> bool {
+    s.has(|_, o| matches!(o, OptionDesc::ActivateAbility { source, .. } if *source == id))
+}
+
+// CR 702.29a, 602.2a, 113.6 (2026-11-06). Forge: `K:Cycling:2`.
+#[test]
+fn cycling_discards_the_card_from_hand_and_draws() {
+    let cards = [creature(
+        "Test Dune Beast",
+        "5 R",
+        "Beast",
+        "4/4",
+        "K:Cycling:2",
+    )];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Mountain", "Mountain"]);
+    let in_hand = sc.card(P0, Zone::Hand, "Test Dune Beast");
+    let in_play = sc.card(P0, Zone::Battlefield, "Test Dune Beast");
+    let theirs = sc.card(P1, Zone::Hand, "Test Dune Beast");
+    let mut s = Script::new(sc.build());
+    // Only from the hand, and only its owner.
+    assert!(can_activate(&s, in_hand));
+    assert!(!can_activate(&s, in_play));
+    assert!(!can_activate(&s, theirs));
+    s.pick(
+        "cycle",
+        |_, o| matches!(o, OptionDesc::ActivateAbility { source, .. } if *source == in_hand),
+    )
+    .pay();
+    // The cost is paid: the card was shown and discarded, the ability is on the stack.
+    assert_eq!(
+        s.count(|e| matches!(e, Event::Revealed { player, cards } if *player == P0 && cards == &vec![in_hand])),
+        1
+    );
+    assert_eq!(s.count(|e| matches!(e, Event::Discarded { .. })), 1);
+    assert_eq!(s.count(|e| matches!(e, Event::Cycled { .. })), 1);
+    assert!(s.find(P0, Zone::Graveyard, "Test Dune Beast").is_some());
+    assert_eq!((hand(&s, P0), s.st.stack.len()), (0, 1));
+    s.pass_all();
+    assert_eq!(hand(&s, P0), 1, "draw a card");
+    // No mana left: the opponent's copy stays theirs, and nothing more can be cycled.
+    assert!(!s.has(|_, o| matches!(o, OptionDesc::ActivateAbility { .. })));
+}
+
+// CR 702.29e–f (2026-11-06). Forge: `K:TypeCycling:Plains:2`, `K:TypeCycling:Basic:1`
+// ("basic landcycling").
+#[test]
+fn typecycling_searches_for_a_card_of_the_type() {
+    let cards = [
+        creature(
+            "Test Dune Strider",
+            "5 W",
+            "Camel",
+            "4/4",
+            "K:TypeCycling:Plains:2",
+        ),
+        creature(
+            "Test Wayfinder",
+            "5 G",
+            "Scout",
+            "4/4",
+            "K:TypeCycling:Basic:1",
+        ),
+        // (A word in a filter is a subtype only if some card has it.)
+        "Name:Test Steppe\nManaCost:no cost\nTypes:Land Plains\nOracle:Text.".to_string(),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.library(P0, "Plains", 1);
+    sc.library(P0, "Test Steppe", 1);
+    sc.library(P0, "Test Elf", 1);
+    sc.cards(P0, Zone::Battlefield, &["Mountain", "Mountain", "Mountain"]);
+    sc.cards(P0, Zone::Hand, &["Test Dune Strider", "Test Wayfinder"]);
+    let mut s = Script::new(sc.build());
+    s.activate("Test Dune Strider").pay().pass_all();
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::SearchLibrary));
+    // The two Plains cards (basic or not); the search may fail to find (CR 701.23b).
+    assert_eq!(s.decision().prim, Primitive::PickN { min: 0, max: 1 });
+    assert_eq!(s.options().len(), 2);
+    s.pick(
+        "the basic Plains",
+        |s, o| matches!(o, OptionDesc::Card { card } if s.name(*card) == "Plains"),
+    );
+    assert!(s.find(P0, Zone::Hand, "Plains").is_some());
+    assert!(s.count(|e| matches!(e, Event::Revealed { cards, .. } if cards.len() == 1)) >= 2);
+    assert_eq!(s.count(|e| matches!(e, Event::Cycled { .. })), 1);
+    // Basic landcycling: any basic land card (twenty Forests), not the Elf.
+    s.activate("Test Wayfinder").pay().pass_all();
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::SearchLibrary));
+    assert_eq!(s.options().len(), 20);
+    assert_eq!(s.count(|e| matches!(e, Event::Cycled { .. })), 2);
+}
+
+// CR 702.29c–d (2026-11-06). Forge: `T:Mode$ Cycled | ValidCard$ Card.Self` ("when you
+// cycle this card", from wherever it went) and `ValidCard$ Card.Other+YouOwn |
+// TriggerZones$ Battlefield` ("whenever you cycle another card").
+#[test]
+fn cycle_triggers_on_the_card_and_on_permanents() {
+    let cards = [
+        spell(
+            "Test Sandblast",
+            "3 R",
+            "Instant",
+            "A:SP$ DealDamage | ValidTgts$ Any | NumDmg$ 3 | SpellDescription$ Text.\n\
+             K:Cycling:R\n\
+             T:Mode$ Cycled | ValidCard$ Card.Self | Execute$ TrigDmg | TriggerDescription$ Text.\n\
+             SVar:TrigDmg:DB$ DealDamage | ValidTgts$ Any | NumDmg$ 1",
+        ),
+        creature(
+            "Test Dune Watcher",
+            "W",
+            "Fox",
+            "1/1",
+            "T:Mode$ Cycled | ValidCard$ Card.Other+YouOwn | TriggerZones$ Battlefield | Execute$ TrigGain | TriggerDescription$ Text.\n\
+             SVar:TrigGain:DB$ GainLife | LifeAmount$ 1",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Mountain", "Test Dune Watcher"]);
+    sc.card(P1, Zone::Battlefield, "Test Dune Watcher");
+    sc.card(P0, Zone::Hand, "Test Sandblast");
+    let mut s = Script::new(sc.build());
+    s.activate("Test Sandblast").pay();
+    // Both of my triggers triggered while the cost was paid; the opponent's Watcher only
+    // watches its own controller. They go on the stack above the cycling ability.
+    if s.kind() == ChoiceKind::OrderTriggers {
+        let n = s.options().len();
+        assert_eq!(n, 2);
+        s.respond(Response::Order((0..n).collect()));
+    }
+    s.target_player(P1);
+    assert_eq!(s.st.stack.len(), 3);
+    drive_until(&mut s, |s| s.st.stack.len() == 1);
+    // The triggers have resolved; the draw hasn't happened yet.
+    assert_eq!((life(&s, P0), life(&s, P1)), (41, 39));
+    assert_eq!(hand(&s, P0), 0);
+    s.pass_all();
+    assert_eq!(hand(&s, P0), 1);
+    assert_eq!(s.count(|e| matches!(e, Event::Discarded { .. })), 1);
+}
+
+// CR 113.6j, 113.6b (2026-11-06). Forge: `ActivationZone$ Hand` with `Discard<1/CARDNAME>`,
+// `ActivationZone$ Graveyard` with `ExileFromGrave<1/CARDNAME>`.
+#[test]
+fn abilities_that_work_from_the_hand_or_the_graveyard() {
+    let cards = [
+        creature(
+            "Test Channeler",
+            "3 R",
+            "Shaman",
+            "2/2",
+            "A:AB$ DealDamage | Cost$ 1 R Discard<1/CARDNAME> | ActivationZone$ Hand | ValidTgts$ Any | NumDmg$ 2 | SpellDescription$ Text.",
+        ),
+        creature(
+            "Test Kind Soul",
+            "3 W",
+            "Spirit",
+            "2/2",
+            "A:AB$ GainLife | Cost$ 1 ExileFromGrave<1/CARDNAME> | ActivationZone$ Graveyard | LifeAmount$ 3 | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Mountain"; 4]);
+    let channeler = sc.card(P0, Zone::Hand, "Test Channeler");
+    let channeler_in_play = sc.card(P0, Zone::Battlefield, "Test Channeler");
+    let channeler_dead = sc.card(P0, Zone::Graveyard, "Test Channeler");
+    let soul = sc.card(P0, Zone::Graveyard, "Test Kind Soul");
+    let soul_in_hand = sc.card(P0, Zone::Hand, "Test Kind Soul");
+    let soul_in_play = sc.card(P0, Zone::Battlefield, "Test Kind Soul");
+    let their_soul = sc.card(P1, Zone::Graveyard, "Test Kind Soul");
+    let mut s = Script::new(sc.build());
+    for (id, yes) in [
+        (channeler, true),
+        (channeler_in_play, false),
+        (channeler_dead, false),
+        (soul, true),
+        (soul_in_hand, false),
+        (soul_in_play, false),
+        (their_soul, false),
+    ] {
+        assert_eq!(can_activate(&s, id), yes, "{}", s.name(id));
+    }
+    s.pick(
+        "channel",
+        |_, o| matches!(o, OptionDesc::ActivateAbility { source, .. } if *source == channeler),
+    );
+    s.target_player(P1).pay().pass_all();
+    assert_eq!(life(&s, P1), 38);
+    assert_eq!(s.st.zones.list(Zone::Graveyard, P0).len(), 3);
+    // A discard, but not cycling.
+    assert_eq!(s.count(|e| matches!(e, Event::Discarded { .. })), 1);
+    assert_eq!(s.count(|e| matches!(e, Event::Cycled { .. })), 0);
+    s.pick(
+        "the soul",
+        |_, o| matches!(o, OptionDesc::ActivateAbility { source, .. } if *source == soul),
+    );
+    s.pay();
+    assert!(s.find(P0, Zone::Exile, "Test Kind Soul").is_some());
+    s.pass_all();
+    assert_eq!(life(&s, P0), 43);
+
+    // A cost that uses the card where the ability doesn't work is not compiled.
+    for script in [
+        "A:AB$ GainLife | Cost$ T | ActivationZone$ Hand | LifeAmount$ 3 | SpellDescription$ Text.",
+        "A:AB$ GainLife | Cost$ 1 Discard<1/CARDNAME> | LifeAmount$ 3 | SpellDescription$ Text.",
+        "A:AB$ GainLife | Cost$ 1 ExileFromGrave<1/CARDNAME> | ActivationZone$ Hand | LifeAmount$ 3 | SpellDescription$ Text.",
+    ] {
+        let b = forge_test_blockers(&creature("Test Misfit", "W", "Spirit", "1/1", script));
+        assert_eq!(b, ["activated:cost does not fit the zone"], "{script}");
+    }
+    let b = forge_test_blockers(&creature(
+        "Test Misfit",
+        "W",
+        "Spirit",
+        "1/1",
+        "A:AB$ GainLife | Cost$ 1 | ActivationZone$ Exile | LifeAmount$ 3 | SpellDescription$ Text.",
+    ));
+    assert_eq!(b, ["activated:zone Exile"]);
+}
+
+// CR 400.7 (2026-11-06). Forge: `AB$ ChangeZone | Origin$ Graveyard | Destination$ Hand |
+// ActivationZone$ Graveyard` — "return this card from your graveyard to your hand".
+#[test]
+fn returning_this_card_from_the_graveyard() {
+    let cards = [
+        creature(
+            "Test Firebird",
+            "3 R",
+            "Phoenix",
+            "2/2",
+            "A:AB$ ChangeZone | Cost$ R | Origin$ Graveyard | Destination$ Hand | ActivationZone$ Graveyard | SpellDescription$ Text.",
+        ),
+        creature(
+            "Test Revenant",
+            "3 B",
+            "Zombie",
+            "2/2",
+            "A:AB$ ChangeZone | Cost$ B | Origin$ Graveyard | Destination$ Battlefield | Tapped$ True | ActivationZone$ Graveyard | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Grave Purge",
+            "B",
+            "Instant",
+            "A:SP$ ChangeZone | Origin$ Graveyard | Destination$ Exile | ValidTgts$ Card | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let build = || {
+        let mut sc = scenario(&cards);
+        sc.cards(P0, Zone::Battlefield, &["Mountain", "Swamp"]);
+        sc.card(P1, Zone::Battlefield, "Swamp");
+        sc.cards(P0, Zone::Graveyard, &["Test Firebird", "Test Revenant"]);
+        sc.card(P1, Zone::Hand, "Test Grave Purge");
+        Script::new(sc.build())
+    };
+    let mut s = build();
+    s.activate("Test Firebird").pay().pass_all();
+    assert!(s.find(P0, Zone::Hand, "Test Firebird").is_some());
+    s.activate("Test Revenant").pay().pass_all();
+    let revenant = s.find(P0, Zone::Battlefield, "Test Revenant").unwrap();
+    assert!(s.st.object(revenant).tapped);
+
+    // In response the card is exiled: the ability does nothing — it doesn't follow the
+    // card to another zone.
+    let mut s = build();
+    s.activate("Test Firebird").pay().pass();
+    s.cast("Test Grave Purge").target("Test Firebird").pay();
+    drive_until(&mut s, |s| s.st.stack.is_empty());
+    assert!(s.find(P0, Zone::Exile, "Test Firebird").is_some());
+    assert!(s.find(P0, Zone::Hand, "Test Firebird").is_none());
+}
+
+// "Another target creature", "another target creature card": not the object the ability
+// is on. Forge: `ValidTgts$ Creature.Other`, `Creature.YouOwn+Other`.
+#[test]
+fn another_target_is_not_the_abilitys_source() {
+    let cards = [
+        creature(
+            "Test Mentor",
+            "W",
+            "Cleric",
+            "1/1",
+            "A:AB$ PutCounter | Cost$ 1 | ValidTgts$ Creature.Other | CounterType$ P1P1 | CounterNum$ 1 | SpellDescription$ Text.",
+        ),
+        creature(
+            "Test Brigadier",
+            "W",
+            "Soldier",
+            "2/2",
+            "T:Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield | ValidCard$ Card.Self | Execute$ TrigCounter | TriggerDescription$ Text.\n\
+             SVar:TrigCounter:DB$ PutCounter | ValidTgts$ Creature.Other+YouCtrl | CounterType$ P1P1 | CounterNum$ 2",
+        ),
+        creature(
+            "Test Soultender",
+            "B",
+            "Spirit",
+            "1/1",
+            "A:AB$ ChangeZone | Cost$ B ExileFromGrave<1/CARDNAME> | ActivationZone$ Graveyard | Origin$ Graveyard | Destination$ Hand | ValidTgts$ Creature.YouOwn+Other | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    // Alone, the Mentor has nothing to target: its ability can't be activated at all.
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Plains", "Plains"]);
+    let mentor = sc.card(P0, Zone::Battlefield, "Test Mentor");
+    sc.card(P0, Zone::Hand, "Test Brigadier");
+    let mut s = Script::new(sc.build());
+    assert!(!can_activate(&s, mentor));
+    // The Captain enters: its trigger may target the Mentor, not the Captain.
+    s.cast("Test Brigadier").pay().pass_all();
+    assert!(matches!(s.kind(), ChoiceKind::ChooseTargets { .. }));
+    assert_eq!(target_names(&s), ["Test Mentor"]);
+    s.target("Test Mentor").pass_all();
+    assert_eq!(pt(&s, mentor), (3, 3));
+    // Now the Mentor can target the Captain — and only the Captain.
+    s.activate("Test Mentor");
+    assert_eq!(target_names(&s), ["Test Brigadier"]);
+
+    // In the graveyard: the Soultender can't return itself (it is exiled to pay).
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Swamp"]);
+    let tender = sc.card(P0, Zone::Graveyard, "Test Soultender");
+    let s = Script::new(sc.build());
+    assert!(!can_activate(&s, tender));
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Swamp"]);
+    sc.cards(P0, Zone::Graveyard, &["Test Soultender", "Test Elf"]);
+    let mut s = Script::new(sc.build());
+    s.activate("Test Soultender");
+    assert_eq!(target_names(&s), ["Test Elf"]);
+}

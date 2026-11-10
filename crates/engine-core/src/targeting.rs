@@ -11,13 +11,15 @@ use card_model::{CardType, Keyword, TargetFilter};
 
 /// Whether `t` is a legal target for `filter`, for a spell/ability controlled by
 /// `controller` whose own stack object is `this` (CR 115.5: it can't target itself): it is
-/// what the filter describes, and nothing stops it from being targeted.
+/// what the filter describes, and nothing stops it from being targeted. `source` is the
+/// object an ability is on: what "another target …" is other than.
 pub fn is_legal(
     st: &GameState,
     filter: &TargetFilter,
     t: Target,
     controller: PlayerId,
     this: Option<ObjectId>,
+    source: Option<ObjectId>,
 ) -> bool {
     // CR 702.18a (shroud) and 702.11b (hexproof): abilities of permanents.
     if let Target::Object(id) = t
@@ -29,7 +31,7 @@ pub fn is_legal(
             return false;
         }
     }
-    describes(st, filter, t, controller, this)
+    describes(st, filter, t, controller, this, source)
 }
 
 /// Whether `t` is what `filter` describes — without asking whether it can be targeted.
@@ -41,6 +43,7 @@ pub fn describes(
     t: Target,
     controller: PlayerId,
     this: Option<ObjectId>,
+    source: Option<ObjectId>,
 ) -> bool {
     match t {
         Target::Player(p) => {
@@ -81,13 +84,14 @@ pub fn describes(
                         }
                 }
                 TargetFilter::Permanent(selectors) => {
-                    // "Other" has no meaning for a target (it can't be the spell itself).
-                    let none = ObjectId(u32::MAX);
+                    // "Another target permanent": not the ability's source. (A spell
+                    // can't target itself anyway, CR 115.5.)
+                    let source = source.unwrap_or(ObjectId(u32::MAX));
                     o.zone == Zone::Battlefield && {
                         let c = chars(st, id);
                         selectors
                             .iter()
-                            .any(|s| crate::layers::matches(st, s, &c, o, none, controller))
+                            .any(|s| crate::layers::matches(st, s, &c, o, source, controller))
                     }
                 }
                 TargetFilter::CardInGraveyard { cards, whose } => {
@@ -98,6 +102,8 @@ pub fn describes(
                             card_model::Who::Opponent => o.owner != controller,
                         }
                         && card_matches(st, id, cards)
+                        // "Another target card": not the card the ability is on.
+                        && !(cards.other && Some(id) == source)
                 }
                 TargetFilter::Player | TargetFilter::Opponent => false,
             }
@@ -140,6 +146,7 @@ pub fn candidates(
     filter: &TargetFilter,
     controller: PlayerId,
     this: Option<ObjectId>,
+    source: Option<ObjectId>,
 ) -> Vec<Target> {
     let mut out: Vec<Target> = Vec::new();
     match filter {
@@ -161,6 +168,6 @@ pub fn candidates(
     if filter.allows_players() {
         out.extend((0..st.num_players()).map(|i| Target::Player(PlayerId(i as u8))));
     }
-    out.retain(|t| is_legal(st, filter, *t, controller, this));
+    out.retain(|t| is_legal(st, filter, *t, controller, this, source));
     out
 }

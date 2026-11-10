@@ -126,6 +126,7 @@ pub(crate) fn gather(st: &mut GameState) -> Gathered {
                         Target::Object(t),
                         c.controller,
                         Some(id),
+                        None,
                     )
             });
             if !legal {

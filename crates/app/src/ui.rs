@@ -460,6 +460,19 @@ pub fn option_label(
             Some(src) => format!("tap {} for {}", src.name, mana.symbol()),
             None => harness::text::option_line(v, o),
         },
+        // The ability itself, so that two abilities of one card (or casting it and
+        // cycling it) can be told apart.
+        OptionDesc::ActivateAbility { source, index } => {
+            let text = find_object(v, *source).and_then(|src| {
+                let a = cat.get(src.card).abilities.get(*index as usize)?;
+                let mut text = describe::ability_text(a);
+                if text.chars().count() > 90 {
+                    text = text.chars().take(89).chain(['…']).collect();
+                }
+                Some(format!("{} — {text}", src.name))
+            });
+            text.unwrap_or_else(|| harness::text::option_line(v, o))
+        }
         other => harness::text::option_line(v, other),
     }
 }

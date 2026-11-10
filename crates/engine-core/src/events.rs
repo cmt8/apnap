@@ -276,4 +276,10 @@ pub enum Event {
         player: PlayerId,
         cards: Vec<ObjectId>,
     },
+    /// CR 702.29c: `player` cycled `card` — discarded it to pay for its cycling ability.
+    /// Follows the `Discarded` event for the same card.
+    Cycled {
+        player: PlayerId,
+        card: ObjectId,
+    },
 }

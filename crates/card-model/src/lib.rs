@@ -369,6 +369,13 @@ pub enum AbilityDef {
         #[serde(default)]
         only_if: Option<Condition>,
         body: Body,
+        /// The zone the card must be in for the ability to be activated (CR 113.6).
+        #[serde(default)]
+        from: ActivationZone,
+        /// A cycling ability (CR 702.29a, 702.29f: typecycling is cycling). Discarding
+        /// the card to pay for it is "cycling" it (CR 702.29c).
+        #[serde(default)]
+        cycling: bool,
     },
     /// A static ability: "[Selector] spells you cast cost {N} less to cast" (generic mana
     /// only, CR 118.7a). The selector is matched against the spell being cast.
@@ -540,6 +547,9 @@ pub enum Trigger {
     Attacks(ObjFilter),
     /// One ability with several trigger events: "Whenever this creature enters or attacks".
     Any(Vec<Trigger>),
+    /// CR 702.29c: "When you cycle this card" (`this`) — it triggers from wherever the card
+    /// went — or "Whenever [who] cycles a card", watched from the battlefield.
+    Cycles { by: Who, this: bool },
 }
 
 impl Trigger {
@@ -830,6 +840,22 @@ pub struct Cost {
     pub discard: Option<CostChoice>,
     /// "Pay N life" (CR 119.4: only a player with at least that much life can).
     pub life: u32,
+    /// "Discard this card": for an ability activated from the hand (CR 113.6j).
+    pub discard_self: bool,
+    /// "Exile this card from your graveyard": for an ability activated from the graveyard.
+    pub exile_self: bool,
+}
+
+/// Where the card with an activated ability must be for the ability to be activated
+/// (CR 113.6: the battlefield unless the ability says or implies otherwise).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ActivationZone {
+    #[default]
+    Battlefield,
+    /// The owner's hand: cycling (CR 702.29a), "[cost], discard this card: …".
+    Hand,
+    /// The owner's graveyard: "[cost]: Return this card from your graveyard to your hand".
+    Graveyard,
 }
 
 /// Things chosen to pay a cost with: `count` of those matching any of `what`.
@@ -1194,6 +1220,10 @@ pub enum ObjRef {
     /// The object whose event triggered the ability ("it", "that creature"): the creature
     /// that entered, died or attacked.
     Triggering,
+    /// "This card", where the ability was activated or triggered from outside the
+    /// battlefield (a graveyard, a hand): the source for as long as it is still that
+    /// object (CR 400.7).
+    ThisCard,
 }
 
 /// Which object deals the damage of a `DealDamage`.

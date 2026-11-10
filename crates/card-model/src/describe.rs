@@ -4,10 +4,11 @@
 //! vocabulary without describing it is a compile error.
 
 use crate::{
-    AbilityDef, Affected, Amount, Body, Calc, CardDef, CardDest, CardType, CardZone, Color,
-    CombatRule, Condition, ContinuousEffect, Cost, CounterKind, DamageBy, EachPlayerAction, Effect,
-    Keyword, ManaProduce, Measure, Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces,
-    Selector, Take, TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
+    AbilityDef, ActivationZone, Affected, Amount, Body, Calc, CardDef, CardDest, CardType,
+    CardZone, Color, CombatRule, Condition, ContinuousEffect, Cost, CounterKind, DamageBy,
+    EachPlayerAction, Effect, Keyword, ManaProduce, Measure, Mode, ObjFilter, ObjRef, PlayerRef,
+    ReplaceWith, Replaces, Selector, Take, TargetFilter, TargetRef, Timing, Trigger, TriggerStep,
+    Who,
 };
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -211,6 +212,7 @@ fn obj(mode: &Mode, r: ObjRef) -> String {
         ObjRef::Target(i) => target(mode, TargetRef::Target(i)),
         ObjRef::This => "this permanent".into(),
         ObjRef::Triggering => "it".into(),
+        ObjRef::ThisCard => "this card".into(),
     }
 }
 
@@ -1022,6 +1024,12 @@ fn cost(c: &Cost) -> String {
     if c.life > 0 {
         parts.push(format!("Pay {} life", c.life));
     }
+    if c.discard_self {
+        parts.push("Discard this card".to_string());
+    }
+    if c.exile_self {
+        parts.push("Exile this card from your graveyard".to_string());
+    }
     parts.join(", ")
 }
 
@@ -1047,6 +1055,15 @@ fn obj_filter(f: &ObjFilter) -> String {
 fn trigger(t: &Trigger) -> String {
     match t {
         Trigger::Attacks(f) => format!("Whenever {} attacks", obj_filter(f)),
+        Trigger::Cycles { this: true, .. } => "When you cycle this card".to_string(),
+        Trigger::Cycles { by, this: false } => format!(
+            "Whenever {} a card",
+            match by {
+                Who::Any => "a player cycles",
+                Who::You => "you cycle",
+                Who::Opponent => "an opponent cycles",
+            }
+        ),
         Trigger::Any(v) => {
             // "Whenever this permanent enters or attacks".
             let parts: Vec<String> = v.iter().map(trigger).collect();
@@ -1142,15 +1159,47 @@ fn condition(c: &Condition) -> String {
 fn ability(a: &AbilityDef) -> String {
     match a {
         AbilityDef::Spell(b) => body(b),
+        // CR 702.29a: "Cycling [cost]" means "[Cost], Discard this card: Draw a card."
+        AbilityDef::Activated {
+            cost: c,
+            body: b,
+            cycling: true,
+            ..
+        } if body(b) == "You draw a card." => {
+            let rest = cost(&Cost {
+                discard_self: false,
+                ..c.clone()
+            });
+            if c.mana.is_some() && c.life == 0 && c.discard.is_none() && c.sacrifice.is_none() {
+                format!("Cycling {rest}")
+            } else {
+                format!("Cycling—{rest}")
+            }
+        }
         AbilityDef::Activated {
             cost: c,
             timing,
             only_if,
             body: b,
+            from,
+            cycling: _,
         } => format!(
             "{}: {}{}{}",
             cost(c),
-            body(b),
+            // Where the ability works from, unless its cost already says (CR 113.6).
+            match from {
+                ActivationZone::Graveyard if !c.exile_self => {
+                    let text = body(b);
+                    if text.contains("this card") {
+                        text.replace("this card", "this card from your graveyard")
+                    } else {
+                        format!("{text} Activate only if this card is in your graveyard.")
+                    }
+                }
+                ActivationZone::Hand if !c.discard_self =>
+                    format!("{} Activate only if this card is in your hand.", body(b)),
+                _ => body(b),
+            },
             match timing {
                 Timing::Instant => "",
                 Timing::Sorcery => " Activate only as a sorcery.",
@@ -1341,6 +1390,11 @@ fn ability(a: &AbilityDef) -> String {
 /// One mode of a modal spell or ability, as a sentence (for the mode-choice UI).
 pub fn mode_text(m: &Mode) -> String {
     sentence(effect(m, &m.effect))
+}
+
+/// One ability as rules text ("Cycling {2}", "{T}: Add {G}.").
+pub fn ability_text(a: &AbilityDef) -> String {
+    ability(a)
 }
 
 /// The card's rules text, one line per keyword group / ability.

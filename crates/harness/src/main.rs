@@ -37,6 +37,37 @@ fn setup(args: &[String], default: Setup) -> Setup {
     })
 }
 
+/// The feature a blocker belongs to: "param:trig Drawn.Number" and "trig:Drawn …" are both
+/// the trigger mode `trig:Drawn`; "param:Pump.KW" is the effect `api:Pump`.
+fn family(blocker: &str) -> String {
+    let word = |s: &str| {
+        s.split(|c: char| !c.is_ascii_alphanumeric())
+            .next()
+            .unwrap_or(s)
+            .to_string()
+    };
+    if let Some(rest) = blocker.strip_prefix("param:") {
+        return match rest.split_once(' ') {
+            Some((kind @ ("trig" | "static" | "repl"), rest)) => format!("{kind}:{}", word(rest)),
+            _ => format!("api:{}", word(rest)),
+        };
+    }
+    match blocker.split_once(':') {
+        Some((kind @ ("trig" | "static" | "repl" | "kw" | "api" | "cost"), rest)) => {
+            format!("{kind}:{}", word(rest))
+        }
+        Some((kind, _)) if !kind.contains(' ') => {
+            // "Dig:each player chooses", "ChangeZone:no-target": the effect.
+            if kind.chars().next().is_some_and(char::is_uppercase) {
+                format!("api:{kind}")
+            } else {
+                blocker.to_string()
+            }
+        }
+        _ => blocker.to_string(),
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("run");
@@ -327,6 +358,33 @@ fn main() -> ExitCode {
                 );
             }
             // How many cards each blocker stops, and for how many it is the only one.
+            // `--families`: rank the kinds of feature instead of the single blockers. A
+            // trigger mode, static mode, effect or keyword counts together with its own
+            // parameters ("trig:Drawn" with "param:trig Drawn.ValidCard"), which never
+            // block alone.
+            if args.iter().any(|a| a == "--families") {
+                let mut rows: std::collections::BTreeMap<String, (usize, usize)> =
+                    Default::default();
+                for blockers in lib.blocked.values() {
+                    let mut fams: Vec<String> = blockers.iter().map(|b| family(b)).collect();
+                    fams.sort();
+                    fams.dedup();
+                    for f in &fams {
+                        let e = rows.entry(f.clone()).or_default();
+                        e.0 += 1;
+                        if fams.len() == 1 {
+                            e.1 += 1;
+                        }
+                    }
+                }
+                let mut rows: Vec<(String, (usize, usize))> = rows.into_iter().collect();
+                rows.sort_by_key(|a| std::cmp::Reverse((a.1.1, a.1.0)));
+                println!("family — cards it alone blocks / cards it blocks at all");
+                for (name, (all, alone)) in rows.iter().take(top) {
+                    println!("  {alone:6} / {all:6}  {name}");
+                }
+                return ExitCode::SUCCESS;
+            }
             let mut blocks: std::collections::BTreeMap<&str, (usize, usize)> = Default::default();
             let mut one_away = 0usize;
             for blockers in lib.blocked.values() {
