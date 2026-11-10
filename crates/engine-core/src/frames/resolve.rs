@@ -143,6 +143,9 @@ pub struct ResolveFrame {
     pub filters: Vec<Vec<TargetFilter>>,
     /// Remaining work; last = next.
     pub work: Vec<Work>,
+    /// The total power of what was sacrificed to pay for this (CR 608.2h).
+    #[serde(default)]
+    pub sacrificed_power: u32,
 }
 
 impl ResolveFrame {
@@ -158,6 +161,7 @@ impl ResolveFrame {
             targets: Vec::new(),
             filters: Vec::new(),
             work: Vec::new(),
+            sacrificed_power: 0,
         }
     }
 
@@ -287,6 +291,7 @@ impl ResolveFrame {
                 .max(0) as u32,
             Amount::Fixed(n) => *n,
             Amount::X => self.x,
+            Amount::SacrificedPower => self.sacrificed_power,
             Amount::Count(_) | Amount::TotalPower(_) => {
                 crate::layers::count_amount(st, a, self.source, self.controller)
             }
@@ -933,6 +938,7 @@ impl ResolveFrame {
         self.object = Some(top.id);
         self.controller = top.controller;
         self.x = top.x;
+        self.sacrificed_power = top.sacrificed_power;
         self.targets = top.targets.clone();
         self.source_lki = top.source_lki.clone();
         self.subject = top.subject;
@@ -1087,6 +1093,17 @@ impl ResolveFrame {
             }
             Effect::SetX(amount) => {
                 self.x = self.amount(st, &amount);
+                Vec::new()
+            }
+            // CR 106.4: the mana goes to the player's pool. (Not a mana ability: this is
+            // a spell or an ability on the stack, CR 605.5.)
+            Effect::AddMana { who, mana, amount } => {
+                let amount = self.amount(st, &amount);
+                for player in self.players(st, k, who) {
+                    for _ in 0..amount {
+                        execute(st, GameAction::AddMana { player, mana });
+                    }
+                }
                 Vec::new()
             }
             Effect::May(effect) => {

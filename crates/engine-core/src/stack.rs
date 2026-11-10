@@ -50,6 +50,10 @@ pub struct StackObject {
     pub x: u32,
     /// `targets[k][slot]` for the k-th chosen mode.
     pub targets: Vec<Vec<Target>>,
+    /// The total power, as they last existed, of the permanents sacrificed to pay for this
+    /// ("the sacrificed creature's power", CR 608.2h).
+    #[serde(default)]
+    pub sacrificed_power: u32,
 }
 
 impl StackObject {

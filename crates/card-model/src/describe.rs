@@ -85,6 +85,7 @@ fn amount(a: &Amount) -> String {
         Amount::TotalPower(s) => format!("the total power of {}", selector(s, true)),
         Amount::TriggeringPower => "its power".into(),
         Amount::TriggeringToughness => "its toughness".into(),
+        Amount::SacrificedPower => "the sacrificed creature's power".into(),
     }
 }
 
@@ -368,6 +369,23 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             };
             format!("{} {cards}", verb(&player(mode, *who), "draw", "draws"))
         }
+        Effect::AddMana {
+            who,
+            mana,
+            amount: a,
+        } => match a {
+            Amount::Fixed(n) => format!(
+                "{} {}",
+                verb(&player(mode, *who), "add", "adds"),
+                mana.symbol().repeat(*n as usize)
+            ),
+            a => format!(
+                "{} X mana of type {}, where X is {}",
+                verb(&player(mode, *who), "add", "adds"),
+                mana.symbol(),
+                amount(a)
+            ),
+        },
         Effect::GainLife { who, amount: a } => {
             format!(
                 "{} {} life",
@@ -1030,12 +1048,19 @@ fn ability(a: &AbilityDef) -> String {
                 condition(c)
             ))
         ),
-        AbilityDef::Mana { cost: c, produce } => format!(
-            "{}: Add {}.",
+        AbilityDef::Mana {
+            cost: c,
+            produce,
+            only_if,
+            spend,
+        } => format!(
+            "{}: Add {}.{}{}",
             cost(c),
             match produce {
                 ManaProduce::One(t) => t.symbol().to_string(),
                 ManaProduce::AnyColor => "one mana of any color".to_string(),
+                ManaProduce::CommanderIdentity =>
+                    "one mana of any color in your commander's color identity".to_string(),
                 ManaProduce::OneOf(of) =>
                     join(of.iter().map(|t| t.symbol().to_string()).collect(), "or",),
                 ManaProduce::Times { of, count } => match of.as_slice() {
@@ -1046,7 +1071,30 @@ fn ability(a: &AbilityDef) -> String {
                         join(of.iter().map(|t| t.symbol().to_string()).collect(), "or")
                     ),
                 },
-            }
+            },
+            spend.as_ref().map_or(String::new(), |r| {
+                let mut uses: Vec<String> = Vec::new();
+                if !r.spells.is_empty() {
+                    uses.push(format!(
+                        "cast {} spells",
+                        join(r.spells.iter().map(spell_kind).collect(), "or")
+                    ));
+                }
+                if !r.abilities.is_empty() {
+                    uses.push(format!(
+                        "activate abilities of {}",
+                        join(
+                            r.abilities.iter().map(|s| selector(s, true)).collect(),
+                            "or"
+                        )
+                    ));
+                }
+                format!(" Spend this mana only to {}.", join(uses, "or"))
+            }),
+            only_if.as_ref().map_or(String::new(), |c| format!(
+                " Activate only {}.",
+                condition(c)
+            ))
         ),
         AbilityDef::Triggered {
             when,
@@ -1091,7 +1139,12 @@ fn ability(a: &AbilityDef) -> String {
             format!("{subject} {}{when}.", continuous(effects, plural))
         }
         AbilityDef::Replacement { replaces, with } => {
+            let others;
             let what = match replaces {
+                Replaces::OtherEnters(s) => {
+                    others = format!("Each {}", selector(s, false));
+                    others.as_str()
+                }
                 Replaces::CreateTokens => "If an effect would create tokens under your control",
                 Replaces::PutCountersOnYourPermanents => {
                     "If an effect would put counters on a permanent you control"
@@ -1113,6 +1166,13 @@ fn ability(a: &AbilityDef) -> String {
                     format!(
                         "{what} enters with {n} {} counter(s) on it.",
                         counter(*kind)
+                    )
+                }
+                ReplaceWith::EntersWithCounted { kind, amount: a } => {
+                    format!(
+                        "{what} enters with X {} counters on it, where X is {}.",
+                        counter(*kind),
+                        amount(a)
                     )
                 }
             }

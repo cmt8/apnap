@@ -245,9 +245,11 @@ pub fn count_amount(
             .into_iter()
             .map(|id| chars(st, id).power.unwrap_or(0).max(0) as u32)
             .sum(),
-        Amount::X | Amount::SourcePower | Amount::TriggeringPower | Amount::TriggeringToughness => {
-            0
-        }
+        Amount::X
+        | Amount::SourcePower
+        | Amount::TriggeringPower
+        | Amount::TriggeringToughness
+        | Amount::SacrificedPower => 0,
     }
 }
 

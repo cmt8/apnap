@@ -35,6 +35,10 @@ pub enum Setup {
     /// A soak over every card that compiles from Forge's scripts (D-046): each seat gets a
     /// 60-card two-colour deck drawn at random (by the game's seed) from all of them.
     Forge { players: u8 },
+    /// M4: a Commander game with the four precons in seat order (D-034), as far as their
+    /// cards compile from Forge's scripts: a card that doesn't yet is left out, and basic
+    /// lands are trimmed to keep the deck's proportion of lands (D-053). Needs the caches.
+    Precon { players: u8 },
 }
 
 /// The real-card decks, in seat order.
@@ -56,6 +60,7 @@ impl Setup {
             | Setup::M2 { players }
             | Setup::Commander { players }
             | Setup::Real { players }
+            | Setup::Precon { players }
             | Setup::Forge { players } => players,
         }
     }
@@ -69,6 +74,7 @@ impl Setup {
             Setup::Commander { players } => format!("cmd-{players}p"),
             Setup::Real { players } => format!("real-{players}p"),
             Setup::Forge { players } => format!("forge-{players}p"),
+            Setup::Precon { players } => format!("precon-{players}p"),
         }
     }
 
@@ -83,6 +89,10 @@ impl Setup {
         if let Some(rest) = label.strip_prefix("forge-") {
             let n = rest.strip_suffix('p')?.parse().ok()?;
             return Some(Setup::Forge { players: n });
+        }
+        if let Some(rest) = label.strip_prefix("precon-") {
+            let n = rest.strip_suffix('p')?.parse().ok()?;
+            return Some(Setup::Precon { players: n });
         }
         if let Some(rest) = label.strip_prefix("real-") {
             let n = rest.strip_suffix('p')?.parse().ok()?;
@@ -143,6 +153,36 @@ impl Setup {
                 .collect();
             return engine_core::new_game(config, catalog, &decks, seed).expect("valid setup");
         }
+        if let Setup::Precon { players } = self {
+            let lib = forge_library();
+            let base = catalog();
+            let lists: Vec<PreconDeck> = (0..players as usize)
+                .map(|i| precon_deck(&lib, PRECON_DECKS[i % PRECON_DECKS.len()]))
+                .collect();
+            let names = lists
+                .iter()
+                .flat_map(|d| d.cards.iter().chain(std::iter::once(&d.commander)))
+                .map(String::as_str);
+            let catalog = Arc::new(
+                lib.catalog_for(&base, names)
+                    .unwrap_or_else(|missing| panic!("cards that don't compile: {missing:?}")),
+            );
+            let id = |n: &String| catalog.find(n).expect("in the catalog");
+            let decks: Vec<Vec<CardDefId>> = lists
+                .iter()
+                .map(|d| d.cards.iter().map(id).collect())
+                .collect();
+            let commanders: Vec<Option<CardDefId>> =
+                lists.iter().map(|d| Some(id(&d.commander))).collect();
+            return engine_core::new_game_with_commanders(
+                GameConfig::commander(players),
+                catalog,
+                &decks,
+                &commanders,
+                seed,
+            )
+            .expect("valid commander setup");
+        }
         if let Setup::Forge { players } = self {
             let config = if players == 2 {
                 GameConfig::constructed_1v1()
@@ -172,7 +212,10 @@ impl Setup {
             Setup::M1 { players } => (GameConfig::free_for_all(players), "m1_red_green.ron"),
             Setup::M2 { players: 2 } => (GameConfig::constructed_1v1(), "m2_mixed.ron"),
             Setup::M2 { players } => (GameConfig::free_for_all(players), "m2_mixed.ron"),
-            Setup::Commander { .. } | Setup::Real { .. } | Setup::Forge { .. } => {
+            Setup::Commander { .. }
+            | Setup::Real { .. }
+            | Setup::Forge { .. }
+            | Setup::Precon { .. } => {
                 unreachable!("handled above")
             }
         };
@@ -209,6 +252,82 @@ pub const PRECON_DECKS: &[&str] = &[
     "precon_reign_of_dragons.ron",
     "precon_tramplesaurus_rex.ron",
 ];
+
+/// A precon as it can be played today (D-053).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreconDeck {
+    pub name: String,
+    pub commander: String,
+    /// The library: one name per card.
+    pub cards: Vec<String>,
+    /// The cards of the list that don't compile yet, and so are left out.
+    pub missing: Vec<String>,
+    /// Basic lands taken out to keep the proportion of lands.
+    pub basics_trimmed: u32,
+}
+
+/// The playable part of a precon: every card of its list that compiles. Basic lands are
+/// trimmed in proportion to the other cards left out, so that the deck keeps its share of
+/// lands. Panics if the commander itself doesn't compile.
+pub fn precon_deck(lib: &card_db::forge::Library, file: &str) -> PreconDeck {
+    let list = precon_list(file);
+    let base = catalog();
+    let is_basic = |n: &str| {
+        base.find(n).is_some_and(|id| {
+            base.get(id)
+                .supertypes
+                .contains(&card_model::Supertype::Basic)
+        })
+    };
+    let compiles = |n: &str| base.find(n).is_some() || lib.cards.contains_key(n);
+    let commander = list.commander.clone().expect("a precon has a commander");
+    assert!(
+        compiles(&commander),
+        "{}: the commander {commander} doesn't compile yet: {:?}",
+        list.name,
+        lib.blocked.get(&commander)
+    );
+    let (mut others, mut kept, mut basics, mut missing) = (0u32, 0u32, 0u32, Vec::new());
+    for (n, name) in &list.cards {
+        if is_basic(name) {
+            basics += n;
+        } else {
+            others += n;
+            if compiles(name) {
+                kept += n;
+            } else {
+                missing.push(name.clone());
+            }
+        }
+    }
+    // Round to nearest; never fewer than one basic if the list has any.
+    let keep_basics = if others == 0 {
+        basics
+    } else {
+        ((basics * kept * 2 + others) / (others * 2)).max(basics.min(1))
+    };
+    let mut trim = basics - keep_basics;
+    let basics_trimmed = trim;
+    let mut cards = Vec::new();
+    for (n, name) in &list.cards {
+        let mut n = *n;
+        if is_basic(name) {
+            let cut = trim.min(n);
+            n -= cut;
+            trim -= cut;
+        } else if !compiles(name) {
+            continue;
+        }
+        cards.extend(std::iter::repeat_n(name.clone(), n as usize));
+    }
+    PreconDeck {
+        name: list.name,
+        commander,
+        cards,
+        missing,
+        basics_trimmed,
+    }
+}
 
 /// A precon's unresolved list: (deck name, commander, [(count, card name)]).
 pub fn precon_list(file: &str) -> card_db::DeckFile {

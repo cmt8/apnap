@@ -201,6 +201,26 @@ pub enum GameAction {
         /// The bottom cards go in a random order instead of the listed one.
         random_bottom: bool,
     },
+    /// CR 106.6: add one mana that can only be spent as mana ability `index` of `card` says.
+    AddRestrictedMana {
+        player: PlayerId,
+        mana: ManaType,
+        card: card_model::CardDefId,
+        index: u16,
+    },
+    /// CR 106.6: `amount` of the restricted mana at `entry` is about to pay for something
+    /// it may be spent on: it joins the rest of the pool, to be paid with it.
+    ReleaseRestrictedMana {
+        player: PlayerId,
+        entry: u32,
+        amount: u32,
+    },
+    /// CR 608.2h: record on a stack object the total power of what was sacrificed to pay
+    /// for it ("where X is the sacrificed creature's power").
+    SetSacrificedPower {
+        object: ObjectId,
+        power: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -430,9 +450,58 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             });
             ActionResult::Done
         }
+        GameAction::AddRestrictedMana {
+            player,
+            mana,
+            card,
+            index,
+        } => {
+            let pool = &mut st.player_mut(player).restricted_mana;
+            match pool
+                .iter_mut()
+                .find(|r| r.mana == mana && r.card == card && r.index == index)
+            {
+                Some(r) => r.amount += 1,
+                None => pool.push(crate::state::RestrictedMana {
+                    mana,
+                    amount: 1,
+                    card,
+                    index,
+                }),
+            }
+            st.emit(Event::ManaAdded { player, mana });
+            ActionResult::Done
+        }
+        GameAction::ReleaseRestrictedMana {
+            player,
+            entry,
+            amount,
+        } => {
+            let pl = st.player_mut(player);
+            let r = &mut pl.restricted_mana[entry as usize];
+            debug_assert!(r.amount >= amount);
+            r.amount -= amount;
+            let mana = r.mana;
+            pl.mana_pool.add(mana, amount);
+            pl.restricted_mana.retain(|r| r.amount > 0);
+            ActionResult::Done
+        }
+        GameAction::SetSacrificedPower { object, power } => {
+            if let Some(so) = st.stack.iter_mut().find(|s| s.id == object) {
+                so.sacrificed_power = power;
+            }
+            ActionResult::Done
+        }
         GameAction::EmptyManaPool { player } => {
+            let restricted: u32 = st
+                .player(player)
+                .restricted_mana
+                .iter()
+                .map(|r| r.amount)
+                .sum();
+            st.player_mut(player).restricted_mana.clear();
             let pool = &mut st.player_mut(player).mana_pool;
-            let amount = pool.total();
+            let amount = pool.total() + restricted;
             *pool = Default::default();
             if amount > 0 {
                 st.emit(Event::ManaEmptied { player, amount });
@@ -522,6 +591,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 modes: Vec::new(),
                 x: 0,
                 targets: Vec::new(),
+                sacrificed_power: 0,
             });
             st.emit(Event::AbilityActivated {
                 player: controller,
@@ -694,6 +764,7 @@ fn perform_move(
             modes: Vec::new(),
             x: 0,
             targets: Vec::new(),
+            sacrificed_power: 0,
         });
     } else {
         let list = st.zones.list_mut(to, old.owner);
@@ -758,5 +829,6 @@ fn leave_game(st: &mut GameState, p: PlayerId) {
     }
     // Their mana pool and life no longer matter; priority is handled by the priority frame.
     st.player_mut(p).mana_pool = Default::default();
+    st.player_mut(p).restricted_mana.clear();
     st.emit(Event::PlayerLeftGame { player: p });
 }

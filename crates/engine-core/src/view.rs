@@ -74,7 +74,11 @@ pub struct PlayerPublic {
     pub has_lost: bool,
     pub hand_size: usize,
     pub library_size: usize,
+    /// All unspent mana, restricted or not.
     pub mana_pool: ManaPool,
+    /// How much of `mana_pool` can only be spent in certain ways (CR 106.6).
+    #[serde(default)]
+    pub restricted_mana: [u32; 6],
     pub graveyard: Vec<ObjectView>,
     /// CR 903.10a: combat damage taken from each commander card.
     pub commander_damage: Vec<(CardInstanceId, u32)>,
@@ -153,7 +157,20 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
                 has_lost: p.has_lost,
                 hand_size: st.zones.hands[p.id.index()].len(),
                 library_size: st.zones.libraries[p.id.index()].len(),
-                mana_pool: p.mana_pool,
+                mana_pool: {
+                    let mut pool = p.mana_pool;
+                    for r in &p.restricted_mana {
+                        pool.add(r.mana, r.amount);
+                    }
+                    pool
+                },
+                restricted_mana: {
+                    let mut a = [0u32; 6];
+                    for r in &p.restricted_mana {
+                        a[r.mana.index()] += r.amount;
+                    }
+                    a
+                },
                 graveyard: views(st, &st.zones.graveyards[p.id.index()]),
                 commander_damage: p.commander_damage.iter().map(|(c, n)| (*c, *n)).collect(),
                 commander_casts: p.commander_casts.iter().map(|(c, n)| (*c, *n)).collect(),

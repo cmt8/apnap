@@ -125,3 +125,20 @@
 
 ## Tests
 `crates/harness/tests/rules_m2.rs`: `cr_614_*`, `cr_615_*`, `cr_616_*`.
+
+## Entering with counters: "for each", another permanent's ability, X (D-052)
+> 614.1c Effects that read “[This permanent] enters with . . . ,” “As [this permanent] enters . . . ,” or “[This permanent] enters as . . . “ are replacement effects.
+
+> 614.12. Some replacement effects modify how a permanent enters the battlefield. (See rules 614.1c–d.) Such effects may come from the permanent itself if they affect only that permanent (as opposed to a general subset of permanents that includes it). They may also come from other sources. To determine which replacement effects apply and how they apply, check the characteristics of the permanent as it would exist on the battlefield, taking into account replacement effects that have already modified how it enters the battlefield (see rule 616.1), continuous effects from the permanent’s own static abilities that would apply to it once it’s on the battlefield, and continuous effects that already exist and would apply to the permanent.
+
+> 122.6. Some spells and abilities refer to counters being put on an object. This refers to putting counters on that object while it’s on the battlefield and also to an object that’s given counters as it enters the battlefield.
+
+> 107.3m If an object’s enters-the-battlefield triggered ability or replacement effect refers to X, and the spell that became that object as it resolved had a value of X chosen for any of its costs, the value of X for that ability is the same as the value of X for that spell, although the value of X for that permanent is 0. This is an exception to rule 107.3i.
+
+Engine: `Replaces::OtherEnters(selector)` applies to another permanent that would enter
+the battlefield and matches the selector *as it would exist there* (614.12), relative to
+the source's controller; the source must be on the battlefield, so a permanent never
+counts for itself as it enters. `ReplaceWith::EntersWithCounted` is evaluated when the
+effect is applied to the event — "for each Angel you already control" doesn't count the
+one entering. For the permanent's own "enters with X counters", `Amount::X` is the X of
+the spell it is entering as (107.3m), read from its stack object.

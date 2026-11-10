@@ -809,6 +809,47 @@ parallel worktrees.) Rules text: `docs/rules-notes/702-evasion-protection-keywor
   the user's suggestion; both were stopped by declined tool calls inside their worktrees
   and left only partial, uncommitted work there.
 
+## D-052 Mana for the precons: Treasure, commander identity, restrictions; cost steps in rules order (2026-11-09)
+The user asked for the precons to be playable ("so I have something to play and test");
+their commanders and mana rocks needed these.
+- **Mana abilities are per ability, not per permanent** (`cast::ManaSource`): plain "{T}:
+  Add one mana" abilities of a permanent are merged, every other one (several mana,
+  "sacrifice this", a spending restriction) is an alternative way to tap it. This replaces
+  D-049's "a multi-mana ability must be the permanent's only mana ability". What remains
+  unmodelled, and is rejected by `card_db::validate`: two abilities of one permanent that
+  differ in more than the mana's type and make the same type (the player picks an ability
+  by permanent + type), and mana abilities whose cost is more than `{T}` and "sacrifice
+  this" (signets' `{1}, {T}`, "sacrifice a creature: add …").
+- **Treasure:** the sacrifice is applied the moment the ability is activated, in the middle
+  of paying for something else (`Flow::Continue([cast frame, Apply])`).
+- **The order of cost steps changed to the rules' order** (CR 601.2g then 601.2h): mana
+  abilities first, then the choice of what to sacrifice and discard, then everything is
+  paid. Before, the sacrifice was chosen before the mana, which with Treasure would have
+  let one permanent pay two costs. `SacLimit` keeps enough sacrifice candidates out of the
+  mana payment that the cost can always be completed (D-019). Replays recorded before this
+  change that pay such costs no longer replay.
+- **Commander identity mana**, **restricted mana** (`PlayerState::restricted_mana`, new
+  `GameAction`s `AddRestrictedMana` / `ReleaseRestrictedMana`), **"activate only if" on mana
+  abilities**, **`Effect::AddMana`**, **`Amount::SacrificedPower`**: see
+  `docs/rules-notes/601-casting-602-activating-605-mana.md`.
+- **Entering with counters:** `K:etbCounter` (fixed, counted, or the spell's own X) and
+  `K:ETBReplacement` when it puts counters on other entering permanents
+  (`Replaces::OtherEnters`, `ReplaceWith::EntersWithCounted`). `Replaces`/`ReplaceWith` are
+  no longer `Copy`. Counters other than +1/+1 and -1/-1 are still not modelled.
+- State hashes changed (new fields on `PlayerState`, `StackObject`); event-log hashes did
+  not. Golden file re-blessed.
+- The heuristic AI taps permanents that stay before sacrificing Treasures.
+
+## D-053 The precons in the app before they are complete (2026-11-09)
+`Setup::Precon { players }` (`precon-Np`, first in the app's menu) is a Commander game with
+the four precons in seat order, **as far as their cards compile**: a card that doesn't
+compile yet is left out of the deck — never approximated — and basic lands are trimmed in
+proportion (`harness::precon_deck`), so that a deck missing a third of its spells isn't
+two-thirds land. The decks are therefore smaller than 100 cards for now and grow as
+`harness coverage` does; Commander deck validation (CR 903.5a) is not applied to this
+setup. All four commanders compile. Chosen over waiting for 100% because the user wants to
+play and test now; chosen over filling with basics because that plays badly.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

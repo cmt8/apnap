@@ -43,9 +43,11 @@ pub enum CastStage {
     Modes,
     X,
     Targets,
-    /// CR 601.2h: choose what to sacrifice / discard for the cost (paid with the mana).
+    /// CR 601.2h: choose what to sacrifice / discard for the cost. This comes after the
+    /// mana abilities (CR 601.2g): what was sacrificed for mana can't be chosen any more.
     ChooseSacrifice,
     ChooseDiscard,
+    /// CR 601.2g: mana abilities, until the pool covers the mana in the cost.
     Pay,
     PayGeneric,
 }
@@ -73,6 +75,9 @@ pub struct CastFrame {
     pub pay_sacrifice: Vec<ObjectId>,
     #[serde(default)]
     pub pay_discard: Vec<ObjectId>,
+    /// Which mana in the pool pays the generic part of the cost (per mana type).
+    #[serde(default)]
+    pub generic: [u32; 6],
 }
 
 /// CR 903.8: the commander tax `p` would pay to cast `card` from the command zone now.
@@ -284,52 +289,192 @@ pub(crate) fn can_tap_for_ability(st: &GameState, id: ObjectId) -> bool {
     !o.tapped && (!c.is(CardType::Creature) || !o.summoning_sick || c.has(Keyword::Haste))
 }
 
-/// Untapped mana sources `p` controls (battlefield order) and the mana types each can make.
-/// Every M1 mana ability costs exactly `{T}` (D-021), so one source = one mana.
-/// A permanent that can be tapped for mana now: one activation adds `count` mana, all of
-/// one type chosen from `mask` (CR 605). `count` is 1 except for "Add {C}{C}", "add three
-/// mana of any one color" (card-db: such an ability is the permanent's only mana ability).
+/// What mana is being spent on (CR 106.6: some mana can only be spent in certain ways).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Payee {
+    /// A spell: the card being cast (in hand before it is announced, then on the stack).
+    Spell(ObjectId),
+    /// An activated ability of this permanent.
+    Ability(ObjectId),
+}
+
+fn payee_of(source: &CastSource) -> Option<Payee> {
+    match source {
+        CastSource::Card(card) => Some(Payee::Spell(*card)),
+        CastSource::Ability { source, .. } => Some(Payee::Ability(*source)),
+        CastSource::Trigger(_) => None,
+    }
+}
+
+/// CR 106.6: may mana restricted by `r` pay for `payee`, as `p` spends it?
+fn may_spend(st: &GameState, p: PlayerId, r: &card_model::ManaRestriction, payee: Payee) -> bool {
+    match payee {
+        Payee::Spell(card) => {
+            let c = chars(st, card);
+            let facts = crate::layers::Facts {
+                id: card,
+                controller: p,
+                is_token: false,
+                tapped: false,
+                attacking: false,
+                blocking: false,
+            };
+            r.spells
+                .iter()
+                .any(|s| crate::layers::matches_parts(s, &c, facts, card, p))
+        }
+        Payee::Ability(source) => {
+            let c = chars(st, source);
+            r.abilities
+                .iter()
+                .any(|s| crate::layers::matches(st, s, &c, st.object(source), source, p))
+        }
+    }
+}
+
+/// The restriction on a unit of restricted mana in a pool.
+fn restriction<'a>(
+    st: &'a GameState,
+    r: &crate::state::RestrictedMana,
+) -> &'a card_model::ManaRestriction {
+    match &st.catalog.get(r.card).abilities[r.index as usize] {
+        AbilityDef::Mana {
+            spend: Some(spend), ..
+        } => spend,
+        other => unreachable!("not a restricted mana ability: {other:?}"),
+    }
+}
+
+/// The mana `p` could spend on `payee`: the unrestricted pool plus the restricted mana
+/// that may pay for it (CR 106.6).
+pub(crate) fn usable_pool(st: &GameState, p: PlayerId, payee: Option<Payee>) -> ManaPool {
+    let mut pool = st.player(p).mana_pool;
+    if let Some(payee) = payee {
+        for r in &st.player(p).restricted_mana {
+            if may_spend(st, p, restriction(st, r), payee) {
+                pool.add(r.mana, r.amount);
+            }
+        }
+    }
+    pool
+}
+
+/// CR 903.4: the colors of mana "in your commander's color identity", as a mask. Empty
+/// without a commander (CR 903.4f: the ability then adds nothing).
+fn identity_mask(st: &GameState, p: PlayerId) -> ManaMask {
+    let mut mask = 0;
+    for (owner, instance) in &st.commanders {
+        if *owner != p {
+            continue;
+        }
+        // CR 903.4a: the identity established for the card as the game began.
+        if let Some(o) = st.objects.values().find(|o| o.card_instance == *instance) {
+            for c in card_model::color_identity(st.catalog.get(o.card)) {
+                mask |= 1 << ManaType::from_color(c).index();
+            }
+        }
+    }
+    mask
+}
+
+/// One way to tap a permanent for mana now (CR 605, 106.12): one activation adds `count`
+/// mana, all of one type chosen from `mask`. Entries with the same `id` are different
+/// mana abilities of one permanent: tapping it for one excludes the others. A permanent's
+/// plain abilities ("{T}: Add one mana", including what its land types give it) are merged
+/// into one entry; `ability` names the printed ability of any other entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ManaSource {
     pub id: ObjectId,
     pub mask: ManaMask,
     pub count: u32,
+    /// "{T}, Sacrifice this: Add …" (Treasure, CR 111.10a).
+    pub sacrifice: bool,
+    pub ability: Option<u16>,
 }
 
+/// The mana abilities `p` can activate now, in battlefield order. With a `payee`, sources
+/// whose mana couldn't be spent on it (CR 106.6) are left out.
 pub(crate) fn mana_sources(
     st: &GameState,
     p: PlayerId,
     exclude: Option<ObjectId>,
+    payee: Option<Payee>,
 ) -> Vec<ManaSource> {
-    st.zones
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|&id| Some(id) != exclude && controller_of(st, id) == p)
-        .filter_map(|id| {
-            let c = chars(st, id);
-            let mut mask: ManaMask = 0;
-            let mut count = 1;
-            if c.is(CardType::Land) {
-                // CR 305.6: each basic land type grants "{T}: Add [mana]".
-                for t in &c.land_types {
-                    mask |= 1 << ManaType::from_color(t.produces()).index();
-                }
+    let mut out = Vec::new();
+    let mut identity: Option<ManaMask> = None;
+    for &id in &st.zones.battlefield {
+        // Every mana ability's cost includes {T} (card-db checks it).
+        if Some(id) == exclude || controller_of(st, id) != p || !can_tap_for_ability(st, id) {
+            continue;
+        }
+        let c = chars(st, id);
+        let start = out.len();
+        let mut plain: ManaMask = 0;
+        if c.is(CardType::Land) {
+            // CR 305.6: each basic land type grants "{T}: Add [mana]".
+            for t in &c.land_types {
+                plain |= 1 << ManaType::from_color(t.produces()).index();
             }
-            for (_, a) in abilities(st, id) {
-                if let AbilityDef::Mana { produce, .. } = a {
-                    mask |= mask_of(&produce.options());
-                    count = count.max(produce.count());
-                }
+        }
+        for (index, a) in abilities(st, id) {
+            let AbilityDef::Mana {
+                cost,
+                produce,
+                only_if,
+                spend,
+            } = a
+            else {
+                continue;
+            };
+            // "Activate only if …" (CR 602.5b).
+            if !triggers::condition_holds(st, only_if.as_ref(), p, id) {
+                continue;
             }
-            (mask != 0 && can_tap_for_ability(st, id)).then_some(ManaSource { id, mask, count })
-        })
-        .collect()
+            if let (Some(r), Some(payee)) = (spend, payee)
+                && !may_spend(st, p, r, payee)
+            {
+                continue;
+            }
+            let mask = match produce {
+                card_model::ManaProduce::CommanderIdentity => {
+                    *identity.get_or_insert_with(|| identity_mask(st, p))
+                }
+                other => mask_of(&other.options()),
+            };
+            if mask == 0 {
+                continue;
+            }
+            if produce.count() == 1 && !cost.sacrifice_self && spend.is_none() {
+                plain |= mask;
+            } else {
+                out.push(ManaSource {
+                    id,
+                    mask,
+                    count: produce.count(),
+                    sacrifice: cost.sacrifice_self,
+                    ability: Some(index),
+                });
+            }
+        }
+        if plain != 0 {
+            out.insert(
+                start,
+                ManaSource {
+                    id,
+                    mask: plain,
+                    count: 1,
+                    sacrifice: false,
+                    ability: None,
+                },
+            );
+        }
+    }
+    out
 }
 
 /// Can `req` be paid from `pool` plus `sources` (CR 601.2g–h)? Exact: a source that makes
-/// several mana of one *chosen* type is tried with each choice. (Mana beyond the cost is
-/// allowed: it stays in the pool.)
+/// several mana of one *chosen* type is tried with each choice, and so is each way to tap
+/// a permanent that has several. (Mana beyond the cost is allowed: it stays in the pool.)
 pub(crate) fn payable(req: &ManaRequirement, pool: &ManaPool, sources: &[ManaSource]) -> bool {
     // How many multi-mana sources with a real choice are tried exhaustively (5 types each).
     const BRANCHING: usize = 4;
@@ -340,31 +485,45 @@ pub(crate) fn payable(req: &ManaRequirement, pool: &ManaPool, sources: &[ManaSou
         masks: &mut Vec<ManaMask>,
         branches: usize,
     ) -> bool {
-        let Some((first, rest)) = sources.split_first() else {
+        let Some(first) = sources.first() else {
             return req.feasible(pool, masks);
         };
-        let single = first.mask.count_ones() == 1;
-        if first.count == 1 || single || branches == 0 {
+        // The ways to tap one permanent exclude each other.
+        let run = sources.iter().take_while(|s| s.id == first.id).count();
+        let (ways, rest) = sources.split_at(run);
+        ways.iter()
+            .any(|way| tap(req, pool, way, rest, masks, branches))
+    }
+    fn tap(
+        req: &ManaRequirement,
+        pool: &ManaPool,
+        way: &ManaSource,
+        rest: &[ManaSource],
+        masks: &mut Vec<ManaMask>,
+        branches: usize,
+    ) -> bool {
+        let single = way.mask.count_ones() == 1;
+        if way.count == 1 || single || branches == 0 {
             // One unit per mana when the type is fixed; a choice beyond the branching
             // budget counts as a single mana (never more than it can really give).
-            let n = if first.count == 1 || single {
-                first.count
+            let n = if way.count == 1 || single {
+                way.count
             } else {
                 1
             };
             for _ in 0..n {
-                masks.push(first.mask);
+                masks.push(way.mask);
             }
             let ok = go(req, pool, rest, masks, branches);
             masks.truncate(masks.len() - n as usize);
             return ok;
         }
-        for t in types_in(first.mask) {
-            for _ in 0..first.count {
+        for t in types_in(way.mask) {
+            for _ in 0..way.count {
                 masks.push(1 << t.index());
             }
             let ok = go(req, pool, rest, masks, branches - 1);
-            masks.truncate(masks.len() - first.count as usize);
+            masks.truncate(masks.len() - way.count as usize);
             if ok {
                 return true;
             }
@@ -374,8 +533,119 @@ pub(crate) fn payable(req: &ManaRequirement, pool: &ManaPool, sources: &[ManaSou
     go(req, pool, sources, &mut Vec::new(), BRANCHING)
 }
 
-fn feasible(st: &GameState, p: PlayerId, req: &ManaRequirement, exclude: Option<ObjectId>) -> bool {
-    payable(req, &st.player(p).mana_pool, &mana_sources(st, p, exclude))
+/// CR 601.2g–h: a permanent sacrificed for mana (Treasure) can't also be sacrificed to pay
+/// the cost itself. Of the mana sources `ids` — those that sacrifice themselves and could
+/// be chosen for the cost's "sacrifice N" — at most `max` may be used, so that N remain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SacLimit {
+    pub ids: Vec<ObjectId>,
+    pub max: usize,
+}
+
+/// [`payable`], using at most `limit.max` of the sources in `limit.ids`.
+pub(crate) fn payable_within(
+    req: &ManaRequirement,
+    pool: &ManaPool,
+    sources: &[ManaSource],
+    limit: Option<&SacLimit>,
+) -> bool {
+    let limited = |s: &ManaSource| s.sacrifice && limit.is_some_and(|l| l.ids.contains(&s.id));
+    let max = limit.map_or(0, |l| l.max);
+    if sources.iter().filter(|s| limited(s)).count() <= max {
+        return payable(req, pool, sources);
+    }
+    // Which `max` of them to use: sources that make the same mana are interchangeable, so
+    // only how many of each kind matters.
+    let mut kinds: Vec<(ManaMask, u32)> = Vec::new();
+    for s in sources.iter().filter(|s| limited(s)) {
+        if !kinds.contains(&(s.mask, s.count)) {
+            kinds.push((s.mask, s.count));
+        }
+    }
+    fn choose(
+        req: &ManaRequirement,
+        pool: &ManaPool,
+        sources: &[ManaSource],
+        limited: &dyn Fn(&ManaSource) -> bool,
+        kinds: &[(ManaMask, u32)],
+        take: &mut Vec<usize>,
+        left: usize,
+    ) -> bool {
+        if take.len() == kinds.len() {
+            let mut used = alloc::vec![0usize; kinds.len()];
+            let kept: Vec<ManaSource> = sources
+                .iter()
+                .filter(|s| {
+                    if !limited(s) {
+                        return true;
+                    }
+                    let k = kinds
+                        .iter()
+                        .position(|k| *k == (s.mask, s.count))
+                        .expect("a kind");
+                    used[k] += 1;
+                    used[k] <= take[k]
+                })
+                .copied()
+                .collect();
+            return payable(req, pool, &kept);
+        }
+        let k = kinds[take.len()];
+        let have = sources
+            .iter()
+            .filter(|s| limited(s) && (s.mask, s.count) == k)
+            .count();
+        for n in (0..=have.min(left)).rev() {
+            take.push(n);
+            let ok = choose(req, pool, sources, limited, kinds, take, left - n);
+            take.pop();
+            if ok {
+                return true;
+            }
+        }
+        false
+    }
+    choose(req, pool, sources, &limited, &kinds, &mut Vec::new(), max)
+}
+
+/// The mana sources `p` can use to pay for `source`, and the limit the cost's own
+/// sacrifice puts on them.
+fn sources_for(
+    st: &GameState,
+    p: PlayerId,
+    source: &CastSource,
+    prop: &Proposal,
+    payee: Option<Payee>,
+) -> (Vec<ManaSource>, Option<SacLimit>) {
+    let mut sources = mana_sources(st, p, prop.tap, payee);
+    // "Sacrifice this" in the cost being paid: it can't be sacrificed for mana as well.
+    sources.retain(|s| !(s.sacrifice && Some(s.id) == prop.sacrifice));
+    let limit = prop.extra.sacrifice.as_ref().map(|ch| {
+        let candidates = sacrifice_candidates(st, p, ch, cost_source(source), prop.sacrifice);
+        SacLimit {
+            ids: sources
+                .iter()
+                .filter(|s| s.sacrifice && candidates.contains(&s.id))
+                .map(|s| s.id)
+                .collect(),
+            max: candidates.len().saturating_sub(ch.count as usize),
+        }
+    });
+    (sources, limit)
+}
+
+/// Can `p` pay the mana `req` for `source` (with what is in their pool and the mana
+/// abilities they could activate), and still pay the rest of its cost?
+fn feasible(
+    st: &GameState,
+    p: PlayerId,
+    source: &CastSource,
+    prop: &Proposal,
+    payee: Option<Payee>,
+    req: &ManaRequirement,
+) -> bool {
+    let (sources, limit) = sources_for(st, p, source, prop, payee);
+    payable_within(req, &usable_pool(st, p, payee), &sources, limit.as_ref())
 }
 
 /// Mode indices whose every target slot has at least one legal choice (CR 700.2a).
@@ -468,7 +738,15 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
         CastSource::Card(card) => (commander_tax(st, p, *card), cost_reduction(st, p, *card)),
         _ => (0, 0),
     };
-    feasible(st, p, &total(&prop.cost, 0, tax, discount), prop.tap)
+    let payee = payee_of(&source);
+    feasible(
+        st,
+        p,
+        &source,
+        &prop,
+        payee,
+        &total(&prop.cost, 0, tax, discount),
+    )
 }
 
 impl CastFrame {
@@ -486,6 +764,7 @@ impl CastFrame {
             from_command: None,
             pay_sacrifice: Vec::new(),
             pay_discard: Vec::new(),
+            generic: [0; 6],
         }
     }
 
@@ -498,6 +777,15 @@ impl CastFrame {
         match &self.source {
             CastSource::Card(_) => proposal(st, &CastSource::Card(self.object.expect("announced"))),
             s => proposal(st, s),
+        }
+    }
+
+    /// What the mana is spent on: the spell as it is now (on the stack), or the ability's
+    /// source.
+    fn payee(&self) -> Option<Payee> {
+        match &self.source {
+            CastSource::Card(_) => self.object.map(Payee::Spell),
+            s => payee_of(s),
         }
     }
 
@@ -639,11 +927,14 @@ impl CastFrame {
                             });
                         } else {
                             let mut max = 0;
+                            let payee = self.payee();
                             while feasible(
                                 st,
                                 p,
+                                &self.source,
+                                &prop,
+                                payee,
                                 &total(&prop.cost, max + 1, self.tax, self.discount),
-                                prop.tap,
                             ) {
                                 max += 1;
                             }
@@ -711,11 +1002,12 @@ impl CastFrame {
                         },
                     );
                     // CR 601.2e: legality is guaranteed by construction (D-019).
-                    self.stage = CastStage::ChooseSacrifice;
+                    self.stage = CastStage::Pay;
                 }
-                // CR 601.2h: which permanents / cards pay the cost. They are chosen here
-                // and leave with the rest of the payment (`finish`), so a land chosen to be
-                // sacrificed can still be tapped for mana first.
+                // CR 601.2h: which permanents / cards pay the cost, chosen once the mana
+                // abilities are done (CR 601.2g): a land can be tapped for mana and then
+                // sacrificed, but a Treasure sacrificed for mana is gone. They leave with
+                // the rest of the payment (`finish`).
                 CastStage::ChooseSacrifice | CastStage::ChooseDiscard => {
                     let sacrificing = self.stage == CastStage::ChooseSacrifice;
                     if let Some(inp) = input.take() {
@@ -760,36 +1052,39 @@ impl CastFrame {
                             return self.ask(kind, Primitive::PickN { min: n, max: n }, options);
                         }
                     }
-                    self.stage = if sacrificing {
-                        CastStage::ChooseDiscard
+                    if sacrificing {
+                        self.stage = CastStage::ChooseDiscard;
                     } else {
-                        CastStage::Pay
-                    };
+                        let prop = self.proposal(st);
+                        return self.finish(st, prop);
+                    }
                 }
                 CastStage::Pay => {
                     // CR 601.2f: total cost, locked in. CR 601.2g: mana abilities.
                     let prop = self.proposal(st);
                     let req = total(&prop.cost, self.x, self.tax, self.discount);
+                    let payee = self.payee();
                     if let Some(inp) = input.take() {
                         let Some(OptionDesc::TapForMana { source, mana }) =
                             inp.picked_one().cloned()
                         else {
                             unreachable!()
                         };
-                        tap_for_mana(st, p, source, mana);
+                        let cost = tap_for_mana(st, p, source, mana, payee);
+                        if !cost.is_empty() {
+                            // CR 605.3b: the mana ability resolves at once; its own cost
+                            // (the sacrifice) is paid now, and this frame carries on after.
+                            let apply = Frame::Apply(ApplyFrame::new(st, cost));
+                            return Flow::Continue(vec![Frame::Cast(self), apply]);
+                        }
                     }
-                    let pool = st.player(p).mana_pool;
+                    let pool = usable_pool(st, p, payee);
                     if req.payable_from(&pool) {
                         match req.forced_generic(&pool) {
                             Some(alloc) => {
-                                return self.finish(
-                                    st,
-                                    req,
-                                    alloc,
-                                    prop.tap,
-                                    prop.sacrifice,
-                                    prop.extra.life,
-                                );
+                                self.generic = alloc;
+                                self.stage = CastStage::ChooseSacrifice;
+                                continue;
                             }
                             None => {
                                 // CR 601.2h: the player picks which floating mana pays generic.
@@ -815,19 +1110,36 @@ impl CastFrame {
                             }
                         }
                     }
-                    let sources = mana_sources(st, p, prop.tap);
+                    let (sources, limit) = sources_for(st, p, &self.source, &prop, payee);
                     let mut options = Vec::new();
-                    for (i, src) in sources.iter().enumerate() {
-                        let mut rest = sources.clone();
-                        rest.remove(i);
+                    for src in &sources {
+                        let rest: Vec<ManaSource> =
+                            sources.iter().filter(|s| s.id != src.id).copied().collect();
+                        // Sacrificing this one for mana leaves one fewer for the cost.
+                        let limit = match &limit {
+                            Some(l) if src.sacrifice && l.ids.contains(&src.id) => {
+                                if l.max == 0 {
+                                    continue;
+                                }
+                                Some(SacLimit {
+                                    ids: l.ids.iter().copied().filter(|i| *i != src.id).collect(),
+                                    max: l.max - 1,
+                                })
+                            }
+                            other => other.clone(),
+                        };
                         for mana in types_in(src.mask) {
+                            let option = OptionDesc::TapForMana {
+                                source: src.id,
+                                mana,
+                            };
+                            if options.contains(&option) {
+                                continue;
+                            }
                             let mut pl = pool;
                             pl.add(mana, src.count);
-                            if payable(&req, &pl, &rest) {
-                                options.push(OptionDesc::TapForMana {
-                                    source: src.id,
-                                    mana,
-                                });
+                            if payable_within(&req, &pl, &rest, limit.as_ref()) {
+                                options.push(option);
                             }
                         }
                     }
@@ -840,8 +1152,6 @@ impl CastFrame {
                 }
                 CastStage::PayGeneric => {
                     let inp = input.take().expect("generic allocation");
-                    let prop = self.proposal(st);
-                    let req = total(&prop.cost, self.x, self.tax, self.discount);
                     let mut alloc = [0u32; 6];
                     for (i, &n) in inp.allocation().iter().enumerate() {
                         let OptionDesc::Mana { mana } = inp.decision.options[i] else {
@@ -849,30 +1159,53 @@ impl CastFrame {
                         };
                         alloc[mana.index()] = n;
                     }
-                    return self.finish(st, req, alloc, prop.tap, prop.sacrifice, prop.extra.life);
+                    self.generic = alloc;
+                    self.stage = CastStage::ChooseSacrifice;
                 }
             }
         }
     }
 
     /// CR 601.2h: pay; CR 601.2i: the spell becomes cast / the ability becomes activated.
-    fn finish(
-        self,
-        st: &mut GameState,
-        req: ManaRequirement,
-        generic: [u32; 6],
-        tap: Option<ObjectId>,
-        sacrifice: Option<ObjectId>,
-        life: u32,
-    ) -> Flow {
+    fn finish(self, st: &mut GameState, prop: Proposal) -> Flow {
         let p = self.player;
+        let req = total(&prop.cost, self.x, self.tax, self.discount);
+        let (tap, sacrifice, life) = (prop.tap, prop.sacrifice, prop.extra.life);
         if req.total() > 0 {
+            // CR 106.6: restricted mana that may pay for this is spent first (it is the
+            // least useful to keep).
+            if let Some(payee) = self.payee() {
+                let mut need = [0u32; 6];
+                for (t, n) in need.iter_mut().enumerate() {
+                    *n = req.specific[t] + self.generic[t];
+                }
+                let mut release: Vec<(u32, u32)> = Vec::new();
+                for (i, r) in st.player(p).restricted_mana.iter().enumerate() {
+                    let n = &mut need[r.mana.index()];
+                    let amount = r.amount.min(*n);
+                    if amount > 0 && may_spend(st, p, restriction(st, r), payee) {
+                        *n -= amount;
+                        release.push((i as u32, amount));
+                    }
+                }
+                // Last first: an emptied entry is removed.
+                for (entry, amount) in release.into_iter().rev() {
+                    execute(
+                        st,
+                        GameAction::ReleaseRestrictedMana {
+                            player: p,
+                            entry,
+                            amount,
+                        },
+                    );
+                }
+            }
             execute(
                 st,
                 GameAction::PayMana {
                     player: p,
                     requirement: req,
-                    generic,
+                    generic: self.generic,
                 },
             );
         }
@@ -896,6 +1229,22 @@ impl CastFrame {
                 .get(id)
                 .is_some_and(|o| o.zone == Zone::Battlefield)
         };
+        if !self.pay_sacrifice.is_empty() {
+            // CR 608.2h: "the sacrificed creature's power" is its power as it last existed.
+            let power = self
+                .pay_sacrifice
+                .iter()
+                .filter(|id| on_battlefield(st, id))
+                .map(|&id| chars(st, id).power.unwrap_or(0).max(0) as u32)
+                .sum();
+            execute(
+                st,
+                GameAction::SetSacrificedPower {
+                    object: self.object.expect("announced"),
+                    power,
+                },
+            );
+        }
         let mut events: Vec<Proposed> = sacrifice
             .iter()
             .chain(self.pay_sacrifice.iter())
@@ -923,15 +1272,50 @@ impl CastFrame {
     }
 }
 
-/// CR 605.3b: activate a `{T}` mana ability; it resolves immediately, adding as many mana
-/// of the chosen type as the ability makes.
-pub(crate) fn tap_for_mana(st: &mut GameState, p: PlayerId, source: ObjectId, mana: ManaType) {
-    let count = mana_sources(st, p, None)
-        .iter()
-        .find(|s| s.id == source)
-        .map_or(1, |s| s.count);
+/// CR 605.3b: activate a mana ability of `source` for `mana`. It resolves immediately,
+/// adding as many mana of the chosen type as the ability makes. Returns the rest of its
+/// cost — "sacrifice this" — for the caller to apply (a replaceable event).
+pub(crate) fn tap_for_mana(
+    st: &mut GameState,
+    p: PlayerId,
+    source: ObjectId,
+    mana: ManaType,
+    payee: Option<Payee>,
+) -> Vec<Proposed> {
+    let way = mana_sources(st, p, None, payee)
+        .into_iter()
+        .find(|s| s.id == source && s.mask & (1 << mana.index()) != 0)
+        .expect("an offered mana ability");
+    let card = st.object(source).card;
+    // CR 106.6: mana with a spending restriction is kept apart.
+    let restricted = way.ability.filter(|i| {
+        matches!(
+            st.catalog.get(card).abilities[*i as usize],
+            AbilityDef::Mana { spend: Some(_), .. }
+        )
+    });
     execute(st, GameAction::Tap { object: source });
-    for _ in 0..count {
-        execute(st, GameAction::AddMana { player: p, mana });
+    for _ in 0..way.count {
+        execute(
+            st,
+            match restricted {
+                Some(index) => GameAction::AddRestrictedMana {
+                    player: p,
+                    mana,
+                    card,
+                    index,
+                },
+                None => GameAction::AddMana { player: p, mana },
+            },
+        );
+    }
+    if way.sacrifice {
+        vec![Proposed::moving(
+            source,
+            Zone::Graveyard,
+            MoveCause::Sacrifice,
+        )]
+    } else {
+        Vec::new()
     }
 }

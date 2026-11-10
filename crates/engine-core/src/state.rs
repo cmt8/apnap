@@ -37,6 +37,20 @@ pub struct PlayerState {
     pub commander_damage: BTreeMap<CardInstanceId, u32>,
     /// CR 903.8: how many times this player has cast each commander from the command zone.
     pub commander_casts: BTreeMap<CardInstanceId, u32>,
+    /// CR 106.6: unspent mana that can only be spent in certain ways, in the order it was
+    /// added. Not part of `mana_pool`.
+    #[serde(default)]
+    pub restricted_mana: Vec<RestrictedMana>,
+}
+
+/// CR 106.6: mana with a spending restriction — the `spend` of mana ability `index` of
+/// card `card`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestrictedMana {
+    pub mana: crate::mana::ManaType,
+    pub amount: u32,
+    pub card: card_model::CardDefId,
+    pub index: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

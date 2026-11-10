@@ -71,7 +71,7 @@ fn tier(setup: Setup) -> u8 {
         Setup::M2 { .. } => 2,
         Setup::Commander { .. } => 3,
         // No label list of its own: the real-card decks reuse M1–M3 decisions.
-        Setup::Real { .. } | Setup::Forge { .. } => 4,
+        Setup::Real { .. } | Setup::Forge { .. } | Setup::Precon { .. } => 4,
     }
 }
 

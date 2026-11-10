@@ -143,11 +143,13 @@ Engine (`frames/cast.rs`):
   (`extra_payable`): enough permanents to sacrifice, enough cards to discard — the card
   being cast doesn't count, it is on the stack by then (601.2a) — and life total ≥ the life
   to pay.
-- Which permanents and cards pay is asked after targets (`CastStage::ChooseSacrifice`,
-  `ChooseDiscard`) and before mana. They leave with the rest of the payment in `finish`
-  (601.2h, one Apply batch: sacrifices, discards, the life loss), so a land chosen to be
-  sacrificed can still be tapped for mana first. They are events like any other:
-  replaceable, and they trigger ("dies", "whenever you lose life").
+- Which permanents and cards pay is asked after the mana abilities (601.2g, `CastStage::Pay`)
+  and before the payment itself (`CastStage::ChooseSacrifice`, `ChooseDiscard`; D-052 — until
+  then it was asked before the mana). They leave with the rest of the payment in `finish`
+  (601.2h, one Apply batch: sacrifices, discards, the life loss), so a land can be tapped
+  for mana and then sacrificed, while a Treasure sacrificed for mana is no longer there to
+  be chosen. They are events like any other: replaceable, and they trigger ("dies",
+  "whenever you lose life").
 - A spell's additional cost is `AbilityDef::AdditionalCost` on its card. Forge restates the
   whole cost on the `SP$` line (`Cost$ 1 B Sac<1/Creature>`); the compiler requires the mana
   in it to be the card's mana cost and takes the rest as the additional cost.
@@ -168,3 +170,56 @@ one activation adds `count` mana, all of one type the player picks from `mask`
 each type for a source that makes several mana of a chosen type, so that no payment step is
 offered that can't be completed (D-019). Mana that isn't spent stays in the pool until the
 step or phase ends (106.4; `frames/turn.rs`).
+
+## Treasure, commander identity, restricted mana, mana from spells (D-052)
+> 111.10a A Treasure token is a colorless Treasure artifact token with “{T}, Sacrifice this token: Add one mana of any color.”
+
+> 106.6. Some spells or abilities that produce mana restrict how that mana can be spent, have an additional effect that affects the spell or ability that mana is spent on, or create a delayed triggered ability (see rule 603.7a) that triggers when that mana is spent. This doesn’t affect the mana’s type.
+
+> 106.12. To “tap [a permanent] for mana” is to activate a mana ability of that permanent that includes the {T} symbol in its activation cost. See rule 605, “Mana Abilities.”
+
+> 605.5a An ability with a target is not a mana ability, even if it could put mana into a player’s mana pool when it resolves. The same is true for a triggered ability that could produce mana but triggers from an event other than activating a mana ability, or a triggered ability that triggers from activating a mana ability but couldn’t produce mana. These follow the normal rules for activated or triggered abilities, as appropriate.
+
+> 605.5b A spell can never be a mana ability, even if it could put mana into a player’s mana pool when it resolves. It’s cast and resolves just like any other spell. Some older cards were printed with the card type “mana source”; these cards have received errata in the Oracle card reference and are now instants.
+
+> 602.5b If an activated ability has a restriction on its use (for example, “Activate only once each turn”), the restriction continues to apply to that object even if its controller changes.
+
+> 903.4. The Commander variant uses color identity to determine what cards can be in a deck with a certain commander. The color identity of a card is the color or colors of any mana symbols in that card’s mana cost or rules text, plus any colors defined by its characteristic-defining abilities (see rule 604.3) or color indicator (see rule 204).
+
+> 903.4f If an ability refers to the colors or number of colors in a commander’s color identity, that quality is undefined if that player doesn’t have a commander. That part of the ability won’t do anything. Costs that refer to that quality are unpayable.
+
+> 608.2h If an effect requires information from the game (such as the number of creatures on the battlefield), the answer is determined only once, when the effect is applied. If the effect requires information from a specific object, including the source of the ability itself, the effect uses the current information of that object if it’s in the public zone it was expected to be in; if it’s no longer in that zone, or if the effect has moved it from a public zone to a hidden zone, the effect uses the object’s last known information. See rule 113.7a. If an ability states that an object does something, it’s the object as it exists—or as it most recently existed—that does it, not the ability.
+
+Engine (`frames/cast.rs`):
+- `ManaSource { id, mask, count, sacrifice, ability }` is one *way* to tap a permanent for
+  mana. A permanent's plain abilities ("{T}: Add one mana", and what its land types give
+  it) are merged into one entry; any other mana ability (several mana, "sacrifice this",
+  a spending restriction) is its own entry, and entries of one permanent exclude each
+  other in `payable`. The player still picks by permanent and mana type
+  (`OptionDesc::TapForMana`), so card-db rejects a card with two mana abilities that
+  differ in more than the type and make the same type.
+- **Treasure (111.10a, 605.3b):** `tap_for_mana` taps, adds the mana and returns the
+  sacrifice, which the caller applies at once as a `Frame::Apply` (a replaceable event);
+  the cast frame then carries on. The mana ability's cost is paid when it is activated,
+  i.e. before the spell's own costs (601.2g before 601.2h).
+- **One permanent can't pay twice:** a source that sacrifices itself and could also be
+  chosen for the cost's own "sacrifice N" is limited (`SacLimit`): only so many of them may
+  be used for mana that N candidates remain. `can_begin`, the X bound and every tap option
+  use the same check (`payable_within`), so no offered step can dead-end (D-019).
+- **"Activate only if" (602.5b)** on a mana ability: `AbilityDef::Mana::only_if`, checked
+  each time the sources are listed.
+- **Commander identity (903.4, 903.4f):** `ManaProduce::CommanderIdentity` makes one mana of
+  a colour in the identity of the controller's commander(s), taken from the commander
+  card's definition (903.4a); with no commander the ability adds nothing and isn't offered.
+  `color_identity` moved from card-db to card-model so the engine can use it.
+- **Restricted mana (106.6):** `AbilityDef::Mana::spend` (`ManaRestriction { spells,
+  abilities }`). Such mana is kept apart in `PlayerState::restricted_mana` (which ability
+  made it); what a player can spend on a given spell or ability is `usable_pool`. When
+  the cost is paid, matching restricted mana is spent first. While paying for something
+  the mana can't be spent on, its source isn't offered. It empties with the pool (106.4).
+  A player's view shows it as part of the pool, with the restricted part counted.
+- **Mana from a spell or a non-mana ability (605.5):** `Effect::AddMana` — on the stack like
+  any other, the mana arrives on resolution.
+- **"The sacrificed creature's power" (608.2h):** the total power of the permanents chosen
+  for a cost's sacrifice, read in `finish` just before they leave, kept on the stack object
+  (`StackObject::sacrificed_power`) and used as `Amount::SacrificedPower`.

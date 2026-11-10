@@ -69,6 +69,7 @@ fn effect_polarity(e: &Effect) -> Polarity {
         Effect::Apply { effects, .. } => continuous_polarity(effects),
         Effect::May(inner) => effect_polarity(inner),
         Effect::GainLife { .. }
+        | Effect::AddMana { .. }
         | Effect::ReturnToBattlefield { .. }
         | Effect::Draw { .. }
         | Effect::CreateToken { .. }
@@ -990,7 +991,20 @@ impl Agent for HeuristicAgent {
                 }
                 Response::Allocate(alloc)
             }
-            (ChoiceKind::PayMana, Primitive::PickN { .. }) => Response::Pick(vec![0]),
+            (ChoiceKind::PayMana, Primitive::PickN { .. }) => {
+                // Tap what stays before sacrificing what doesn't (Treasure).
+                let keeps = |o: &OptionDesc| match o {
+                    OptionDesc::TapForMana { source, .. } => {
+                        Self::find(v, *source).is_none_or(|ov| {
+                            !self.catalog.get(ov.card).abilities.iter().any(|a| {
+                                matches!(a, AbilityDef::Mana { cost, .. } if cost.sacrifice_self)
+                            })
+                        })
+                    }
+                    _ => true,
+                };
+                Response::Pick(vec![d.options.iter().position(keeps).unwrap_or(0)])
+            }
             _ => return self.fallback.decide(v, d),
         };
         if d.validate(&r).is_ok() {

@@ -107,8 +107,13 @@ impl PriorityFrame {
             ]),
             // CR 117.1d / 605.3a: mana abilities with priority; the mana floats.
             OptionDesc::TapForMana { source, mana } => {
-                tap_for_mana(st, p, source, mana);
-                Flow::then(again)
+                // The ability's own cost may include sacrificing its source (Treasure).
+                let cost = tap_for_mana(st, p, source, mana, None);
+                if cost.is_empty() {
+                    Flow::then(again)
+                } else {
+                    Flow::Continue(vec![again, Frame::Apply(ApplyFrame::new(st, cost))])
+                }
             }
             o => unreachable!("not a priority option: {o:?}"),
         }
@@ -151,12 +156,16 @@ fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
             }
         }
     }
-    for src in mana_sources(st, p, None) {
+    for src in mana_sources(st, p, None, None) {
         for mana in types_in(src.mask) {
-            opts.push(OptionDesc::TapForMana {
+            let option = OptionDesc::TapForMana {
                 source: src.id,
                 mana,
-            });
+            };
+            // Two abilities of one permanent that make the same mana are one option.
+            if !opts.contains(&option) {
+                opts.push(option);
+            }
         }
     }
     opts

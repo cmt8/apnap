@@ -786,15 +786,15 @@ fn sacrificing_a_chosen_permanent_as_a_cost() {
     let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
     sc.card(P1, Zone::Battlefield, "Test Golem");
     let mut s = Script::new(sc.build());
-    // The Altar: either of my creatures (not the opponent's).
-    s.activate("Test Altar");
+    // The Altar: mana abilities first (CR 601.2g), then the choice of what to sacrifice
+    // (CR 601.2h) — either of my creatures (not the opponent's).
+    s.activate("Test Altar").pay();
     assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::Sacrifice));
     assert_eq!(s.options().len(), 2);
     s.pick(
         "the Golem",
         |_, o| matches!(o, OptionDesc::Card { card } if *card == golem),
     );
-    s.pay();
     // Paid on activation: the Golem is gone while the ability is still on the stack.
     assert!(!on_battlefield(&s, golem));
     assert_eq!(s.st.stack.len(), 1);
@@ -806,9 +806,9 @@ fn sacrificing_a_chosen_permanent_as_a_cost() {
     assert!(!s.has(
         |s, o| matches!(o, OptionDesc::ActivateAbility { source, .. } if s.name(*source) == "Test Cannibal")
     ));
-    s.activate("Test Altar");
+    s.activate("Test Altar").pay();
     assert_eq!(s.options().len(), 1);
-    s.respond(Response::Pick(vec![0])).pay().pass_all();
+    s.respond(Response::Pick(vec![0])).pass_all();
     assert!(!on_battlefield(&s, cannibal));
     // Nothing left to sacrifice (CR 118.3): the Altar can't be activated.
     assert!(!s.has(|_, o| matches!(o, OptionDesc::ActivateAbility { .. })));
@@ -892,10 +892,10 @@ fn additional_costs_of_spells() {
     // The Insight discards another card: the Offering is the only candidate (the Insight
     // itself is on the stack by then).
     assert!(s.can_cast("Test Insight"));
-    s.cast("Test Insight");
+    s.cast("Test Insight").pay();
     assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::Discard));
     assert_eq!(s.options().len(), 1);
-    s.respond(Response::Pick(vec![0])).pay().pass_all();
+    s.respond(Response::Pick(vec![0])).pass_all();
     assert!(s.find(P0, Zone::Graveyard, "Test Offering").is_some());
     assert_eq!(hand(&s, P0), 2, "drew two");
     // With only itself in hand, a spell that needs a discard can't be cast.
@@ -910,9 +910,9 @@ fn additional_costs_of_spells() {
     let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
     sc.card(P0, Zone::Hand, "Test Offering");
     let mut s = Script::new(sc.build());
-    s.cast("Test Offering");
+    s.cast("Test Offering").pay();
     assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::Sacrifice));
-    s.respond(Response::Pick(vec![0])).pay();
+    s.respond(Response::Pick(vec![0]));
     assert!(!on_battlefield(&s, golem));
     assert!(s.find(P0, Zone::Stack, "Test Offering").is_some());
     s.pass_all();
@@ -1700,8 +1700,8 @@ fn mana_abilities_with_a_choice_of_type_or_several_mana() {
 }
 
 // What isn't compiled: different mana from one activation ("{W}{U}"), and several mana "in
-// any combination". And a multi-mana ability next to another mana ability of the same
-// permanent isn't a valid card for the payment planner.
+// any combination". And two mana abilities of one permanent that make the same type of
+// mana in different amounts: the player picks an ability by the type it makes.
 #[test]
 fn mana_forms_not_compiled() {
     let rock = |mana: &str| {
@@ -1718,13 +1718,22 @@ fn mana_forms_not_compiled() {
         ["Mana:produced"]
     );
     let two = "Name:Test Twin Rock\nManaCost:2\nTypes:Artifact\n\
-        A:AB$ Mana | Cost$ T | Produced$ C C | SpellDescription$ Text.\n\
+        A:AB$ Mana | Cost$ T | Produced$ G G | SpellDescription$ Text.\n\
         A:AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Text.\nOracle:Text.";
     let b = forge_test_blockers(two);
     assert!(
         b.iter()
-            .any(|x| x.starts_with("invalid:") && x.contains("only mana ability")),
+            .any(|x| x.starts_with("invalid:") && x.contains("can't make the same type")),
         "{b:?}"
+    );
+    // A mana ability that costs mana, or a sacrifice of something else.
+    assert_eq!(
+        forge_test_blockers(&rock("Produced$ W").replace("Cost$ T", "Cost$ 1 T")),
+        ["Mana:cost"]
+    );
+    assert_eq!(
+        forge_test_blockers(&rock("Produced$ W").replace("Cost$ T", "Cost$ T Sac<1/Creature>")),
+        ["Mana:cost"]
     );
 }
 
@@ -2074,4 +2083,445 @@ fn an_aura_returned_to_the_battlefield_chooses_what_it_enchants() {
         .pass_all();
     assert!(s.find(P0, Zone::Graveyard, "Test Blessing").is_some());
     assert!(s.find(P0, Zone::Battlefield, "Test Blessing").is_none());
+}
+
+// ---------------------------------------------------------------------------------------
+// Mana: Treasure, commander identity, conditions, restrictions, effects that add mana
+// (D-052).
+
+const TREASURE: (&str, &str) = (
+    "c_a_test_treasure_sac",
+    "Name:Test Treasure Token\nManaCost:no cost\nTypes:Artifact Treasure\n\
+     A:AB$ Mana | Cost$ T Sac<1/CARDNAME/this token> | Produced$ Any | Amount$ 1 | SpellDescription$ Text.\nOracle:Text.",
+);
+
+fn prospector() -> String {
+    creature(
+        "Test Prospector",
+        "R",
+        "Goblin",
+        "1/1",
+        "T:Mode$ ChangesZone | ValidCard$ Card.Self | Origin$ Any | Destination$ Battlefield | Execute$ TrigTreasure | TriggerDescription$ Text.\n\
+         SVar:TrigTreasure:DB$ Token | TokenAmount$ 2 | TokenScript$ c_a_test_treasure_sac | TokenOwner$ You",
+    )
+}
+
+fn treasures(s: &Script, p: PlayerId) -> Vec<ObjectId> {
+    s.st.zones
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| s.name(id) == "Test Treasure Token" && chars(&s.st, id).controller == p)
+        .collect()
+}
+
+// CR 111.10a, 605.3b, 601.2g–h (2026-11-06). Forge: `Cost$ T Sac<1/CARDNAME>` on an
+// `AB$ Mana` — "{T}, Sacrifice this token: Add one mana of any color."
+#[test]
+fn treasure_is_sacrificed_for_mana() {
+    let cards = [
+        prospector(),
+        spell(
+            "Test Verdant",
+            "G G",
+            "Instant",
+            "A:SP$ GainLife | LifeAmount$ 3 | SpellDescription$ Text.",
+        ),
+        "Name:Test Smelter\nManaCost:1\nTypes:Artifact\n\
+         A:AB$ Draw | Cost$ 1 Sac<1/Artifact.Other/another artifact> | NumCards$ 1 | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let build = |battlefield: &[&str], hand: &[&str]| {
+        let catalog = forge_test_catalog(&cards, &[TREASURE]);
+        let mut sc = Scenario::new(GameConfig::commander(2), catalog, 31);
+        for p in [P0, P1] {
+            sc.library(p, "Forest", 20);
+        }
+        sc.cards(P0, Zone::Battlefield, battlefield);
+        sc.cards(P0, Zone::Hand, hand);
+        Script::new(sc.build())
+    };
+    // The Prospector makes two Treasures; they pay {G}{G} (any colour) and are gone.
+    let mut s = build(&["Mountain"], &["Test Prospector", "Test Verdant"]);
+    // (The spell resolves, then its enters trigger.)
+    s.cast("Test Prospector").pay().pass_all().pass_all();
+    assert_eq!(treasures(&s, P0).len(), 2);
+    assert!(s.can_cast("Test Verdant"));
+    s.cast("Test Verdant");
+    // Each tap sacrifices the Treasure at once (CR 605.3b), before the spell is paid for.
+    s.respond(Response::Pick(vec![0]));
+    assert_eq!(treasures(&s, P0).len(), 1);
+    assert_eq!(s.kind(), ChoiceKind::PayMana);
+    s.pay();
+    assert_eq!(treasures(&s, P0).len(), 0);
+    s.pass_all();
+    assert_eq!(life(&s, P0), 43);
+
+    // A Treasure can't pay twice: the Smelter's "{1}, sacrifice another artifact" needs one
+    // Treasure for the mana and another artifact to sacrifice.
+    let mut s = build(&["Mountain", "Test Smelter"], &["Test Prospector"]);
+    s.cast("Test Prospector").pay().pass_all().pass_all();
+    let can_smelt = |s: &Script| {
+        s.has(|s, o| matches!(o, OptionDesc::ActivateAbility { source, .. } if s.name(*source) == "Test Smelter"))
+    };
+    // Mountain tapped for the Prospector: two Treasures left — one for {1}, one to sacrifice.
+    assert!(can_smelt(&s));
+    s.activate("Test Smelter");
+    assert_eq!(s.kind(), ChoiceKind::PayMana);
+    s.respond(Response::Pick(vec![0]));
+    // The mana is in: the other Treasure is the only thing left to sacrifice.
+    assert_eq!(s.kind(), ChoiceKind::Sacrifice);
+    assert_eq!(s.options().len(), 1);
+    s.respond(Response::Pick(vec![0])).pass_all();
+    assert_eq!(treasures(&s, P0).len(), 0);
+    assert_eq!(hand(&s, P0), 1);
+
+    // One Treasure and no other mana: it can't be both the mana and the sacrifice.
+    let s = build(&["Test Smelter", TREASURE.0], &[]);
+    assert!(!can_smelt(&s));
+    // With a Mountain for the mana, the Treasure is the sacrifice — so it isn't offered
+    // as mana.
+    let mut s = build(&["Test Smelter", TREASURE.0, "Mountain"], &[]);
+    assert!(can_smelt(&s));
+    s.activate("Test Smelter");
+    assert_eq!(s.kind(), ChoiceKind::PayMana);
+    assert!(!s.has(
+        |s, o| matches!(o, OptionDesc::TapForMana { source, .. } if s.name(*source) == "Test Treasure Token")
+    ));
+    s.pay();
+    assert_eq!(s.kind(), ChoiceKind::Sacrifice);
+}
+
+// CR 903.4, 903.4f (2026-11-06). Forge: `Produced$ Combo ColorIdentity` — "Add one mana of
+// any color in your commander's color identity."
+#[test]
+fn mana_of_the_commanders_color_identity() {
+    let cards = [
+        "Name:Test Signet\nManaCost:2\nTypes:Artifact\n\
+         A:AB$ Mana | Cost$ T | Produced$ Combo ColorIdentity | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+        // Green by its cost, white by the mana symbol in its rules text (CR 903.4).
+        "Name:Test Warden\nManaCost:1 G\nTypes:Legendary Creature Elf\nPT:2/2\n\
+         A:AB$ GainLife | Cost$ W | LifeAmount$ 1 | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.commander(P0, Zone::Command, "Test Warden");
+    let signet = sc.card(P0, Zone::Battlefield, "Test Signet");
+    let other = sc.card(P1, Zone::Battlefield, "Test Signet");
+    let mut s = Script::new(sc.build());
+    let colors = |s: &Script, id: ObjectId| -> Vec<engine_core::mana::ManaType> {
+        s.options()
+            .iter()
+            .filter_map(|o| match o {
+                OptionDesc::TapForMana { source, mana } if *source == id => Some(*mana),
+                _ => None,
+            })
+            .collect()
+    };
+    use engine_core::mana::ManaType;
+    assert_eq!(colors(&s, signet), [ManaType::White, ManaType::Green]);
+    // P1 has no commander: their Signet adds nothing (CR 903.4f), so it isn't offered.
+    s.pass();
+    assert_eq!(s.who(), P1);
+    assert_eq!(colors(&s, other), []);
+}
+
+// CR 602.5b, 605.1a (2026-11-06). Forge: `IsPresent$ Land.YouCtrl | PresentCompare$ GE5` on
+// an `AB$ Mana` — "Activate only if you control five or more lands."
+#[test]
+fn a_mana_ability_with_an_activation_condition() {
+    let cards = [
+        "Name:Test Temple\nManaCost:no cost\nTypes:Land\n\
+         A:AB$ Mana | Cost$ T | Produced$ C | Amount$ 2 | IsPresent$ Land.YouCtrl | PresentCompare$ GE5 | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+        creature("Test Colossus", "5", "Golem", "5/5", ""),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Test Temple", "Forest", "Forest", "Forest"],
+    );
+    sc.cards(P0, Zone::Hand, &["Forest", "Test Colossus"]);
+    let mut s = Script::new(sc.build());
+    let temple = |s: &Script| {
+        s.has(|s, o| matches!(o, OptionDesc::TapForMana { source, .. } if s.name(*source) == "Test Temple"))
+    };
+    // Four lands: the Temple can't be tapped for mana.
+    assert!(!temple(&s));
+    assert!(!s.can_cast("Test Colossus"));
+    // The fifth: four Forests alone don't pay {5}; with the Temple's {C}{C} they do.
+    s.pick("play the Forest", |_, o| {
+        matches!(o, OptionDesc::PlayLand { .. })
+    });
+    assert!(temple(&s));
+    assert!(s.can_cast("Test Colossus"));
+}
+
+// CR 106.6, 106.4 (2026-11-06). Forge: `RestrictValid$ Spell.Angel` — "Spend this mana only
+// to cast an Angel spell."
+#[test]
+fn mana_that_can_only_be_spent_on_some_spells() {
+    let cards = [
+        creature(
+            "Test Font",
+            "W",
+            "Human",
+            "1/1",
+            "A:AB$ Mana | Cost$ T | Produced$ W | RestrictValid$ Spell.Angel | SpellDescription$ Text.",
+        ),
+        creature("Test Seraph", "W", "Angel", "2/2", "K:Flying"),
+        creature("Test Squire", "W", "Human", "1/1", ""),
+        // An Angel that costs {1}{W}: restricted mana pays generic costs too.
+        creature("Test Archon", "1 W", "Angel", "2/2", ""),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let build = |lands: &[&str]| {
+        let mut sc = scenario(&cards);
+        sc.cards(P0, Zone::Battlefield, &["Test Font"]);
+        sc.cards(P0, Zone::Battlefield, lands);
+        sc.cards(
+            P0,
+            Zone::Hand,
+            &["Test Seraph", "Test Squire", "Test Archon"],
+        );
+        Script::new(sc.build())
+    };
+    // Only the Font: the Angel is castable, the Human is not.
+    let mut s = build(&[]);
+    assert!(s.can_cast("Test Seraph"));
+    assert!(!s.can_cast("Test Squire"));
+    assert!(!s.can_cast("Test Archon"));
+    // Tapped ahead of time, the mana keeps its restriction while it floats…
+    s.tap("Test Font", engine_core::mana::ManaType::White);
+    assert_eq!(s.st.player(P0).restricted_mana.len(), 1);
+    assert_eq!(mana_pool(&s, P0), 0);
+    assert!(!s.can_cast("Test Squire"));
+    assert!(s.can_cast("Test Seraph"));
+    // …and a player sees it as part of their unspent mana.
+    let view = engine_core::view::player_view(&s.st, P0);
+    assert_eq!(view.players[0].mana_pool.amounts.iter().sum::<u32>(), 1);
+    assert_eq!(view.players[0].restricted_mana.iter().sum::<u32>(), 1);
+    s.cast("Test Seraph");
+    assert!(s.st.player(P0).restricted_mana.is_empty());
+    assert!(s.find(P0, Zone::Stack, "Test Seraph").is_some());
+    // With a Plains as well: the Font's mana pays the Herald's generic {1}; the Squire is
+    // paid by the Plains alone.
+    let mut s = build(&["Plains"]);
+    assert!(s.can_cast("Test Archon") && s.can_cast("Test Squire"));
+    s.cast("Test Squire");
+    // The Font isn't offered for the Squire.
+    assert!(!s.has(
+        |s, o| matches!(o, OptionDesc::TapForMana { source, .. } if s.name(*source) == "Test Font")
+    ));
+    s.pay().pass_all();
+    // The Plains is tapped; the Font still casts the Angel, and nothing else.
+    assert!(s.can_cast("Test Seraph") && !s.can_cast("Test Archon"));
+    // CR 106.4: unspent restricted mana empties with the rest at the end of the step.
+    let mut s = build(&[]);
+    s.tap("Test Font", engine_core::mana::ManaType::White);
+    s.pass_all();
+    assert!(s.st.player(P0).restricted_mana.is_empty());
+}
+
+// CR 106.4, 605.5b (2026-11-06). Forge: `SP$ Mana | Produced$ R | Amount$ X` — a spell that
+// adds mana (not a mana ability: it uses the stack).
+#[test]
+fn a_spell_that_adds_mana() {
+    let cards = [spell(
+        "Test Geyser",
+        "R",
+        "Sorcery",
+        "A:SP$ Mana | Produced$ R | Amount$ X | SpellDescription$ Text.\nSVar:X:Count$Valid Land.tapped+OppCtrl",
+    )];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Mountain"]);
+    sc.card(P0, Zone::Hand, "Test Geyser");
+    for _ in 0..3 {
+        let land = sc.card(P1, Zone::Battlefield, "Forest");
+        sc.tapped(land);
+    }
+    sc.card(P1, Zone::Battlefield, "Forest");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Geyser").pay();
+    assert_eq!(s.st.stack.len(), 1, "on the stack: it can be responded to");
+    s.pass_all();
+    assert_eq!(
+        s.st.player(P0).mana_pool.amounts[engine_core::mana::ManaType::Red.index()],
+        3
+    );
+}
+
+// CR 608.2h, 601.2h (2026-11-06). Forge: `SVar:X:Sacrificed$CardPower` — "where X is the
+// sacrificed creature's power": its power as it last existed on the battlefield.
+#[test]
+fn the_power_of_the_creature_sacrificed_as_a_cost() {
+    let cards = [creature(
+        "Test Ghoulcaller",
+        "B",
+        "Human",
+        "1/1",
+        "A:AB$ GainLife | Cost$ T Sac<1/Creature.Other/another creature> | LifeAmount$ X | SpellDescription$ Text.\nSVar:X:Sacrificed$CardPower",
+    )];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Test Ghoulcaller"]);
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    let power = {
+        let st = sc.build();
+        chars(&st, golem).power.unwrap()
+    };
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Test Ghoulcaller", "Test Golem"]);
+    let mut s = Script::new(sc.build());
+    s.activate("Test Ghoulcaller");
+    assert_eq!(s.kind(), ChoiceKind::Sacrifice);
+    s.respond(Response::Pick(vec![0])).pass_all();
+    assert_eq!(life(&s, P0), 40 + power);
+    // Without a sacrifice in the cost there is no such creature: not a card.
+    let bad = creature(
+        "Test Ghoulcaller",
+        "B",
+        "Human",
+        "1/1",
+        "A:AB$ GainLife | Cost$ T | LifeAmount$ X | SpellDescription$ Text.\nSVar:X:Sacrificed$CardPower",
+    );
+    let b = forge_test_blockers(&bad);
+    assert!(b.iter().any(|x| x.starts_with("invalid:")), "{b:?}");
+}
+
+// ---------------------------------------------------------------------------------------
+// Entering with counters (D-052).
+
+fn counters(s: &Script, id: ObjectId) -> u32 {
+    s.st.object(id)
+        .counters
+        .get(&card_model::CounterKind::PlusOne)
+        .copied()
+        .unwrap_or(0)
+}
+
+// CR 614.1c, 614.12, 122.6 (2026-11-06). Forge: `K:etbCounter:P1P1:<n or count>` — "this
+// creature enters with N +1/+1 counters on it".
+#[test]
+fn entering_with_counters() {
+    let cards = [
+        // CR 107.3m: "enters with X +1/+1 counters": the X it was cast with.
+        creature(
+            "Test Hydra",
+            "X G",
+            "Hydra",
+            "0/0",
+            "K:etbCounter:P1P1:X\nSVar:X:Count$xPaid",
+        ),
+        creature("Test Hatchling", "G", "Hydra", "0/0", "K:etbCounter:P1P1:2"),
+        creature(
+            "Test Swarmling",
+            "G",
+            "Insect",
+            "0/0",
+            "K:etbCounter:P1P1:X\nSVar:X:Count$Valid Land.YouCtrl",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Forest", "Forest", "Forest"]);
+    sc.cards(
+        P1,
+        Zone::Battlefield,
+        &["Forest", "Forest", "Forest", "Forest"],
+    );
+    sc.cards(
+        P0,
+        Zone::Hand,
+        &["Test Hatchling", "Test Swarmling", "Test Hydra"],
+    );
+    let mut s = Script::new(sc.build());
+    s.cast("Test Hatchling").pay().pass_all();
+    let hatchling = s.find(P0, Zone::Battlefield, "Test Hatchling").unwrap();
+    assert_eq!(counters(&s, hatchling), 2);
+    assert_eq!(pt(&s, hatchling), (2, 2));
+    // "…for each land you control": mine, not the opponent's four.
+    s.cast("Test Swarmling").pay().pass_all();
+    let swarmling = s.find(P0, Zone::Battlefield, "Test Swarmling").unwrap();
+    assert_eq!(counters(&s, swarmling), 3);
+    // The Hydra, cast for X = 2 with three Forests.
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Forest", "Forest", "Forest"]);
+    sc.card(P0, Zone::Hand, "Test Hydra");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Hydra").x(2).pay().pass_all();
+    let hydra = s.find(P0, Zone::Battlefield, "Test Hydra").unwrap();
+    assert_eq!(counters(&s, hydra), 2);
+    // Other kinds of counters aren't modelled.
+    let charged =
+        "Name:Test Battery\nManaCost:1\nTypes:Artifact\nK:etbCounter:CHARGE:3\nOracle:Text.";
+    assert_eq!(forge_test_blockers(charged), ["counter:CHARGE"]);
+}
+
+// CR 614.1c, 614.12 (2026-11-06). Forge:
+// `K:ETBReplacement:Other:<SVar>:Mandatory:Battlefield:Creature.Angel+YouCtrl+Other` with
+// `DB$ PutCounter | ETB$ True | Defined$ ReplacedCard` — "each other Angel you control
+// enters with an additional +1/+1 counter on it for each Angel you already control".
+#[test]
+fn other_permanents_enter_with_counters_for_each() {
+    let cards = [
+        creature(
+            "Test Abbess",
+            "W",
+            "Angel",
+            "2/2",
+            "K:ETBReplacement:Other:AddExtraCounter:Mandatory:Battlefield:Creature.Angel+YouCtrl+Other\n\
+             SVar:AddExtraCounter:DB$ PutCounter | ETB$ True | Defined$ ReplacedCard | CounterType$ P1P1 | CounterNum$ X | SpellDescription$ Text.\n\
+             SVar:X:Count$Valid Angel.YouCtrl",
+        ),
+        creature("Test Seraph", "W", "Angel", "2/2", ""),
+        creature("Test Squire", "W", "Human", "1/1", ""),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Plains", "Plains", "Plains", "Plains"],
+    );
+    sc.cards(P1, Zone::Battlefield, &["Plains", "Test Seraph"]);
+    sc.cards(
+        P0,
+        Zone::Hand,
+        &["Test Abbess", "Test Seraph", "Test Seraph", "Test Squire"],
+    );
+    sc.card(P1, Zone::Hand, "Test Seraph");
+    let mut s = Script::new(sc.build());
+    // The Matriarch herself gets nothing: her ability isn't there while she enters.
+    s.cast("Test Abbess").pay().pass_all();
+    let matriarch = s.find(P0, Zone::Battlefield, "Test Abbess").unwrap();
+    assert_eq!(counters(&s, matriarch), 0);
+    // The first Seraph: one Angel already there (the opponent's doesn't count).
+    s.cast("Test Seraph").pay().pass_all();
+    let mine = |s: &Script| -> Vec<u32> {
+        s.st.zones
+            .battlefield
+            .iter()
+            .filter(|&&id| s.name(id) == "Test Seraph" && s.st.object(id).owner == P0)
+            .map(|&id| counters(s, id))
+            .collect()
+    };
+    assert_eq!(mine(&s), [1]);
+    // The second: two Angels already there.
+    s.cast("Test Seraph").pay().pass_all();
+    assert_eq!(mine(&s), [1, 2]);
+    // Not an Angel: nothing.
+    s.cast("Test Squire").pay().pass_all();
+    let squire = s.find(P0, Zone::Battlefield, "Test Squire").unwrap();
+    assert_eq!(counters(&s, squire), 0);
+    // "As this enters, choose …" is the same keyword with another effect: not compiled.
+    let banner = "Name:Test Banner\nManaCost:3\nTypes:Artifact\nK:ETBReplacement:Other:ChooseColor\n\
+        SVar:ChooseColor:DB$ ChooseColor | Defined$ You | SpellDescription$ Text.\nOracle:Text.";
+    assert_eq!(forge_test_blockers(banner), ["kw:ETBReplacement"]);
 }

@@ -375,8 +375,18 @@ pub enum AbilityDef {
     CostReduction { spells: Selector, amount: u32 },
     /// "This spell costs {N} less to cast[, where N is …]": functions while it is cast.
     SelfCostReduction(Amount),
-    /// An activated mana ability (CR 605.1a). M1: the cost must be exactly `{T}`.
-    Mana { cost: Cost, produce: ManaProduce },
+    /// An activated mana ability (CR 605.1a). Its cost is `{T}`, optionally with
+    /// "sacrifice this" (Treasure, CR 111.10a).
+    Mana {
+        cost: Cost,
+        produce: ManaProduce,
+        /// "Activate only if [condition]" (CR 602.5b).
+        #[serde(default)]
+        only_if: Option<Condition>,
+        /// "Spend this mana only …" (CR 106.6).
+        #[serde(default)]
+        spend: Option<ManaRestriction>,
+    },
     /// A triggered ability (CR 603): "[When/Whenever/At] `when`, [if `intervening_if`,] `body`."
     Triggered {
         when: Trigger,
@@ -612,7 +622,9 @@ pub enum ContinuousEffect {
 }
 
 /// Events a static replacement effect watches for (CR 614). M2 vocabulary.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+// Built once when the catalog loads, then only read (as `AbilityDef`).
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Replaces {
     /// "If an effect would create one or more tokens under your control" (CR 614.16).
     CreateTokens,
@@ -625,9 +637,14 @@ pub enum Replaces {
     ThisDies,
     /// "This permanent enters …" (CR 614.1c–d): a self ETB replacement.
     ThisEnters,
+    /// "Each other [selector] enters …" (CR 614.1c): another permanent matching the
+    /// selector — as it would exist on the battlefield (CR 614.12), relative to this
+    /// ability's source and controller — would enter the battlefield.
+    OtherEnters(Selector),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ReplaceWith {
     /// "… twice that many … instead" (tokens or counters).
     Twice,
@@ -639,6 +656,11 @@ pub enum ReplaceWith {
     EntersTapped,
     /// "enters with N [kind] counters".
     EntersWithCounters { kind: CounterKind, n: u32 },
+    /// "enters with a [kind] counter on it for each …": counted as the event is modified
+    /// (so not counting the permanent that is entering), relative to the controller of
+    /// the ability's source. For the permanent itself, `Amount::X` is the X it was cast
+    /// with (CR 107.3m).
+    EntersWithCounted { kind: CounterKind, amount: Amount },
 }
 
 /// An amount with a sign: "+X" or "-X".
@@ -793,14 +815,29 @@ pub enum ManaProduce {
         of: Vec<ManaType>,
         count: u32,
     },
+    /// "Add one mana of any color in your commander's color identity" (CR 903.4; with no
+    /// commander it adds nothing, CR 903.4f).
+    CommanderIdentity,
+}
+
+/// "Spend this mana only to cast [spells] or activate abilities of [permanents]" (CR 106.6).
+/// The mana can pay for a spell matching any of `spells`, or an ability whose source matches
+/// any of `abilities`; the selectors are relative to the player spending it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ManaRestriction {
+    #[serde(default)]
+    pub spells: Vec<Selector>,
+    #[serde(default)]
+    pub abilities: Vec<Selector>,
 }
 
 impl ManaProduce {
-    /// The types the player chooses between.
+    /// The types the player chooses between. For [`ManaProduce::CommanderIdentity`] these
+    /// are the five colors: the game narrows them to the identity.
     pub fn options(&self) -> Vec<ManaType> {
         match self {
             ManaProduce::One(t) => alloc::vec![*t],
-            ManaProduce::AnyColor => Color::ALL
+            ManaProduce::AnyColor | ManaProduce::CommanderIdentity => Color::ALL
                 .iter()
                 .map(|c| ManaType::from_color(*c))
                 .collect(),
@@ -1043,6 +1080,13 @@ pub enum Effect {
         #[serde(default)]
         shuffle: bool,
     },
+    /// A spell or a non-mana ability adds mana (CR 106.4, 605.5): "add {R} for each tapped
+    /// land your opponents control", "add {G}{G}". `amount` mana of the one type.
+    AddMana {
+        who: PlayerRef,
+        mana: ManaType,
+        amount: Amount,
+    },
 }
 
 /// A zone an effect takes cards out of as it resolves.
@@ -1156,6 +1200,57 @@ pub enum Amount {
     /// The source's power: current if it's still on the battlefield, otherwise as it last
     /// existed there (CR 608.2h, 113.7a).
     SourcePower,
+    /// "the sacrificed creature's power": the total power, as they last existed on the
+    /// battlefield, of the permanents sacrificed to pay this ability's cost (CR 608.2h).
+    SacrificedPower,
+}
+
+/// CR 903.4: a card's color identity — the colors of mana symbols in its mana cost or rules
+/// text, plus its color indicator. (Basic land types are handled by CR 903.5d.)
+pub fn color_identity(def: &CardDef) -> Vec<Color> {
+    let mut out: Vec<Color> = def.colors.clone().unwrap_or_default();
+    let add_cost = |m: &ManaCost, out: &mut Vec<Color>| {
+        for s in &m.symbols {
+            if let ManaSymbol::Colored(c) = s {
+                out.push(*c);
+            }
+        }
+    };
+    if let Some(m) = &def.mana_cost {
+        add_cost(m, &mut out);
+    }
+    for a in &def.abilities {
+        match a {
+            AbilityDef::Activated { cost, .. } | AbilityDef::Mana { cost, .. } => {
+                if let Some(m) = &cost.mana {
+                    add_cost(m, &mut out);
+                }
+                // CR 903.4: the mana symbols in the rules text. "{T}: Add {W} or {U}" has
+                // two; "one mana of any color" and "of any one color" have none.
+                if let AbilityDef::Mana { produce, .. } = a {
+                    let named: Vec<ManaType> = match produce {
+                        ManaProduce::One(t) => alloc::vec![*t],
+                        ManaProduce::AnyColor | ManaProduce::CommanderIdentity => Vec::new(),
+                        ManaProduce::OneOf(of) => of.clone(),
+                        ManaProduce::Times { of, .. } if of.len() < 5 => of.clone(),
+                        ManaProduce::Times { .. } => Vec::new(),
+                    };
+                    for t in named {
+                        if let Some(c) = Color::ALL
+                            .into_iter()
+                            .find(|c| ManaType::from_color(*c) == t)
+                        {
+                            out.push(c);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// A card file: the definition plus authoring metadata (spec §7.1). Parsed by `card-db`.

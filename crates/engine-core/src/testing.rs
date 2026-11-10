@@ -80,6 +80,7 @@ impl Scenario {
                 modes: Vec::new(),
                 x: 0,
                 targets: Vec::new(),
+                sacrificed_power: 0,
             });
         } else {
             self.st.zones.list_mut(zone, owner).push(id);

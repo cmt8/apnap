@@ -89,6 +89,7 @@ pub fn new_game_with_commanders(
                 drew_from_empty_library: false,
                 commander_damage: BTreeMap::new(),
                 commander_casts: BTreeMap::new(),
+                restricted_mana: Vec::new(),
             })
             .collect(),
         config,

@@ -31,6 +31,14 @@ pub enum Screen {
 /// The setups offered in the menu.
 pub const SETUPS: &[(&str, Setup)] = &[
     (
+        "Commander — the four precons, 4 players (the cards that work so far)",
+        Setup::Precon { players: 4 },
+    ),
+    (
+        "Commander — precons, 1 v 1 (Calling All Angels vs Wretched Ranks)",
+        Setup::Precon { players: 2 },
+    ),
+    (
         "60-card duel — real cards (Stompy vs Angels)",
         Setup::Real { players: 2 },
     ),
@@ -220,7 +228,7 @@ impl App {
     /// Real cards need their printed data in the cache. Says so (and returns false) if
     /// it isn't there yet.
     fn cards_ready(&mut self, setup: Setup) -> bool {
-        if !matches!(setup, Setup::Real { .. }) {
+        if !matches!(setup, Setup::Real { .. } | Setup::Precon { .. }) {
             return true;
         }
         match harness::real_cards_ready() {

@@ -185,7 +185,7 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
         // CLAUDE.md invariant 4: only abilities the source currently has.
         for (index, a) in abilities(st, source) {
             if let AbilityDef::Replacement { replaces, .. } = a
-                && applies(st, source, *replaces, &p.event)
+                && applies(st, source, replaces, &p.event)
             {
                 out.push(RepKey::Static { source, index });
             }
@@ -243,7 +243,7 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
     out
 }
 
-fn applies(st: &GameState, source: ObjectId, replaces: Replaces, ev: &Proposed) -> bool {
+fn applies(st: &GameState, source: ObjectId, replaces: &Replaces, ev: &Proposed) -> bool {
     let you = crate::layers::controller_of(st, source);
     match (replaces, ev) {
         (
@@ -285,6 +285,33 @@ fn applies(st: &GameState, source: ObjectId, replaces: Replaces, ev: &Proposed) 
                 ..
             },
         ) => *object == source && st.object(source).zone == Zone::Battlefield,
+        // CR 614.12: checked against the permanent as it would exist on the battlefield.
+        (
+            Replaces::OtherEnters(sel),
+            Proposed::Move {
+                object,
+                to: Zone::Battlefield,
+                controller,
+                ..
+            },
+        ) => st.objects.get(object).is_some_and(|o| {
+            o.zone != Zone::Battlefield
+                && *object != source
+                && crate::layers::matches_parts(
+                    sel,
+                    &crate::layers::chars(st, *object),
+                    crate::layers::Facts {
+                        id: *object,
+                        controller: controller.unwrap_or(o.owner),
+                        is_token: o.is_token,
+                        tapped: false,
+                        attacking: false,
+                        blocking: false,
+                    },
+                    source,
+                    you,
+                )
+        }),
         _ => false,
     }
 }
@@ -349,7 +376,25 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
             else {
                 unreachable!()
             };
-            let with = *with;
+            let mut with = with.clone();
+            // "…for each …": counted now, before the permanent has entered.
+            if let ReplaceWith::EntersWithCounted { kind, amount } = &with {
+                let you = match (&ev, st.object(source).zone) {
+                    (_, Zone::Battlefield) => crate::layers::controller_of(st, source),
+                    // Its own "enters with": whoever will control it.
+                    (Proposed::Move { controller, .. }, _) => {
+                        controller.unwrap_or(st.object(source).owner)
+                    }
+                    _ => st.object(source).owner,
+                };
+                let n = match amount {
+                    // CR 107.3m: the X the permanent spell was cast with (0 if it isn't
+                    // entering from the stack).
+                    card_model::Amount::X => st.stack_object(source).map_or(0, |so| so.x),
+                    amount => crate::layers::count_amount(st, amount, source, you),
+                };
+                with = ReplaceWith::EntersWithCounters { kind: *kind, n };
+            }
             st.emit(crate::events::Event::Replaced { source });
             Some(modify(ev, with))
         }
@@ -357,7 +402,7 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
 }
 
 fn modify(mut ev: Proposed, with: ReplaceWith) -> Proposed {
-    match (&mut ev, with) {
+    match (&mut ev, &with) {
         (Proposed::CreateTokens { count, .. }, ReplaceWith::Twice)
         | (Proposed::PutCounters { count, .. }, ReplaceWith::Twice) => *count *= 2,
         (Proposed::Move { counters, .. }, ReplaceWith::Twice) => {
@@ -387,7 +432,9 @@ fn modify(mut ev: Proposed, with: ReplaceWith) -> Proposed {
         }
         (Proposed::Move { tapped, .. }, ReplaceWith::EntersTapped) => *tapped = true,
         (Proposed::Move { counters, .. }, ReplaceWith::EntersWithCounters { kind, n }) => {
-            counters.push((kind, n))
+            if *n > 0 {
+                counters.push((*kind, *n))
+            }
         }
         (e, w) => unreachable!("{w:?} can't modify {e:?} (applicability checked)"),
     }

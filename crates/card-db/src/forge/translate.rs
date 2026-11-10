@@ -13,9 +13,9 @@ use super::parse::{Face, Record, Script};
 use card_model::{
     AbilityDef, Affected, Amount, BasicLandType, Body, CardDef, CardDest, CardType, CardZone,
     Color, CombatRule, Condition, ContinuousEffect, Cost, CostChoice, CounterKind, DamageBy,
-    EachPlayerAction, Effect, Keyword, ManaCost, ManaProduce, ManaType, Mode, ObjFilter, ObjRef,
-    PlayerRef, ReplaceWith, Replaces, Selector, Signed, Supertype, TargetFilter, TargetRef, Timing,
-    Trigger, TriggerStep, Who,
+    EachPlayerAction, Effect, Keyword, ManaCost, ManaProduce, ManaRestriction, ManaType, Mode,
+    ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, Signed, Supertype, TargetFilter,
+    TargetRef, Timing, Trigger, TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -32,7 +32,7 @@ pub struct Compiled {
 
 /// Parameters that never affect the rules: descriptions shown to players, prompts, and
 /// hints for Forge's AI. (docs/forge/script-format.md, "keys a translator can ignore".)
-const TEXT_ONLY: [&str; 14] = [
+const TEXT_ONLY: [&str; 15] = [
     "ChangeTypeDesc",
     "ChangeNumDesc",
     "DefinedDesc",
@@ -45,6 +45,7 @@ const TEXT_ONLY: [&str; 14] = [
     "ValidDescription",
     "TgtPrompt",
     "AILogic",
+    "AINoRecursiveCheck",
     "IsCurse",
     "PrecostDesc",
 ];
@@ -458,7 +459,10 @@ impl<'a> Tx<'a> {
         match a {
             // The announced X of the cost, or a property of the triggering object: used
             // directly.
-            Amount::X | Amount::TriggeringPower | Amount::TriggeringToughness => Some(a),
+            Amount::X
+            | Amount::TriggeringPower
+            | Amount::TriggeringToughness
+            | Amount::SacrificedPower => Some(a),
             // Read off the battlefield: worked out once for the whole resolution (CR
             // 608.2h), as "X".
             _ => match &chain.x {
@@ -493,6 +497,10 @@ impl<'a> Tx<'a> {
         }
         if v == "TriggeredCard$CardPower" {
             return Some(Amount::TriggeringPower);
+        }
+        // "the sacrificed creature's power": what was sacrificed to pay the cost.
+        if v == "Sacrificed$CardPower" {
+            return Some(Amount::SacrificedPower);
         }
         if v == "TriggeredCard$CardToughness" {
             return Some(Amount::TriggeringToughness);
@@ -713,6 +721,28 @@ impl<'a> Tx<'a> {
                     "Mill" => Effect::Mill { who, amount },
                     "GainLife" => Effect::GainLife { who, amount },
                     _ => Effect::LoseLife { who, amount },
+                }
+            }
+            // A spell or a non-mana ability that adds mana: one type, any amount.
+            "Mana" => {
+                let mana = match rd.get("Produced") {
+                    Some("W") => Some(ManaType::White),
+                    Some("U") => Some(ManaType::Blue),
+                    Some("B") => Some(ManaType::Black),
+                    Some("R") => Some(ManaType::Red),
+                    Some("G") => Some(ManaType::Green),
+                    Some("C") => Some(ManaType::Colorless),
+                    _ => {
+                        self.block("Mana:produced");
+                        None
+                    }
+                };
+                let who = self.player(&rd, chain, triggered);
+                let amount = self.amount(rd.get("Amount").unwrap_or("1"), chain);
+                Effect::AddMana {
+                    who: who?,
+                    mana: mana?,
+                    amount: amount?,
                 }
             }
             "Destroy" => {
@@ -1443,6 +1473,122 @@ impl<'a> Tx<'a> {
         }
     }
 
+    /// An amount that is counted without a spell or ability resolving (a replacement
+    /// effect's "for each …"): a number, or a count of permanents.
+    /// `own_x`: the X of the permanent spell itself may be used ("enters with X counters").
+    fn counted(&mut self, text: &str, own_x: bool) -> Option<Amount> {
+        if let Ok(n) = text.parse::<u32>() {
+            return Some(Amount::Fixed(n));
+        }
+        match self.expr(text)? {
+            a @ (Amount::Count(_) | Amount::TotalPower(_)) => Some(a),
+            Amount::X if own_x => Some(Amount::X),
+            _ => {
+                self.block("expr:not countable by a replacement");
+                None
+            }
+        }
+    }
+
+    fn enters_with(kind: CounterKind, amount: Amount) -> ReplaceWith {
+        match amount {
+            Amount::Fixed(n) => ReplaceWith::EntersWithCounters { kind, n },
+            amount => ReplaceWith::EntersWithCounted { kind, amount },
+        }
+    }
+
+    fn counter_kind(&mut self, text: Option<&str>) -> Option<CounterKind> {
+        match text {
+            Some("P1P1") => Some(CounterKind::PlusOne),
+            Some("M1M1") => Some(CounterKind::MinusOne),
+            other => {
+                self.block(format!("counter:{}", other.unwrap_or("?")));
+                None
+            }
+        }
+    }
+
+    /// `K:etbCounter:<type>:<amount>[:<condition>[:<description>]]` — "this permanent
+    /// enters with N counters on it".
+    fn etb_counter(&mut self, k: &str) -> Option<AbilityDef> {
+        let parts: Vec<&str> = k.split(':').collect();
+        let kind = self.counter_kind(parts.get(1).copied());
+        if !matches!(parts.get(3), None | Some(&"no Condition")) {
+            self.block("kw:etbCounter-condition");
+            return None;
+        }
+        let amount = self.counted(parts.get(2).copied().unwrap_or("1"), true);
+        Some(AbilityDef::Replacement {
+            replaces: Replaces::ThisEnters,
+            with: Self::enters_with(kind?, amount?),
+        })
+    }
+
+    /// `K:ETBReplacement:Other:<SVar>:Mandatory:Battlefield:<ValidCard>` whose SVar puts
+    /// counters on the entering permanent — "each other [permanent] enters with …". (The
+    /// other uses of this keyword — "as this enters, choose …", "enters as a copy" — are
+    /// not compiled.)
+    fn etb_replacement(&mut self, k: &str) -> Option<AbilityDef> {
+        let parts: Vec<&str> = k.splitn(6, ':').collect();
+        let [_, "Other", svar, "Mandatory", "Battlefield", valid] = parts.as_slice() else {
+            self.block("kw:ETBReplacement");
+            return None;
+        };
+        let Some(rec) = self.records.iter().find(|(n, _)| n == svar).map(|(_, r)| r) else {
+            self.block("kw:ETBReplacement");
+            return None;
+        };
+        if rec.head() != Some(("DB", "PutCounter")) || rec.get("Defined") != Some("ReplacedCard") {
+            self.block("kw:ETBReplacement");
+            return None;
+        }
+        let rec = self.sub(svar)?;
+        let rd = Rd::new(rec, "ETBReplacement PutCounter");
+        rd.get("Defined");
+        if rd.get("ETB") != Some("True") {
+            self.block("kw:ETBReplacement");
+            return None;
+        }
+        let kind = self.counter_kind(rd.get("CounterType"));
+        let amount = self.counted(rd.get("CounterNum").unwrap_or("1"), false);
+        rd.finish(&mut self.blockers);
+        let sel = self.selector(valid);
+        Some(AbilityDef::Replacement {
+            replaces: Replaces::OtherEnters(sel?),
+            with: Self::enters_with(kind?, amount?),
+        })
+    }
+
+    /// `RestrictValid$` of a mana ability: `Spell.<card filter>` and
+    /// `Activated.<permanent filter>+inZoneBattlefield`, separated by commas.
+    fn mana_restriction(&mut self, text: &str) -> Option<ManaRestriction> {
+        let mut out = ManaRestriction::default();
+        for part in text.split(',').map(str::trim) {
+            let (kind, props) = part.split_once('.').unwrap_or((part, ""));
+            let mut props: Vec<&str> = props.split('+').filter(|p| !p.is_empty()).collect();
+            let on_battlefield = props.contains(&"inZoneBattlefield");
+            props.retain(|p| *p != "inZoneBattlefield");
+            // The filter is about the spell's card / the ability's source. A card type
+            // first is the head of our filters ("Creature+Dragon" = "Creature.Dragon").
+            let filter = match props.split_first() {
+                None => "Card".to_string(),
+                Some((first, rest)) if card_type(first).is_some() => {
+                    format!("{first}.{}", rest.join("+"))
+                }
+                Some(_) => format!("Card.{}", props.join("+")),
+            };
+            match (kind, on_battlefield) {
+                ("Spell", false) => out.spells.push(self.selector(&filter)?),
+                ("Activated", true) => out.abilities.push(self.selector(&filter)?),
+                _ => {
+                    self.block(format!("Mana:RestrictValid {kind}"));
+                    return None;
+                }
+            }
+        }
+        Some(out)
+    }
+
     fn cost(&mut self, text: &str) -> Option<Cost> {
         let mut cost = Cost::default();
         let mut mana = String::new();
@@ -1591,6 +1737,7 @@ impl<'a> Tx<'a> {
                     // "Add {W} or {U}": each mana any of the listed colours. More than
                     // one such mana ("in any combination") is not modelled.
                     ["Combo", "Any"] if n == 1 => Some(ManaProduce::AnyColor),
+                    ["Combo", "ColorIdentity"] if n == 1 => Some(ManaProduce::CommanderIdentity),
                     ["Combo", of @ ..] if n == 1 && !of.is_empty() => {
                         let mut of: Vec<ManaType> = of.iter().map(letter).collect::<Option<_>>()?;
                         of.dedup();
@@ -1613,21 +1760,36 @@ impl<'a> Tx<'a> {
                     }
                     [] => None,
                 });
+                // "Activate only if you control …".
+                let only_if = self.condition(&rd);
+                // "Spend this mana only to cast … spells / activate abilities of …".
+                let spend = match rd.get("RestrictValid") {
+                    None => Some(None),
+                    Some(text) => self.mana_restriction(text).map(Some),
+                };
                 rd.finish(&mut self.blockers);
                 let Some(produce) = produce else {
                     self.block("Mana:produced");
                     return None;
                 };
-                let cost = cost?;
-                let just_tap = Cost {
+                let (cost, only_if, spend) = (cost?, only_if?, spend?);
+                // `{T}`, or `{T}` and "sacrifice this" (Treasure). Mana abilities that cost
+                // mana or anything chosen are not modelled.
+                let plain = Cost {
                     tap: true,
+                    sacrifice_self: cost.sacrifice_self,
                     ..Cost::default()
                 };
-                if cost != just_tap {
+                if cost != plain {
                     self.block("Mana:cost");
                     return None;
                 }
-                Some(AbilityDef::Mana { cost, produce })
+                Some(AbilityDef::Mana {
+                    cost,
+                    produce,
+                    only_if,
+                    spend,
+                })
             }
             "AB" => {
                 let rd = Rd::new(rec, "activated");
@@ -2346,6 +2508,19 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
                         },
                     }),
                 });
+            }
+            continue;
+        }
+        if k.starts_with("etbCounter:") || k.starts_with("ETBReplacement:") {
+            let before = tx.blockers.len();
+            let a = if k.starts_with("etbCounter:") {
+                tx.etb_counter(k)
+            } else {
+                tx.etb_replacement(k)
+            };
+            match a {
+                Some(a) => abilities.push((0, a)),
+                None => tx.explained(before, "keyword"),
             }
             continue;
         }

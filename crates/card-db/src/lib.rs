@@ -12,9 +12,8 @@ pub mod real;
 pub mod scryfall;
 
 use card_model::{
-    AbilityDef, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript, CardType, Color, Cost,
-    Effect, ManaCost, ManaProduce, ManaSymbol, ManaType, Mode, ObjRef, PlayerRef, ReplaceWith,
-    Replaces, Supertype, TargetFilter, TargetRef,
+    AbilityDef, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript, CardType, Cost, Effect,
+    ManaType, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces, Supertype, TargetFilter, TargetRef,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -235,6 +234,22 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
     let card_has_x = c.mana_cost.as_ref().is_some_and(|m| m.has_x());
     for (i, a) in c.abilities.iter().enumerate() {
         let at = |m: String| format!("ability {i}: {m}");
+        // "The sacrificed creature's power" needs a sacrifice chosen as its cost is paid.
+        if format!("{a:?}").contains("SacrificedPower") {
+            let paid = match a {
+                AbilityDef::Activated { cost, .. } => cost.sacrifice.is_some(),
+                AbilityDef::Spell(_) => c
+                    .abilities
+                    .iter()
+                    .any(|x| matches!(x, AbilityDef::AdditionalCost(c) if c.sacrifice.is_some())),
+                _ => false,
+            };
+            if !paid {
+                p.push(at(
+                    "the sacrificed creature's power, but nothing is sacrificed as a cost".into(),
+                ));
+            }
+        }
         match a {
             AbilityDef::Spell(body) => check_body(body, card_has_x, &mut |m| p.push(at(m))),
             AbilityDef::Activated { cost, body, .. } => {
@@ -245,30 +260,61 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 check_cost(cost, &mut |m| p.push(at(m)));
                 check_body(body, has_x, &mut |m| p.push(at(m)));
             }
-            AbilityDef::Mana { cost, .. } => {
-                let just_tap = Cost {
+            AbilityDef::Mana {
+                cost,
+                produce,
+                spend,
+                ..
+            } => {
+                // `{T}`, optionally with "sacrifice this" (D-052). A mana ability that
+                // costs mana, or anything chosen, is not modelled.
+                let allowed = Cost {
                     tap: true,
+                    sacrifice_self: cost.sacrifice_self,
                     ..Cost::default()
                 };
-                if *cost != just_tap {
-                    p.push(at("M1 mana abilities must cost exactly {T} (D-021)".into()));
+                if *cost != allowed {
+                    p.push(at(
+                        "a mana ability must cost {T}, or {T} and sacrificing itself (D-052)"
+                            .into(),
+                    ));
                 }
-                // A source that makes several mana is planned as that many units of one
-                // type; mixing it with another way to tap the same permanent for mana is
-                // not modelled (D-049).
-                if let AbilityDef::Mana { produce, .. } = a {
-                    let ways = c
-                        .abilities
+                if produce.count() == 0 || produce.options().is_empty() {
+                    p.push(at("a mana ability that adds nothing".into()));
+                }
+                if spend
+                    .as_ref()
+                    .is_some_and(|r| r.spells.is_empty() && r.abilities.is_empty())
+                {
+                    p.push(at("mana that can be spent on nothing".into()));
+                }
+                // The player picks a mana ability by the permanent and the type of mana
+                // (`OptionDesc::TapForMana`). Two abilities that differ in more than the
+                // type (how much, at what cost, with what restriction) must therefore not
+                // make the same type (D-052).
+                let plain = |x: &AbilityDef| {
+                    matches!(x, AbilityDef::Mana { cost, produce, spend, .. }
+                        if produce.count() == 1 && !cost.sacrifice_self && spend.is_none())
+                };
+                if !plain(a) {
+                    let mine = produce.options();
+                    let mut others: Vec<ManaType> = c
+                        .land_types
                         .iter()
-                        .filter(|x| matches!(x, AbilityDef::Mana { .. }))
-                        .count()
-                        + c.land_types.len();
-                    if produce.count() == 0 || produce.options().is_empty() {
-                        p.push(at("a mana ability that adds nothing".into()));
+                        .map(|t| ManaType::from_color(t.produces()))
+                        .collect();
+                    for (j, x) in c.abilities.iter().enumerate() {
+                        if let AbilityDef::Mana { produce, .. } = x
+                            && j != i
+                        {
+                            others.extend(produce.options());
+                        }
                     }
-                    if produce.count() > 1 && ways > 1 {
+                    if mine.iter().any(|t| others.contains(t)) {
                         p.push(at(
-                            "a multi-mana ability must be the permanent's only mana ability".into(),
+                            "two mana abilities that differ in more than the mana's type can't \
+                             make the same type (D-052)"
+                                .into(),
                         ));
                     }
                 }
@@ -371,9 +417,28 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                         )
                         | (
                             Replaces::ThisEnters,
-                            ReplaceWith::EntersTapped | ReplaceWith::EntersWithCounters { .. }
+                            ReplaceWith::EntersTapped
+                                | ReplaceWith::EntersWithCounters { .. }
+                                | ReplaceWith::EntersWithCounted { .. }
+                        )
+                        | (
+                            Replaces::OtherEnters(_),
+                            ReplaceWith::EntersTapped
+                                | ReplaceWith::EntersWithCounters { .. }
+                                | ReplaceWith::EntersWithCounted { .. }
                         )
                 );
+                // Counted without a resolving spell or ability to supply X or a trigger.
+                // (Its own X — "enters with X counters" — is the X it was cast with.)
+                let own_x = *replaces == Replaces::ThisEnters && card_has_x;
+                if let ReplaceWith::EntersWithCounted { amount, .. } = with
+                    && !matches!(amount, Amount::Count(_) | Amount::TotalPower(_))
+                    && !(own_x && *amount == Amount::X)
+                {
+                    p.push(at(
+                        "counters counted from something a replacement can't know".into(),
+                    ));
+                }
                 if !ok {
                     p.push(at(format!(
                         "unsupported replacement {replaces:?} -> {with:?}"
@@ -563,6 +628,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         }
         Effect::Draw { who, amount: a }
         | Effect::GainLife { who, amount: a }
+        | Effect::AddMana { who, amount: a, .. }
         | Effect::LoseLife { who, amount: a } => {
             player(who, p);
             amount(a, p);
@@ -636,53 +702,7 @@ pub fn load_deck_file(src: Source<'_>, catalog: &CardCatalog) -> Result<Deck, Lo
     })
 }
 
-/// CR 903.4: a card's color identity — the colors of mana symbols in its mana cost or rules
-/// text, plus its color indicator. (Basic land types are handled by CR 903.5d.)
-pub fn color_identity(def: &CardDef) -> Vec<Color> {
-    let mut out: Vec<Color> = def.colors.clone().unwrap_or_default();
-    let add_cost = |m: &ManaCost, out: &mut Vec<Color>| {
-        for s in &m.symbols {
-            if let ManaSymbol::Colored(c) = s {
-                out.push(*c);
-            }
-        }
-    };
-    if let Some(m) = &def.mana_cost {
-        add_cost(m, &mut out);
-    }
-    for a in &def.abilities {
-        match a {
-            AbilityDef::Activated { cost, .. } | AbilityDef::Mana { cost, .. } => {
-                if let Some(m) = &cost.mana {
-                    add_cost(m, &mut out);
-                }
-                // CR 903.4: the mana symbols in the rules text. "{T}: Add {W} or {U}" has
-                // two; "one mana of any color" and "of any one color" have none.
-                if let AbilityDef::Mana { produce, .. } = a {
-                    let named: Vec<ManaType> = match produce {
-                        ManaProduce::One(t) => vec![*t],
-                        ManaProduce::AnyColor => Vec::new(),
-                        ManaProduce::OneOf(of) => of.clone(),
-                        ManaProduce::Times { of, .. } if of.len() < 5 => of.clone(),
-                        ManaProduce::Times { .. } => Vec::new(),
-                    };
-                    for t in named {
-                        if let Some(c) = Color::ALL
-                            .into_iter()
-                            .find(|c| ManaType::from_color(*c) == t)
-                        {
-                            out.push(c);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
+pub use card_model::color_identity;
 
 /// CR 903.5: Commander deck construction rules (and 903.3 for the commander).
 pub fn validate_commander_deck(catalog: &CardCatalog, deck: &Deck) -> Vec<String> {
