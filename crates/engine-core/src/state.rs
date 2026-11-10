@@ -46,14 +46,12 @@ pub struct PlayerState {
     pub drawn_this_turn: u32,
 }
 
-/// CR 106.6: mana with a spending restriction — the `spend` of mana ability `index` of
-/// card `card`.
+/// CR 106.6: mana with a spending restriction — the `spend` of mana ability `ability`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestrictedMana {
     pub mana: crate::mana::ManaType,
     pub amount: u32,
-    pub card: card_model::CardDefId,
-    pub index: u16,
+    pub ability: card_model::AbilityId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

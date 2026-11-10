@@ -5,7 +5,7 @@
 use crate::ids::{ObjectId, PlayerId};
 use crate::layers::Characteristics;
 use alloc::vec::Vec;
-use card_model::CardDefId;
+use card_model::{AbilityId, CardDefId};
 use serde::{Deserialize, Serialize};
 
 /// A chosen target (CR 115).
@@ -20,11 +20,12 @@ pub enum Target {
 pub enum StackKind {
     /// The spell is the card object with the same id.
     Spell,
-    /// An activated ability of `source` (printed ability `index` of `source_card`).
+    /// An activated or triggered ability of `source`, whose card is `source_card`.
+    /// `ability` is its text: of that card, or of the card that gave `source` the ability.
     Ability {
         source: ObjectId,
         source_card: CardDefId,
-        index: u16,
+        ability: AbilityId,
         /// A triggered ability (CR 603) rather than an activated one (CR 602).
         triggered: bool,
     },

@@ -1700,8 +1700,7 @@ fn mana_abilities_with_a_choice_of_type_or_several_mana() {
 }
 
 // What isn't compiled: different mana from one activation ("{W}{U}"), and several mana "in
-// any combination". And two mana abilities of one permanent that make the same type of
-// mana in different amounts: the player picks an ability by the type it makes.
+// any combination".
 #[test]
 fn mana_forms_not_compiled() {
     let rock = |mana: &str| {
@@ -1716,15 +1715,6 @@ fn mana_forms_not_compiled() {
     assert_eq!(
         forge_test_blockers(&rock("Produced$ Combo W U | Amount$ 2")),
         ["Mana:produced"]
-    );
-    let two = "Name:Test Twin Rock\nManaCost:2\nTypes:Artifact\n\
-        A:AB$ Mana | Cost$ T | Produced$ G G | SpellDescription$ Text.\n\
-        A:AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Text.\nOracle:Text.";
-    let b = forge_test_blockers(two);
-    assert!(
-        b.iter()
-            .any(|x| x.starts_with("invalid:") && x.contains("can't make the same type")),
-        "{b:?}"
     );
     // A mana ability that costs mana, or a sacrifice of something else.
     assert_eq!(
@@ -2216,7 +2206,7 @@ fn mana_of_the_commanders_color_identity() {
         s.options()
             .iter()
             .filter_map(|o| match o {
-                OptionDesc::TapForMana { source, mana } if *source == id => Some(*mana),
+                OptionDesc::TapForMana { source, mana, .. } if *source == id => Some(*mana),
                 _ => None,
             })
             .collect()
@@ -5257,4 +5247,445 @@ fn restricted_mana_cant_pay_a_cost_on_resolution() {
         s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
     });
     assert_eq!(life(&s, P0), 43);
+}
+
+// ---------------------------------------------------------------------------------------
+// Abilities given to other objects (D-064).
+
+fn given(s: &Script, id: ObjectId) -> usize {
+    chars(&s.st, id)
+        .abilities
+        .iter()
+        .filter(|a| a.granted)
+        .count()
+}
+
+const PING: &str =
+    "SVar:Ping:AB$ DealDamage | Cost$ T | ValidTgts$ Any | NumDmg$ 1 | SpellDescription$ Text.";
+
+fn ember_gift() -> String {
+    aura(
+        "Test Ember Gift",
+        "R",
+        "Creature",
+        &format!(
+            "S:Mode$ Continuous | AffectedDefined$ Enchanted | Affected$ Creature | AddAbility$ Ping | Description$ Text.\n{PING}"
+        ),
+    )
+}
+
+// CR 113.1a, 113.2c, 113.10 (2026-11-06): an effect can give an object an ability; the
+// object that has it is its source, and whoever controls that object may activate it.
+// Forge: `AddAbility$ <SVar>` on a Continuous static — "Enchanted creature has "{T}: This
+// creature deals 1 damage to any target."" The Aura itself has no such ability.
+#[test]
+fn an_aura_gives_the_enchanted_creature_an_activated_ability() {
+    let cards = [
+        ember_gift(),
+        spell(
+            "Test Unravel",
+            "W",
+            "Instant",
+            "A:SP$ Destroy | ValidTgts$ Enchantment | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Mountain", "Plains"]);
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    let other = sc.card(P0, Zone::Battlefield, "Test Giant");
+    sc.cards(P0, Zone::Hand, &["Test Ember Gift", "Test Unravel"]);
+    let mut s = Script::new(sc.build());
+    assert!(!can_activate(&s, golem));
+    s.cast("Test Ember Gift")
+        .target_object(golem)
+        .pay()
+        .pass_all();
+    let gift = s.find(P0, Zone::Battlefield, "Test Ember Gift").unwrap();
+    assert_eq!(
+        (given(&s, golem), given(&s, other), given(&s, gift)),
+        (1, 0, 0)
+    );
+    assert!(can_activate(&s, golem) && !can_activate(&s, gift) && !can_activate(&s, other));
+    // The Golem is the source: it taps for the cost, and it deals the damage.
+    s.activate("Test Golem").target_player(P1).pass_all();
+    assert!(s.st.object(golem).tapped);
+    assert_eq!(life(&s, P1), 39);
+    assert_eq!(
+        s.count(|e| matches!(e, Event::DamageDealt { source, .. } if *source == golem)),
+        1
+    );
+    // The Aura goes: so does the ability.
+    s.cast("Test Unravel").target_object(gift).pay().pass_all();
+    assert_eq!(given(&s, golem), 0);
+}
+
+// CR 113.2c (2026-11-06): "If an object has multiple instances of the same ability, each
+// instance functions independently." Forge: `AddTrigger$ <SVar>` — "Insect creatures have
+// "Whenever this creature attacks, you gain 1 life."" Two such lords: it triggers twice.
+// `AddSVar$` copies script variables for Forge's use; a hint for its AI means nothing here.
+#[test]
+fn a_lord_gives_a_triggered_ability_and_two_lords_give_it_twice() {
+    let singer = creature(
+        "Test Hive Singer",
+        "1 G",
+        "Insect",
+        "1/1",
+        "S:Mode$ Continuous | Affected$ Creature.Insect | AddTrigger$ AttackTrig | AddSVar$ AE & TrigGain | Description$ Text.\n\
+         SVar:AttackTrig:Mode$ Attacks | ValidCard$ Card.Self | Execute$ TrigGain | TriggerDescription$ Text.\n\
+         SVar:TrigGain:DB$ GainLife | LifeAmount$ 1\n\
+         SVar:AE:SVar:HasAttackEffect:TRUE",
+    );
+    for lords in [1usize, 2] {
+        let mut sc = scenario(&[&singer]);
+        let singers = sc.cards(P0, Zone::Battlefield, &vec!["Test Hive Singer"; lords]);
+        let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+        let mut s = Script::new(sc.build());
+        assert_eq!(given(&s, singers[0]), lords);
+        assert_eq!(given(&s, golem), 0, "not an Insect");
+        attack_with(&mut s, &[singers[0], golem]);
+        drive_until(&mut s, |s| s.st.turn.step == Step::PostcombatMain);
+        assert_eq!(life(&s, P0), 40 + lords as i32);
+    }
+    // Under another name, a copied variable could mean something to what is given: only
+    // the names Forge's AI reads are known to mean nothing.
+    let odd = singer.replace("SVar:HasAttackEffect:TRUE", "SVar:X:Count$Valid Creature");
+    assert_eq!(
+        forge_test_blockers(&odd),
+        ["static:AddSVar under another name"]
+    );
+}
+
+// CR 603.10a (2026-11-06): a leaves-the-battlefield ability looks back in time — at the
+// creature as it last existed, with the abilities it had been given. "Enchanted creature
+// has "When this creature dies, you gain 3 life.""
+#[test]
+fn a_given_dies_trigger_is_found_on_the_creature_as_it_last_existed() {
+    let cards = [
+        aura(
+            "Test Last Gift",
+            "W",
+            "Creature",
+            "S:Mode$ Continuous | AffectedDefined$ Enchanted | Affected$ Creature | AddTrigger$ DiesTrig | Description$ Text.\n\
+             SVar:DiesTrig:Mode$ ChangesZone | Origin$ Battlefield | Destination$ Graveyard | ValidCard$ Card.Self | Execute$ TrigGain | TriggerDescription$ Text.\n\
+             SVar:TrigGain:DB$ GainLife | LifeAmount$ 3",
+        ),
+        SMITE.to_string(),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Plains", "Swamp"]);
+    // The opponent's creature: the ability is its controller's.
+    let golem = sc.card(P1, Zone::Battlefield, "Test Golem");
+    sc.cards(P0, Zone::Hand, &["Test Last Gift", "Test Smiting"]);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Last Gift")
+        .target_object(golem)
+        .pay()
+        .pass_all();
+    // (The spell resolves, then the trigger.)
+    s.cast("Test Smiting")
+        .target_object(golem)
+        .pay()
+        .pass_all()
+        .pass_all();
+    assert!(!on_battlefield(&s, golem));
+    assert_eq!((life(&s, P0), life(&s, P1)), (40, 43));
+}
+
+// CR 605.1a, 106.12, 302.6 (2026-11-06). Forge: `AddAbility$` of an `AB$ Mana` — "Enchanted
+// land has "{T}: Add two mana of any one color."" A Forest then has two ways to be tapped
+// for {G}: the player says which. "Creatures you control have "{T}: Add {G}."": not one
+// that came under your control this turn.
+#[test]
+fn given_mana_abilities() {
+    use engine_core::mana::ManaType;
+    let cards = [
+        aura(
+            "Test Bounty",
+            "R",
+            "Land",
+            "S:Mode$ Continuous | AffectedDefined$ Enchanted | AddAbility$ TwoMana | Description$ Text.\n\
+             SVar:TwoMana:AB$ Mana | Cost$ T | Produced$ Any | Amount$ 2 | SpellDescription$ Text.",
+        ),
+        creature(
+            "Test Grove Tender",
+            "1 G",
+            "Druid",
+            "1/1",
+            "S:Mode$ Continuous | Affected$ Creature.YouCtrl | AddAbility$ GreenMana | Description$ Text.\n\
+             SVar:GreenMana:AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Text.",
+        ),
+        creature("Test Sapling", "G", "Plant", "0/1", ""),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    // (The Mountain first: it is the first source offered for the Aura's {R}.)
+    let lands = sc.cards(P0, Zone::Battlefield, &["Mountain", "Forest"]);
+    let forest = lands[1];
+    sc.card(P0, Zone::Hand, "Test Bounty");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Bounty").target_object(forest).pay().pass_all();
+    let ways = |s: &Script, mana: ManaType| -> Vec<bool> {
+        s.options()
+            .iter()
+            .filter_map(|o| match o {
+                OptionDesc::TapForMana {
+                    source,
+                    mana: m,
+                    ability,
+                } if *source == forest && *m == mana => Some(ability.is_some()),
+                _ => None,
+            })
+            .collect()
+    };
+    // Its own "{T}: Add {G}" (CR 305.6) and the ability it was given.
+    assert_eq!(ways(&s, ManaType::Green), [false, true]);
+    assert_eq!(ways(&s, ManaType::Blue), [true]);
+    s.pick("two green", |_, o| {
+        matches!(o, OptionDesc::TapForMana { source, mana: ManaType::Green, ability: Some(_) }
+            if *source == forest)
+    });
+    assert_eq!(mana_pool(&s, P0), 2);
+    assert!(s.st.object(forest).tapped);
+
+    let mut sc = scenario(&cards);
+    let tender = sc.card(P0, Zone::Battlefield, "Test Grove Tender");
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Golem");
+    sc.card(P0, Zone::Hand, "Test Sapling");
+    let mut s = Script::new(sc.build());
+    let taps = |s: &Script, id: ObjectId| {
+        s.has(|_, o| matches!(o, OptionDesc::TapForMana { source, .. } if *source == id))
+    };
+    assert!(taps(&s, tender) && taps(&s, golem) && !taps(&s, theirs));
+    // Paid for by a creature's mana.
+    s.cast("Test Sapling").pay().pass_all();
+    let sapling = s.find(P0, Zone::Battlefield, "Test Sapling").unwrap();
+    assert_eq!(given(&s, sapling), 1);
+    assert!(!taps(&s, sapling), "summoning sick (CR 302.6)");
+}
+
+// CR 113.3d, 613.1f, 613.7a (2026-11-06): a static ability an object is given works like
+// any other — its effect starts applying in the layer after abilities are given, and
+// "you" is the controller of the object that has it. Forge: `AddStaticAbility$ <SVar>` —
+// "Enchanted creature has "Other creatures you control get +1/+1."" Given twice, it
+// applies twice (CR 113.2c).
+#[test]
+fn a_given_static_ability_works_for_the_controller_of_what_has_it() {
+    let cards = [aura(
+        "Test Banner Gift",
+        "W",
+        "Creature",
+        "S:Mode$ Continuous | AffectedDefined$ Enchanted | Affected$ Creature | AddStaticAbility$ Anthem | Description$ Text.\n\
+         SVar:Anthem:Mode$ Continuous | Affected$ Creature.Other+YouCtrl | AddPower$ 1 | AddToughness$ 1 | Description$ Text.",
+    )];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Plains", "Plains"]);
+    let mine = sc.card(P0, Zone::Battlefield, "Test Golem"); // 2/3
+    let giant = sc.card(P1, Zone::Battlefield, "Test Giant"); // 5/4
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Golem");
+    sc.cards(P0, Zone::Hand, &["Test Banner Gift", "Test Banner Gift"]);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Banner Gift")
+        .target_object(giant)
+        .pay()
+        .pass_all();
+    assert_eq!(pt(&s, theirs), (3, 4), "the Giant's controller's creature");
+    assert_eq!(pt(&s, giant), (5, 4), "other creatures");
+    assert_eq!(pt(&s, mine), (2, 3), "not the Aura's controller's");
+    s.cast("Test Banner Gift")
+        .target_object(giant)
+        .pay()
+        .pass_all();
+    assert_eq!(pt(&s, theirs), (4, 5));
+}
+
+// CR 613.1f, 613.7, 113.10c (2026-11-06): giving and removing abilities happen in one
+// layer, in timestamp order — the later effect prevails. One ability that does both ("loses
+// all other abilities and has …") takes away first.
+#[test]
+fn abilities_given_and_lost_in_timestamp_order() {
+    let hush = aura(
+        "Test Hush",
+        "U",
+        "Creature",
+        "S:Mode$ Continuous | AffectedDefined$ Enchanted | Affected$ Creature | RemoveAllAbilities$ True | Description$ Text.",
+    );
+    let rewrite = aura(
+        "Test Rewrite",
+        "U",
+        "Creature",
+        &format!(
+            "S:Mode$ Continuous | AffectedDefined$ Enchanted | Affected$ Creature | RemoveAllAbilities$ True | AddKeyword$ Flying | AddAbility$ Ping | Description$ Text.\n{PING}"
+        ),
+    );
+    let cards = [
+        ember_gift(),
+        hush,
+        rewrite,
+        creature("Test Lookout", "1 W", "Bird", "1/1", "K:Vigilance"),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let play = |order: &[&str]| {
+        let mut sc = scenario(&cards);
+        sc.cards(P0, Zone::Battlefield, &["Mountain", "Island"]);
+        let bird = sc.card(P0, Zone::Battlefield, "Test Lookout");
+        sc.cards(P0, Zone::Hand, order);
+        let mut s = Script::new(sc.build());
+        for name in order {
+            s.cast(name).target_object(bird).pay().pass_all();
+        }
+        let c = chars(&s.st, bird);
+        (c.abilities.len(), c.keywords.clone())
+    };
+    assert_eq!(play(&["Test Ember Gift"]), (1, vec![Keyword::Vigilance]));
+    assert_eq!(play(&["Test Ember Gift", "Test Hush"]), (0, vec![]));
+    assert_eq!(play(&["Test Hush", "Test Ember Gift"]), (1, vec![]));
+    assert_eq!(play(&["Test Rewrite"]), (1, vec![Keyword::Flying]));
+}
+
+// CR 305.6 (2026-11-06): a land with a basic land type "has the intrinsic ability
+// "{T}: Add [mana]"" — an ability it has, so one it loses with all its abilities.
+#[test]
+fn a_land_that_loses_all_abilities_loses_the_mana_ability_of_its_type() {
+    let cards = [aura(
+        "Test Fallow",
+        "R",
+        "Land",
+        "S:Mode$ Continuous | AffectedDefined$ Enchanted | RemoveAllAbilities$ True | Description$ Text.",
+    )];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    let lands = sc.cards(P0, Zone::Battlefield, &["Mountain", "Forest", "Forest"]);
+    sc.card(P0, Zone::Hand, "Test Fallow");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Fallow")
+        .target_object(lands[1])
+        .pay()
+        .pass_all();
+    let taps = |s: &Script, id: ObjectId| {
+        s.has(|_, o| matches!(o, OptionDesc::TapForMana { source, .. } if *source == id))
+    };
+    assert!(!s.st.object(lands[1]).tapped);
+    assert!(!taps(&s, lands[1]) && taps(&s, lands[2]));
+    assert!(
+        chars(&s.st, lands[1]).has_subtype("Forest"),
+        "still a Forest"
+    );
+}
+
+// CR 611.2a–c, 514.2 (2026-11-06): a spell can give abilities for a while. Forge: Animate
+// with `Abilities$`, `Triggers$`, `staticAbilities$` (comma-separated script variables) —
+// "Until end of turn, target creature gains "{T}: …", "Whenever this creature attacks, …"
+// and "This creature has haste.""
+#[test]
+fn a_spell_gives_abilities_until_end_of_turn() {
+    let cards = [spell(
+        "Test Kindle",
+        "R",
+        "Instant",
+        &format!(
+            "A:SP$ Animate | ValidTgts$ Creature | Abilities$ Ping | Triggers$ AttackTrig | staticAbilities$ Swift | SpellDescription$ Text.\n\
+             {PING}\n\
+             SVar:AttackTrig:Mode$ Attacks | ValidCard$ Card.Self | Execute$ TrigGain | TriggerDescription$ Text.\n\
+             SVar:TrigGain:DB$ GainLife | LifeAmount$ 2\n\
+             SVar:Swift:Mode$ Continuous | Affected$ Card.Self | AddKeyword$ Haste | Description$ Text."
+        ),
+    )];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.card(P0, Zone::Battlefield, "Mountain");
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    let giant = sc.card(P0, Zone::Battlefield, "Test Giant");
+    sc.card(P0, Zone::Hand, "Test Kindle");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Kindle").target_object(golem).pay().pass_all();
+    assert_eq!((given(&s, golem), given(&s, giant)), (3, 0));
+    // The static ability it was given gives it haste in the same layer.
+    assert!(has(&s, golem, Keyword::Haste));
+    assert!(can_activate(&s, golem));
+    attack_with(&mut s, &[golem]);
+    drive_until(&mut s, |s| s.st.turn.step == Step::PostcombatMain);
+    assert_eq!(life(&s, P0), 42);
+    drive_until(&mut s, |s| s.st.turn.active == P1);
+    assert_eq!(given(&s, golem), 0);
+    assert!(!has(&s, golem, Keyword::Haste));
+}
+
+// CR 611.3c (2026-11-06): continuous effects apply to a permanent as it enters, "before
+// determining whether the permanent will cause an ability to trigger when it enters". "As
+// long as you control an artifact, this creature has "When this creature enters, you gain
+// 4 life."" — it has that ability as it enters, or it doesn't.
+#[test]
+fn an_enters_trigger_the_permanent_is_given_as_it_enters() {
+    let cards = [
+        creature(
+            "Test Reveler",
+            "1 W",
+            "Human",
+            "2/2",
+            "S:Mode$ Continuous | Affected$ Card.Self | AddTrigger$ Arrive | IsPresent$ Artifact.YouCtrl | Description$ Text.\n\
+             SVar:Arrive:Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield | ValidCard$ Card.Self | Execute$ TrigGain | TriggerDescription$ Text.\n\
+             SVar:TrigGain:DB$ GainLife | LifeAmount$ 4",
+        ),
+        "Name:Test Automaton\nManaCost:2\nTypes:Artifact Creature Construct\nPT:1/1\nOracle:"
+            .to_string(),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    for artifact in [false, true] {
+        let mut sc = scenario(&cards);
+        sc.cards(P0, Zone::Battlefield, &["Plains", "Plains"]);
+        if artifact {
+            sc.card(P0, Zone::Battlefield, "Test Automaton");
+        }
+        sc.card(P0, Zone::Hand, "Test Reveler");
+        let mut s = Script::new(sc.build());
+        s.cast("Test Reveler").pay().pass_all().pass_all();
+        assert_eq!(life(&s, P0), if artifact { 44 } else { 40 });
+    }
+}
+
+// What can't be given. An ability about casting, about a card as it enters, or of a layer
+// that is over when abilities are given (CR 613.1f) is refused by the card checks; a
+// script variable that isn't an activated ability, and an ability that gives itself, by
+// the compiler.
+#[test]
+fn abilities_that_cant_be_given() {
+    let lord = |rest: &str| creature("Test Odd Lord", "2", "Golem", "2/2", rest);
+    let b = forge_test_blockers(&lord(
+        "S:Mode$ Continuous | Affected$ Land | AddReplacementEffect$ Slow | Description$ Text.\n\
+         SVar:Slow:Event$ Moved | ValidCard$ Card.Self | Destination$ Battlefield | ReplacementResult$ Updated | ReplaceWith$ ETBTapped\n\
+         SVar:ETBTapped:DB$ Tap | Defined$ Self | ETB$ True",
+    ));
+    assert!(
+        b.iter()
+            .any(|x| x.starts_with("invalid:") && x.contains("another object can be given")),
+        "{b:?}"
+    );
+    // A given static ability that changes types: layer 4 is over by layer 6.
+    let b = forge_test_blockers(&lord(
+        "S:Mode$ Continuous | Affected$ Creature | AddStaticAbility$ Wall | Description$ Text.\n\
+         SVar:Wall:Mode$ Continuous | Affected$ Card.Self | AddType$ Golem | Description$ Text.",
+    ));
+    assert!(
+        b.iter()
+            .any(|x| x.starts_with("invalid:") && x.contains("another object can be given")),
+        "{b:?}"
+    );
+    assert_eq!(
+        forge_test_blockers(&lord(
+            "S:Mode$ Continuous | Affected$ Creature | AddAbility$ Cast | Description$ Text.\n\
+             SVar:Cast:SP$ Draw | NumCards$ 1 | SpellDescription$ Text.",
+        )),
+        ["granted:not an activated ability"]
+    );
+    assert_eq!(
+        forge_test_blockers(&lord(
+            "S:Mode$ Continuous | Affected$ Creature | AddStaticAbility$ Loop | Description$ Text.\n\
+             SVar:Loop:Mode$ Continuous | Affected$ Creature | AddStaticAbility$ Loop | Description$ Text.",
+        )),
+        ["granted:nested too deep"]
+    );
 }

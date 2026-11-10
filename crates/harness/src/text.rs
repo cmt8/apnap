@@ -347,9 +347,19 @@ pub fn option_line(v: &PlayerView, o: &OptionDesc) -> String {
         OptionDesc::Pass => "pass".into(),
         OptionDesc::PlayLand { card } => format!("play {}", view_name(v, *card)),
         OptionDesc::CastSpell { card } => format!("cast {}", view_name(v, *card)),
-        OptionDesc::TapForMana { source, mana } => {
-            format!("tap {} for {mana:?}", view_name(v, *source))
-        }
+        OptionDesc::TapForMana {
+            source,
+            mana,
+            ability,
+        } => match ability {
+            None => format!("tap {} for {mana:?}", view_name(v, *source)),
+            Some(a) => format!(
+                "tap {} for {mana:?} ({}ability {})",
+                view_name(v, *source),
+                if a.granted { "granted " } else { "" },
+                a.index
+            ),
+        },
         OptionDesc::Player { player } => p(*player),
         OptionDesc::Keep => "keep".into(),
         OptionDesc::Mulligan => "mulligan".into(),
@@ -365,23 +375,35 @@ pub fn option_line(v: &PlayerView, o: &OptionDesc) -> String {
             )
         }
         OptionDesc::DamageRecipient { object } => view_name(v, *object),
-        OptionDesc::ActivateAbility { source, index } => {
-            format!("activate {} (ability {index})", view_name(v, *source))
+        OptionDesc::ActivateAbility { source, ability } => {
+            format!(
+                "activate {} ({}ability {})",
+                view_name(v, *source),
+                if ability.granted { "granted " } else { "" },
+                ability.index
+            )
         }
         OptionDesc::Mode { index } => format!("mode {index}"),
         OptionDesc::Target { target } => format!("target {}", target_name(v, target)),
         OptionDesc::Mana { mana } => mana.symbol().into(),
-        OptionDesc::Replacement { source, index } => {
+        OptionDesc::Replacement {
+            source, ability, ..
+        } => {
             format!(
-                "apply {}'s replacement effect ({index})",
-                view_name(v, *source)
+                "apply {}'s replacement effect ({})",
+                view_name(v, *source),
+                ability.index
             )
         }
         OptionDesc::Shield { id } => format!("prevention shield #{id}"),
         OptionDesc::Accept => "yes".into(),
         OptionDesc::Decline => "no".into(),
-        OptionDesc::Trigger { source, index } => {
-            format!("{}'s triggered ability ({index})", view_name(v, *source))
+        OptionDesc::Trigger { source, ability } => {
+            format!(
+                "{}'s triggered ability ({})",
+                view_name(v, *source),
+                ability.index
+            )
         }
     }
 }

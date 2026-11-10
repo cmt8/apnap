@@ -505,6 +505,7 @@ mod tests {
             colors: Some(colors.to_vec()),
             token: true,
             key: None,
+            granted: vec![],
         }
     }
 

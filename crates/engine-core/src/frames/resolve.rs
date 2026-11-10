@@ -169,6 +169,9 @@ pub struct ResolveFrame {
     /// controller" still means that player once the target is gone (CR 608.2h).
     #[serde(default)]
     pub target_controllers: Vec<Vec<Option<PlayerId>>>,
+    /// The card the resolving text is written on: the spell's, or the ability's (which
+    /// is another card's than its source's when the ability was given to the source).
+    pub card: card_model::CardDefId,
 }
 
 impl ResolveFrame {
@@ -188,6 +191,7 @@ impl ResolveFrame {
             facts: Default::default(),
             spell_to: None,
             target_controllers: Vec::new(),
+            card: card_model::CardDefId(0),
         }
     }
 
@@ -1080,6 +1084,10 @@ impl ResolveFrame {
         self.x = top.x;
         self.sacrificed_power = top.sacrificed_power;
         self.facts = top.facts;
+        self.card = match &top.kind {
+            StackKind::Spell => st.object(top.id).card,
+            StackKind::Ability { ability, .. } => ability.card,
+        };
         self.targets = top.targets.clone();
         self.source_lki = top.source_lki.clone();
         self.subject = top.subject;
@@ -1126,13 +1134,10 @@ impl ResolveFrame {
                     .expect("instants and sorceries have a spell ability")
             }
             StackKind::Ability {
-                source,
-                source_card,
-                index,
-                ..
+                source, ability, ..
             } => {
                 self.source = *source;
-                match &st.catalog.get(*source_card).abilities[*index as usize] {
+                match st.catalog.ability(*ability) {
                     AbilityDef::Activated { body, .. } => body.clone(),
                     AbilityDef::Triggered {
                         body,
@@ -1346,6 +1351,7 @@ impl ResolveFrame {
                             affected,
                             effects,
                             until_end_of_turn,
+                            card: self.card,
                         },
                     );
                 }
@@ -1418,6 +1424,7 @@ impl ResolveFrame {
                             affected: vec![o],
                             effects,
                             until_end_of_turn,
+                            card: self.card,
                         },
                     );
                 }

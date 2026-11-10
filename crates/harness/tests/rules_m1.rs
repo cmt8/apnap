@@ -29,7 +29,7 @@ fn scenario(players: u8) -> Scenario {
 }
 
 fn taps(s: &Script, name: &str, mana: ManaType) -> bool {
-    s.has(|s, o| matches!(o, OptionDesc::TapForMana { source, mana: m } if s.name(*source) == name && *m == mana))
+    s.has(|s, o| matches!(o, OptionDesc::TapForMana { source, mana: m, .. } if s.name(*source) == name && *m == mana))
 }
 
 fn life(s: &Script, p: PlayerId) -> i32 {

@@ -471,6 +471,7 @@ pub fn coverage_of(name: &str, data: &card_db::scryfall::ScryfallData) -> Covera
                         tests: vec![],
                         keywords: vec![],
                         abilities: vec![],
+                        granted: vec![],
                     };
                     card_db::real::compile(&empty, card)
                         .err()
@@ -870,8 +871,14 @@ pub fn play_random(seed: u64, opts: PlayOptions) -> Result<GameRecord, HarnessEr
         if rec.responses.len().is_multiple_of(2000) && std::env::var_os("APNAP_TRACE").is_some() {
             let top = st.stack.last().map(|top| match &top.kind {
                 engine_core::stack::StackKind::Ability {
-                    source_card, index, ..
-                } => format!("{} ability {index}", st.catalog.get(*source_card).name),
+                    source_card,
+                    ability,
+                    ..
+                } => format!(
+                    "{} ability {}",
+                    st.catalog.get(*source_card).name,
+                    ability.index
+                ),
                 engine_core::stack::StackKind::Spell => st.card_def(top.id).name.clone(),
             });
             eprintln!(

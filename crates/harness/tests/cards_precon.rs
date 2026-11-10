@@ -410,7 +410,7 @@ fn diamonds_enter_tapped_and_tap_for_their_color() {
             .options()
             .iter()
             .filter_map(|o| match o {
-                OptionDesc::TapForMana { source, mana } if *source == ready => Some(*mana),
+                OptionDesc::TapForMana { source, mana, .. } if *source == ready => Some(*mana),
                 _ => None,
             })
             .collect();
@@ -615,7 +615,7 @@ fn birds_of_paradise_fly_and_tap_for_any_color() {
         .options()
         .iter()
         .filter_map(|o| match o {
-            OptionDesc::TapForMana { source, mana } if *source == birds => Some(*mana),
+            OptionDesc::TapForMana { source, mana, .. } if *source == birds => Some(*mana),
             _ => None,
         })
         .collect();
@@ -1376,7 +1376,7 @@ fn mind_stone_taps_for_mana_or_is_sacrificed_for_a_card() {
     sc.card(P0, Zone::Battlefield, "Forest");
     let mut s = Script::new(sc.build());
     let offered = s.has(|s, o| {
-        matches!(o, OptionDesc::TapForMana { source, mana: ManaType::Colorless }
+        matches!(o, OptionDesc::TapForMana { source, mana: ManaType::Colorless, .. }
             if s.name(*source) == "Mind Stone")
     });
     assert!(offered);
@@ -1417,7 +1417,7 @@ fn infernal_idol_taps_for_black_or_is_sacrificed_for_cards() {
     sc.cards(P0, Zone::Battlefield, &["Swamp"; 3]);
     let mut s = Script::new(sc.build());
     let offered = s.has(|s, o| {
-        matches!(o, OptionDesc::TapForMana { source, mana: ManaType::Black }
+        matches!(o, OptionDesc::TapForMana { source, mana: ManaType::Black, .. }
             if s.name(*source) == "Infernal Idol")
     });
     assert!(offered);

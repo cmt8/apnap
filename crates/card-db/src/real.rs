@@ -25,6 +25,9 @@ pub struct RealCardScript {
     pub keywords: Vec<Keyword>,
     #[serde(default)]
     pub abilities: Vec<AbilityDef>,
+    /// Abilities the card gives to other objects (`CardDef::granted`).
+    #[serde(default)]
+    pub granted: Vec<AbilityDef>,
 }
 
 fn keyword_name(k: Keyword) -> &'static str {
@@ -213,6 +216,7 @@ pub fn compile(script: &RealCardScript, card: &ScryfallCard) -> Result<CardDef, 
         colors: Some(colors),
         token: false,
         key: None,
+        granted: script.granted.clone(),
     })
 }
 
@@ -249,6 +253,7 @@ mod tests {
             name: "Example".into(),
             verified: true,
             tests: vec!["t".into()],
+            granted: vec![],
             keywords,
             abilities: vec![],
         }

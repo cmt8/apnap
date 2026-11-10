@@ -1141,6 +1141,62 @@ Rules text: docs/rules-notes/601-casting-602-activating-605-mana.md (last sectio
   for it is too noisy to be a compiler guard yet.
 - 8,668 → 8,933 of 34,463 scripts (25.9%). Golden hashes unchanged.
 
+## D-064 Abilities given to other objects; an ability is named by its card (2026-11-10)
+Rules text: docs/rules-notes/113-abilities-given.md.
+- **`AbilityId { card, index, granted }`** replaces the bare index into an object's own
+  card everywhere an ability is named: `Characteristics::abilities`, the options
+  `ActivateAbility` / `Trigger` / `Replacement`, `CastSource::Ability`, `StackKind::Ability`,
+  `PendingTrigger`, `RestrictedMana`, replacement keys, `Event::Triggered`, the views. The
+  text of an ability is looked up in the catalog (`CardCatalog::ability`), so it is found
+  after its source has left and whoever's card it is written on.
+- **`CardDef::granted`**: the abilities a card gives away (the quoted text in "enchanted
+  creature has "…""), beside the ones it has. **`ContinuousEffect::GrantAbilities`**
+  (layer 6) names them by index — in a static ability, or in a resolving effect
+  ("until end of turn, target creature gains "…"").
+- The refactor was checked to change nothing before anything was added: all 15 golden
+  games kept their event logs, and 650 soak games over four setups ended exactly as before.
+- **Static abilities that are given** join the layer walk when they are given (layer 6),
+  with the timestamp of CR 613.7a. card-db refuses a given static ability whose effect
+  belongs to an earlier layer (control, types, colors, a characteristic-defining ability):
+  by the rules it would never apply, and nothing printed needs it.
+- **The same ability twice is had twice** (CR 113.2c): it triggers twice, its static effect
+  applies twice, each replacement effect is its own (`nth` in the key). As something to
+  activate it is offered once.
+- **`OptionDesc::TapForMana` names the ability** unless it is a plain "{T}: Add one mana"
+  (those stay one way to tap the permanent). This lifts D-052's limit — two mana abilities
+  of one permanent may now make the same type in different amounts, at different costs or
+  with different restrictions — which a land given "{T}: Add two mana of any one color"
+  needs anyway. The app says which ability only where two make the same mana.
+- **Rules correction, changes existing games:** a land that loses all abilities loses the
+  "{T}: Add [mana]" of its basic land types too (CR 305.6: an ability it has; ruled so for
+  Imprisoned in the Moon, 2016-07-13). Before, an animated Forest under "creatures lose
+  all abilities" still tapped for {G}. With this one rule switched off, every soak game of
+  the old cards matched the baseline; with it, games in which that happens differ.
+- **Compiler:** `AddAbility$`, `AddTrigger$`, `AddStaticAbility$`, `AddReplacementEffect$`
+  on `S:Mode$ Continuous`; `Abilities$`, `Triggers$`, `staticAbilities$`, `Replacements$`
+  on Animate. The script variables are compiled as abilities of whatever gets them (a
+  trigger needs no `TriggerZones$`: it works where the object is given it). `AddSVar$` is
+  read and means nothing here — the variables are found on the giving card anyway —
+  except a variable copied under another name, which is accepted only for the names
+  Forge's AI reads (`AI_HINTS`). An ability that gives itself is refused.
+- One static ability that takes abilities away and gives some ("loses all other abilities
+  and has flying") now takes away first, as Forge does; before, the keywords it gave
+  were lost with the rest. No compiled card had both.
+- The Oracle guard compares what a card says in quotes with the abilities the compiled
+  card gives, and what it says outright with the rest.
+- The app shows the abilities a permanent has been given under its enlarged card, and
+  labels a given ability's button with its text.
+- `Event::Triggered` carries the `AbilityId`: the event logs of games with triggers hash
+  differently (7 of the 15 golden games; the 8 without triggers kept theirs). State
+  hashes changed for all (the types above are part of the state). Re-blessed.
+- 8,933 → 9,115 of 34,463 scripts (26.4%); precons 148 of 275 deck slots. The family
+  "static abilities" fell from 426 cards blocked by it alone to 166. All 182 newly
+  compiled cards were read against their Oracle text.
+- **Next by family** (cards blocked by it alone): Forge's `Effect` objects 419,
+  double-faced cards 399, `Mana` 356 (different mana at once, mana abilities that cost
+  mana — the payment feasibility rework of D-021), `ChangeZone` rest 350, tokens 218,
+  Sagas 185, regeneration 182.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

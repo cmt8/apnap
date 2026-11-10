@@ -15,7 +15,7 @@ use crate::stack::{StackKind, StackObject, Target};
 use crate::state::GameState;
 use crate::zones::{LibraryPosition, Zone};
 use alloc::vec::Vec;
-use card_model::{CardDefId, ContinuousEffect, CounterKind};
+use card_model::{AbilityId, CardDefId, ContinuousEffect, CounterKind};
 
 // An action is built and executed on the spot, never stored: the size of the largest
 // variant (the one that carries last known information) doesn't matter.
@@ -62,6 +62,8 @@ pub enum GameAction {
         affected: Vec<ObjectId>,
         effects: Vec<ContinuousEffect>,
         until_end_of_turn: bool,
+        /// The card the effects are written on.
+        card: CardDefId,
     },
     /// CR 615.7: create a prevention shield.
     AddShield {
@@ -161,7 +163,7 @@ pub enum GameAction {
         controller: PlayerId,
         source: ObjectId,
         source_card: CardDefId,
-        index: u16,
+        ability: AbilityId,
         triggered: bool,
         source_lki: Option<Characteristics>,
         /// The object whose event triggered the ability, and its last known information.
@@ -202,12 +204,11 @@ pub enum GameAction {
         /// The bottom cards go in a random order instead of the listed one.
         random_bottom: bool,
     },
-    /// CR 106.6: add one mana that can only be spent as mana ability `index` of `card` says.
+    /// CR 106.6: add one mana that can only be spent as mana ability `ability` says.
     AddRestrictedMana {
         player: PlayerId,
         mana: ManaType,
-        card: card_model::CardDefId,
-        index: u16,
+        ability: AbilityId,
     },
     /// CR 106.6: `amount` of the restricted mana at `entry` is about to pay for something
     /// it may be spent on: it joins the rest of the pool, to be paid with it.
@@ -315,6 +316,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             affected,
             effects,
             until_end_of_turn,
+            card,
         } => {
             let id = st.next_effect_id;
             st.next_effect_id += 1;
@@ -327,6 +329,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 affected,
                 effects,
                 until_end_of_turn,
+                card,
             });
             st.emit(Event::ContinuousEffectBegan { id, source });
             ActionResult::Done
@@ -455,20 +458,18 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
         GameAction::AddRestrictedMana {
             player,
             mana,
-            card,
-            index,
+            ability,
         } => {
             let pool = &mut st.player_mut(player).restricted_mana;
             match pool
                 .iter_mut()
-                .find(|r| r.mana == mana && r.card == card && r.index == index)
+                .find(|r| r.mana == mana && r.ability == ability)
             {
                 Some(r) => r.amount += 1,
                 None => pool.push(crate::state::RestrictedMana {
                     mana,
                     amount: 1,
-                    card,
-                    index,
+                    ability,
                 }),
             }
             st.emit(Event::ManaAdded { player, mana });
@@ -571,7 +572,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             controller,
             source,
             source_card,
-            index,
+            ability,
             triggered,
             source_lki,
             subject,
@@ -585,7 +586,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 kind: StackKind::Ability {
                     source,
                     source_card,
-                    index,
+                    ability,
                     triggered,
                 },
                 source_lki,

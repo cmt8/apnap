@@ -9,6 +9,7 @@ use crate::ids::{ObjectId, PlayerId};
 use crate::mana::ManaType;
 use crate::stack::Target;
 use alloc::vec::Vec;
+use card_model::AbilityId;
 use core::fmt;
 use serde::{Deserialize, Serialize};
 
@@ -124,16 +125,20 @@ pub enum OptionDesc {
     CastSpell {
         card: ObjectId,
     },
-    /// Activate non-mana activated ability `index` of `source` (CR 602).
+    /// Activate non-mana activated ability `ability` of `source` (CR 602).
     ActivateAbility {
         source: ObjectId,
-        index: u16,
+        ability: AbilityId,
     },
     /// Activate a `{T}` mana ability of `source` for one `mana` (CR 605; includes the
     /// intrinsic abilities of basic land types, CR 305.6).
     TapForMana {
         source: ObjectId,
         mana: ManaType,
+        /// Which of the source's mana abilities, when it isn't one of the plain ones
+        /// ("{T}: Add one mana", which are all one way to tap it): an ability that makes
+        /// more, sacrifices the source, or makes mana with a restriction.
+        ability: Option<AbilityId>,
     },
     /// A mode of a modal spell or ability (CR 700.2), by printed index.
     Mode {
@@ -147,10 +152,12 @@ pub enum OptionDesc {
     Mana {
         mana: ManaType,
     },
-    /// A replacement effect: ability `index` of `source` (CR 616.1).
+    /// A replacement effect: ability `ability` of `source` (CR 616.1); `nth` tells apart
+    /// the times `source` has that ability.
     Replacement {
         source: ObjectId,
-        index: u16,
+        ability: AbilityId,
+        nth: u8,
     },
     /// A prevention shield (CR 615.7, 616.1).
     Shield {
@@ -164,7 +171,7 @@ pub enum OptionDesc {
     /// A triggered ability waiting to go on the stack (CR 603.3b).
     Trigger {
         source: ObjectId,
-        index: u16,
+        ability: AbilityId,
     },
     Player {
         player: PlayerId,

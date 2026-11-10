@@ -118,7 +118,9 @@ fn continuous_polarity(effects: &[ContinuousEffect]) -> Polarity {
                     Polarity::Help
                 };
             }
-            ContinuousEffect::AddKeywords(_) | ContinuousEffect::AddTypes { .. } => {
+            ContinuousEffect::AddKeywords(_)
+            | ContinuousEffect::AddTypes { .. }
+            | ContinuousEffect::GrantAbilities(_) => {
                 return Polarity::Help;
             }
             ContinuousEffect::SetColors(_)
@@ -194,7 +196,7 @@ pub struct HeuristicAgent {
     last_modes: Vec<u8>,
     /// How often each ability was activated this turn (`ability_turn`). An ability that
     /// costs nothing would otherwise be activated every time this player has priority.
-    ability_uses: BTreeMap<(ObjectId, u16), u8>,
+    ability_uses: BTreeMap<(ObjectId, card_model::AbilityId), u8>,
     ability_turn: u32,
 }
 
@@ -295,7 +297,7 @@ impl HeuristicAgent {
                     })
                 })
             }),
-            Some(i) => match &def.abilities[i as usize] {
+            Some(a) => match self.catalog.ability(a) {
                 AbilityDef::Activated { body, .. } | AbilityDef::Triggered { body, .. } => {
                     Some(body.clone())
                 }
@@ -367,11 +369,11 @@ impl HeuristicAgent {
         &self,
         v: &PlayerView,
         card: card_model::CardDefId,
-        ability: Option<u16>,
+        ability: Option<card_model::AbilityId>,
     ) -> i64 {
         let def = self.catalog.get(card);
         let body = match ability {
-            Some(i) => match &def.abilities[i as usize] {
+            Some(a) => match self.catalog.ability(a) {
                 AbilityDef::Activated { body, .. } => Some(body.clone()),
                 _ => None,
             },
@@ -503,13 +505,13 @@ impl HeuristicAgent {
                     }
                     self.spell_score(v, ov.card, None) + if ov.is_commander { 20 } else { 0 }
                 }
-                OptionDesc::ActivateAbility { source, index } => {
-                    let used = self.ability_uses.get(&(*source, *index)).copied();
+                OptionDesc::ActivateAbility { source, ability } => {
+                    let used = self.ability_uses.get(&(*source, *ability)).copied();
                     if used.unwrap_or(0) >= ABILITY_USES_PER_TURN {
                         continue;
                     }
                     match Self::find(v, *source) {
-                        Some(ov) => self.spell_score(v, ov.card, Some(*index)) - 5,
+                        Some(ov) => self.spell_score(v, ov.card, Some(*ability)) - 5,
                         None => continue,
                     }
                 }
@@ -521,8 +523,8 @@ impl HeuristicAgent {
         }
         match best {
             Some((_, i)) => {
-                if let OptionDesc::ActivateAbility { source, index } = &d.options[i] {
-                    *self.ability_uses.entry((*source, *index)).or_insert(0) += 1;
+                if let OptionDesc::ActivateAbility { source, ability } = &d.options[i] {
+                    *self.ability_uses.entry((*source, *ability)).or_insert(0) += 1;
                 }
                 Response::Pick(vec![i])
             }
@@ -1012,13 +1014,10 @@ impl Agent for HeuristicAgent {
             (ChoiceKind::PayMana, Primitive::PickN { .. }) => {
                 // Tap what stays before sacrificing what doesn't (Treasure).
                 let keeps = |o: &OptionDesc| match o {
-                    OptionDesc::TapForMana { source, .. } => {
-                        Self::find(v, *source).is_none_or(|ov| {
-                            !self.catalog.get(ov.card).abilities.iter().any(|a| {
-                                matches!(a, AbilityDef::Mana { cost, .. } if cost.sacrifice_self)
-                            })
-                        })
-                    }
+                    OptionDesc::TapForMana { ability, .. } => ability.is_none_or(|a| {
+                        !matches!(self.catalog.ability(a),
+                            AbilityDef::Mana { cost, .. } if cost.sacrifice_self)
+                    }),
                     _ => true,
                 };
                 Response::Pick(vec![d.options.iter().position(keeps).unwrap_or(0)])

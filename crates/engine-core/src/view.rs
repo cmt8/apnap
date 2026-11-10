@@ -38,6 +38,10 @@ pub struct ObjectView {
     pub is_commander: bool,
     pub card_instance: CardInstanceId,
     pub attached_to: Option<ObjectId>,
+    /// Abilities it has that aren't printed on its card: given to it by other objects or
+    /// effects (public: the text is the giving card's).
+    #[serde(default)]
+    pub granted: Vec<card_model::AbilityId>,
 }
 
 /// A commander designation (CR 903.3): public for the whole game, wherever the card is.
@@ -60,8 +64,8 @@ pub struct StackView {
     pub name: String,
     /// The spell's card, or the ability's source card.
     pub card: card_model::CardDefId,
-    /// For abilities: the ability's index on `card`.
-    pub ability: Option<u16>,
+    /// For abilities: the ability's text (of `card`, or of the card that gave it).
+    pub ability: Option<card_model::AbilityId>,
     pub modes: Vec<u8>,
     pub x: u32,
     pub targets: Vec<Target>,
@@ -135,6 +139,7 @@ fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
         is_commander: st.is_commander(id),
         card_instance: o.card_instance,
         attached_to: o.attached_to,
+        granted: c.abilities.iter().copied().filter(|a| a.granted).collect(),
     }
 }
 
@@ -194,7 +199,7 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
                 },
                 ability: match &so.kind {
                     StackKind::Spell => None,
-                    StackKind::Ability { index, .. } => Some(*index),
+                    StackKind::Ability { ability, .. } => Some(*ability),
                 },
                 name: match &so.kind {
                     StackKind::Spell => st.card_def(so.id).name.clone(),

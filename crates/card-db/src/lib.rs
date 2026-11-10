@@ -13,7 +13,7 @@ pub mod scryfall;
 
 use card_model::{
     AbilityDef, ActivationZone, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript,
-    CardType, Cost, Effect, ManaType, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces, Supertype,
+    CardType, Cost, Effect, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces, Supertype,
     TargetFilter, TargetRef, Trigger,
 };
 use serde::Deserialize;
@@ -233,8 +233,72 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
         p.push("duplicate keyword".into());
     }
     let card_has_x = c.mana_cost.as_ref().is_some_and(|m| m.has_x());
-    for (i, a) in c.abilities.iter().enumerate() {
-        let at = |m: String| format!("ability {i}: {m}");
+    // "Has [quoted ability]" names an ability of the card's `granted` list.
+    let text = format!("{:?}", (&c.abilities, &c.granted));
+    for list in text.split("GrantAbilities([").skip(1) {
+        let list = list.split(']').next().unwrap_or_default();
+        if list.is_empty() {
+            p.push("an effect that gives no ability".into());
+        }
+        for index in list.split(", ").filter(|i| !i.is_empty()) {
+            if index
+                .parse::<usize>()
+                .map_or(true, |i| i >= c.granted.len())
+            {
+                p.push(format!("no granted ability {index}"));
+            }
+        }
+    }
+    let printed = c.abilities.iter().enumerate().map(|(i, a)| (i, a, false));
+    let given = c.granted.iter().enumerate().map(|(i, a)| (i, a, true));
+    for (i, a, granted) in printed.chain(given) {
+        let at = |m: String| {
+            if granted {
+                format!("granted ability {i}: {m}")
+            } else {
+                format!("ability {i}: {m}")
+            }
+        };
+        // An ability another object is given works on the battlefield, for whatever has
+        // it: nothing about casting, about the card it is written on, or about a layer
+        // that is over by the time abilities are given (CR 613.1f).
+        if granted {
+            let fits = match a {
+                AbilityDef::Spell(_)
+                | AbilityDef::AdditionalCost(_)
+                | AbilityDef::Enchant(_)
+                | AbilityDef::SelfCostReduction(_) => false,
+                AbilityDef::Activated { from, cycling, .. } => {
+                    *from == ActivationZone::Battlefield && !*cycling
+                }
+                AbilityDef::Static {
+                    affected, effects, ..
+                } => {
+                    *affected != card_model::Affected::Enchanted
+                        && effects.iter().all(|e| {
+                            use card_model::ContinuousEffect as E;
+                            !matches!(
+                                e,
+                                E::GainControl
+                                    | E::AddTypes { .. }
+                                    | E::SetColors(_)
+                                    | E::SetPTBy { .. }
+                            )
+                        })
+                }
+                AbilityDef::CombatRule { affected, .. } => {
+                    *affected != card_model::Affected::Enchanted
+                }
+                AbilityDef::Replacement { replaces, .. } => *replaces != Replaces::ThisEnters,
+                AbilityDef::Mana { .. }
+                | AbilityDef::Triggered { .. }
+                | AbilityDef::CostReduction { .. } => true,
+            };
+            if !fits {
+                p.push(at("not an ability another object can be given".into()));
+                continue;
+            }
+        }
         // "The sacrificed creature's power" needs a sacrifice chosen as its cost is paid.
         if format!("{a:?}").contains("SacrificedPower") {
             let paid = match a {
@@ -393,36 +457,6 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                     .is_some_and(|r| r.spells.is_empty() && r.abilities.is_empty())
                 {
                     p.push(at("mana that can be spent on nothing".into()));
-                }
-                // The player picks a mana ability by the permanent and the type of mana
-                // (`OptionDesc::TapForMana`). Two abilities that differ in more than the
-                // type (how much, at what cost, with what restriction) must therefore not
-                // make the same type (D-052).
-                let plain = |x: &AbilityDef| {
-                    matches!(x, AbilityDef::Mana { cost, produce, spend, .. }
-                        if produce.count() == 1 && !cost.sacrifice_self && spend.is_none())
-                };
-                if !plain(a) {
-                    let mine = produce.options();
-                    let mut others: Vec<ManaType> = c
-                        .land_types
-                        .iter()
-                        .map(|t| ManaType::from_color(t.produces()))
-                        .collect();
-                    for (j, x) in c.abilities.iter().enumerate() {
-                        if let AbilityDef::Mana { produce, .. } = x
-                            && j != i
-                        {
-                            others.extend(produce.options());
-                        }
-                    }
-                    if mine.iter().any(|t| others.contains(t)) {
-                        p.push(at(
-                            "two mana abilities that differ in more than the mana's type can't \
-                             make the same type (D-052)"
-                                .into(),
-                        ));
-                    }
                 }
             }
             AbilityDef::CombatRule { affected, .. } => {

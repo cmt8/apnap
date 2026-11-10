@@ -379,7 +379,8 @@ fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
     };
     let parts: Vec<String> = effects
         .iter()
-        .map(|e| match e {
+        .enumerate()
+        .map(|(i, e)| match e {
             ContinuousEffect::GainControl => "is under your control".to_string(),
             ContinuousEffect::AddTypes {
                 card_types,
@@ -445,9 +446,54 @@ fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
                 (None, Some(t)) => format!("{have} toughness equal to {}", amount(t)),
                 (None, None) => String::new(),
             },
+            // The quoted texts are filled in by `quote_granted`, which has the card.
+            ContinuousEffect::GrantAbilities(indices) => {
+                let quoted = join(
+                    indices
+                        .iter()
+                        .map(|i| format!("{GRANTED}{i}{GRANTED}"))
+                        .collect(),
+                    "and",
+                );
+                // "Has flying and \"…\"": one "has" for keywords and quoted abilities.
+                match i.checked_sub(1).map(|j| &effects[j]) {
+                    Some(ContinuousEffect::AddKeywords(_)) => quoted,
+                    _ => format!("{have} {quoted}"),
+                }
+            }
         })
         .collect();
     join(parts, "and")
+}
+
+/// Brackets the index of a granted ability until its text is filled in.
+const GRANTED: char = '\u{1}';
+
+/// Replace each marker `continuous` left with the quoted text of that ability of
+/// `def.granted` (which can quote others in turn).
+fn quote_granted(def: &CardDef, text: &str) -> String {
+    let mut out = String::new();
+    let mut parts = text.split(GRANTED);
+    // A quotation that ends a sentence ends it with its own full stop.
+    let mut ends_sentence = false;
+    while let Some(plain) = parts.next() {
+        out.push_str(match plain.strip_prefix('.') {
+            Some(rest) if ends_sentence => rest,
+            _ => plain,
+        });
+        ends_sentence = false;
+        let Some(index) = parts.next() else { break };
+        match index.parse::<usize>().ok().and_then(|i| def.granted.get(i)) {
+            Some(a) => {
+                out.push('"');
+                out.push_str(&quote_granted(def, &ability(a)));
+                out.push('"');
+                ends_sentence = out.ends_with(".\"");
+            }
+            None => out.push_str("[a missing ability]"),
+        }
+    }
+    out
 }
 
 fn effect(mode: &Mode, e: &Effect) -> String {
@@ -628,7 +674,16 @@ fn effect(mode: &Mode, e: &Effect) -> String {
         }
         Effect::SacrificeThis => "sacrifice this permanent".to_string(),
         Effect::AttachThis { to } => format!("attach this permanent to {}", obj(mode, *to)),
-        Effect::May(inner) => format!("you may {}", effect(mode, inner)),
+        Effect::May(inner) => {
+            let text = effect(mode, inner);
+            // "You may draw a card", not "you may you draw a card"; and an instruction
+            // that is a choice already says "you may".
+            if text.starts_with("you may ") {
+                text
+            } else {
+                format!("you may {}", text.strip_prefix("you ").unwrap_or(&text))
+            }
+        }
         // The same instruction for each target of one "target" word.
         Effect::Together(v) => {
             let parts: Vec<String> = v.iter().map(|e| effect(mode, e)).collect();
@@ -1608,13 +1663,15 @@ fn ability(a: &AbilityDef) -> String {
 }
 
 /// One mode of a modal spell or ability, as a sentence (for the mode-choice UI).
-pub fn mode_text(m: &Mode) -> String {
-    sentence(effect(m, &m.effect))
+/// `def` is the card the mode is written on.
+pub fn mode_text(def: &CardDef, m: &Mode) -> String {
+    quote_granted(def, &sentence(effect(m, &m.effect)))
 }
 
-/// One ability as rules text ("Cycling {2}", "{T}: Add {G}.").
-pub fn ability_text(a: &AbilityDef) -> String {
-    ability(a)
+/// One ability as rules text ("Cycling {2}", "{T}: Add {G}."). `def` is the card the
+/// ability is written on (for an ability another card grants: that card).
+pub fn ability_text(def: &CardDef, a: &AbilityDef) -> String {
+    quote_granted(def, &ability(a))
 }
 
 /// The card's rules text, one line per keyword group / ability.
@@ -1631,7 +1688,11 @@ pub fn rules_text(def: &CardDef) -> Vec<String> {
             crate::ManaType::from_color(t.produces()).symbol()
         ));
     }
-    lines.extend(def.abilities.iter().map(ability));
+    lines.extend(
+        def.abilities
+            .iter()
+            .map(|a| quote_granted(def, &ability(a))),
+    );
     // What an attached permanent calls the thing it is attached to.
     let host = if def.creature_types.iter().any(|t| t == "Equipment") {
         Some("quipped creature")

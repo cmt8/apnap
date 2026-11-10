@@ -19,7 +19,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
 use card_model::{
-    AbilityDef, CardDefId, Condition, DamagePer, DamageTo, ObjFilter, Selector, Trigger,
+    AbilityDef, AbilityId, CardDefId, Condition, DamagePer, DamageTo, ObjFilter, Selector, Trigger,
     TriggerStep, Who,
 };
 use serde::{Deserialize, Serialize};
@@ -31,8 +31,8 @@ pub struct PendingTrigger {
     pub controller: PlayerId,
     pub source: ObjectId,
     pub source_card: CardDefId,
-    /// Index of the triggered ability on `source_card`.
-    pub index: u16,
+    /// The triggered ability: of `source_card`, or of the card that gave it to the source.
+    pub ability: AbilityId,
     /// The source as it last existed, if it had already left the battlefield (look-back
     /// triggers, CR 603.10a; LKI for "its power", CR 608.2h).
     pub source_lki: Option<Characteristics>,
@@ -164,7 +164,7 @@ fn queue(st: &mut GameState, t: PendingTrigger) {
     st.emit(Event::Triggered {
         source: t.source,
         controller: t.controller,
-        index: t.index,
+        ability: t.ability,
     });
     st.pending_triggers.push(t);
 }
@@ -174,7 +174,7 @@ struct Source<'a> {
     id: ObjectId,
     card: CardDefId,
     controller: PlayerId,
-    abilities: Vec<(u16, &'a AbilityDef)>,
+    abilities: Vec<(AbilityId, &'a AbilityDef)>,
     lki: Option<Characteristics>,
     /// What it is attached to (not known for a source that has left).
     host: Option<ObjectId>,
@@ -272,7 +272,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
     if !entered.is_empty() {
         // CR 603.6a: every permanent on the battlefield, including the newcomers.
         for src in battlefield_sources(st) {
-            for &(index, a) in &src.abilities {
+            for &(ability, a) in &src.abilities {
                 let AbilityDef::Triggered {
                     when,
                     intervening_if,
@@ -306,7 +306,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                                 controller: src.controller,
                                 source: src.id,
                                 source_card: src.card,
-                                index,
+                                ability,
                                 source_lki: None,
                                 subject: Some(e),
                                 subject_lki: None,
@@ -332,14 +332,14 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                     .chars
                     .abilities
                     .iter()
-                    .map(|&i| (i, &st.catalog.get(l.card).abilities[i as usize]))
+                    .map(|&a| (a, st.catalog.ability(a)))
                     .collect(),
                 lki: Some(l.chars.clone()),
                 host: None,
             });
         }
         for src in &sources {
-            for &(index, a) in &src.abilities {
+            for &(ability, a) in &src.abilities {
                 let AbilityDef::Triggered {
                     when,
                     intervening_if,
@@ -377,7 +377,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                                 controller: src.controller,
                                 source: src.id,
                                 source_card: src.card,
-                                index,
+                                ability,
                                 source_lki: src.lki.clone(),
                                 subject: Some(*d),
                                 subject_lki: Some(l.chars.clone()),
@@ -402,7 +402,7 @@ pub(crate) fn detect_step(st: &mut GameState, step: Step) {
     let mut found = Vec::new();
     let mut conds = Vec::new();
     for src in battlefield_sources(st) {
-        for &(index, a) in &src.abilities {
+        for &(ability, a) in &src.abilities {
             let AbilityDef::Triggered {
                 when,
                 intervening_if,
@@ -430,7 +430,7 @@ pub(crate) fn detect_step(st: &mut GameState, step: Step) {
                         controller: src.controller,
                         source: src.id,
                         source_card: src.card,
-                        index,
+                        ability,
                         source_lki: None,
                         subject: None,
                         subject_lki: None,
@@ -449,7 +449,7 @@ pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
     let mut found = Vec::new();
     let mut conds = Vec::new();
     for src in battlefield_sources(st) {
-        for &(index, a) in &src.abilities {
+        for &(ability, a) in &src.abilities {
             let AbilityDef::Triggered {
                 when,
                 intervening_if,
@@ -492,7 +492,7 @@ pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
                             controller: src.controller,
                             source: src.id,
                             source_card: src.card,
-                            index,
+                            ability,
                             source_lki: None,
                             subject: Some(attacker),
                             subject_lki: None,
@@ -521,7 +521,7 @@ fn detect_with(
     let mut found = Vec::new();
     let mut conds = Vec::new();
     for src in battlefield_sources(st) {
-        for &(index, a) in &src.abilities {
+        for &(ability, a) in &src.abilities {
             let AbilityDef::Triggered {
                 when,
                 intervening_if,
@@ -536,7 +536,7 @@ fn detect_with(
                         controller: src.controller,
                         source: src.id,
                         source_card: src.card,
-                        index,
+                        ability,
                         source_lki: None,
                         subject,
                         subject_lki,
@@ -764,7 +764,7 @@ fn detect_damage(st: &mut GameState, dealt: &[Dealt], lki: &BTreeMap<ObjectId, L
     let mut found = Vec::new();
     let mut conds = Vec::new();
     for src in battlefield_sources(st) {
-        for &(index, a) in &src.abilities {
+        for &(ability, a) in &src.abilities {
             let AbilityDef::Triggered {
                 when,
                 intervening_if,
@@ -845,7 +845,7 @@ fn detect_damage(st: &mut GameState, dealt: &[Dealt], lki: &BTreeMap<ObjectId, L
                         controller: src.controller,
                         source: src.id,
                         source_card: src.card,
-                        index,
+                        ability,
                         source_lki: None,
                         subject,
                         subject_lki: None,
@@ -916,7 +916,7 @@ fn detect_cycled(st: &mut GameState, player: PlayerId, card: ObjectId) {
     let mut found = Vec::new();
     let mut conds = Vec::new();
     for src in sources {
-        for &(index, a) in &src.abilities {
+        for &(ability, a) in &src.abilities {
             let AbilityDef::Triggered {
                 when,
                 intervening_if,
@@ -938,7 +938,7 @@ fn detect_cycled(st: &mut GameState, player: PlayerId, card: ObjectId) {
                         controller: src.controller,
                         source: src.id,
                         source_card: src.card,
-                        index,
+                        ability,
                         source_lki: None,
                         subject: Some(card),
                         subject_lki: None,
@@ -958,7 +958,7 @@ pub(crate) fn detect_cast(st: &mut GameState, caster: PlayerId, spell: ObjectId)
     let mut found = Vec::new();
     let mut conds = Vec::new();
     for src in battlefield_sources(st) {
-        for &(index, a) in &src.abilities {
+        for &(ability, a) in &src.abilities {
             let AbilityDef::Triggered {
                 when,
                 intervening_if,
@@ -980,7 +980,7 @@ pub(crate) fn detect_cast(st: &mut GameState, caster: PlayerId, spell: ObjectId)
                         controller: src.controller,
                         source: src.id,
                         source_card: src.card,
-                        index,
+                        ability,
                         source_lki: None,
                         subject: None,
                         subject_lki: None,
@@ -1006,6 +1006,7 @@ mod tests {
         let you = PlayerId(0);
         let chars_of = |types: &[&str]| {
             Characteristics::printed(
+                CardDefId(0),
                 &CardDef {
                     name: "Test".into(),
                     creature_types: types

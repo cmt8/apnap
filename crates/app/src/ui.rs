@@ -437,18 +437,20 @@ pub fn option_label(
         OptionDesc::Mode { index } => {
             // Describe the mode from the spell or ability being put on the stack.
             let text = v.stack.last().and_then(|top| {
-                let def = cat.get(top.card);
-                let body = match top.ability {
-                    None => def.spell_ability(),
-                    Some(i) => match &def.abilities[i as usize] {
-                        AbilityDef::Activated { body, .. } | AbilityDef::Triggered { body, .. } => {
-                            Some(body)
-                        }
-                        _ => None,
-                    },
+                // The card the text is written on: an ability can be another card's gift.
+                let (def, body) = match top.ability {
+                    None => (cat.get(top.card), cat.get(top.card).spell_ability()),
+                    Some(a) => (
+                        cat.get(a.card),
+                        match cat.ability(a) {
+                            AbilityDef::Activated { body, .. }
+                            | AbilityDef::Triggered { body, .. } => Some(body),
+                            _ => None,
+                        },
+                    ),
                 };
                 body.and_then(|b| b.modes().get(*index as usize))
-                    .map(describe::mode_text)
+                    .map(|m| describe::mode_text(def, m))
             });
             text.unwrap_or_else(|| format!("mode {index}"))
         }
@@ -456,20 +458,36 @@ pub fn option_label(
         OptionDesc::Accept => "Yes".into(),
         OptionDesc::Decline => "No".into(),
         OptionDesc::Pass if d.kind == ChoiceKind::Priority => "Pass priority".into(),
-        OptionDesc::TapForMana { source, mana } => match find_object(v, *source) {
-            Some(src) => format!("tap {} for {}", src.name, mana.symbol()),
-            None => harness::text::option_line(v, o),
-        },
+        OptionDesc::TapForMana {
+            source,
+            mana,
+            ability,
+        } => {
+            // Two ways to tap it for the same mana: say which ability this one is.
+            let twice = d.options.iter().any(|x| {
+                matches!(x, OptionDesc::TapForMana { source: s, mana: m, ability: a }
+                    if s == source && m == mana && a != ability)
+            });
+            match (find_object(v, *source), ability) {
+                (Some(src), Some(a)) if twice => format!(
+                    "tap {} for {} — {}",
+                    src.name,
+                    mana.symbol(),
+                    describe::ability_text(cat.get(a.card), cat.ability(*a))
+                ),
+                (Some(src), _) => format!("tap {} for {}", src.name, mana.symbol()),
+                (None, _) => harness::text::option_line(v, o),
+            }
+        }
         // The ability itself, so that two abilities of one card (or casting it and
         // cycling it) can be told apart.
-        OptionDesc::ActivateAbility { source, index } => {
-            let text = find_object(v, *source).and_then(|src| {
-                let a = cat.get(src.card).abilities.get(*index as usize)?;
-                let mut text = describe::ability_text(a);
+        OptionDesc::ActivateAbility { source, ability } => {
+            let text = find_object(v, *source).map(|src| {
+                let mut text = describe::ability_text(cat.get(ability.card), cat.ability(*ability));
                 if text.chars().count() > 90 {
                     text = text.chars().take(89).chain(['…']).collect();
                 }
-                Some(format!("{} — {text}", src.name))
+                format!("{} — {text}", src.name)
             });
             text.unwrap_or_else(|| harness::text::option_line(v, o))
         }
@@ -1596,7 +1614,15 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
     };
     // What the picture can't show: the object's current state.
     let mut now: Vec<String> = Vec::new();
+    // Abilities other cards give it, each once ("x2" if it has one twice).
+    let mut gained: Vec<(card_model::AbilityId, usize)> = Vec::new();
     if let Some(o) = pv.object.and_then(|id| find_object(cx.view, id)) {
+        for a in &o.granted {
+            match gained.iter_mut().find(|(b, _)| b == a) {
+                Some((_, n)) => *n += 1,
+                None => gained.push((*a, 1)),
+            }
+        }
         if let (Some(p), Some(t)) = (o.power, o.toughness) {
             now.push(format!("{p}/{t}"));
         }
@@ -1621,7 +1647,18 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
             now.push(format!("commander tax: {{{tax}}} more to cast"));
         }
     }
-    let lines = usize::from(credit.is_some()) + usize::from(!now.is_empty());
+    let gained: Vec<String> = gained
+        .iter()
+        .map(|(a, n)| {
+            let text = describe::ability_text(cx.cat.get(a.card), cx.cat.ability(*a));
+            if *n > 1 {
+                format!("Has \"{text}\" x{n}")
+            } else {
+                format!("Has \"{text}\"")
+            }
+        })
+        .collect();
+    let lines = usize::from(credit.is_some()) + usize::from(!now.is_empty()) + gained.len();
     let size = card + vec2(12.0, 12.0 + lines as f32 * 18.0);
     let (x, y) = zoom_position(screen, near, size, hover.in_hand);
     egui::Area::new(egui::Id::unique("zoomed card"))
@@ -1642,6 +1679,9 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
                     }
                     if !now.is_empty() {
                         let text = format!("Now: {}", now.join(" · "));
+                        ui.add(egui::Label::new(RichText::new(text).small()).truncate());
+                    }
+                    for text in &gained {
                         ui.add(egui::Label::new(RichText::new(text).small()).truncate());
                     }
                 });
@@ -2838,5 +2878,39 @@ mod tests {
         let (x, y) = zoom_position(short, near, size, true);
         assert!(x >= near.right());
         assert!(short.contains_rect(Rect::from_min_size(pos2(x, y), size)));
+    }
+
+    // An ability a permanent was given by another card (D-064): the view lists it, and
+    // its button says what it does — in the words of the card that gives it.
+    #[test]
+    fn an_ability_given_by_another_card_is_shown_with_its_text() {
+        use engine_core::testing::Scenario;
+        use engine_core::zones::Zone;
+        let gift = "Name:Test Ember Gift\nManaCost:R\nTypes:Enchantment Aura\nK:Enchant:Creature\n\
+            S:Mode$ Continuous | AffectedDefined$ Enchanted | Affected$ Creature | AddAbility$ Ping | Description$ Text.\n\
+            SVar:Ping:AB$ DealDamage | Cost$ T | ValidTgts$ Any | NumDmg$ 1 | SpellDescription$ Text.\nOracle:Text.";
+        let cat = harness::forge_test_catalog(&[gift], &[]);
+        let me = PlayerId(0);
+        let mut sc = Scenario::new(engine_core::GameConfig::commander(2), cat.clone(), 7);
+        for p in [me, PlayerId(1)] {
+            sc.library(p, "Forest", 10);
+        }
+        let golem = sc.card(me, Zone::Battlefield, "Test Golem");
+        let aura = sc.card(me, Zone::Battlefield, "Test Ember Gift");
+        sc.attach(aura, golem);
+        let mut st = sc.build();
+        let d = engine_core::start(&mut st).next.expect("a decision");
+        let v = engine_core::view::player_view(&st, me);
+        let o = find_object(&v, golem).expect("the Golem");
+        assert_eq!(o.granted.len(), 1);
+        let option = d
+            .options
+            .iter()
+            .find(|o| matches!(o, OptionDesc::ActivateAbility { source, .. } if *source == golem))
+            .expect("the Golem's ability is offered");
+        assert_eq!(
+            option_label(&v, &cat, &d, option),
+            "Test Golem — {T}: This deals 1 damage to any target."
+        );
     }
 }

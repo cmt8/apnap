@@ -24,6 +24,28 @@ use serde::{Deserialize, Serialize};
 #[serde(transparent)]
 pub struct CardDefId(pub u32);
 
+/// One ability text in a catalog: ability `index` of card `card` — of the abilities
+/// printed on it, or (`granted`) of the abilities it gives to other objects
+/// ([`CardDef::granted`]). An object can have abilities of other cards (CR 113.2c), so
+/// an ability is never named by a bare index into its object's own card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct AbilityId {
+    pub card: CardDefId,
+    pub index: u16,
+    pub granted: bool,
+}
+
+impl AbilityId {
+    /// Printed ability `index` of `card`.
+    pub fn printed(card: CardDefId, index: u16) -> Self {
+        AbilityId {
+            card,
+            index,
+            granted: false,
+        }
+    }
+}
+
 /// The five colors (CR 105.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Color {
@@ -263,6 +285,10 @@ pub struct CardDef {
     /// What effects call this definition when its name isn't unique: several different
     /// tokens are all named "Dragon" (CR 111.4), so they are told apart by key.
     pub key: Option<String>,
+    /// Abilities this card gives to other objects (or to itself) rather than has: the
+    /// quoted text in "enchanted creature has \"{T}: …\"". Referred to by index from
+    /// [`ContinuousEffect::GrantAbilities`]; the object that gets one is its source.
+    pub granted: Vec<AbilityDef>,
 }
 
 impl CardDef {
@@ -293,6 +319,15 @@ impl CardDef {
 
     pub fn has_type(&self, t: CardType) -> bool {
         self.card_types.contains(&t)
+    }
+
+    /// The ability `id` names on this card (`id.card` is this card).
+    pub fn ability(&self, id: AbilityId) -> &AbilityDef {
+        if id.granted {
+            &self.granted[id.index as usize]
+        } else {
+            &self.abilities[id.index as usize]
+        }
     }
 
     pub fn has_keyword(&self, k: Keyword) -> bool {
@@ -794,6 +829,10 @@ pub enum ContinuousEffect {
         power: Option<Box<Amount>>,
         toughness: Option<Box<Amount>>,
     },
+    /// Layer 6: "has [quoted ability]" / "gains [quoted ability]" (CR 113.2c) — the
+    /// abilities with these indices in [`CardDef::granted`] of the card this effect is
+    /// written on. The affected object is the source of what it gains.
+    GrantAbilities(Vec<u16>),
 }
 
 /// Events a static replacement effect watches for (CR 614). M2 vocabulary.
@@ -1655,6 +1694,10 @@ pub struct CardCatalog {
 impl CardCatalog {
     pub fn get(&self, id: CardDefId) -> &CardDef {
         &self.defs[id.0 as usize]
+    }
+
+    pub fn ability(&self, id: AbilityId) -> &AbilityDef {
+        self.get(id.card).ability(id)
     }
 
     pub fn add(&mut self, def: CardDef) -> CardDefId {

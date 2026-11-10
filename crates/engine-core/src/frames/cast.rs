@@ -23,15 +23,18 @@ use crate::zones::{LibraryPosition, Zone};
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use card_model::{AbilityDef, Body, CardType, Cost, Keyword, ManaCost, Timing};
+use card_model::{AbilityDef, AbilityId, Body, CardType, Cost, Keyword, ManaCost, Timing};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CastSource {
     /// Cast this card (from hand in M1).
     Card(ObjectId),
-    /// Activate printed ability `index` of this permanent.
-    Ability { source: ObjectId, index: u16 },
+    /// Activate ability `ability` of this object.
+    Ability {
+        source: ObjectId,
+        ability: AbilityId,
+    },
     /// Put a triggered ability on the stack (CR 603.3): modes and targets as in 601.2b–c,
     /// no costs; with no legal choice it's removed instead (603.3c–d).
     Trigger(Box<PendingTrigger>),
@@ -227,18 +230,16 @@ fn proposal(st: &GameState, source: &CastSource) -> Proposal {
                 })
                 .unwrap_or_default(),
         },
-        CastSource::Ability { source, index } => {
-            match &st.card_def(*source).abilities[*index as usize] {
-                AbilityDef::Activated { cost, body, .. } => Proposal {
-                    body: Some(body.clone()),
-                    cost: cost.mana.clone(),
-                    tap: cost.tap.then_some(*source),
-                    sacrifice: cost.sacrifice_self.then_some(*source),
-                    extra: cost.clone(),
-                },
-                other => unreachable!("not an activated ability: {other:?}"),
-            }
-        }
+        CastSource::Ability { source, ability } => match st.catalog.ability(*ability) {
+            AbilityDef::Activated { cost, body, .. } => Proposal {
+                body: Some(body.clone()),
+                cost: cost.mana.clone(),
+                tap: cost.tap.then_some(*source),
+                sacrifice: cost.sacrifice_self.then_some(*source),
+                extra: cost.clone(),
+            },
+            other => unreachable!("not an activated ability: {other:?}"),
+        },
         // A cost paid on resolution: `{T}` and "sacrifice this" are the ability's source,
         // if the payer still controls it.
         CastSource::Payment { source, cost } => {
@@ -255,18 +256,16 @@ fn proposal(st: &GameState, source: &CastSource) -> Proposal {
                 extra: (**cost).clone(),
             }
         }
-        CastSource::Trigger(t) => {
-            match &st.catalog.get(t.source_card).abilities[t.index as usize] {
-                AbilityDef::Triggered { body, .. } => Proposal {
-                    body: Some(body.clone()),
-                    cost: None,
-                    tap: None,
-                    sacrifice: None,
-                    extra: Cost::default(),
-                },
-                other => unreachable!("not a triggered ability: {other:?}"),
-            }
-        }
+        CastSource::Trigger(t) => match st.catalog.ability(t.ability) {
+            AbilityDef::Triggered { body, .. } => Proposal {
+                body: Some(body.clone()),
+                cost: None,
+                tap: None,
+                sacrifice: None,
+                extra: Cost::default(),
+            },
+            other => unreachable!("not a triggered ability: {other:?}"),
+        },
     }
 }
 
@@ -382,7 +381,7 @@ fn restriction<'a>(
     st: &'a GameState,
     r: &crate::state::RestrictedMana,
 ) -> &'a card_model::ManaRestriction {
-    match &st.catalog.get(r.card).abilities[r.index as usize] {
+    match st.catalog.ability(r.ability) {
         AbilityDef::Mana {
             spend: Some(spend), ..
         } => spend,
@@ -434,7 +433,7 @@ pub(crate) struct ManaSource {
     pub count: u32,
     /// "{T}, Sacrifice this: Add …" (Treasure, CR 111.10a).
     pub sacrifice: bool,
-    pub ability: Option<u16>,
+    pub ability: Option<AbilityId>,
 }
 
 /// The mana abilities `p` can activate now, in battlefield order. With a `payee`, sources
@@ -455,7 +454,7 @@ pub(crate) fn mana_sources(
         let c = chars(st, id);
         let start = out.len();
         let mut plain: ManaMask = 0;
-        if c.is(CardType::Land) {
+        if c.is(CardType::Land) && !c.land_abilities_lost {
             // CR 305.6: each basic land type grants "{T}: Add [mana]".
             for t in &c.land_types {
                 plain |= 1 << ManaType::from_color(t.produces()).index();
@@ -781,8 +780,8 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
             }
         }
         CastSource::Trigger(_) | CastSource::Payment { .. } => return false,
-        CastSource::Ability { source, index } => {
-            let (source, index) = (*source, *index);
+        CastSource::Ability { source, ability } => {
+            let (source, ability) = (*source, *ability);
             let o = st.object(source);
             // CLAUDE.md invariant 4: only abilities the object currently has.
             let Some((
@@ -794,7 +793,9 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
                     from,
                     ..
                 },
-            )) = abilities(st, source).into_iter().find(|(i, _)| *i == index)
+            )) = abilities(st, source)
+                .into_iter()
+                .find(|(i, _)| *i == ability)
             else {
                 return false;
             };
@@ -944,7 +945,7 @@ impl CastFrame {
                             move_object(st, *card, Zone::Stack, LibraryPosition::Top, Some(p))
                         }
                         // CR 602.2a: the ability is created on the stack.
-                        CastSource::Ability { source, index } => {
+                        CastSource::Ability { source, ability } => {
                             let source_card = st.object(*source).card;
                             // CR 602.2a: a card whose ability is activated from a hidden
                             // zone is revealed.
@@ -960,7 +961,7 @@ impl CastFrame {
                                     controller: p,
                                     source: *source,
                                     source_card,
-                                    index: *index,
+                                    ability: *ability,
                                     triggered: false,
                                     source_lki: None,
                                     subject: None,
@@ -979,7 +980,7 @@ impl CastFrame {
                                 controller: t.controller,
                                 source: t.source,
                                 source_card: t.source_card,
-                                index: t.index,
+                                ability: t.ability,
                                 triggered: true,
                                 source_lki: t.source_lki.clone(),
                                 subject: t.subject,
@@ -1222,12 +1223,15 @@ impl CastFrame {
                     let req = total(&prop.cost, self.x, self.tax, self.discount);
                     let payee = self.payee();
                     if let Some(inp) = input.take() {
-                        let Some(OptionDesc::TapForMana { source, mana }) =
-                            inp.picked_one().cloned()
+                        let Some(OptionDesc::TapForMana {
+                            source,
+                            mana,
+                            ability,
+                        }) = inp.picked_one().cloned()
                         else {
                             unreachable!()
                         };
-                        let cost = tap_for_mana(st, p, source, mana, payee);
+                        let cost = tap_for_mana(st, p, source, mana, ability, payee);
                         if !cost.is_empty() {
                             // CR 605.3b: the mana ability resolves at once; its own cost
                             // (the sacrifice) is paid now, and this frame carries on after.
@@ -1289,6 +1293,7 @@ impl CastFrame {
                             let option = OptionDesc::TapForMana {
                                 source: src.id,
                                 mana,
+                                ability: src.ability,
                             };
                             if options.contains(&option) {
                                 continue;
@@ -1421,14 +1426,14 @@ impl CastFrame {
         );
         // "Discard this card" / "exile this card from your graveyard": the card the
         // ability is on, where the ability works from.
-        if let CastSource::Ability { source, index } = &self.source
+        if let CastSource::Ability { source, ability } = &self.source
             && let Some(o) = st.objects.get(source)
         {
             if prop.extra.discard_self && o.zone == Zone::Hand {
                 // CR 702.29c: discarding it for its cycling ability is cycling it.
                 let cycling = matches!(
-                    st.card_def(*source).abilities.get(*index as usize),
-                    Some(AbilityDef::Activated { cycling: true, .. })
+                    st.catalog.ability(*ability),
+                    AbilityDef::Activated { cycling: true, .. }
                 );
                 let cause = if cycling {
                     MoveCause::Cycle
@@ -1456,25 +1461,26 @@ impl CastFrame {
     }
 }
 
-/// CR 605.3b: activate a mana ability of `source` for `mana`. It resolves immediately,
-/// adding as many mana of the chosen type as the ability makes. Returns the rest of its
-/// cost — "sacrifice this" — for the caller to apply (a replaceable event).
+/// CR 605.3b: activate a mana ability of `source` for `mana` — `ability`, or one of its
+/// plain ones. It resolves immediately, adding as many mana of the chosen type as the
+/// ability makes. Returns the rest of its cost — "sacrifice this" — for the caller to
+/// apply (a replaceable event).
 pub(crate) fn tap_for_mana(
     st: &mut GameState,
     p: PlayerId,
     source: ObjectId,
     mana: ManaType,
+    ability: Option<AbilityId>,
     payee: Option<Payee>,
 ) -> Vec<Proposed> {
     let way = mana_sources(st, p, None, payee)
         .into_iter()
-        .find(|s| s.id == source && s.mask & (1 << mana.index()) != 0)
+        .find(|s| s.id == source && s.ability == ability && s.mask & (1 << mana.index()) != 0)
         .expect("an offered mana ability");
-    let card = st.object(source).card;
     // CR 106.6: mana with a spending restriction is kept apart.
-    let restricted = way.ability.filter(|i| {
+    let restricted = way.ability.filter(|a| {
         matches!(
-            st.catalog.get(card).abilities[*i as usize],
+            st.catalog.ability(*a),
             AbilityDef::Mana { spend: Some(_), .. }
         )
     });
@@ -1483,11 +1489,10 @@ pub(crate) fn tap_for_mana(
         execute(
             st,
             match restricted {
-                Some(index) => GameAction::AddRestrictedMana {
+                Some(ability) => GameAction::AddRestrictedMana {
                     player: p,
                     mana,
-                    card,
-                    index,
+                    ability,
                 },
                 None => GameAction::AddMana { player: p, mana },
             },

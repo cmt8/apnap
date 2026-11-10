@@ -14,7 +14,7 @@ use crate::stack::Target;
 use crate::state::GameState;
 use crate::zones::{LibraryPosition, Zone};
 use alloc::vec::Vec;
-use card_model::{AbilityDef, CardDefId, CounterKind, ReplaceWith, Replaces};
+use card_model::{AbilityDef, AbilityId, CardDefId, CounterKind, ReplaceWith, Replaces};
 use serde::{Deserialize, Serialize};
 
 /// Why an object is moving (for events and for "destroy" vs other moves, CR 701.8b).
@@ -125,8 +125,13 @@ impl Proposed {
 /// Identifies one replacement/prevention effect, so it applies at most once per event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RepKey {
-    /// Replacement ability `index` of `source` (a permanent, or the entering object itself).
-    Static { source: ObjectId, index: u16 },
+    /// Replacement ability `ability` of `source` (a permanent, or the entering object
+    /// itself); `nth` tells apart the times `source` has that ability.
+    Static {
+        source: ObjectId,
+        ability: AbilityId,
+        nth: u8,
+    },
     /// A prevention shield (CR 615.7).
     Shield(u32),
     /// CR 903.9b: "If a commander would be put into its owner's hand or library from
@@ -185,11 +190,18 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
     let mut out = Vec::new();
     for &source in &st.zones.battlefield {
         // CLAUDE.md invariant 4: only abilities the source currently has.
-        for (index, a) in abilities(st, source) {
+        let has = abilities(st, source);
+        for (k, (ability, a)) in has.iter().enumerate() {
             if let AbilityDef::Replacement { replaces, .. } = a
                 && applies(st, source, replaces, &p.event)
             {
-                out.push(RepKey::Static { source, index });
+                // An ability the source was given twice is two effects.
+                let nth = has[..k].iter().filter(|(b, _)| b == ability).count() as u8;
+                out.push(RepKey::Static {
+                    source,
+                    ability: *ability,
+                    nth,
+                });
             }
         }
     }
@@ -213,7 +225,8 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
             {
                 out.push(RepKey::Static {
                     source: *object,
-                    index: i as u16,
+                    ability: AbilityId::printed(st.object(*object).card, i as u16),
+                    nth: 0,
                 });
             }
         }
@@ -373,10 +386,10 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
             }
             Some(ev)
         }
-        RepKey::Static { source, index } => {
-            let AbilityDef::Replacement { with, .. } =
-                &st.card_def(source).abilities[index as usize]
-            else {
+        RepKey::Static {
+            source, ability, ..
+        } => {
+            let AbilityDef::Replacement { with, .. } = st.catalog.ability(ability) else {
                 unreachable!()
             };
             let mut with = with.clone();

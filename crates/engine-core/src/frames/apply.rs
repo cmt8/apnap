@@ -76,9 +76,18 @@ impl ApplyFrame {
     pub(crate) fn run(mut self, st: &mut GameState, input: Option<Input>) -> Flow {
         if let Some(inp) = input {
             match inp.picked_one().cloned() {
-                Some(OptionDesc::Replacement { source, index }) => {
-                    self.apply_front(st, RepKey::Static { source, index })
-                }
+                Some(OptionDesc::Replacement {
+                    source,
+                    ability,
+                    nth,
+                }) => self.apply_front(
+                    st,
+                    RepKey::Static {
+                        source,
+                        ability,
+                        nth,
+                    },
+                ),
                 Some(OptionDesc::Shield { id }) => self.apply_front(st, RepKey::Shield(id)),
                 Some(OptionDesc::Accept) => self.apply_front(st, RepKey::CommanderReturn),
                 // Declining an optional effect: it won't be offered again for this event.
@@ -101,9 +110,15 @@ impl ApplyFrame {
                     let mut options: Vec<OptionDesc> = many
                         .iter()
                         .map(|k| match *k {
-                            RepKey::Static { source, index } => {
-                                OptionDesc::Replacement { source, index }
-                            }
+                            RepKey::Static {
+                                source,
+                                ability,
+                                nth,
+                            } => OptionDesc::Replacement {
+                                source,
+                                ability,
+                                nth,
+                            },
                             RepKey::Shield(id) => OptionDesc::Shield { id },
                             RepKey::CommanderReturn => OptionDesc::Accept,
                         })

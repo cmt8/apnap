@@ -48,6 +48,10 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
 - `Response::Pick` is a set; ordered answers use `Order`. `MulliganBottom/Order`: last listed
   ends up bottom-most.
 - Events contain hidden info (engine truth); redact before showing to a player (D-014).
+- An ability is named by `AbilityId { card, index, granted }` — where its text is written —
+  never by a bare index into its object's card: an object can have abilities of other
+  cards (`CardDef::granted`, `ContinuousEffect::GrantAbilities`, D-064), and have one twice.
+  Read abilities through `layers::abilities(st, id)` and `st.catalog.ability(id)`.
 - New dependency in engine-core/card-model ⇒ add to `PURE_ALLOWLIST` in `crates/xtask` AND
   log a decision. Must be `no_std`-capable with `default-features = false`.
 
@@ -130,7 +134,7 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-063): 8,933 of 34,463 scripts compile (25.9%); about 10,500 more are one feature
+Status (D-064): 9,115 of 34,463 scripts compile (26.4%); about 10,500 more are one feature
 away. Precons: `harness coverage --verbose` lists what blocks the rest. Feature tests live in `crates/harness/tests/forge_features.rs`: invented cards written
 in Forge's format, compiled by `harness::forge_test_catalog` and played (`forge_test_blockers`
 for "this must not compile"). Four guards catch compiler holes — keep them: a line that
@@ -146,12 +150,10 @@ presence, `Defined$ Targeted` means every target of the chain, a trigger that ru
 `AB$` with a cost is "you may pay", triggers without `TriggerZones$` work from any zone).
 Not built yet: the full generated-text-vs-Oracle round trip (a word-level guard exists),
 multi-face cards, searching another player's library, "X target creatures", mana abilities
-that cost mana (signets) or make different mana at once, two mana abilities of one
-permanent that make the same type in different amounts, counters other than +1/+1 and
--1/-1, "as this enters, choose …", regeneration, statics and effects that grant abilities
-(see the end of D-062),
-"becomes tapped" and "becomes the target" triggers, protection, Forge's "Effect" objects,
-Sagas. `forge-coverage --families` ranks what is left by kind of feature.
+that cost mana (signets) or make different mana at once, counters other than +1/+1 and
+-1/-1, "as this enters, choose …", regeneration, abilities given to cards that aren't on
+the battlefield, "becomes tapped" and "becomes the target" triggers, protection, Forge's
+"Effect" objects, Sagas (the end of D-064 ranks them). `forge-coverage --families` ranks what is left by kind of feature.
 
 ## Current milestone: M4 — IN PROGRESS (started 2026-11-09), branch `m4-wip`
 Decisions: D-034 (precons: Calling All Angels, Wretched Ranks, Reign of Dragons,

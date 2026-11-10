@@ -21,6 +21,8 @@ pub struct ContinuousInstance {
     pub effects: Vec<ContinuousEffect>,
     /// Ends at cleanup (CR 514.2); otherwise lasts until the end of the game (611.2a).
     pub until_end_of_turn: bool,
+    /// The card the effects are written on (`GrantAbilities` names abilities of it).
+    pub card: card_model::CardDefId,
 }
 
 /// CR 615.7: "prevent the next N damage that would be dealt to [target] this turn".

@@ -169,7 +169,7 @@ pub enum Event {
     Triggered {
         source: ObjectId,
         controller: PlayerId,
-        index: u16,
+        ability: card_model::AbilityId,
     },
     LandPlayed {
         player: PlayerId,

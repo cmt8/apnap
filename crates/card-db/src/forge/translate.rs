@@ -153,7 +153,42 @@ struct Tx<'a> {
     /// The script variables that hold abilities, parsed.
     records: &'a [(String, Record)],
     known: &'a Known,
+    /// Abilities the card gives to other objects (`CardDef::granted`), as compiled so far.
+    granted: Vec<AbilityDef>,
+    /// Compiling an ability that another object is given (how deep): "this" is whatever
+    /// has it, a permanent on the battlefield.
+    granting: u8,
 }
+
+/// The kinds of ability a script gives to other objects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Given {
+    /// `AddAbility$` / `Abilities$`: an activated ability (`AB$ …`).
+    Activated,
+    /// `AddTrigger$` / `Triggers$`
+    Triggered,
+    /// `AddStaticAbility$` / `staticAbilities$`
+    Static,
+    /// `AddReplacementEffect$` / `Replacements$`
+    Replacement,
+}
+
+/// Script variables that only tell Forge's AI something, by the name a card that is given
+/// them knows them under (`AddSVar$` of a variable written `SVar:<name>:<value>`).
+const AI_HINTS: [&str; 12] = [
+    "HasAttackEffect",
+    "HasCombatEffect",
+    "MustBeBlocked",
+    "MustAttack",
+    "EquipMe",
+    "DontEquip",
+    "EnchantMe",
+    "SacMe",
+    "DestroyWhenDamaged",
+    "AITapDown",
+    "EndOfTurnLeavePlay",
+    "Targeting",
+];
 
 /// What a trigger's event gives its ability to refer to (Forge's `Triggered…` names).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -676,11 +711,13 @@ impl<'a> Tx<'a> {
     /// The filter of a trigger's `ValidCard$`.
     /// Is the card a permanent card (not an instant or sorcery)?
     fn permanent(&self) -> bool {
-        !self
-            .face
-            .types
-            .iter()
-            .any(|t| t == "Instant" || t == "Sorcery")
+        // What is given an ability is on the battlefield.
+        self.granting > 0
+            || !self
+                .face
+                .types
+                .iter()
+                .any(|t| t == "Instant" || t == "Sorcery")
     }
 
     fn obj_filter(&mut self, text: &str) -> Option<ObjFilter> {
@@ -1744,6 +1781,21 @@ impl<'a> Tx<'a> {
                         }
                     }
                     effects.push(ContinuousEffect::AddKeywords(ks));
+                }
+                // "… and gains \"[ability]\"".
+                let mut given = Vec::new();
+                for (key, kind) in [
+                    ("Abilities", Given::Activated),
+                    ("Triggers", Given::Triggered),
+                    ("staticAbilities", Given::Static),
+                    ("Replacements", Given::Replacement),
+                ] {
+                    if let Some(names) = rd.get(key) {
+                        given.extend(self.grant(kind, names, ',')?);
+                    }
+                }
+                if !given.is_empty() {
+                    effects.push(ContinuousEffect::GrantAbilities(given));
                 }
                 // Layer 7b: base power and toughness, both or neither.
                 let number = |t: Option<&str>| t.map(|t| t.parse::<i32>().ok());
@@ -3231,6 +3283,20 @@ impl<'a> Tx<'a> {
         let mut out: Vec<(usize, &str, AbilityDef)> = Vec::new();
         let face = self.face;
         for (line, rec) in face.triggers.iter().enumerate() {
+            self.trigger(line, rec, &mut out);
+        }
+        out.into_iter().map(|(line, _, a)| (line, a)).collect()
+    }
+
+    /// One trigger line: a triggered ability added to `out` (with its line and the name
+    /// of what it executes), or a second event for an ability already there.
+    fn trigger(
+        &mut self,
+        line: usize,
+        rec: &'a Record,
+        out: &mut Vec<(usize, &'a str, AbilityDef)>,
+    ) {
+        {
             let before = self.blockers.len();
             let rd = Rd::new(rec, format!("trig {}", rec.get("Mode").unwrap_or("?")));
             let event = self.trigger_event(&rd);
@@ -3283,6 +3349,8 @@ impl<'a> Tx<'a> {
             match rd.get("TriggerZones") {
                 Some("Battlefield") => {}
                 None if own_event => {}
+                // An ability something is given works where that thing is given it.
+                None if self.granting > 0 => {}
                 None => self.block("trig:zone unstated"),
                 Some(z) => self.block(format!("trig:zone {z}")),
             }
@@ -3319,7 +3387,7 @@ impl<'a> Tx<'a> {
                     }
                     one => Trigger::Any(vec![one, event.clone()]),
                 };
-                continue;
+                return;
             }
             if secondary {
                 self.block("trig:Secondary-alone");
@@ -3336,7 +3404,7 @@ impl<'a> Tx<'a> {
             self.trig = TrigCtx::default();
             let (Some(when), Some(intervening_if), Some(mut body)) = (event, cond, body) else {
                 self.explained(before, "trigger");
-                continue;
+                return;
             };
             // "You may pay …. If you do, …" is the choice already: asking "may?" first
             // would ask twice.
@@ -3374,7 +3442,81 @@ impl<'a> Tx<'a> {
                 },
             ));
         }
-        out.into_iter().map(|(line, _, a)| (line, a)).collect()
+    }
+
+    /// Abilities other objects are given ("has \"…\""): each named script variable,
+    /// compiled as an ability of whatever gets it and added to the card's `granted`
+    /// list. Returns their places in that list.
+    fn grant(&mut self, kind: Given, names: &str, separator: char) -> Option<Vec<u16>> {
+        let mut out = Vec::new();
+        // An ability that gives an ability that gives … itself would never end.
+        if self.granting >= 3 {
+            self.block("granted:nested too deep");
+            return None;
+        }
+        for name in names.split(separator).map(str::trim) {
+            let rec = self.sub(name)?;
+            // Nothing about the ability being compiled around this one carries over.
+            let outer = (
+                self.in_trigger,
+                self.optional_trigger,
+                self.trig,
+                self.from_zone,
+                self.in_spell,
+                self.has_x_cost,
+                self.enchant,
+                self.equipment,
+            );
+            let outer_additional = std::mem::take(&mut self.additional);
+            self.in_trigger = false;
+            self.optional_trigger = false;
+            self.trig = TrigCtx::default();
+            self.from_zone = ActivationZone::Battlefield;
+            self.in_spell = false;
+            self.has_x_cost = false;
+            self.enchant = None;
+            self.equipment = false;
+            self.granting += 1;
+            let before = self.blockers.len();
+            let a = match kind {
+                Given::Activated => match rec.head() {
+                    Some(("AB", _)) => self.ability(rec),
+                    _ => {
+                        self.block("granted:not an activated ability");
+                        None
+                    }
+                },
+                Given::Triggered => {
+                    let mut one = Vec::new();
+                    self.trigger(0, rec, &mut one);
+                    one.pop().map(|(_, _, a)| a)
+                }
+                Given::Static => self.static_ability(rec),
+                Given::Replacement => self.replacement(rec),
+            };
+            self.granting -= 1;
+            (
+                self.in_trigger,
+                self.optional_trigger,
+                self.trig,
+                self.from_zone,
+                self.in_spell,
+                self.has_x_cost,
+                self.enchant,
+                self.equipment,
+            ) = outer;
+            let extra = std::mem::replace(&mut self.additional, outer_additional);
+            let Some(a) = a else {
+                self.explained(before, "granted ability");
+                return None;
+            };
+            // ("Can't attack or block" is two abilities.)
+            for a in std::iter::once(a).chain(extra) {
+                out.push(self.granted.len() as u16);
+                self.granted.push(a);
+            }
+        }
+        Some(out)
     }
 
     fn static_ability(&mut self, rec: &'a Record) -> Option<AbilityDef> {
@@ -3486,19 +3628,6 @@ impl<'a> Tx<'a> {
                         });
                     }
                 }
-                if let Some(kw) = rd.get("AddKeyword") {
-                    let mut ks = Vec::new();
-                    for k in kw.split('&').map(str::trim) {
-                        match keyword(k) {
-                            Some(k) => ks.push(k),
-                            None => {
-                                self.block(format!("kw:{k}"));
-                                return None;
-                            }
-                        }
-                    }
-                    effects.push(ContinuousEffect::AddKeywords(ks));
-                }
                 // Layer 4: "are [types] in addition to their other types".
                 if let Some(types) = rd.get("AddType") {
                     effects.insert(0, self.added_types(types.split('&'))?);
@@ -3534,6 +3663,52 @@ impl<'a> Tx<'a> {
                 }
                 if rd.get("RemoveAllAbilities").is_some() {
                     effects.push(ContinuousEffect::LoseAllAbilities);
+                }
+                // What one ability both takes away and gives is given ("loses all other
+                // abilities and has flying"): Forge removes first.
+                if let Some(kw) = rd.get("AddKeyword") {
+                    let mut ks = Vec::new();
+                    for k in kw.split('&').map(str::trim) {
+                        match keyword(k) {
+                            Some(k) => ks.push(k),
+                            None => {
+                                self.block(format!("kw:{k}"));
+                                return None;
+                            }
+                        }
+                    }
+                    effects.push(ContinuousEffect::AddKeywords(ks));
+                }
+                // "Has \"[ability]\"" (CR 113.2c): script variables holding the abilities,
+                // read as abilities of whatever is affected.
+                let mut given = Vec::new();
+                for (key, kind) in [
+                    ("AddAbility", Given::Activated),
+                    ("AddTrigger", Given::Triggered),
+                    ("AddStaticAbility", Given::Static),
+                    ("AddReplacementEffect", Given::Replacement),
+                ] {
+                    if let Some(names) = rd.get(key) {
+                        given.extend(self.grant(kind, names, '&')?);
+                    }
+                }
+                if !given.is_empty() {
+                    effects.push(ContinuousEffect::GrantAbilities(given));
+                }
+                // `AddSVar$` copies script variables to the affected card so that what it
+                // is given finds them there. Here they are found on this card anyway —
+                // unless the copy goes by another name, which only hints for Forge's AI do.
+                if let Some(names) = rd.get("AddSVar") {
+                    for name in names.split('&').map(str::trim) {
+                        let renamed = self
+                            .svar(name)
+                            .and_then(|v| v.strip_prefix("SVar:"))
+                            .map(|v| v.split(':').next().unwrap_or(v));
+                        if renamed.is_some_and(|n| !AI_HINTS.contains(&n)) {
+                            self.block("static:AddSVar under another name");
+                            return None;
+                        }
+                    }
                 }
                 // Layer 7b: "have base power and toughness N/N" (not a
                 // characteristic-defining ability, which is read above).
@@ -3830,6 +4005,8 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
         equipment: face.types.iter().any(|t| t == "Equipment"),
         records: &parsed,
         known,
+        granted: Vec::new(),
+        granting: 0,
     };
     let mut def = CardDef {
         name: face.name.clone(),
@@ -4262,6 +4439,7 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
     abilities.extend(equips.into_iter().map(|a| (usize::MAX, a)));
     abilities.sort_by_key(|(i, _)| *i);
     def.abilities = abilities.into_iter().map(|(_, a)| a).collect();
+    def.granted = std::mem::take(&mut tx.granted);
     // A variable holding an ability that nothing refers to means part of the card was
     // not understood.
     // (Only reported for a card that is otherwise understood: when something else is
@@ -4294,41 +4472,58 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
     }
 }
 
-/// Words of the card's Oracle text (without reminder text and without the quoted
-/// abilities of tokens it makes) that the compiled card has no counterpart for.
-fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
-    // Drop "(reminder text)" and "quoted abilities".
-    let mut plain = String::new();
+/// Rules text in lower case without "(reminder text)", split into what is said outright
+/// and what is said in quotes (the abilities of tokens, and abilities given to others).
+fn outright_and_quoted(text: &str) -> (String, String) {
+    let (mut plain, mut inside) = (String::new(), String::new());
     let (mut parens, mut quoted) = (0u32, false);
-    for c in oracle.chars() {
+    for c in text.chars() {
         match c {
             '(' => parens += 1,
             ')' => parens = parens.saturating_sub(1),
-            '"' => quoted = !quoted,
+            '"' => {
+                quoted = !quoted;
+                inside.push(' ');
+            }
             c if parens == 0 && !quoted => plain.extend(c.to_lowercase()),
+            c if parens == 0 => inside.extend(c.to_lowercase()),
             _ => {}
         }
     }
+    (plain, inside)
+}
+
+/// Words of the card's Oracle text that the compiled card has no counterpart for. What
+/// the card says outright is compared with what the compiled card says outright; what it
+/// gives to others in quotes, with the abilities the compiled card gives. (The quoted
+/// abilities of tokens it makes are not compared: tokens are compiled on their own.)
+fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
+    let (plain, quoted) = outright_and_quoted(oracle);
+    let text = card_model::describe::rules_text(def).join(" / ");
+    let (compiled, compiled_quoted) = outright_and_quoted(&text);
     let has_word = |text: &str, word: &str| {
         text.split(|c: char| !c.is_ascii_alphabetic())
             .any(|w| w == word)
     };
-    let compiled = card_model::describe::rules_text(def)
-        .join(" / ")
-        .to_lowercase();
     let mut missing = Vec::new();
-    // "You may": an optional instruction, or "up to" some number of things.
-    if has_word(&plain, "may") && !has_word(&compiled, "may") && !compiled.contains("up to") {
-        missing.push("says may");
-    }
-    // "Another target creature": the ability's source can't be chosen.
-    if (plain.contains("another target") || plain.contains("other target"))
-        && !has_word(&compiled, "another")
-        && !has_word(&compiled, "other")
-        // (Several targets of one instruction are different objects anyway: CR 115.3.)
-        && !has_word(&compiled, "targets")
-    {
-        missing.push("another target");
+    let mut compare = |plain: &str, compiled: &str| {
+        // "You may": an optional instruction, or "up to" some number of things.
+        if has_word(plain, "may") && !has_word(compiled, "may") && !compiled.contains("up to") {
+            missing.push("says may");
+        }
+        // "Another target creature": the ability's source can't be chosen.
+        if (plain.contains("another target") || plain.contains("other target"))
+            && !has_word(compiled, "another")
+            && !has_word(compiled, "other")
+            // (Several targets of one instruction are different objects anyway: CR 115.3.)
+            && !has_word(compiled, "targets")
+        {
+            missing.push("another target");
+        }
+    };
+    compare(&plain, &compiled);
+    if !def.granted.is_empty() {
+        compare(&quoted, &compiled_quoted);
     }
     // "Is put into your graveyard from the battlefield" is about whose card it is; the
     // script may say whose creature it was.
@@ -4348,6 +4543,8 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
             missing.push(word);
         }
     }
+    missing.sort();
+    missing.dedup();
     missing
 }
 

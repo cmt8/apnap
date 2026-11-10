@@ -101,14 +101,18 @@ impl PriorityFrame {
                 again,
                 Frame::Cast(CastFrame::new(p, CastSource::Card(card))),
             ]),
-            OptionDesc::ActivateAbility { source, index } => Flow::Continue(vec![
+            OptionDesc::ActivateAbility { source, ability } => Flow::Continue(vec![
                 again,
-                Frame::Cast(CastFrame::new(p, CastSource::Ability { source, index })),
+                Frame::Cast(CastFrame::new(p, CastSource::Ability { source, ability })),
             ]),
             // CR 117.1d / 605.3a: mana abilities with priority; the mana floats.
-            OptionDesc::TapForMana { source, mana } => {
+            OptionDesc::TapForMana {
+                source,
+                mana,
+                ability,
+            } => {
                 // The ability's own cost may include sacrificing its source (Treasure).
-                let cost = tap_for_mana(st, p, source, mana, None);
+                let cost = tap_for_mana(st, p, source, mana, ability, None);
                 if cost.is_empty() {
                     Flow::then(again)
                 } else {
@@ -148,22 +152,28 @@ fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
         if crate::layers::controller_of(st, source) != p {
             continue;
         }
-        for (index, a) in abilities(st, source) {
+        for (ability, a) in abilities(st, source) {
+            let option = OptionDesc::ActivateAbility { source, ability };
+            // An ability it was given twice is one thing to do.
             if matches!(a, AbilityDef::Activated { .. })
-                && can_begin(st, p, CastSource::Ability { source, index })
+                && !opts.contains(&option)
+                && can_begin(st, p, CastSource::Ability { source, ability })
             {
-                opts.push(OptionDesc::ActivateAbility { source, index });
+                opts.push(option);
             }
         }
     }
     // CR 113.6: abilities that work from the hand (cycling, CR 702.29a) or the graveyard.
     let graveyard = &st.zones.graveyards[p.index()];
     for &source in hand.iter().chain(graveyard) {
-        for (index, a) in abilities(st, source) {
+        for (ability, a) in abilities(st, source) {
+            let option = OptionDesc::ActivateAbility { source, ability };
+            // An ability it was given twice is one thing to do.
             if matches!(a, AbilityDef::Activated { .. })
-                && can_begin(st, p, CastSource::Ability { source, index })
+                && !opts.contains(&option)
+                && can_begin(st, p, CastSource::Ability { source, ability })
             {
-                opts.push(OptionDesc::ActivateAbility { source, index });
+                opts.push(option);
             }
         }
     }
@@ -172,8 +182,9 @@ fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
             let option = OptionDesc::TapForMana {
                 source: src.id,
                 mana,
+                ability: src.ability,
             };
-            // Two abilities of one permanent that make the same mana are one option.
+            // An ability the permanent has twice is one option.
             if !opts.contains(&option) {
                 opts.push(option);
             }
