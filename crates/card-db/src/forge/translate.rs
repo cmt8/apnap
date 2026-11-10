@@ -357,6 +357,8 @@ pub fn keyword(name: &str) -> Option<Keyword> {
         "Indestructible" => Keyword::Indestructible,
         "Intimidate" => Keyword::Intimidate,
         "Shroud" => Keyword::Shroud,
+        "Shadow" => Keyword::Shadow,
+        "Horsemanship" => Keyword::Horsemanship,
         "Landwalk:Plains" => Keyword::Landwalk(BasicLandType::Plains),
         "Landwalk:Island" => Keyword::Landwalk(BasicLandType::Island),
         "Landwalk:Swamp" => Keyword::Landwalk(BasicLandType::Swamp),
@@ -2717,10 +2719,14 @@ impl<'a> Tx<'a> {
                     spells,
                 })
             }
-            "Attacks" => rd
-                .get("ValidCard")
-                .and_then(|f| self.obj_filter(f))
-                .map(Trigger::Attacks),
+            "Attacks" => {
+                let filter = rd.get("ValidCard").and_then(|f| self.obj_filter(f));
+                // "Attacks alone" (CR 506.5): Forge only tests that the key is there.
+                match rd.get("Alone") {
+                    None => filter.map(Trigger::Attacks),
+                    Some(_) => filter.map(Trigger::AttacksAlone),
+                }
+            }
             // Damage being dealt (CR 120). `DamageDone`: once for each source and
             // recipient; `DamageDoneOnce`: once for each recipient ("is dealt damage",
             // "one or more creatures deal damage"); `DamageDealtOnce`: once for each
@@ -3485,6 +3491,79 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
                         groups: Vec::new(),
                     }),
                 });
+            }
+            continue;
+        }
+        // Keywords that are shorthand for an ability the engine has.
+        let pump_one = |what: ObjRef| {
+            Body::Effect(Mode {
+                targets: Vec::new(),
+                effect: Effect::Apply {
+                    what,
+                    effects: vec![ContinuousEffect::ModifyPT(1, 1)],
+                    until_end_of_turn: true,
+                },
+                groups: Vec::new(),
+            })
+        };
+        match k.as_str() {
+            // CR 702.108a: "Whenever you cast a noncreature spell, this creature gets
+            // +1/+1 until end of turn."
+            "Prowess" => {
+                abilities.push((
+                    0,
+                    AbilityDef::Triggered {
+                        when: Trigger::Cast {
+                            by: Who::You,
+                            types: Vec::new(),
+                            spells: vec![Selector {
+                                not_types: vec![CardType::Creature],
+                                ..Selector::default()
+                            }],
+                        },
+                        intervening_if: None,
+                        body: pump_one(ObjRef::This),
+                    },
+                ));
+                continue;
+            }
+            // CR 702.83a: "Whenever a creature you control attacks alone, that creature
+            // gets +1/+1 until end of turn."
+            "Exalted" => {
+                abilities.push((
+                    0,
+                    AbilityDef::Triggered {
+                        when: Trigger::AttacksAlone(ObjFilter::Matching(Selector {
+                            types: vec![CardType::Creature],
+                            controller: Who::You,
+                            ..Selector::default()
+                        })),
+                        intervening_if: None,
+                        body: pump_one(ObjRef::Triggering),
+                    },
+                ));
+                continue;
+            }
+            // CR 702.114a: "This object is colorless", everywhere: the same as having no
+            // color to begin with (its color identity still comes from its mana cost).
+            "Devoid" => {
+                def.colors = Some(Vec::new());
+                continue;
+            }
+            _ => {}
+        }
+        // CR 702.41a: "Affinity for [things]": "This spell costs {1} less to cast for each
+        // [thing] you control."
+        if let Some(rest) = k.strip_prefix("Affinity:") {
+            let what = rest.split(':').next().unwrap_or(rest);
+            let before = tx.blockers.len();
+            match tx.selector(what) {
+                Some(mut s) if s.controller == Who::Any && s.owner == Who::Any => {
+                    s.controller = Who::You;
+                    abilities.push((0, AbilityDef::SelfCostReduction(Amount::Count(s))));
+                }
+                Some(_) => tx.block("kw:Affinity for something controlled"),
+                None => tx.explained(before, "keyword"),
             }
             continue;
         }

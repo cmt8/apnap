@@ -4466,3 +4466,130 @@ fn a_card_from_a_graveyard_to_a_library() {
     let top = *s.st.zones.list(Zone::Library, P0).last().unwrap();
     assert_eq!(s.name(top), "Test Elf");
 }
+
+// ---------------------------------------------------------------------------------------
+// Keywords that are shorthand for abilities the engine has (D-060).
+
+// CR 702.28b, 702.31b (2026-11-06). Forge: `K:Shadow`, `K:Horsemanship`.
+#[test]
+fn shadow_and_horsemanship() {
+    let cards = [
+        creature("Test Shade", "B", "Shade", "1/1", "K:Shadow"),
+        creature("Test Rider", "W", "Soldier", "1/1", "K:Horsemanship"),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let blockers_of = |attacker: &str| {
+        let mut sc = scenario(&cards);
+        let a = sc.card(P0, Zone::Battlefield, attacker);
+        sc.cards(
+            P1,
+            Zone::Battlefield,
+            &["Test Shade", "Test Rider", "Test Golem"],
+        );
+        let mut s = Script::new(sc.build());
+        attack_with(&mut s, &[a]);
+        offered_blockers(&mut s, a)
+    };
+    // Shadow is blocked only by shadow, and blocks only shadow.
+    assert_eq!(blockers_of("Test Shade"), ["Test Shade"]);
+    // Horsemanship is blocked only by horsemanship, but blocks anything (without shadow).
+    assert_eq!(blockers_of("Test Rider"), ["Test Rider"]);
+    assert_eq!(blockers_of("Test Golem"), ["Test Rider", "Test Golem"]);
+}
+
+// CR 702.108a, 702.83a–b, 506.5 (2026-11-06). Forge: `K:Prowess`, `K:Exalted`, and
+// `Mode$ Attacks | Alone$ True`.
+#[test]
+fn prowess_and_exalted() {
+    let cards = [
+        creature("Test Monk", "U", "Monk", "1/1", "K:Prowess"),
+        creature("Test Squire", "W", "Soldier", "1/1", "K:Exalted"),
+        bell(
+            "Test Lone Bell",
+            "Attacks | ValidCard$ Creature.YouCtrl | Alone$ True",
+            5,
+        ),
+        spell(
+            "Test Pondering",
+            "U",
+            "Instant",
+            "A:SP$ Draw | NumCards$ 1 | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Island", "Island", "Forest"]);
+    let monk = sc.card(P0, Zone::Battlefield, "Test Monk");
+    sc.cards(P0, Zone::Hand, &["Test Pondering", "Test Elf"]);
+    let mut s = Script::new(sc.build());
+    // A creature spell: nothing. A noncreature spell: +1/+1 until end of turn.
+    s.cast("Test Elf").pay().pass_all();
+    assert_eq!(pt(&s, monk), (1, 1));
+    s.cast("Test Pondering").pay();
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+    });
+    assert_eq!(pt(&s, monk), (2, 2));
+    drive_until(&mut s, |s| at(s, P1, Step::Upkeep));
+    assert_eq!(pt(&s, monk), (1, 1));
+
+    // Exalted: the one attacker gets +1/+1 for each instance; two attackers get nothing.
+    let build = || {
+        let mut sc = scenario(&cards);
+        sc.cards(
+            P0,
+            Zone::Battlefield,
+            &["Test Squire", "Test Squire", "Test Lone Bell"],
+        );
+        let golems = sc.cards(P0, Zone::Battlefield, &["Test Golem", "Test Golem"]);
+        (Script::new(sc.build()), golems)
+    };
+    let (mut s, golems) = build();
+    attack_with(&mut s, &[golems[0]]);
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() != ChoiceKind::OrderTriggers
+    });
+    assert_eq!(pt(&s, golems[0]), (4, 5));
+    assert_eq!(pt(&s, golems[1]), (2, 3));
+    assert_eq!(life(&s, P0), 45);
+    let (mut s, golems) = build();
+    attack_with(&mut s, &golems);
+    drive_until(&mut s, |s| at(s, P0, Step::PostcombatMain));
+    assert_eq!(life(&s, P0), 40);
+    assert_eq!(life(&s, P1), 36, "two unpumped 2/3s");
+}
+
+// CR 702.114a, 702.41a (2026-11-06). Forge: `K:Devoid`, `K:Affinity:Artifact`.
+#[test]
+fn devoid_and_affinity() {
+    let cards = [
+        creature("Test Voidling", "1 R", "Eldrazi", "2/1", "K:Devoid"),
+        creature(
+            "Test Scrapling",
+            "4",
+            "Construct",
+            "2/2",
+            "K:Affinity:Artifact",
+        ),
+        "Name:Test Trinket\nManaCost:1\nTypes:Artifact\nOracle:Text.".to_string(),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Forest", "Forest"]);
+    let on_table = sc.card(P0, Zone::Battlefield, "Test Voidling");
+    let in_hand = sc.card(P0, Zone::Hand, "Test Voidling");
+    // Two artifacts I control; the opponent's doesn't count.
+    sc.cards(P0, Zone::Battlefield, &["Test Trinket", "Test Trinket"]);
+    sc.card(P1, Zone::Battlefield, "Test Trinket");
+    sc.card(P0, Zone::Hand, "Test Scrapling");
+    let mut s = Script::new(sc.build());
+    // Colorless everywhere, though its mana cost is red — which is still its identity.
+    assert!(chars(&s.st, on_table).colors.is_empty());
+    assert!(chars(&s.st, in_hand).colors.is_empty());
+    let def = s.st.catalog.get(s.st.object(in_hand).card);
+    assert_eq!(card_model::color_identity(def), [card_model::Color::Red]);
+    // {4} less {1} for each of my two artifacts: two lands pay for it.
+    assert!(s.can_cast("Test Scrapling"));
+    s.cast("Test Scrapling").pay().pass_all();
+    assert!(s.find(P0, Zone::Battlefield, "Test Scrapling").is_some());
+}

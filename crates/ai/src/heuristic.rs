@@ -131,7 +131,11 @@ fn kw_value(k: Keyword) -> i64 {
         Keyword::FirstStrike | Keyword::Trample | Keyword::Lifelink | Keyword::Menace => 2,
         Keyword::Indestructible => 4,
         Keyword::Hexproof | Keyword::Shroud => 2,
-        Keyword::Fear | Keyword::Intimidate | Keyword::Landwalk(_) => 2,
+        Keyword::Fear
+        | Keyword::Intimidate
+        | Keyword::Landwalk(_)
+        | Keyword::Shadow
+        | Keyword::Horsemanship => 2,
         Keyword::Vigilance | Keyword::Haste | Keyword::Reach | Keyword::Flash => 1,
         Keyword::Defender => -1,
     }

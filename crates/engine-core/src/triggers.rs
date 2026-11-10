@@ -458,6 +458,8 @@ pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
             };
             for filter in when.events().into_iter().filter_map(|t| match t {
                 Trigger::Attacks(f) => Some(f),
+                // CR 702.83b: the only creature declared as an attacker.
+                Trigger::AttacksAlone(f) if attackers.len() == 1 => Some(f),
                 _ => None,
             }) {
                 for &attacker in attackers {

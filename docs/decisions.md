@@ -1057,6 +1057,19 @@ Rules text: docs/rules-notes/702.29-cycling-113.6-ability-zones.md (last section
 - Golden state hashes re-blessed (`Selector` gained a field); event-log hashes unchanged.
 - 7,924 → 8,060 of 34,463 scripts (23.4%).
 
+## D-060 Compiler batch 9 (breadth): keywords that are shorthand (2026-11-10)
+- **Shadow** (CR 702.28b) and **horsemanship** (702.31b): `Keyword` variants, checked
+  where the other evasion abilities are (`combat::can_block`).
+- **Prowess** (702.108a) and **exalted** (702.83a) compile to the triggered abilities the
+  rules define them as; `Trigger::AttacksAlone` (CR 506.5: the only creature declared as
+  an attacker), also for Forge's `Mode$ Attacks | Alone$`. They are not `Keyword`s, so
+  "gains prowess" stays a blocker.
+- **Affinity** (702.41a) is `SelfCostReduction` counting what the player controls.
+- **Devoid** (702.114a): the card is compiled with no colors. That is what the
+  characteristic-defining ability amounts to in every zone; its color identity still
+  comes from its mana cost (CR 903.4).
+- 8,060 → 8,237 of 34,463 scripts (23.9%). Golden hashes unchanged.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

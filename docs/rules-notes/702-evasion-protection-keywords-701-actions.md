@@ -159,3 +159,31 @@ Engine: `AbilityDef::CombatRule` abilities are collected from what permanents cu
 (`combat::combat_rules`); a creature that can't attack or can't block is never offered, and
 `can_block` refuses a pair a rule forbids — so restrictions that look at one creature or one
 pair can't be disobeyed. (Menace looks at the whole declaration and is checked afterwards.)
+
+## Shadow, horsemanship, prowess, exalted, affinity, devoid (D-060)
+
+> 702.28b A creature with shadow can’t be blocked by creatures without shadow, and a creature without shadow can’t be blocked by creatures with shadow. (See rule 509, “Declare Blockers Step.”)
+>
+> 702.31b A creature with horsemanship can’t be blocked by creatures without horsemanship. A creature with horsemanship can block a creature with or without horsemanship. (See rule 509, “Declare Blockers Step.”)
+>
+> 702.108a Prowess is a triggered ability. “Prowess” means “Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn.”
+>
+> 702.108b If a creature has multiple instances of prowess, each triggers separately.
+>
+> 702.83a Exalted is a triggered ability. “Exalted” means “Whenever a creature you control attacks alone, that creature gets +1/+1 until end of turn.”
+>
+> 702.83b A creature “attacks alone” if it’s the only creature declared as an attacker in a given combat phase. See rule 506.5.
+>
+> 506.5. A creature attacks alone if it’s the only creature declared as an attacker during the declare attackers step. A creature is attacking alone if it’s attacking but no other creatures are. A creature blocks alone if it’s the only creature declared as a blocker during the declare blockers step. A creature is blocking alone if it’s blocking but no other creatures are.
+>
+> 702.41a Affinity is a static ability that functions while the spell with affinity is on the stack. “Affinity for [text]” means “This spell costs {1} less to cast for each [text] you control.”
+>
+> 702.41b If a spell has multiple instances of affinity, each of them applies.
+>
+> 702.114a Devoid is a characteristic-defining ability. “Devoid” means “This object is colorless.” This ability functions everywhere, even outside the game. See rule 604.3.
+
+| Rule | Test (`crates/harness/tests/forge_features.rs`) |
+|---|---|
+| 702.28b, 702.31b | `shadow_and_horsemanship` |
+| 702.108a, 702.83a–b, 506.5 | `prowess_and_exalted` |
+| 702.114a, 702.41a | `devoid_and_affinity` |

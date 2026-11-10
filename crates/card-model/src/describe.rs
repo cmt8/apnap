@@ -33,6 +33,8 @@ pub fn keyword(k: Keyword) -> &'static str {
         Keyword::Indestructible => "Indestructible",
         Keyword::Intimidate => "Intimidate",
         Keyword::Shroud => "Shroud",
+        Keyword::Shadow => "Shadow",
+        Keyword::Horsemanship => "Horsemanship",
         Keyword::Landwalk(crate::BasicLandType::Plains) => "Plainswalk",
         Keyword::Landwalk(crate::BasicLandType::Island) => "Islandwalk",
         Keyword::Landwalk(crate::BasicLandType::Swamp) => "Swampwalk",
@@ -1087,6 +1089,7 @@ fn obj_filter(f: &ObjFilter) -> String {
 fn trigger(t: &Trigger) -> String {
     match t {
         Trigger::Attacks(f) => format!("Whenever {} attacks", obj_filter(f)),
+        Trigger::AttacksAlone(f) => format!("Whenever {} attacks alone", obj_filter(f)),
         Trigger::Cycles { this: true, .. } => "When you cycle this card".to_string(),
         Trigger::Cycles { by, this: false } => format!(
             "Whenever {} a card",

@@ -350,6 +350,11 @@ pub enum Keyword {
     /// CR 702.14: "[type]walk" — can't be blocked as long as the defending player controls
     /// a land of that type.
     Landwalk(BasicLandType),
+    /// CR 702.28b: can't be blocked by creatures without shadow, and can't block creatures
+    /// without it.
+    Shadow,
+    /// CR 702.31b: can't be blocked by creatures without horsemanship.
+    Horsemanship,
 }
 
 /// One ability printed on a card (CR 113).
@@ -581,6 +586,9 @@ pub enum Trigger {
         combat: Option<bool>,
         per: DamagePer,
     },
+    /// CR 702.83b, 506.5: "Whenever [filter] attacks alone" — it is the only creature
+    /// declared as an attacker.
+    AttacksAlone(ObjFilter),
 }
 
 /// What a damage trigger's damage was dealt to.

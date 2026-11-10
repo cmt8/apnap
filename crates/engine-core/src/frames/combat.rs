@@ -98,6 +98,14 @@ pub(crate) fn can_block(
     if a.has(Keyword::Intimidate) && !(artifact || b.colors.iter().any(|c| a.colors.contains(c))) {
         return false;
     }
+    // CR 702.28b: shadow — only by shadow, and shadow blocks only shadow.
+    if a.has(Keyword::Shadow) != b.has(Keyword::Shadow) {
+        return false;
+    }
+    // CR 702.31b: horsemanship — only by horsemanship.
+    if a.has(Keyword::Horsemanship) && !b.has(Keyword::Horsemanship) {
+        return false;
+    }
     // "Can't be blocked [by …]" and "can't block [creatures …]".
     for (src, ctl, affected, rule) in combat_rules(st) {
         let matches = |sel: &card_model::Selector, obj: ObjectId| {
