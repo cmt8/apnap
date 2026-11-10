@@ -13,7 +13,7 @@ use crate::decision::{ChoiceKind, OptionDesc, Primitive, Response};
 use crate::events::Event;
 use crate::ids::{ObjectId, PlayerId};
 use crate::layers::{abilities, chars, controller_of};
-use crate::mana::{ManaMask, ManaRequirement, ManaType, mask_of, types_in};
+use crate::mana::{ManaMask, ManaPool, ManaRequirement, ManaType, mask_of, types_in};
 use crate::replacement::{MoveCause, Proposed};
 use crate::stack::Target;
 use crate::state::GameState;
@@ -286,11 +286,21 @@ pub(crate) fn can_tap_for_ability(st: &GameState, id: ObjectId) -> bool {
 
 /// Untapped mana sources `p` controls (battlefield order) and the mana types each can make.
 /// Every M1 mana ability costs exactly `{T}` (D-021), so one source = one mana.
+/// A permanent that can be tapped for mana now: one activation adds `count` mana, all of
+/// one type chosen from `mask` (CR 605). `count` is 1 except for "Add {C}{C}", "add three
+/// mana of any one color" (card-db: such an ability is the permanent's only mana ability).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ManaSource {
+    pub id: ObjectId,
+    pub mask: ManaMask,
+    pub count: u32,
+}
+
 pub(crate) fn mana_sources(
     st: &GameState,
     p: PlayerId,
     exclude: Option<ObjectId>,
-) -> Vec<(ObjectId, ManaMask)> {
+) -> Vec<ManaSource> {
     st.zones
         .battlefield
         .iter()
@@ -299,6 +309,7 @@ pub(crate) fn mana_sources(
         .filter_map(|id| {
             let c = chars(st, id);
             let mut mask: ManaMask = 0;
+            let mut count = 1;
             if c.is(CardType::Land) {
                 // CR 305.6: each basic land type grants "{T}: Add [mana]".
                 for t in &c.land_types {
@@ -308,16 +319,63 @@ pub(crate) fn mana_sources(
             for (_, a) in abilities(st, id) {
                 if let AbilityDef::Mana { produce, .. } = a {
                     mask |= mask_of(&produce.options());
+                    count = count.max(produce.count());
                 }
             }
-            (mask != 0 && can_tap_for_ability(st, id)).then_some((id, mask))
+            (mask != 0 && can_tap_for_ability(st, id)).then_some(ManaSource { id, mask, count })
         })
         .collect()
 }
 
+/// Can `req` be paid from `pool` plus `sources` (CR 601.2g–h)? Exact: a source that makes
+/// several mana of one *chosen* type is tried with each choice. (Mana beyond the cost is
+/// allowed: it stays in the pool.)
+pub(crate) fn payable(req: &ManaRequirement, pool: &ManaPool, sources: &[ManaSource]) -> bool {
+    // How many multi-mana sources with a real choice are tried exhaustively (5 types each).
+    const BRANCHING: usize = 4;
+    fn go(
+        req: &ManaRequirement,
+        pool: &ManaPool,
+        sources: &[ManaSource],
+        masks: &mut Vec<ManaMask>,
+        branches: usize,
+    ) -> bool {
+        let Some((first, rest)) = sources.split_first() else {
+            return req.feasible(pool, masks);
+        };
+        let single = first.mask.count_ones() == 1;
+        if first.count == 1 || single || branches == 0 {
+            // One unit per mana when the type is fixed; a choice beyond the branching
+            // budget counts as a single mana (never more than it can really give).
+            let n = if first.count == 1 || single {
+                first.count
+            } else {
+                1
+            };
+            for _ in 0..n {
+                masks.push(first.mask);
+            }
+            let ok = go(req, pool, rest, masks, branches);
+            masks.truncate(masks.len() - n as usize);
+            return ok;
+        }
+        for t in types_in(first.mask) {
+            for _ in 0..first.count {
+                masks.push(1 << t.index());
+            }
+            let ok = go(req, pool, rest, masks, branches - 1);
+            masks.truncate(masks.len() - first.count as usize);
+            if ok {
+                return true;
+            }
+        }
+        false
+    }
+    go(req, pool, sources, &mut Vec::new(), BRANCHING)
+}
+
 fn feasible(st: &GameState, p: PlayerId, req: &ManaRequirement, exclude: Option<ObjectId>) -> bool {
-    let masks: Vec<ManaMask> = mana_sources(st, p, exclude).iter().map(|s| s.1).collect();
-    req.feasible(&st.player(p).mana_pool, &masks)
+    payable(req, &st.player(p).mana_pool, &mana_sources(st, p, exclude))
 }
 
 /// Mode indices whose every target slot has at least one legal choice (CR 700.2a).
@@ -758,16 +816,18 @@ impl CastFrame {
                         }
                     }
                     let sources = mana_sources(st, p, prop.tap);
-                    let masks: Vec<ManaMask> = sources.iter().map(|s| s.1).collect();
                     let mut options = Vec::new();
-                    for (i, &(source, mask)) in sources.iter().enumerate() {
-                        let mut rest = masks.clone();
+                    for (i, src) in sources.iter().enumerate() {
+                        let mut rest = sources.clone();
                         rest.remove(i);
-                        for mana in types_in(mask) {
+                        for mana in types_in(src.mask) {
                             let mut pl = pool;
-                            pl.add(mana, 1);
-                            if req.feasible(&pl, &rest) {
-                                options.push(OptionDesc::TapForMana { source, mana });
+                            pl.add(mana, src.count);
+                            if payable(&req, &pl, &rest) {
+                                options.push(OptionDesc::TapForMana {
+                                    source: src.id,
+                                    mana,
+                                });
                             }
                         }
                     }
@@ -863,8 +923,15 @@ impl CastFrame {
     }
 }
 
-/// CR 605.3b: activate a `{T}` mana ability; it resolves immediately.
+/// CR 605.3b: activate a `{T}` mana ability; it resolves immediately, adding as many mana
+/// of the chosen type as the ability makes.
 pub(crate) fn tap_for_mana(st: &mut GameState, p: PlayerId, source: ObjectId, mana: ManaType) {
+    let count = mana_sources(st, p, None)
+        .iter()
+        .find(|s| s.id == source)
+        .map_or(1, |s| s.count);
     execute(st, GameAction::Tap { object: source });
-    execute(st, GameAction::AddMana { player: p, mana });
+    for _ in 0..count {
+        execute(st, GameAction::AddMana { player: p, mana });
+    }
 }

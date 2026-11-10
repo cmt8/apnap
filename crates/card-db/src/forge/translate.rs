@@ -1363,20 +1363,60 @@ impl<'a> Tx<'a> {
             "AB" if api == "Mana" => {
                 let rd = Rd::new(rec, "Mana");
                 let cost = rd.get("Cost").and_then(|c| self.cost(c));
-                let produce = match (rd.get("Produced"), rd.get("Amount")) {
-                    (Some("Any"), None) => Some(ManaProduce::AnyColor),
-                    (Some(p), None) => match p {
-                        "W" => Some(ManaType::White),
-                        "U" => Some(ManaType::Blue),
-                        "B" => Some(ManaType::Black),
-                        "R" => Some(ManaType::Red),
-                        "G" => Some(ManaType::Green),
-                        "C" => Some(ManaType::Colorless),
-                        _ => None,
-                    }
-                    .map(ManaProduce::One),
+                let letter = |w: &&str| match *w {
+                    "W" => Some(ManaType::White),
+                    "U" => Some(ManaType::Blue),
+                    "B" => Some(ManaType::Black),
+                    "R" => Some(ManaType::Red),
+                    "G" => Some(ManaType::Green),
+                    "C" => Some(ManaType::Colorless),
                     _ => None,
                 };
+                let colors = || -> Vec<ManaType> {
+                    Color::ALL.into_iter().map(ManaType::from_color).collect()
+                };
+                // `Amount$`: how many times the whole of `Produced$` is made.
+                let times = match rd.get("Amount") {
+                    None => Some(1),
+                    Some(n) => n.parse::<u32>().ok().filter(|n| *n > 0),
+                };
+                let words: Vec<&str> = rd
+                    .get("Produced")
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .collect();
+                let produce = times.and_then(|n| match words.as_slice() {
+                    // One colour of the player's choice, `n` mana of it.
+                    ["Any"] if n == 1 => Some(ManaProduce::AnyColor),
+                    ["Any"] => Some(ManaProduce::Times {
+                        of: colors(),
+                        count: n,
+                    }),
+                    // "Add {W} or {U}": each mana any of the listed colours. More than
+                    // one such mana ("in any combination") is not modelled.
+                    ["Combo", "Any"] if n == 1 => Some(ManaProduce::AnyColor),
+                    ["Combo", of @ ..] if n == 1 && !of.is_empty() => {
+                        let mut of: Vec<ManaType> = of.iter().map(letter).collect::<Option<_>>()?;
+                        of.dedup();
+                        match of.as_slice() {
+                            [one] => Some(ManaProduce::One(*one)),
+                            _ => Some(ManaProduce::OneOf(of)),
+                        }
+                    }
+                    // Fixed mana: "C C", "G" with `Amount$ 3`. Only one type at a time.
+                    [first, ..] => {
+                        let all: Vec<ManaType> = words.iter().map(letter).collect::<Option<_>>()?;
+                        let t = letter(first)?;
+                        if all.iter().any(|x| *x != t) {
+                            return None;
+                        }
+                        match all.len() as u32 * n {
+                            1 => Some(ManaProduce::One(t)),
+                            count => Some(ManaProduce::Times { of: vec![t], count }),
+                        }
+                    }
+                    [] => None,
+                });
                 rd.finish(&mut self.blockers);
                 let Some(produce) = produce else {
                     self.block("Mana:produced");

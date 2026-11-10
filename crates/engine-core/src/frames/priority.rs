@@ -151,9 +151,12 @@ fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
             }
         }
     }
-    for (source, mask) in mana_sources(st, p, None) {
-        for mana in types_in(mask) {
-            opts.push(OptionDesc::TapForMana { source, mana });
+    for src in mana_sources(st, p, None) {
+        for mana in types_in(src.mask) {
+            opts.push(OptionDesc::TapForMana {
+                source: src.id,
+                mana,
+            });
         }
     }
     opts

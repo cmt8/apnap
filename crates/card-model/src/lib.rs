@@ -780,9 +780,18 @@ pub enum ManaProduce {
     One(ManaType),
     /// "Add one mana of any color."
     AnyColor,
+    /// "Add {W} or {U}": one mana of one of these types.
+    OneOf(Vec<ManaType>),
+    /// `count` mana of ONE type chosen from `of`: "Add {C}{C}" (`of` = colorless only),
+    /// "Add three mana of any one color" (`of` = the five colors).
+    Times {
+        of: Vec<ManaType>,
+        count: u32,
+    },
 }
 
 impl ManaProduce {
+    /// The types the player chooses between.
     pub fn options(&self) -> Vec<ManaType> {
         match self {
             ManaProduce::One(t) => alloc::vec![*t],
@@ -790,6 +799,15 @@ impl ManaProduce {
                 .iter()
                 .map(|c| ManaType::from_color(*c))
                 .collect(),
+            ManaProduce::OneOf(of) | ManaProduce::Times { of, .. } => of.clone(),
+        }
+    }
+
+    /// How many mana (all of the chosen type) one activation adds.
+    pub fn count(&self) -> u32 {
+        match self {
+            ManaProduce::Times { count, .. } => *count,
+            _ => 1,
         }
     }
 }

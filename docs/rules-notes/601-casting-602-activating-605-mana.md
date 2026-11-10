@@ -153,3 +153,18 @@ Engine (`frames/cast.rs`):
   in it to be the card's mana cost and takes the rest as the additional cost.
 - Costs are paid whether or not the spell or ability later resolves (601.2h happens before
   it can be responded to).
+
+## Mana abilities that make a choice of mana, or several mana (D-049)
+> 106.4. When an effect instructs a player to add mana, that mana goes into a player’s mana pool. From there, it can be used to pay costs immediately, or it can stay in the player’s mana pool as unspent mana. Each player’s mana pool empties at the end of each step and phase, and the player is said to lose this mana. Cards with abilities that produce mana or refer to unspent mana have received errata in the Oracle™ card reference to no longer explicitly refer to the mana pool.
+
+> 605.1a An activated ability is a mana ability if it meets all of the following criteria: it doesn’t require a target (see rule 115.6), it could add mana to a player’s mana pool when it resolves, it’s not a loyalty ability (see rule 606, “Loyalty Abilities”), and its cost and effect don’t move any card to or from a library. Do not take into account replacement effects that may apply, other than self-replacement effects, when evaluating these criteria.
+
+> 605.3b An activated mana ability doesn’t go on the stack, so it can’t be targeted, countered, or otherwise responded to. Rather, it resolves immediately after it is activated. (See rule 405.6c.)
+
+Engine: a permanent that can be tapped for mana is a `cast::ManaSource { id, mask, count }`:
+one activation adds `count` mana, all of one type the player picks from `mask`
+(`OptionDesc::TapForMana { source, mana }` names the type; `tap_for_mana` adds all of it).
+`cast::payable` decides whether a cost can be paid from the pool and the sources, trying
+each type for a source that makes several mana of a chosen type, so that no payment step is
+offered that can't be completed (D-019). Mana that isn't spent stays in the pool until the
+step or phase ends (106.4; `frames/turn.rs`).

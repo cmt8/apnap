@@ -253,6 +253,25 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 if *cost != just_tap {
                     p.push(at("M1 mana abilities must cost exactly {T} (D-021)".into()));
                 }
+                // A source that makes several mana is planned as that many units of one
+                // type; mixing it with another way to tap the same permanent for mana is
+                // not modelled (D-049).
+                if let AbilityDef::Mana { produce, .. } = a {
+                    let ways = c
+                        .abilities
+                        .iter()
+                        .filter(|x| matches!(x, AbilityDef::Mana { .. }))
+                        .count()
+                        + c.land_types.len();
+                    if produce.count() == 0 || produce.options().is_empty() {
+                        p.push(at("a mana ability that adds nothing".into()));
+                    }
+                    if produce.count() > 1 && ways > 1 {
+                        p.push(at(
+                            "a multi-mana ability must be the permanent's only mana ability".into(),
+                        ));
+                    }
+                }
             }
             AbilityDef::CombatRule { affected, .. } => {
                 // "Enchanted creature can't attack": only on an Aura.
@@ -614,15 +633,24 @@ pub fn color_identity(def: &CardDef) -> Vec<Color> {
                 if let Some(m) = &cost.mana {
                     add_cost(m, &mut out);
                 }
-                if let AbilityDef::Mana {
-                    produce: ManaProduce::One(t),
-                    ..
-                } = a
-                    && let Some(c) = Color::ALL
-                        .into_iter()
-                        .find(|c| ManaType::from_color(*c) == *t)
-                {
-                    out.push(c);
+                // CR 903.4: the mana symbols in the rules text. "{T}: Add {W} or {U}" has
+                // two; "one mana of any color" and "of any one color" have none.
+                if let AbilityDef::Mana { produce, .. } = a {
+                    let named: Vec<ManaType> = match produce {
+                        ManaProduce::One(t) => vec![*t],
+                        ManaProduce::AnyColor => Vec::new(),
+                        ManaProduce::OneOf(of) => of.clone(),
+                        ManaProduce::Times { of, .. } if of.len() < 5 => of.clone(),
+                        ManaProduce::Times { .. } => Vec::new(),
+                    };
+                    for t in named {
+                        if let Some(c) = Color::ALL
+                            .into_iter()
+                            .find(|c| ManaType::from_color(*c) == t)
+                        {
+                            out.push(c);
+                        }
+                    }
                 }
             }
             _ => {}

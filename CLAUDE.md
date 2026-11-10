@@ -126,7 +126,7 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-051): 5,468 of 34,463 scripts compile (15.9%); about 10,700 more are one feature
+Status (D-051): 5,648 of 34,463 scripts compile (16.4%); about 10,800 more are one feature
 away. Feature tests live in `crates/harness/tests/forge_features.rs`: invented cards written
 in Forge's format, compiled by `harness::forge_test_catalog` and played (`forge_test_blockers`
 for "this must not compile"). Three guards catch compiler holes — keep them: a line that
@@ -139,8 +139,8 @@ feature: Forge's defaults are often not what the key names suggest (flags are te
 presence, `Defined$ Targeted` means every target of the chain, a trigger that runs an
 `AB$` with a cost is "you may pay", triggers without `TriggerZones$` work from any zone).
 Not built yet: the generated-text-vs-Oracle round trip, multi-face cards, library search
-(untargeted ChangeZone, Dig, Scry, Surveil), mana abilities that make more than one mana or
-cost more than {T} (Treasure), "you may pay" triggers, regeneration, statics that grant
+(untargeted ChangeZone, Dig, Scry, Surveil), mana abilities that cost more than {T}
+(Treasure, signets) or make different mana at once, "you may pay" triggers, regeneration, statics that grant
 abilities or types or set P/T, Forge's "Effect" objects, Sagas.
 
 ## Current milestone: M4 — IN PROGRESS (started 2026-11-09), branch `m4-wip`

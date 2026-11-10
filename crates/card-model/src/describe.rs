@@ -731,6 +731,16 @@ fn ability(a: &AbilityDef) -> String {
             match produce {
                 ManaProduce::One(t) => t.symbol().to_string(),
                 ManaProduce::AnyColor => "one mana of any color".to_string(),
+                ManaProduce::OneOf(of) =>
+                    join(of.iter().map(|t| t.symbol().to_string()).collect(), "or",),
+                ManaProduce::Times { of, count } => match of.as_slice() {
+                    [t] => t.symbol().repeat(*count as usize),
+                    _ if of.len() == 5 => format!("{count} mana of any one color"),
+                    _ => format!(
+                        "{count} mana of one of {}",
+                        join(of.iter().map(|t| t.symbol().to_string()).collect(), "or")
+                    ),
+                },
             }
         ),
         AbilityDef::Triggered {

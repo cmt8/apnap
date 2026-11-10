@@ -701,6 +701,31 @@ section of `docs/rules-notes/601-casting-602-activating-605-mana.md`.
   compared, and a cheap pre-check (`Walk::could_matter`) skips the comparison when the other
   effect can't change what this one looks at. Results are unchanged.
 
+## D-049 Mana abilities, step 1: a choice of types, and several mana of one type (2026-11-09)
+5,468 → 5,648 of 34,463 scripts compile (16.4%); precons 109 → 114 of 275 deck slots.
+Rules text: `docs/rules-notes/601-casting-602-activating-605-mana.md`.
+
+- `ManaProduce::OneOf(types)` — "{T}: Add {W} or {U}" (Forge `Produced$ Combo W U`): still
+  one mana per tap, so the payment code only sees a wider choice.
+- `ManaProduce::Times { of, count }` — `count` mana of ONE type chosen from `of`: "Add
+  {C}{C}" (`Produced$ C C`), "{G}{G}{G}" (`G` with `Amount$ 3`), "three mana of any one
+  color" (`Any` with `Amount$ 3`). `cast::ManaSource { id, mask, count }` replaces the
+  `(id, mask)` pair; `cast::payable` is exact: a fixed-type source counts as `count`
+  units, and a source with a real choice of type is tried with each type (up to four such
+  sources exhaustively; beyond that the extras count as one mana each, which can only
+  under-estimate). Mana beyond the cost stays in the pool (CR 106.4) until the step ends.
+  This lifts the "one mana per source" limit of D-021 for these forms.
+- Validation: a multi-mana ability must be the permanent's only way to make mana (the
+  planner models one yield per permanent).
+- Colour identity (CR 903.4) counts the symbols a mana ability names: both of "{W} or
+  {U}", none of "any color".
+- **Still blocked:** different mana from one activation ("{W}{U}"), several mana "in any
+  combination", `Combo ColorIdentity` (Arcane Signet), mana abilities that cost more than
+  {T} (Treasure, signets, pain lands' damage), restricted mana, `DB$ Mana` inside other
+  abilities. When sacrificing sources arrive, two things must be handled with them: a
+  permanent chosen as a sacrifice *cost* must not also be sacrificed for mana, and
+  `can_begin` must not count one Treasure for both.
+
 ## D-051 Compiler batch 3: conditional statics, combat restrictions, Equipment, Auras on anything (2026-11-09)
 5,001 → 5,468 of 34,463 scripts compile (15.9%); precons 103 → 109 of 275 deck slots.
 (D-049 and D-050 are reserved for the mana-ability and library-search work started in

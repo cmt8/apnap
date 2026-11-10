@@ -1594,3 +1594,136 @@ fn auras_that_enchant_lands_or_your_own_creatures() {
     assert!(!on_battlefield(&s, devotion));
     assert!(s.find(P0, Zone::Graveyard, "Test Devotion").is_some());
 }
+
+// ---------------------------------------------------------------------------------------
+// Mana abilities.
+
+fn mana_pool(s: &Script, p: PlayerId) -> u32 {
+    s.st.player(p).mana_pool.amounts.iter().sum()
+}
+
+// CR 605.1a, 106.4 (2026-11-06). Forge: `Produced$ Combo W U` — "{T}: Add {W} or {U}";
+// `Produced$ C C` — two mana from one source, the excess stays in the pool;
+// `Produced$ Any | Amount$ 3` — three mana of any ONE colour.
+#[test]
+fn mana_abilities_with_a_choice_of_type_or_several_mana() {
+    let land = |name: &str, mana: &str| {
+        format!(
+            "Name:{name}\nManaCost:no cost\nTypes:Land\nA:AB$ Mana | Cost$ T | {mana} | SpellDescription$ Text.\nOracle:Text."
+        )
+    };
+    let rock = |name: &str, mana: &str| {
+        format!(
+            "Name:{name}\nManaCost:1\nTypes:Artifact\nA:AB$ Mana | Cost$ T | {mana} | SpellDescription$ Text.\nOracle:Text."
+        )
+    };
+    let cards = [
+        land("Test Estuary", "Produced$ Combo W U"),
+        rock("Test Lodestone", "Produced$ C C"),
+        rock("Test Bloom", "Produced$ Any | Amount$ 3"),
+        spell(
+            "Test Azure",
+            "U",
+            "Instant",
+            "A:SP$ Draw | NumCards$ 1 | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Ivory",
+            "W",
+            "Instant",
+            "A:SP$ GainLife | LifeAmount$ 1 | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Bicolor",
+            "W U",
+            "Instant",
+            "A:SP$ GainLife | LifeAmount$ 2 | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Triple",
+            "G G G",
+            "Instant",
+            "A:SP$ GainLife | LifeAmount$ 3 | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Trinket Spell",
+            "1",
+            "Instant",
+            "A:SP$ GainLife | LifeAmount$ 1 | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let hand = [
+        "Test Azure",
+        "Test Ivory",
+        "Test Bicolor",
+        "Test Triple",
+        "Test Trinket Spell",
+        "Test Elf",
+        "Test Golem",
+    ];
+    let with = |permanents: &[&str]| {
+        let mut sc = scenario(&cards);
+        sc.cards(P0, Zone::Battlefield, permanents);
+        sc.cards(P0, Zone::Hand, &hand);
+        Script::new(sc.build())
+    };
+    let castable =
+        |s: &Script| -> Vec<&str> { hand.iter().copied().filter(|c| s.can_cast(c)).collect() };
+    // "{T}: Add {W} or {U}": either colour (or generic), nothing else.
+    let s = with(&["Test Estuary"]);
+    assert_eq!(
+        castable(&s),
+        ["Test Azure", "Test Ivory", "Test Trinket Spell"]
+    );
+    // Two of them pay {W}{U}.
+    let s = with(&["Test Estuary", "Test Estuary"]);
+    assert!(s.can_cast("Test Bicolor"));
+    // "{T}: Add {C}{C}": two generic from one tap — with a Forest, {3}.
+    let s = with(&["Test Lodestone"]);
+    assert_eq!(castable(&s), ["Test Trinket Spell"]);
+    let mut s = with(&["Test Lodestone", "Forest"]);
+    assert!(s.can_cast("Test Golem") && s.can_cast("Test Elf"));
+    // Paying {1} with it leaves one colorless mana floating.
+    s.tap("Test Lodestone", engine_core::mana::ManaType::Colorless);
+    assert_eq!(mana_pool(&s, P0), 2);
+    s.cast("Test Trinket Spell").pay();
+    assert_eq!(mana_pool(&s, P0), 1);
+    // "Add three mana of any one color": {G}{G}{G} yes, {W}{U} no — one colour only.
+    let s = with(&["Test Bloom"]);
+    assert!(s.can_cast("Test Triple") && s.can_cast("Test Golem"));
+    assert!(!s.can_cast("Test Bicolor"));
+    let mut s = with(&["Test Bloom"]);
+    s.cast("Test Triple").pay().pass_all();
+    assert_eq!(life(&s, P0), 43);
+    assert_eq!(mana_pool(&s, P0), 0);
+}
+
+// What isn't compiled: different mana from one activation ("{W}{U}"), and several mana "in
+// any combination". And a multi-mana ability next to another mana ability of the same
+// permanent isn't a valid card for the payment planner.
+#[test]
+fn mana_forms_not_compiled() {
+    let rock = |mana: &str| {
+        format!(
+            "Name:Test Prism Rock\nManaCost:2\nTypes:Artifact\nA:AB$ Mana | Cost$ T | {mana} | SpellDescription$ Text.\nOracle:Text."
+        )
+    };
+    assert_eq!(
+        forge_test_blockers(&rock("Produced$ W U")),
+        ["Mana:produced"]
+    );
+    assert_eq!(
+        forge_test_blockers(&rock("Produced$ Combo W U | Amount$ 2")),
+        ["Mana:produced"]
+    );
+    let two = "Name:Test Twin Rock\nManaCost:2\nTypes:Artifact\n\
+        A:AB$ Mana | Cost$ T | Produced$ C C | SpellDescription$ Text.\n\
+        A:AB$ Mana | Cost$ T | Produced$ G | SpellDescription$ Text.\nOracle:Text.";
+    let b = forge_test_blockers(two);
+    assert!(
+        b.iter()
+            .any(|x| x.starts_with("invalid:") && x.contains("only mana ability")),
+        "{b:?}"
+    );
+}
