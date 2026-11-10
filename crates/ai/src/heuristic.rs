@@ -42,6 +42,8 @@ fn effect_polarity(e: &Effect) -> Polarity {
         | Effect::Counter { .. }
         | Effect::LoseLife { .. }
         | Effect::ReturnToHand { .. }
+        | Effect::Exile { .. }
+        | Effect::ExileGraveyard { .. }
         | Effect::DamageEachPlayer { .. } => Polarity::Harm,
         Effect::PutCounters { kind, .. } => match kind {
             CounterKind::PlusOne => Polarity::Help,
@@ -52,7 +54,13 @@ fn effect_polarity(e: &Effect) -> Polarity {
         | Effect::Draw { .. }
         | Effect::CreateToken { .. }
         | Effect::PreventNext { .. } => Polarity::Help,
-        Effect::EachPlayer(_) => Polarity::Neutral,
+        // No target to be for or against: these hit everything that matches.
+        Effect::EachPlayer(_)
+        | Effect::DestroyAll(_)
+        | Effect::DamageEach { .. }
+        | Effect::ApplyAll { .. }
+        | Effect::Mill { .. }
+        | Effect::SetX(_) => Polarity::Neutral,
     }
 }
 

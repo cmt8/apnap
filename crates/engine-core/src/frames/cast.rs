@@ -187,7 +187,7 @@ fn legal_modes(st: &GameState, body: &Body, p: PlayerId, this: Option<ObjectId>)
         .filter(|(_, m)| {
             m.targets
                 .iter()
-                .all(|f| !candidates(st, *f, p, this).is_empty())
+                .all(|f| !candidates(st, f, p, this).is_empty())
         })
         .map(|(i, _)| i as u8)
         .collect()
@@ -441,7 +441,7 @@ impl CastFrame {
                             body.as_ref().unwrap().modes()[m as usize]
                                 .targets
                                 .iter()
-                                .map(move |f| (k, *f))
+                                .map(move |f| (k, f.clone()))
                         })
                         .collect();
                     let filled: usize = self.targets.iter().map(Vec::len).sum();
@@ -452,7 +452,7 @@ impl CastFrame {
                         self.targets[slots[filled].0].push(target);
                         continue;
                     }
-                    if let Some(&(_, filter)) = slots.get(filled) {
+                    if let Some((_, filter)) = slots.get(filled) {
                         let options: Vec<OptionDesc> = candidates(st, filter, p, self.object)
                             .into_iter()
                             .map(|target| OptionDesc::Target { target })

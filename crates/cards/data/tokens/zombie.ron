@@ -1,0 +1,15 @@
+// Token definition (CR 111.4: named for its subtype plus "Token"; `key` is what scripts call it): a 2/2 black Zombie creature token.
+CardScript(
+    verified: true,
+    tests: ["open_the_graves_makes_a_zombie_for_each_nontoken_creature"],
+    card: (
+        name: "Zombie Token",
+        key: Some("Zombie"),
+        token: true,
+        colors: Some([Black]),
+        card_types: [Creature],
+        creature_types: ["Zombie"],
+        power: Some(2),
+        toughness: Some(2),
+    ),
+)

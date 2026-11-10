@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Work {
     /// Perform `effect` for the `k`-th chosen mode (targets = `targets[k]`).
-    Eval { k: usize, effect: Effect },
+    Eval { k: usize, effect: Box<Effect> },
     /// CR 101.4: players choose in APNAP order (later players know earlier choices,
     /// 101.4b); then all the actions happen simultaneously.
     EachPlayerChoose {
@@ -78,7 +78,7 @@ impl ResolveFrame {
         // CR 608.2b: illegal targets aren't affected.
         is_legal(
             st,
-            self.filters[k][i as usize],
+            &self.filters[k][i as usize],
             t,
             self.controller,
             self.object,
@@ -86,14 +86,26 @@ impl ResolveFrame {
         .then_some(t)
     }
 
-    fn player(&self, st: &GameState, k: usize, r: PlayerRef) -> Option<PlayerId> {
+    /// The players an effect applies to (none if a targeted player is no longer legal).
+    fn players(&self, st: &GameState, k: usize, r: PlayerRef) -> Vec<PlayerId> {
         match r {
-            PlayerRef::You => st.in_game(self.controller).then_some(self.controller),
-            PlayerRef::Target(i) => match self.target(st, k, TargetRef::Target(i))? {
-                Target::Player(p) => Some(p),
-                Target::Object(_) => None,
+            PlayerRef::You => st
+                .in_game(self.controller)
+                .then_some(self.controller)
+                .into_iter()
+                .collect(),
+            PlayerRef::Target(i) => match self.target(st, k, TargetRef::Target(i)) {
+                Some(Target::Player(p)) => vec![p],
+                _ => Vec::new(),
             },
+            // In turn order from the controller (CR 101.4); the effects are simultaneous.
+            PlayerRef::EachOpponent => st.opponents(self.controller),
         }
+    }
+
+    /// The one player an effect applies to (effects that can't be spread over several).
+    fn player(&self, st: &GameState, k: usize, r: PlayerRef) -> Option<PlayerId> {
+        self.players(st, k, r).into_iter().next()
     }
 
     /// An object the effect refers to, if it's still where the effect expects it.
@@ -120,10 +132,13 @@ impl ResolveFrame {
         }
     }
 
-    fn amount(&self, st: &GameState, a: Amount) -> u32 {
+    fn amount(&self, st: &GameState, a: &Amount) -> u32 {
         match a {
-            Amount::Fixed(n) => n,
+            Amount::Fixed(n) => *n,
             Amount::X => self.x,
+            Amount::Count(sel) => {
+                crate::layers::matching(st, sel, self.source, self.controller).len() as u32
+            }
             Amount::SourcePower => self
                 .source_chars(st)
                 .and_then(|c| c.power)
@@ -153,7 +168,7 @@ impl ResolveFrame {
         while let Some(item) = self.work.pop() {
             match item {
                 Work::Eval { k, effect } => {
-                    let events = self.eval(st, k, effect);
+                    let events = self.eval(st, k, *effect);
                     if !events.is_empty() {
                         let apply = ApplyFrame::new(st, events);
                         return Flow::Continue(vec![
@@ -248,7 +263,7 @@ impl ResolveFrame {
                         let target = top.targets.first().and_then(|t| t.first()).copied();
                         match target {
                             Some(t @ Target::Object(o))
-                                if is_legal(st, filter, t, top.controller, Some(top.id)) =>
+                                if is_legal(st, &filter, t, top.controller, Some(top.id)) =>
                             {
                                 attach = Some(o)
                             }
@@ -293,7 +308,7 @@ impl ResolveFrame {
                         ..
                     } => {
                         // CR 603.4 / 608.2a: re-check an intervening "if" on resolution.
-                        if !condition_holds(st, *intervening_if, top.controller) {
+                        if !condition_holds(st, intervening_if.as_ref(), top.controller, *source) {
                             execute(st, GameAction::RemoveAbility { ability: top.id });
                             return Some(Flow::done());
                         }
@@ -314,7 +329,7 @@ impl ResolveFrame {
         for (k, ts) in self.targets.iter().enumerate() {
             for (i, &t) in ts.iter().enumerate() {
                 any = true;
-                any_legal |= is_legal(st, self.filters[k][i], t, self.controller, Some(top.id));
+                any_legal |= is_legal(st, &self.filters[k][i], t, self.controller, Some(top.id));
             }
         }
         if any && !any_legal {
@@ -325,7 +340,7 @@ impl ResolveFrame {
         for (k, &m) in top.modes.iter().enumerate().rev() {
             self.work.push(Work::Eval {
                 k,
-                effect: body.modes()[m as usize].effect.clone(),
+                effect: Box::new(body.modes()[m as usize].effect.clone()),
             });
         }
         None
@@ -336,12 +351,15 @@ impl ResolveFrame {
         match effect {
             Effect::Seq(v) => {
                 for e in v.into_iter().rev() {
-                    self.work.push(Work::Eval { k, effect: e });
+                    self.work.push(Work::Eval {
+                        k,
+                        effect: Box::new(e),
+                    });
                 }
                 Vec::new()
             }
             Effect::DealDamage { to, amount } => {
-                let amount = self.amount(st, amount);
+                let amount = self.amount(st, &amount);
                 match self.target(st, k, to) {
                     Some(Target::Player(p)) => {
                         vec![self.damage(st, DamageTarget::Player(p), amount)]
@@ -353,32 +371,99 @@ impl ResolveFrame {
                 }
             }
             Effect::DamageEachPlayer { amount } => {
-                let amount = self.amount(st, amount);
+                let amount = self.amount(st, &amount);
                 st.apnap_order()
                     .into_iter()
                     .map(|p| self.damage(st, DamageTarget::Player(p), amount))
                     .collect()
             }
-            Effect::Draw { who, amount } => match self.player(st, k, who) {
-                Some(player) => (0..self.amount(st, amount))
-                    .map(|_| Proposed::Draw { player })
-                    .collect(),
+            Effect::Draw { who, amount } => {
+                let n = self.amount(st, &amount);
+                self.players(st, k, who)
+                    .into_iter()
+                    .flat_map(|player| (0..n).map(move |_| Proposed::Draw { player }))
+                    .collect()
+            }
+            Effect::GainLife { who, amount } => {
+                let amount = self.amount(st, &amount);
+                self.players(st, k, who)
+                    .into_iter()
+                    .map(|player| Proposed::GainLife { player, amount })
+                    .collect()
+            }
+            Effect::LoseLife { who, amount } => {
+                let amount = self.amount(st, &amount);
+                self.players(st, k, who)
+                    .into_iter()
+                    .map(|player| Proposed::LoseLife { player, amount })
+                    .collect()
+            }
+            Effect::SetX(amount) => {
+                self.x = self.amount(st, &amount);
+                Vec::new()
+            }
+            Effect::DestroyAll(sel) => {
+                crate::layers::matching(st, &sel, self.source, self.controller)
+                    .into_iter()
+                    .map(|o| Proposed::moving(o, Zone::Graveyard, MoveCause::Destroy))
+                    .collect()
+            }
+            Effect::DamageEach { each, amount } => {
+                let amount = self.amount(st, &amount);
+                crate::layers::matching(st, &each, self.source, self.controller)
+                    .into_iter()
+                    .map(|o| self.damage(st, DamageTarget::Object(o), amount))
+                    .collect()
+            }
+            Effect::Exile { what } => match self.obj(st, k, what) {
+                // CR 701.13a
+                Some(o) => vec![Proposed::moving(o, Zone::Exile, MoveCause::Rule)],
                 None => Vec::new(),
             },
-            Effect::GainLife { who, amount } => match self.player(st, k, who) {
-                Some(player) => vec![Proposed::GainLife {
-                    player,
-                    amount: self.amount(st, amount),
-                }],
-                None => Vec::new(),
-            },
-            Effect::LoseLife { who, amount } => match self.player(st, k, who) {
-                Some(player) => vec![Proposed::LoseLife {
-                    player,
-                    amount: self.amount(st, amount),
-                }],
-                None => Vec::new(),
-            },
+            Effect::ExileGraveyard { who } => self
+                .players(st, k, who)
+                .into_iter()
+                .flat_map(|p| st.zones.list(Zone::Graveyard, p).clone())
+                .map(|o| Proposed::moving(o, Zone::Exile, MoveCause::Rule))
+                .collect(),
+            Effect::Mill { who, amount } => {
+                // CR 701.17a: the top N cards (the library's last entries), all at once.
+                let n = self.amount(st, &amount) as usize;
+                self.players(st, k, who)
+                    .into_iter()
+                    .flat_map(|p| {
+                        let library = st.zones.list(Zone::Library, p);
+                        let take = n.min(library.len());
+                        library[library.len() - take..]
+                            .iter()
+                            .rev()
+                            .copied()
+                            .collect::<Vec<_>>()
+                    })
+                    .map(|o| Proposed::moving(o, Zone::Graveyard, MoveCause::Rule))
+                    .collect()
+            }
+            Effect::ApplyAll {
+                affected,
+                effects,
+                until_end_of_turn,
+            } => {
+                // CR 611.2c: the affected set is locked in now.
+                let affected = crate::layers::matching(st, &affected, self.source, self.controller);
+                if !affected.is_empty() {
+                    execute(
+                        st,
+                        GameAction::AddContinuous {
+                            source: self.source,
+                            controller: self.controller,
+                            affected,
+                            effects,
+                            until_end_of_turn,
+                        },
+                    );
+                }
+                Vec::new()
+            }
             Effect::Counter { what } => match self.target(st, k, what) {
                 // CR 701.6a: a countered spell is put into its owner's graveyard.
                 Some(Target::Object(spell)) => {
@@ -405,7 +490,7 @@ impl ResolveFrame {
                 match self.player(st, k, who) {
                     Some(controller) => vec![Proposed::CreateTokens {
                         token,
-                        count: self.amount(st, count),
+                        count: self.amount(st, &count),
                         controller,
                     }],
                     None => Vec::new(),
@@ -415,7 +500,7 @@ impl ResolveFrame {
                 Some(object) => vec![Proposed::PutCounters {
                     object,
                     kind,
-                    count: self.amount(st, count),
+                    count: self.amount(st, &count),
                 }],
                 None => Vec::new(),
             },

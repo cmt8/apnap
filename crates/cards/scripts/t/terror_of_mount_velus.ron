@@ -1,0 +1,17 @@
+RealCard(
+    oracle_id: "8161248c-16a3-47db-a3ae-cdfd878d49e0",
+    name: "Terror of Mount Velus",
+    verified: true,
+    tests: ["terror_of_mount_velus_gives_double_strike"],
+    keywords: [Flying, DoubleStrike],
+    abilities: [
+        Triggered(
+            when: Enters(This),
+            body: Effect((effect: ApplyAll(
+                affected: (types: [Creature], controller: You),
+                effects: [AddKeywords([DoubleStrike])],
+                until_end_of_turn: true,
+            ))),
+        ),
+    ],
+)

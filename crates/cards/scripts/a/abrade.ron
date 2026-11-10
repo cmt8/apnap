@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "f9db72dc-9a5b-48a4-a86e-7464d9a2166a",
+    name: "Abrade",
+    verified: true,
+    tests: ["abrade_burns_a_creature_or_destroys_an_artifact"],
+    abilities: [
+        Spell(Modal(min: 1, max: 1, modes: [
+            (targets: [Creature], effect: DealDamage(to: Target(0), amount: Fixed(3))),
+            (targets: [Permanent([(types: [Artifact])])], effect: Destroy(what: Target(0))),
+        ])),
+    ],
+)

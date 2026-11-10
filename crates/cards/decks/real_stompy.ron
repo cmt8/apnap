@@ -4,9 +4,11 @@ DeckFile(
     name: "Stompy (real cards)",
     cards: [
         (17, "Forest"), (5, "Mountain"), (2, "Fire Diamond"),
-        (4, "Llanowar Elves"), (4, "Elvish Mystic"), (3, "Fyndhorn Elves"),
-        (4, "Managorger Hydra"), (4, "Beast Whisperer"), (4, "Regal Imperiosaur"),
-        (3, "Gigantosaurus"), (2, "Terrian, World Tyrant"),
-        (4, "Harmonize"), (4, "Lightning Bolt"),
+        (4, "Llanowar Elves"), (4, "Elvish Mystic"), (2, "Fyndhorn Elves"),
+        (2, "Birds of Paradise"), (4, "Managorger Hydra"), (3, "Beast Whisperer"),
+        (4, "Regal Imperiosaur"), (3, "Gigantosaurus"), (2, "Terrian, World Tyrant"),
+        (1, "Arasta of the Endless Web"),
+        (2, "Harmonize"), (3, "Lightning Bolt"), (1, "Elemental Bond"),
+        (1, "Garruk's Uprising"),
     ],
 )

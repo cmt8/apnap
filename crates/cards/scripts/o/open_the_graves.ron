@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "28778958-a1f9-4fea-b551-c193d1257f18",
+    name: "Open the Graves",
+    verified: true,
+    tests: ["open_the_graves_makes_a_zombie_for_each_nontoken_creature"],
+    abilities: [
+        Triggered(
+            when: Dies(Matching((types: [Creature], controller: You, token: Some(false)))),
+            body: Effect((effect: CreateToken(token: "Zombie", count: Fixed(1), who: You))),
+        ),
+    ],
+)

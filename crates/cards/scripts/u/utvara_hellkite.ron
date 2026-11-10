@@ -1,0 +1,13 @@
+RealCard(
+    oracle_id: "05a6a571-643e-429e-8e5c-1c3f8b0dc746",
+    name: "Utvara Hellkite",
+    verified: true,
+    tests: ["utvara_hellkite_makes_a_dragon_for_each_attacking_dragon"],
+    keywords: [Flying],
+    abilities: [
+        Triggered(
+            when: Attacks(Matching((subtypes: ["Dragon"], controller: You))),
+            body: Effect((effect: CreateToken(token: "Dragon 6/6 flying", count: Fixed(1), who: You))),
+        ),
+    ],
+)

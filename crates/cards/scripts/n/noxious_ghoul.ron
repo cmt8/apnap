@@ -1,0 +1,16 @@
+RealCard(
+    oracle_id: "602e421e-afab-4488-8a52-af66b4fdce4b",
+    name: "Noxious Ghoul",
+    verified: true,
+    tests: ["noxious_ghoul_shrinks_non_zombies"],
+    abilities: [
+        Triggered(
+            when: Enters(ThisOr((subtypes: ["Zombie"]))),
+            body: Effect((effect: ApplyAll(
+                affected: (types: [Creature], not_subtypes: ["Zombie"]),
+                effects: [ModifyPT(-1, -1)],
+                until_end_of_turn: true,
+            ))),
+        ),
+    ],
+)

@@ -476,6 +476,37 @@ named Arena's combat as the model, and asked for the four players in a grid.
   the places the cards are drawn; the robot (`tests/robot.rs`) declares every attack and
   block of its games that way too.
 
+## D-041 M4 card batch 2: mass effects, permanent targets, exile, tokens, attack triggers
+Rules text: `docs/rules-notes/508-701-attack-triggers-keyword-actions.md`. 34 more precon
+cards verified (61 of 254 unique; 65 of 275 deck slots), each with a test.
+- **Selectors** also filter by `not_subtypes`, `colors`, `power_min` / `toughness_min` and
+  `tapped`. Power and toughness are read from final characteristics, so those two are for
+  targets, triggers, conditions and one-shot effects; card-db rejects them in the affected
+  set of a static ability (which is worked out inside the layer walk, CR 613).
+- **Targets:** `TargetFilter::Permanent([selectors])` — a permanent matching any one
+  ("target artifact or enchantment", "target nonartifact creature", "artifact,
+  enchantment, or creature with power 4 or greater"). Legality on resolution uses the same
+  function as choosing, so a creature whose toughness changes can become an illegal target.
+- **Effects:** `DestroyAll`, `DamageEach`, `Exile`, `ExileGraveyard`, `Mill`, `ApplyAll`
+  (set locked in on resolution, CR 611.2c), `SetX` ("where X is …", worked out once, CR
+  608.2h), `Amount::Count(selector)`, `PlayerRef::EachOpponent`.
+- **Triggers:** `Attacks(filter)` (CR 508.1m/508.3a: only creatures *declared* as
+  attackers), `Any([..])` for one ability with several trigger events ("enters or
+  attacks" is one ability, not two), `ObjFilter::ThisOr` ("this creature or another
+  Zombie": the source whatever it is, or another object that matches), and
+  `Condition::Control` for intervening ifs.
+- **Tokens for real cards** are self-contained definitions in `crates/cards/data/tokens/`.
+  **CR finding:** by CR 111.4 (2026-11-06) a token whose name isn't specified is named
+  for its subtype *plus the word "Token"* — a Zombie token is "Zombie Token". The
+  definitions carry that name; scripts refer to them by `CardDef::key`, because different
+  tokens share a name (a 5/5 and a 6/6 "Dragon Token"). Told to the user.
+- **Left for later, deliberately:** mana abilities that make more than one mana (Sol Ring,
+  Llanowar Tribe) — payment feasibility assumes one mana per source (D-021) and needs
+  rework first; effects that refer to the triggering object ("it deals damage equal to its
+  power"); anything needing a cost other than mana and {T}.
+- A third interim deck, `real_zombies.ron`; the other two were refreshed with new cards.
+- Golden re-bless: only `state_hash` changed (catalog: new tokens, new fields).
+
 ## D-039 Future scope: other 1v1 constructed formats (user note 2026-11-09)
 The user wants 1v1 **Modern, Legacy, Vintage, etc.** supported in future. Nothing is built
 for this yet; it is recorded so current work doesn't close the door:

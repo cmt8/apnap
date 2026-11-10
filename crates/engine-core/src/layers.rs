@@ -179,23 +179,66 @@ pub fn matches(
     source: ObjectId,
     controller: PlayerId,
 ) -> bool {
-    matches_parts(sel, c, o.id, c.controller, o.is_token, source, controller)
+    let facts = Facts {
+        id: o.id,
+        controller: c.controller,
+        is_token: o.is_token,
+        tapped: o.tapped,
+    };
+    matches_parts(sel, c, facts, source, controller)
+}
+
+/// What a selector looks at besides an object's characteristics.
+#[derive(Clone, Copy, Debug)]
+pub struct Facts {
+    pub id: ObjectId,
+    pub controller: PlayerId,
+    pub is_token: bool,
+    pub tapped: bool,
+}
+
+/// Every permanent matching `sel` right now, in battlefield (timestamp) order.
+pub fn matching(
+    st: &GameState,
+    sel: &Selector,
+    source: ObjectId,
+    controller: PlayerId,
+) -> Vec<ObjectId> {
+    st.zones
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| matches(sel, &chars(st, id), st.object(id), source, controller))
+        .collect()
 }
 
 /// [`matches`] for an object that may no longer exist (last known information).
 pub fn matches_parts(
     sel: &Selector,
     c: &Characteristics,
-    id: ObjectId,
-    object_controller: PlayerId,
-    is_token: bool,
+    facts: Facts,
     source: ObjectId,
     controller: PlayerId,
 ) -> bool {
+    let Facts {
+        id,
+        controller: object_controller,
+        is_token,
+        tapped,
+    } = facts;
     (sel.types.is_empty() || sel.types.iter().any(|t| c.is(*t)))
         && !sel.not_types.iter().any(|t| c.is(*t))
         && sel.supertypes.iter().all(|s| c.supertypes.contains(s))
         && (sel.subtypes.is_empty() || sel.subtypes.iter().any(|s| c.subtypes.contains(s)))
+        && !sel.not_subtypes.iter().any(|s| c.subtypes.contains(s))
+        && (sel.colors.is_empty() || sel.colors.iter().any(|x| c.colors.contains(x)))
+        && sel
+            .power_min
+            .is_none_or(|n| c.power.is_some_and(|p| p >= n))
+        && sel
+            .toughness_min
+            .is_none_or(|n| c.toughness.is_some_and(|t| t >= n))
+        && sel.tapped.is_none_or(|t| tapped == t)
         && match sel.controller {
             Who::Any => true,
             Who::You => object_controller == controller,

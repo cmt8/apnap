@@ -1,0 +1,18 @@
+RealCard(
+    oracle_id: "b75e667a-1ceb-445a-acf4-ae1fd2dae9e7",
+    name: "Destroy Evil",
+    verified: true,
+    tests: ["destroy_evil_needs_toughness_four_or_an_enchantment"],
+    abilities: [
+        Spell(Modal(min: 1, max: 1, modes: [
+            (
+                targets: [Permanent([(types: [Creature], toughness_min: Some(4))])],
+                effect: Destroy(what: Target(0)),
+            ),
+            (
+                targets: [Permanent([(types: [Enchantment])])],
+                effect: Destroy(what: Target(0)),
+            ),
+        ])),
+    ],
+)

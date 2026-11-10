@@ -105,15 +105,20 @@ cargo run -p harness -- coverage [--verbose]              # which precon cards a
 Decisions: D-034 (precons: Calling All Angels, Wretched Ranks, Reign of Dragons,
 Tramplesaurus Rex), D-035 (real-card pipeline; Scryfall data only in the user's cache),
 D-037 (card images, mana symbols, proxies, AI pacing), D-038 (subtype selectors; `real-Np`
-interim decks), D-040 (combat planned on the table, players in a grid, one main button).
+interim decks), D-040 (combat planned on the table, players in a grid, one main button),
+D-041 (card batch 2: mass effects, permanent targets, exile, tokens, attack triggers).
+Tokens are named per CR 111.4 ("Zombie Token") and referenced from scripts by `key`.
 Order: groundwork (DONE: frozen decklists, `harness fetch-cards`, `harness coverage`,
 real-card script format) → egui app (DONE: D-036; mouse-only, save/load/replay; card
 images + mana symbols + paced AI turns: D-037; Arena-style combat + table grid: D-040) → cards deck by deck until `harness
-coverage` is 100% (IN PROGRESS: 27 real cards verified = 31/275 deck slots; playable now
-as the `real-Np` decks. NEXT: the vocabulary most cards wait on — tokens for real cards,
-attack/damage triggers, sacrifice/discard costs, mass destroy/damage, exile, "may",
-cost reduction, multi-mana abilities — then Wretched Ranks; each card needs a script, a
-test, and never an approximation) → precon setups in the app menu, 10,000-game soak.
+coverage` is 100% (IN PROGRESS: 61 of 254 real cards verified = 65/275 deck slots;
+playable now as the three `real-Np` decks; batches logged as D-038, D-041. NEXT, in order
+of cards unlocked: activated-ability costs beyond mana and {T} (sacrifice, discard, pay
+life) with Treasure/Clue tokens; cost reduction; effects that refer to the triggering
+object; "may"; damage and combat-damage triggers; hexproof/indestructible/ward; multi-mana
+abilities (payment feasibility rework, D-021); graveyard targets; equipment; cycling and
+flashback; monarch; the one-off cards. Each card needs a script, a test, and never an
+approximation) → precon setups in the app menu, 10,000-game soak.
 Real-card scripts hold behaviour only: no Oracle text in them, not even in comments.
 Real-card work needs `cargo run -p harness -- fetch-cards` once (network).
 Acceptance (spec §13 M4): coverage 100% verified, each card >= 1 test, 10,000 AI 4-player

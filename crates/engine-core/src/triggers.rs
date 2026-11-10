@@ -12,12 +12,14 @@
 
 use crate::events::Event;
 use crate::ids::{ObjectId, PlayerId};
-use crate::layers::{Characteristics, abilities, chars, matches_parts};
+use crate::layers::{Characteristics, Facts, abilities, chars, matches_parts, matching};
 use crate::state::GameState;
 use crate::turn::Step;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
-use card_model::{AbilityDef, CardDefId, Condition, ObjFilter, Trigger, TriggerStep, Who};
+use card_model::{
+    AbilityDef, CardDefId, Condition, ObjFilter, Selector, Trigger, TriggerStep, Who,
+};
 use serde::{Deserialize, Serialize};
 
 /// A triggered ability that has triggered but isn't on the stack yet (CR 603.3).
@@ -42,6 +44,7 @@ pub struct Lki {
     pub chars: Characteristics,
     pub controller: PlayerId,
     pub is_token: bool,
+    pub tapped: bool,
 }
 
 pub(crate) fn snapshot(st: &GameState, id: ObjectId) -> Lki {
@@ -51,20 +54,44 @@ pub(crate) fn snapshot(st: &GameState, id: ObjectId) -> Lki {
         chars: chars(st, id),
         controller: crate::layers::controller_of(st, id),
         is_token: o.is_token,
+        tapped: o.tapped,
+    }
+}
+
+/// Does the object `id` (seen as `c` / `facts`) satisfy a trigger's object filter, for an
+/// ability whose source is `source`, controlled by `controller`?
+fn filter_hit(
+    filter: &ObjFilter,
+    id: ObjectId,
+    c: &Characteristics,
+    facts: Facts,
+    source: ObjectId,
+    controller: PlayerId,
+) -> bool {
+    let matches = |sel: &Selector| matches_parts(sel, c, facts, source, controller);
+    match filter {
+        ObjFilter::This => id == source,
+        ObjFilter::Matching(sel) => matches(sel),
+        // "This or another X": the source whatever it is, or a different object that is X.
+        ObjFilter::ThisOr(sel) => id == source || matches(sel),
     }
 }
 
 /// CR 603.4: an intervening "if" clause, for the ability's controller.
 pub(crate) fn condition_holds(
     st: &GameState,
-    cond: Option<Condition>,
+    cond: Option<&Condition>,
     controller: PlayerId,
+    source: ObjectId,
 ) -> bool {
     let life = st.player(controller).life;
     match cond {
         None => true,
-        Some(Condition::LifeAtMost(n)) => life <= n,
-        Some(Condition::LifeAtLeast(n)) => life >= n,
+        Some(Condition::LifeAtMost(n)) => life <= *n,
+        Some(Condition::LifeAtLeast(n)) => life >= *n,
+        Some(Condition::Control { what, at_least }) => {
+            matching(st, what, source, controller).len() >= *at_least as usize
+        }
     }
 }
 
@@ -112,7 +139,7 @@ fn battlefield_sources(st: &GameState) -> Vec<Source<'_>> {
 fn queue_matching(st: &mut GameState, found: Vec<PendingTrigger>, conds: Vec<Option<Condition>>) {
     for (t, c) in found.into_iter().zip(conds) {
         // CR 603.4: the intervening "if" must be true when the trigger event occurs.
-        if condition_holds(st, c, t.controller) {
+        if condition_holds(st, c.as_ref(), t.controller, t.source) {
             queue(st, t);
         }
     }
@@ -147,42 +174,39 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
         for src in battlefield_sources(st) {
             for &(index, a) in &src.abilities {
                 let AbilityDef::Triggered {
-                    when: Trigger::Enters(filter),
+                    when,
                     intervening_if,
                     ..
                 } = a
                 else {
                     continue;
                 };
-                for &e in &entered {
-                    if !st.objects.contains_key(&e) {
-                        continue;
-                    }
-                    let hit = match filter {
-                        ObjFilter::This => e == src.id,
-                        ObjFilter::Matching(sel) => {
-                            let o = st.object(e);
-                            let c = chars(st, e);
-                            matches_parts(
-                                sel,
-                                &c,
-                                e,
-                                c.controller,
-                                o.is_token,
-                                src.id,
-                                src.controller,
-                            )
+                for filter in when.events().into_iter().filter_map(|t| match t {
+                    Trigger::Enters(f) => Some(f),
+                    _ => None,
+                }) {
+                    for &e in &entered {
+                        if !st.objects.contains_key(&e) {
+                            continue;
                         }
-                    };
-                    if hit {
-                        found.push(PendingTrigger {
-                            controller: src.controller,
-                            source: src.id,
-                            source_card: src.card,
-                            index,
-                            source_lki: None,
-                        });
-                        conds.push(*intervening_if);
+                        let o = st.object(e);
+                        let c = chars(st, e);
+                        let facts = Facts {
+                            id: e,
+                            controller: c.controller,
+                            is_token: o.is_token,
+                            tapped: o.tapped,
+                        };
+                        if filter_hit(filter, e, &c, facts, src.id, src.controller) {
+                            found.push(PendingTrigger {
+                                controller: src.controller,
+                                source: src.id,
+                                source_card: src.card,
+                                index,
+                                source_lki: None,
+                            });
+                            conds.push(intervening_if.clone());
+                        }
                     }
                 }
             }
@@ -209,36 +233,35 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
         for src in &sources {
             for &(index, a) in &src.abilities {
                 let AbilityDef::Triggered {
-                    when: Trigger::Dies(filter),
+                    when,
                     intervening_if,
                     ..
                 } = a
                 else {
                     continue;
                 };
-                for d in &died {
-                    let l = &lki[d];
-                    let hit = match filter {
-                        ObjFilter::This => *d == src.id,
-                        ObjFilter::Matching(sel) => matches_parts(
-                            sel,
-                            &l.chars,
-                            *d,
-                            l.controller,
-                            l.is_token,
-                            src.id,
-                            src.controller,
-                        ),
-                    };
-                    if hit {
-                        found.push(PendingTrigger {
-                            controller: src.controller,
-                            source: src.id,
-                            source_card: src.card,
-                            index,
-                            source_lki: src.lki.clone(),
-                        });
-                        conds.push(*intervening_if);
+                for filter in when.events().into_iter().filter_map(|t| match t {
+                    Trigger::Dies(f) => Some(f),
+                    _ => None,
+                }) {
+                    for d in &died {
+                        let l = &lki[d];
+                        let facts = Facts {
+                            id: *d,
+                            controller: l.controller,
+                            is_token: l.is_token,
+                            tapped: l.tapped,
+                        };
+                        if filter_hit(filter, *d, &l.chars, facts, src.id, src.controller) {
+                            found.push(PendingTrigger {
+                                controller: src.controller,
+                                source: src.id,
+                                source_card: src.card,
+                                index,
+                                source_lki: src.lki.clone(),
+                            });
+                            conds.push(intervening_if.clone());
+                        }
                     }
                 }
             }
@@ -254,12 +277,18 @@ pub(crate) fn detect_step(st: &mut GameState, step: Step) {
     let mut conds = Vec::new();
     for src in battlefield_sources(st) {
         for &(index, a) in &src.abilities {
-            if let AbilityDef::Triggered {
-                when: Trigger::BeginningOf { step: ts, whose },
+            let AbilityDef::Triggered {
+                when,
                 intervening_if,
                 ..
             } = a
-            {
+            else {
+                continue;
+            };
+            for t in when.events() {
+                let Trigger::BeginningOf { step: ts, whose } = t else {
+                    continue;
+                };
                 let step_matches = matches!(
                     (ts, step),
                     (TriggerStep::Upkeep, Step::Upkeep)
@@ -274,7 +303,54 @@ pub(crate) fn detect_step(st: &mut GameState, step: Step) {
                         index,
                         source_lki: None,
                     });
-                    conds.push(*intervening_if);
+                    conds.push(intervening_if.clone());
+                }
+            }
+        }
+    }
+    queue_matching(st, found, conds);
+}
+
+/// CR 508.1m: "whenever [a creature] attacks" triggers, as attackers are declared.
+pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
+    let mut found = Vec::new();
+    let mut conds = Vec::new();
+    for src in battlefield_sources(st) {
+        for &(index, a) in &src.abilities {
+            let AbilityDef::Triggered {
+                when,
+                intervening_if,
+                ..
+            } = a
+            else {
+                continue;
+            };
+            for filter in when.events().into_iter().filter_map(|t| match t {
+                Trigger::Attacks(f) => Some(f),
+                _ => None,
+            }) {
+                for &attacker in attackers {
+                    if !st.objects.contains_key(&attacker) {
+                        continue;
+                    }
+                    let o = st.object(attacker);
+                    let c = chars(st, attacker);
+                    let facts = Facts {
+                        id: attacker,
+                        controller: c.controller,
+                        is_token: o.is_token,
+                        tapped: o.tapped,
+                    };
+                    if filter_hit(filter, attacker, &c, facts, src.id, src.controller) {
+                        found.push(PendingTrigger {
+                            controller: src.controller,
+                            source: src.id,
+                            source_card: src.card,
+                            index,
+                            source_lki: None,
+                        });
+                        conds.push(intervening_if.clone());
+                    }
                 }
             }
         }
@@ -289,24 +365,109 @@ pub(crate) fn detect_cast(st: &mut GameState, caster: PlayerId, spell: ObjectId)
     let mut conds = Vec::new();
     for src in battlefield_sources(st) {
         for &(index, a) in &src.abilities {
-            if let AbilityDef::Triggered {
-                when: Trigger::Cast { by, types },
+            let AbilityDef::Triggered {
+                when,
                 intervening_if,
                 ..
             } = a
-                && who_matches(*by, caster, src.controller)
-                && (types.is_empty() || types.iter().any(|t| spell_chars.is(*t)))
-            {
-                found.push(PendingTrigger {
-                    controller: src.controller,
-                    source: src.id,
-                    source_card: src.card,
-                    index,
-                    source_lki: None,
-                });
-                conds.push(*intervening_if);
+            else {
+                continue;
+            };
+            for t in when.events() {
+                if let Trigger::Cast { by, types } = t
+                    && who_matches(*by, caster, src.controller)
+                    && (types.is_empty() || types.iter().any(|t| spell_chars.is(*t)))
+                {
+                    found.push(PendingTrigger {
+                        controller: src.controller,
+                        source: src.id,
+                        source_card: src.card,
+                        index,
+                        source_lki: None,
+                    });
+                    conds.push(intervening_if.clone());
+                }
             }
         }
     }
     queue_matching(st, found, conds);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use card_model::CardDef;
+
+    /// "This creature or another Zombie": the source counts whatever it is; anything else
+    /// has to match.
+    #[test]
+    fn this_or_another_matches_the_source_itself_and_other_matching_objects() {
+        let you = PlayerId(0);
+        let chars_of = |types: &[&str]| {
+            Characteristics::printed(
+                &CardDef {
+                    name: "Test".into(),
+                    creature_types: types
+                        .iter()
+                        .map(|t| alloc::string::String::from(*t))
+                        .collect(),
+                    ..CardDef::default()
+                },
+                you,
+            )
+        };
+        let facts = |id: u32| Facts {
+            id: ObjectId(id),
+            controller: you,
+            is_token: false,
+            tapped: false,
+        };
+        let filter = ObjFilter::ThisOr(Selector {
+            subtypes: alloc::vec!["Zombie".into()],
+            ..Selector::default()
+        });
+        let source = ObjectId(1);
+        let hit = |id: u32, types: &[&str]| {
+            filter_hit(
+                &filter,
+                ObjectId(id),
+                &chars_of(types),
+                facts(id),
+                source,
+                you,
+            )
+        };
+        assert!(hit(1, &["Elf"]), "the source, though it isn't a Zombie");
+        assert!(hit(2, &["Zombie"]), "another Zombie");
+        assert!(!hit(2, &["Elf"]), "another creature that isn't one");
+        // The plain filters, for contrast.
+        let only = ObjFilter::Matching(Selector {
+            subtypes: alloc::vec!["Zombie".into()],
+            ..Selector::default()
+        });
+        assert!(!filter_hit(
+            &only,
+            source,
+            &chars_of(&["Elf"]),
+            facts(1),
+            source,
+            you
+        ));
+        assert!(filter_hit(
+            &ObjFilter::This,
+            source,
+            &chars_of(&["Elf"]),
+            facts(1),
+            source,
+            you
+        ));
+        assert!(!filter_hit(
+            &ObjFilter::This,
+            ObjectId(2),
+            &chars_of(&["Zombie"]),
+            facts(2),
+            source,
+            you
+        ));
+    }
 }

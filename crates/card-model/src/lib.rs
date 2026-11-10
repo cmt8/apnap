@@ -259,13 +259,16 @@ pub struct CardDef {
     pub colors: Option<Vec<Color>>,
     /// A token definition (CR 111): only created by effects, never in decks.
     pub token: bool,
+    /// What effects call this definition when its name isn't unique: several different
+    /// tokens are all named "Dragon" (CR 111.4), so they are told apart by key.
+    pub key: Option<String>,
 }
 
 impl CardDef {
     /// CR 702.5a: the Aura's enchant restriction, if any.
     pub fn enchant(&self) -> Option<TargetFilter> {
         self.abilities.iter().find_map(|a| match a {
-            AbilityDef::Enchant(f) => Some(*f),
+            AbilityDef::Enchant(f) => Some(f.clone()),
             _ => None,
         })
     }
@@ -332,6 +335,9 @@ pub enum Keyword {
 }
 
 /// One ability printed on a card (CR 113).
+// Card definitions are built once when the catalog loads and then only read; the size
+// difference between variants costs nothing that matters.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AbilityDef {
     /// The spell ability of an instant or sorcery (CR 113.3a).
@@ -389,6 +395,17 @@ pub struct Selector {
     /// Must have at least one of these subtypes (empty = any): "Dinosaurs", "Dragon
     /// creatures". Subtypes are compared as the object currently has them (CR 205.3).
     pub subtypes: Vec<String>,
+    /// Must have none of these subtypes ("non-Dragon", "non-Zombie").
+    pub not_subtypes: Vec<String>,
+    /// Must be at least one of these colors (empty = any): "black creatures".
+    pub colors: Vec<Color>,
+    /// "with power N or greater" / "with toughness N or greater". Read from the object's
+    /// final characteristics, so these are for targets, triggers, conditions and one-shot
+    /// effects — not for the affected set of a static ability (card-db rejects that).
+    pub power_min: Option<i32>,
+    pub toughness_min: Option<i32>,
+    /// `Some(true)` = tapped only, `Some(false)` = untapped only.
+    pub tapped: Option<bool>,
     pub controller: Who,
     /// "another" / "other": excludes the ability's own source.
     pub other: bool,
@@ -401,6 +418,9 @@ pub struct Selector {
 pub enum ObjFilter {
     This,
     Matching(Selector),
+    /// "this creature or another [selector]": the source itself whatever it is, or any
+    /// *other* object matching the selector.
+    ThisOr(Selector),
 }
 
 /// Trigger conditions (CR 603.1). M2 vocabulary.
@@ -419,6 +439,20 @@ pub enum Trigger {
         #[serde(default)]
         types: Vec<CardType>,
     },
+    /// CR 508.1m: "Whenever [filter] attacks" — it is declared as an attacker.
+    Attacks(ObjFilter),
+    /// One ability with several trigger events: "Whenever this creature enters or attacks".
+    Any(Vec<Trigger>),
+}
+
+impl Trigger {
+    /// The single trigger events this ability watches for.
+    pub fn events(&self) -> Vec<&Trigger> {
+        match self {
+            Trigger::Any(v) => v.iter().flat_map(Trigger::events).collect(),
+            other => alloc::vec![other],
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -429,10 +463,16 @@ pub enum TriggerStep {
 }
 
 /// An intervening "if" clause (CR 603.4), evaluated for the ability's controller.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Condition {
     LifeAtMost(i32),
     LifeAtLeast(i32),
+    /// "if you control N or more [selector]" (the selector is relative to the ability's
+    /// controller and source).
+    Control {
+        what: Selector,
+        at_least: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -516,6 +556,9 @@ pub enum CounterKind {
 }
 
 /// What a spell or ability does: either a single effect or a modal choice (CR 700.2).
+// Card definitions are built once when the catalog loads and then only read; the size
+// difference between variants costs nothing that matters.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Body {
     Effect(Mode),
@@ -550,7 +593,7 @@ pub struct Mode {
 }
 
 /// What a single target may be (CR 115).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TargetFilter {
     /// CR 115.4: a creature, player, planeswalker or battle (M1: creature or player).
     AnyTarget,
@@ -559,10 +602,23 @@ pub enum TargetFilter {
     Opponent,
     /// A spell on the stack.
     Spell,
+    /// A permanent matching any one of the selectors: "target artifact or enchantment",
+    /// "target nonartifact creature", "target artifact, enchantment, or creature with
+    /// power 4 or greater". `controller` is relative to the spell or ability's controller;
+    /// `other` isn't meaningful for a target.
+    Permanent(Vec<Selector>),
 }
 
 impl TargetFilter {
-    pub fn allows_players(self) -> bool {
+    /// Can an object effect (destroy, exile, return…) be pointed at this slot?
+    pub fn allows_permanents(&self) -> bool {
+        matches!(
+            self,
+            TargetFilter::AnyTarget | TargetFilter::Creature | TargetFilter::Permanent(_)
+        )
+    }
+
+    pub fn allows_players(&self) -> bool {
         matches!(
             self,
             TargetFilter::AnyTarget | TargetFilter::Player | TargetFilter::Opponent
@@ -672,6 +728,37 @@ pub enum Effect {
         to: TargetRef,
         amount: u32,
     },
+    /// "Destroy all [selector]" — everything matching as it resolves, at once.
+    DestroyAll(Selector),
+    /// "[Source] deals N damage to each [selector]" — at once (CR 120.3).
+    DamageEach {
+        each: Selector,
+        amount: Amount,
+    },
+    /// CR 701.13: exile.
+    Exile {
+        what: ObjRef,
+    },
+    /// "Exile [player]'s graveyard": every card in it, at once.
+    ExileGraveyard {
+        who: PlayerRef,
+    },
+    /// CR 701.17: mill — put the top N cards of the library into the graveyard.
+    Mill {
+        who: PlayerRef,
+        amount: Amount,
+    },
+    /// A continuous effect on every permanent matching the selector as this resolves; the
+    /// set is locked in then (CR 611.2c): "creatures you control gain … until end of turn".
+    ApplyAll {
+        affected: Selector,
+        effects: Vec<ContinuousEffect>,
+        #[serde(default)]
+        until_end_of_turn: bool,
+    },
+    /// "…where X is [amount]": works X out once, now; later `Amount::X` in the same
+    /// resolution uses it (CR 608.2h: determined once, when the effect is applied).
+    SetX(Amount),
 }
 
 /// An object an effect refers to: a target slot, or the source itself.
@@ -704,11 +791,16 @@ pub enum PlayerRef {
     You,
     /// The player chosen for target slot `n` (the slot must allow players).
     Target(u8),
+    /// "each opponent" (of the controller), all at once.
+    EachOpponent,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Amount {
     Fixed(u32),
+    /// "the number of [selector]" on the battlefield as this resolves (relative to the
+    /// controller and source).
+    Count(Selector),
     /// The announced value of X (CR 107.3a).
     X,
     /// The source's power: current if it's still on the battlefield, otherwise as it last
@@ -746,10 +838,11 @@ impl CardCatalog {
         id
     }
 
+    /// The definition called `name`: by its key if it has one, otherwise by its name.
     pub fn find(&self, name: &str) -> Option<CardDefId> {
         self.defs
             .iter()
-            .position(|d| d.name == name)
+            .position(|d| d.key.as_deref().unwrap_or(&d.name) == name)
             .map(|i| CardDefId(i as u32))
     }
 }

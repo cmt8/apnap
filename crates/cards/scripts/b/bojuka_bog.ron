@@ -1,0 +1,14 @@
+RealCard(
+    oracle_id: "04b7362d-0490-4cb0-b5d7-2a7732f659ce",
+    name: "Bojuka Bog",
+    verified: true,
+    tests: ["bojuka_bog_enters_tapped_and_exiles_a_graveyard"],
+    abilities: [
+        Replacement(replaces: ThisEnters, with: EntersTapped),
+        Triggered(
+            when: Enters(This),
+            body: Effect((targets: [Player], effect: ExileGraveyard(who: Target(0)))),
+        ),
+        Mana(cost: (tap: true), produce: One(Black)),
+    ],
+)

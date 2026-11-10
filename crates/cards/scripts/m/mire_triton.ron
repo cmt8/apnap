@@ -1,0 +1,16 @@
+RealCard(
+    oracle_id: "4fe6f784-0290-4d4a-85ae-0b66522d31e9",
+    name: "Mire Triton",
+    verified: true,
+    tests: ["mire_triton_mills_two_and_gains_two"],
+    keywords: [Deathtouch],
+    abilities: [
+        Triggered(
+            when: Enters(This),
+            body: Effect((effect: Seq([
+                Mill(who: You, amount: Fixed(2)),
+                GainLife(who: You, amount: Fixed(2)),
+            ]))),
+        ),
+    ],
+)

@@ -1,0 +1,13 @@
+RealCard(
+    oracle_id: "cac95494-0db0-4bec-8665-998431a6f76b",
+    name: "Colossal Majesty",
+    verified: true,
+    tests: ["colossal_majesty_draws_with_a_big_creature"],
+    abilities: [
+        Triggered(
+            when: BeginningOf(step: Upkeep, whose: You),
+            intervening_if: Some(Control(what: (types: [Creature], controller: You, power_min: Some(4)), at_least: 1)),
+            body: Effect((effect: Draw(who: You, amount: Fixed(1)))),
+        ),
+    ],
+)

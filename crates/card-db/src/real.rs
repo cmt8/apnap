@@ -198,6 +198,7 @@ pub fn compile(script: &RealCardScript, card: &ScryfallCard) -> Result<CardDef, 
         abilities: script.abilities.clone(),
         colors: Some(colors),
         token: false,
+        key: None,
     })
 }
 

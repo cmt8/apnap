@@ -117,7 +117,7 @@ pub(crate) fn gather(st: &mut GameState) -> Gathered {
                     .is_some_and(|x| x.zone == Zone::Battlefield)
                     && crate::targeting::is_legal(
                         st,
-                        filter,
+                        &filter,
                         Target::Object(t),
                         c.controller,
                         Some(id),

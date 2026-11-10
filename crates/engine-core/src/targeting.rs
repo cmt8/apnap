@@ -13,7 +13,7 @@ use card_model::{CardType, TargetFilter};
 /// stack object is `this` (CR 115.5: it can't target itself).
 pub fn is_legal(
     st: &GameState,
-    filter: TargetFilter,
+    filter: &TargetFilter,
     t: Target,
     controller: PlayerId,
     this: Option<ObjectId>,
@@ -24,7 +24,9 @@ pub fn is_legal(
                 && match filter {
                     TargetFilter::AnyTarget | TargetFilter::Player => true,
                     TargetFilter::Opponent => p != controller,
-                    TargetFilter::Creature | TargetFilter::Spell => false,
+                    TargetFilter::Creature | TargetFilter::Spell | TargetFilter::Permanent(_) => {
+                        false
+                    }
                 }
         }
         Target::Object(id) => {
@@ -43,6 +45,16 @@ pub fn is_legal(
                 TargetFilter::Spell => st
                     .stack_object(id)
                     .is_some_and(|s| s.kind == StackKind::Spell),
+                TargetFilter::Permanent(selectors) => {
+                    // "Other" has no meaning for a target (it can't be the spell itself).
+                    let none = ObjectId(u32::MAX);
+                    o.zone == Zone::Battlefield && {
+                        let c = chars(st, id);
+                        selectors
+                            .iter()
+                            .any(|s| crate::layers::matches(s, &c, o, none, controller))
+                    }
+                }
                 TargetFilter::Player | TargetFilter::Opponent => false,
             }
         }
@@ -53,14 +65,14 @@ pub fn is_legal(
 /// (timestamp order), then players by seat (CLAUDE.md invariant 5).
 pub fn candidates(
     st: &GameState,
-    filter: TargetFilter,
+    filter: &TargetFilter,
     controller: PlayerId,
     this: Option<ObjectId>,
 ) -> Vec<Target> {
     let mut out: Vec<Target> = Vec::new();
     match filter {
         TargetFilter::Spell => out.extend(st.stack.iter().map(|s| Target::Object(s.id))),
-        TargetFilter::AnyTarget | TargetFilter::Creature => {
+        TargetFilter::AnyTarget | TargetFilter::Creature | TargetFilter::Permanent(_) => {
             out.extend(st.zones.battlefield.iter().map(|&id| Target::Object(id)));
         }
         TargetFilter::Player | TargetFilter::Opponent => {}

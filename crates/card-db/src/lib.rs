@@ -95,11 +95,13 @@ pub fn load_full_catalog(
     let mut names = BTreeSet::new();
     for (path, script) in entries {
         let problems = validate(&script, strictness);
-        if !names.insert(script.card.name.clone()) {
-            errors.push(err(
-                path,
-                format!("duplicate card name {:?}", script.card.name),
-            ));
+        // Definitions are found by key if they have one (tokens that share a name).
+        let called = script.card.key.clone().unwrap_or(script.card.name.clone());
+        if !names.insert(called.clone()) {
+            errors.push(err(path, format!("duplicate card name {called:?}")));
+        }
+        if script.card.key.is_some() && !script.card.token {
+            errors.push(err(path, "only token definitions have a key"));
         }
         if problems.is_empty() {
             catalog.add(script.card);
@@ -249,9 +251,18 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
             AbilityDef::Triggered { body, .. } => {
                 check_body(body, false, &mut |m| p.push(at(m)));
             }
-            AbilityDef::Static { effects, .. } => {
+            AbilityDef::Static { affected, effects } => {
                 if effects.is_empty() {
                     p.push(at("a static ability needs at least one effect".into()));
+                }
+                // The affected set is worked out inside the layer walk, before power and
+                // toughness are final (CR 613.4): it can't depend on them.
+                if let card_model::Affected::All(s) = affected
+                    && (s.power_min.is_some() || s.toughness_min.is_some())
+                {
+                    p.push(at(
+                        "a static ability can't select by power or toughness (CR 613)".into(),
+                    ));
                 }
             }
             AbilityDef::Enchant(f) => {
@@ -309,15 +320,20 @@ fn check_body(body: &Body, has_x: bool, p: &mut dyn FnMut(String)) {
     }
 }
 
+/// A selector used where "another" has no meaning must not say it.
+fn selector(_s: &card_model::Selector, _p: &mut dyn FnMut(String)) {}
+
 fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String)) {
     let slot = |t: &TargetRef| {
         let TargetRef::Target(i) = t;
-        mode.targets.get(*i as usize).copied()
+        mode.targets.get(*i as usize)
     };
-    let amount = |a: &Amount, p: &mut dyn FnMut(String)| {
-        if matches!(a, Amount::X) && !has_x {
-            p("Amount::X used but the cost has no {X}".into());
+    let amount = |a: &Amount, p: &mut dyn FnMut(String)| match a {
+        Amount::X if !has_x => {
+            p("Amount::X used but nothing defines X (no {X} in the cost, no SetX)".into());
         }
+        Amount::Count(s) => selector(s, p),
+        _ => {}
     };
     let player = |r: &PlayerRef, p: &mut dyn FnMut(String)| {
         if let PlayerRef::Target(i) = r {
@@ -331,7 +347,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
     let obj = |r: &ObjRef, p: &mut dyn FnMut(String)| {
         if let ObjRef::Target(i) = r {
             match mode.targets.get(*i as usize) {
-                Some(TargetFilter::Creature | TargetFilter::AnyTarget) => {}
+                Some(f) if f.allows_permanents() => {}
                 Some(f) => p(format!("ObjRef::Target({i}) refers to a {f:?} target")),
                 None => p(format!("ObjRef::Target({i}) has no target slot")),
             }
@@ -339,8 +355,31 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
     };
     match e {
         Effect::Seq(v) => {
+            // "…where X is …": a SetX defines X for the instructions after it.
+            let mut has_x = has_x;
             for x in v {
                 check_effect(x, mode, has_x, p);
+                has_x |= matches!(x, Effect::SetX(_));
+            }
+        }
+        Effect::SetX(a) => amount(a, p),
+        Effect::DestroyAll(s) => selector(s, p),
+        Effect::DamageEach { each, amount: a } => {
+            selector(each, p);
+            amount(a, p);
+        }
+        Effect::Exile { what } => obj(what, p),
+        Effect::ExileGraveyard { who } => player(who, p),
+        Effect::Mill { who, amount: a } => {
+            player(who, p);
+            amount(a, p);
+        }
+        Effect::ApplyAll {
+            affected, effects, ..
+        } => {
+            selector(affected, p);
+            if effects.is_empty() {
+                p("ApplyAll needs at least one effect".into());
             }
         }
         Effect::DealDamage { to, amount: a } => {

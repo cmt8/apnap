@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "086b2564-9114-4ba2-94fd-b490f98f38a7",
+    name: "Chain Reaction",
+    verified: true,
+    tests: ["chain_reaction_counts_the_creatures"],
+    abilities: [
+        Spell(Effect((effect: Seq([
+            SetX(Count((types: [Creature]))),
+            DamageEach(each: (types: [Creature]), amount: X),
+        ])))),
+    ],
+)

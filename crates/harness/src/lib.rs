@@ -35,7 +35,7 @@ pub enum Setup {
 }
 
 /// The real-card decks, in seat order.
-pub const REAL_DECKS: &[&str] = &["real_stompy.ron", "real_angels.ron"];
+pub const REAL_DECKS: &[&str] = &["real_stompy.ron", "real_angels.ron", "real_zombies.ron"];
 
 /// The Commander decks, in seat order.
 pub const COMMANDER_DECKS: &[&str] = &[

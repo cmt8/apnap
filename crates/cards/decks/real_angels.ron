@@ -3,11 +3,12 @@
 DeckFile(
     name: "Angels (real cards)",
     cards: [
-        (13, "Plains"), (9, "Swamp"), (2, "Radiant Fountain"),
-        (2, "Marble Diamond"), (2, "Charcoal Diamond"),
+        (13, "Plains"), (7, "Swamp"), (2, "Radiant Fountain"), (2, "Seraph Sanctuary"),
+        (2, "Marble Diamond"),
         (4, "Segovian Angel"), (4, "Youthful Valkyrie"), (4, "Inspiring Overseer"),
-        (4, "Dazzling Angel"), (4, "Thraben Watcher"), (3, "Always Watching"),
-        (3, "Night's Whisper"), (2, "Sign in Blood"), (2, "Phyrexian Arena"),
-        (2, "Fleshbag Marauder"),
+        (3, "Dazzling Angel"), (3, "Thraben Watcher"), (3, "Bishop of Wings"),
+        (2, "Angel of Finality"), (2, "Lyra Dawnbringer"), (1, "Sunblast Angel"),
+        (2, "Always Watching"), (2, "Night's Whisper"), (2, "Sign in Blood"),
+        (1, "Invoke the Divine"), (1, "Day of Judgment"),
     ],
 )

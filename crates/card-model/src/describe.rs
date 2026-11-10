@@ -65,21 +65,26 @@ fn types(ts: &[CardType], last: &str) -> String {
     join(ts.iter().map(|t| card_type(*t).to_string()).collect(), last)
 }
 
-fn amount(a: Amount) -> String {
+fn amount(a: &Amount) -> String {
     match a {
         Amount::Fixed(n) => n.to_string(),
         Amount::X => "X".into(),
         Amount::SourcePower => "its power".into(),
+        Amount::Count(s) => format!("the number of {}", selector(s, true)),
     }
 }
 
-fn target_filter(f: TargetFilter) -> &'static str {
+fn target_filter(f: &TargetFilter) -> String {
     match f {
-        TargetFilter::AnyTarget => "any target",
-        TargetFilter::Creature => "target creature",
-        TargetFilter::Player => "target player",
-        TargetFilter::Opponent => "target opponent",
-        TargetFilter::Spell => "target spell",
+        TargetFilter::AnyTarget => "any target".into(),
+        TargetFilter::Creature => "target creature".into(),
+        TargetFilter::Player => "target player".into(),
+        TargetFilter::Opponent => "target opponent".into(),
+        TargetFilter::Spell => "target spell".into(),
+        TargetFilter::Permanent(selectors) => {
+            let parts: Vec<String> = selectors.iter().map(|s| selector(s, false)).collect();
+            format!("target {}", join(parts, "or"))
+        }
     }
 }
 
@@ -87,8 +92,7 @@ fn target(mode: &Mode, r: TargetRef) -> String {
     let TargetRef::Target(i) = r;
     mode.targets
         .get(i as usize)
-        .map_or("the target", |f| target_filter(*f))
-        .to_string()
+        .map_or("the target".to_string(), target_filter)
 }
 
 fn obj(mode: &Mode, r: ObjRef) -> String {
@@ -102,6 +106,7 @@ fn player(mode: &Mode, r: PlayerRef) -> String {
     match r {
         PlayerRef::You => "you".into(),
         PlayerRef::Target(i) => target(mode, TargetRef::Target(i)),
+        PlayerRef::EachOpponent => "each opponent".into(),
     }
 }
 
@@ -121,6 +126,17 @@ fn selector(s: &Selector, plural: bool) -> String {
     }
     if s.token == Some(false) {
         out.push_str("nontoken ");
+    }
+    if s.tapped == Some(true) {
+        out.push_str("tapped ");
+    } else if s.tapped == Some(false) {
+        out.push_str("untapped ");
+    }
+    for c in &s.colors {
+        out.push_str(&format!("{c:?} ").to_lowercase());
+    }
+    for st in &s.not_subtypes {
+        out.push_str(&format!("non-{st} "));
     }
     for st in &s.supertypes {
         out.push_str(&format!("{st:?} ").to_lowercase());
@@ -142,6 +158,11 @@ fn selector(s: &Selector, plural: bool) -> String {
     }
     if s.token == Some(true) {
         out.push_str(if plural { " tokens" } else { " token" });
+    }
+    match (s.power_min, s.toughness_min) {
+        (Some(p), _) => out.push_str(&format!(" with power {p} or greater")),
+        (None, Some(t)) => out.push_str(&format!(" with toughness {t} or greater")),
+        (None, None) => {}
     }
     match s.controller {
         Who::Any => {}
@@ -226,13 +247,13 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             .collect::<Vec<_>>()
             .join(". Then "),
         Effect::DealDamage { to, amount: a } => {
-            format!("this deals {} damage to {}", amount(*a), target(mode, *to))
+            format!("this deals {} damage to {}", amount(a), target(mode, *to))
         }
         Effect::DamageEachPlayer { amount: a } => {
-            format!("this deals {} damage to each player", amount(*a))
+            format!("this deals {} damage to each player", amount(a))
         }
         Effect::Draw { who, amount: a } => {
-            let n = amount(*a);
+            let n = amount(a);
             let cards = if n == "1" {
                 "a card".to_string()
             } else {
@@ -244,14 +265,14 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             format!(
                 "{} {} life",
                 verb(&player(mode, *who), "gain", "gains"),
-                amount(*a)
+                amount(a)
             )
         }
         Effect::LoseLife { who, amount: a } => {
             format!(
                 "{} {} life",
                 verb(&player(mode, *who), "lose", "loses"),
-                amount(*a)
+                amount(a)
             )
         }
         Effect::Counter { what } => format!("counter {}", target(mode, *what)),
@@ -269,11 +290,11 @@ fn effect(mode: &Mode, e: &Effect) -> String {
         Effect::CreateToken { token, count, who } => format!(
             "{} {} {token} token(s)",
             verb(&player(mode, *who), "create", "creates"),
-            amount(*count)
+            amount(count)
         ),
         Effect::PutCounters { what, kind, count } => format!(
             "put {} {} counter(s) on {}",
-            amount(*count),
+            amount(count),
             counter(*kind),
             obj(mode, *what)
         ),
@@ -295,6 +316,41 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             "prevent the next {n} damage that would be dealt to {} this turn",
             target(mode, *to)
         ),
+        Effect::DestroyAll(s) => format!("destroy all {}", selector(s, true)),
+        Effect::DamageEach { each, amount: a } => format!(
+            "this deals {} damage to each {}",
+            amount(a),
+            selector(each, false)
+        ),
+        Effect::Exile { what } => format!("exile {}", obj(mode, *what)),
+        Effect::ExileGraveyard { who } => match who {
+            PlayerRef::You => "exile your graveyard".to_string(),
+            other => format!("exile {}'s graveyard", player(mode, *other)),
+        },
+        Effect::Mill { who, amount: a } => {
+            let n = amount(a);
+            let cards = if n == "1" {
+                "a card".to_string()
+            } else {
+                format!("{n} cards")
+            };
+            format!("{} {cards}", verb(&player(mode, *who), "mill", "mills"))
+        }
+        Effect::ApplyAll {
+            affected,
+            effects,
+            until_end_of_turn,
+        } => format!(
+            "{} {}{}",
+            selector(affected, true),
+            continuous(effects, true),
+            if *until_end_of_turn {
+                " until end of turn"
+            } else {
+                ""
+            }
+        ),
+        Effect::SetX(a) => format!("X is {}", amount(a)),
     }
 }
 
@@ -353,11 +409,23 @@ fn obj_filter(f: &ObjFilter) -> String {
             let text = selector(s, false);
             if s.other { text } else { format!("a {text}") }
         }
+        ObjFilter::ThisOr(s) => format!("this permanent or another {}", selector(s, false)),
     }
 }
 
 fn trigger(t: &Trigger) -> String {
     match t {
+        Trigger::Attacks(f) => format!("Whenever {} attacks", obj_filter(f)),
+        Trigger::Any(v) => {
+            // "Whenever this permanent enters or attacks".
+            let parts: Vec<String> = v.iter().map(trigger).collect();
+            let mut out = parts.first().cloned().unwrap_or_default();
+            for p in parts.iter().skip(1) {
+                let words: Vec<&str> = p.split(' ').collect();
+                out.push_str(&format!(" or {}", words.last().copied().unwrap_or("")));
+            }
+            out
+        }
         Trigger::Enters(f) => format!("Whenever {} enters", obj_filter(f)),
         Trigger::Dies(f) => format!("Whenever {} dies", obj_filter(f)),
         Trigger::BeginningOf { step, whose } => format!(
@@ -393,10 +461,23 @@ fn trigger(t: &Trigger) -> String {
     }
 }
 
-fn condition(c: Condition) -> String {
+fn condition(c: &Condition) -> String {
     match c {
         Condition::LifeAtMost(n) => format!("if you have {n} or less life"),
         Condition::LifeAtLeast(n) => format!("if you have {n} or more life"),
+        Condition::Control { what, at_least } => {
+            if *at_least == 1 {
+                format!(
+                    "if you control a {}",
+                    selector(what, false).replace(" you control", "")
+                )
+            } else {
+                format!(
+                    "if you control {at_least} or more {}",
+                    selector(what, true).replace(" you control", "")
+                )
+            }
+        }
     }
 }
 
@@ -429,7 +510,9 @@ fn ability(a: &AbilityDef) -> String {
             intervening_if,
             body: b,
         } => {
-            let cond = intervening_if.map_or(String::new(), |c| format!(", {}", condition(c)));
+            let cond = intervening_if
+                .as_ref()
+                .map_or(String::new(), |c| format!(", {}", condition(c)));
             let text = body(b);
             let mut lower = text.clone();
             if let Some(first) = lower.chars().next() {
@@ -483,10 +566,7 @@ fn ability(a: &AbilityDef) -> String {
             }
         }
         AbilityDef::Enchant(f) => {
-            format!(
-                "Enchant {}",
-                target_filter(*f).trim_start_matches("target ")
-            )
+            format!("Enchant {}", target_filter(f).trim_start_matches("target "))
         }
     }
 }

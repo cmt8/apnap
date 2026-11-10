@@ -1,0 +1,13 @@
+RealCard(
+    oracle_id: "592c91fc-6430-4c76-9460-65f047350f67",
+    name: "Lyra Dawnbringer",
+    verified: true,
+    tests: ["lyra_dawnbringer_gives_other_angels_a_bonus_and_lifelink"],
+    keywords: [Flying, FirstStrike, Lifelink],
+    abilities: [
+        Static(
+            affected: All((subtypes: ["Angel"], controller: You, other: true)),
+            effects: [ModifyPT(1, 1), AddKeywords([Lifelink])],
+        ),
+    ],
+)

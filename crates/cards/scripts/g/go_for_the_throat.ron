@@ -1,0 +1,9 @@
+RealCard(
+    oracle_id: "2f092562-9e17-43cd-aeb8-d0567f99363e",
+    name: "Go for the Throat",
+    verified: true,
+    tests: ["go_for_the_throat_cant_target_artifact_creatures"],
+    abilities: [
+        Spell(Effect((targets: [Permanent([(types: [Creature], not_types: [Artifact])])], effect: Destroy(what: Target(0))))),
+    ],
+)

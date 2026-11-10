@@ -1,0 +1,21 @@
+RealCard(
+    oracle_id: "3127ae9b-a7a7-43ec-89d7-688f8445b33d",
+    name: "Garruk's Uprising",
+    verified: true,
+    tests: ["garruks_uprising_draws_and_gives_trample"],
+    abilities: [
+        Triggered(
+            when: Enters(This),
+            intervening_if: Some(Control(what: (types: [Creature], controller: You, power_min: Some(4)), at_least: 1)),
+            body: Effect((effect: Draw(who: You, amount: Fixed(1)))),
+        ),
+        Static(
+            affected: All((types: [Creature], controller: You)),
+            effects: [AddKeywords([Trample])],
+        ),
+        Triggered(
+            when: Enters(Matching((types: [Creature], controller: You, power_min: Some(4)))),
+            body: Effect((effect: Draw(who: You, amount: Fixed(1)))),
+        ),
+    ],
+)
