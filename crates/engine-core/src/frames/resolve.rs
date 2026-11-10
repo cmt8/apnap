@@ -1257,6 +1257,17 @@ impl ResolveFrame {
                     None => Vec::new(),
                 }
             }
+            Effect::PutCountersAll { what, kind, count } => {
+                let count = self.amount(st, &count);
+                crate::layers::matching(st, &what, self.source, self.controller)
+                    .into_iter()
+                    .map(|object| Proposed::PutCounters {
+                        object,
+                        kind,
+                        count,
+                    })
+                    .collect()
+            }
             Effect::PutCounters { what, kind, count } => match self.obj(st, k, what) {
                 Some(object) => vec![Proposed::PutCounters {
                     object,

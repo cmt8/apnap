@@ -3326,3 +3326,39 @@ fn an_x_cost_the_script_defines_is_not_an_announced_x() {
     );
     assert_eq!(forge_test_blockers(&card), ["cost:X defined by the script"]);
 }
+
+// CR 122.1, 608.2c (2026-11-06). Forge: `PutCounterAll | ValidCards$ Creature.YouCtrl |
+// CounterType$ P1P1 | CounterNum$ 1` — "put a +1/+1 counter on each creature you control".
+#[test]
+fn counters_on_each_creature_you_control() {
+    let cards = [spell(
+        "Test Muster",
+        "G",
+        "Sorcery",
+        "A:SP$ PutCounterAll | ValidCards$ Creature.YouCtrl | CounterType$ P1P1 | CounterNum$ 2 | SpellDescription$ Text.",
+    )];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Forest"]);
+    let mine = sc.cards(P0, Zone::Battlefield, &["Test Elf", "Test Golem"]);
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Giant");
+    sc.card(P0, Zone::Hand, "Test Muster");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Muster").pay().pass_all();
+    assert_eq!(counters(&s, mine[0]), 2);
+    assert_eq!(counters(&s, mine[1]), 2);
+    assert_eq!(counters(&s, theirs), 0);
+    // One event for all of them.
+    assert_eq!(
+        s.count(|e| matches!(e, Event::CountersPut { .. })),
+        2,
+        "two creatures, one batch"
+    );
+    let other = spell(
+        "Test Charge Up",
+        "G",
+        "Sorcery",
+        "A:SP$ PutCounterAll | ValidCards$ Artifact | CounterType$ CHARGE | CounterNum$ 1 | SpellDescription$ Text.",
+    );
+    assert_eq!(forge_test_blockers(&other), ["counter:CHARGE"]);
+}

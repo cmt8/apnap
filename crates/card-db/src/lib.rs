@@ -724,6 +724,10 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         Effect::Destroy { what } | Effect::ReturnToHand { what } | Effect::Apply { what, .. } => {
             obj(what, p)
         }
+        Effect::PutCountersAll { what, count, .. } => {
+            selector(what, p);
+            amount(count, p);
+        }
         Effect::PutCounters { what, count, .. } => {
             obj(what, p);
             amount(count, p);

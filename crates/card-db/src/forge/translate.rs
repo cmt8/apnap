@@ -1357,6 +1357,17 @@ impl<'a> Tx<'a> {
                     count: count?,
                 }
             }
+            // "Put a +1/+1 counter on each creature you control."
+            "PutCounterAll" => {
+                let kind = self.counter_kind(rd.get("CounterType"));
+                let what = self.valid_cards(&rd, api);
+                let count = self.amount(rd.get("CounterNum").unwrap_or("1"), chain);
+                Effect::PutCountersAll {
+                    what: what?,
+                    kind: kind?,
+                    count: count?,
+                }
+            }
             "Pump" | "PumpAll" => {
                 let effects = self.pump_effects(&rd, chain)?;
                 if api == "PumpAll" {

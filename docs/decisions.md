@@ -953,6 +953,15 @@ The user's direction from here: the biggest blockers across all cards, not the p
     Grave: "X is the target's mana value") compiled with a free X — castable for X = 0 on
     any target. The numeric variable was simply never read. `cost:X defined by the
     script` is now a blocker.
+- `PutCounterAll` ("put a +1/+1 counter on each creature you control"):
+  `Effect::PutCountersAll`, one event. +33 cards.
+- **Where this batch ended (2026-11-10):** 7,125 of 34,463 scripts (20.7%), from 6,367.
+  Largest blockers left, alone / at all: double-faced cards 399; Forge's "Effect" objects
+  353 / 1,546; statics that grant abilities or triggers 337 / 1,064 (needs abilities that
+  come from another card: `(CardDefId, index)` instead of an index into the permanent's
+  own card); Animate 236 / 848; "you may pay" triggers 185 / 796 and the other costs paid
+  during resolution (`UnlessCost`); Sagas 185; Adventure 151; Regenerate 146; Cycling 140
+  (+65 typecycling; needs abilities activated from the hand); `repl:Moved` 132.
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may

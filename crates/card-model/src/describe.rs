@@ -497,6 +497,12 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             verb(&player(mode, *who), "create", "creates"),
             amount(count)
         ),
+        Effect::PutCountersAll { what, kind, count } => format!(
+            "put {} {} counter(s) on each {}",
+            amount(count),
+            counter(*kind),
+            selector(what, false)
+        ),
         Effect::PutCounters { what, kind, count } => format!(
             "put {} {} counter(s) on {}",
             amount(count),

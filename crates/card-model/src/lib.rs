@@ -1140,6 +1140,12 @@ pub enum Effect {
     /// is one event, not one after the other. Only for instructions that are a single
     /// event or change each (no choices, nothing done in steps).
     Together(Vec<Effect>),
+    /// "Put N [kind] counters on each [permanent]" — all at once.
+    PutCountersAll {
+        what: Selector,
+        kind: CounterKind,
+        count: Amount,
+    },
 }
 
 /// A zone an effect takes cards out of as it resolves.
