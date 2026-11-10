@@ -909,6 +909,18 @@ The user's direction from here: the biggest blockers across all cards, not the p
   to" group followed by other targets are blockers. +131 cards.
   State hashes changed (`Mode` gained a field, and modes are part of the catalog in the
   state); event-log hashes did not. Golden file re-blessed.
+- **Amounts** (Forge's expression language, `Tx::expr_text`): cards in graveyards, hands
+  and libraries (`Amount::CardsIn`), one arithmetic suffix (`Amount::Calc`: plus, minus,
+  times, halves, limits), `Count$Compare` (`Amount::IfAtLeast`), chaining through `SVar$`,
+  `Number$`, domain, devotion, the greatest power / toughness / mana value, hand size,
+  life total, the source's toughness. `Amount::stands_alone` says which a replacement
+  effect may use, `Amount::countable_in_layers` which a static "+N/+N for each" may.
+  +181 cards.
+  - *Mis-compilation found by reading the sample and fixed:* "where X is …" was worked out
+    before the first instruction of the chain. CR 608.2h has it worked out when the
+    instruction that needs it is applied, so "draw a card, then deal damage equal to the
+    number of cards in your hand" was off by the draw. `SetX` is now placed in front of
+    the first instruction that uses X (`Chain::x_at`).
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may

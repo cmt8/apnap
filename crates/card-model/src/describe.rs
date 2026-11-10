@@ -4,10 +4,10 @@
 //! vocabulary without describing it is a compile error.
 
 use crate::{
-    AbilityDef, Affected, Amount, Body, CardDef, CardDest, CardType, CardZone, Color, CombatRule,
-    Condition, ContinuousEffect, Cost, CounterKind, DamageBy, EachPlayerAction, Effect, Keyword,
-    ManaProduce, Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, Take,
-    TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
+    AbilityDef, Affected, Amount, Body, Calc, CardDef, CardDest, CardType, CardZone, Color,
+    CombatRule, Condition, ContinuousEffect, Cost, CounterKind, DamageBy, EachPlayerAction, Effect,
+    Keyword, ManaProduce, Measure, Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces,
+    Selector, Take, TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
 };
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -86,6 +86,64 @@ fn amount(a: &Amount) -> String {
         Amount::TriggeringPower => "its power".into(),
         Amount::TriggeringToughness => "its toughness".into(),
         Amount::SacrificedPower => "the sacrificed creature's power".into(),
+        Amount::SourceToughness => "its toughness".into(),
+        Amount::CardsIn { zone, cards } => {
+            let what = card_list(cards, true);
+            // "…you own" in a hand, graveyard or library is "your".
+            let yours = !cards.is_empty() && cards.iter().all(|s| s.controller == Who::You);
+            let place = match (zone, yours) {
+                (CardZone::Graveyard, true) => "your graveyard",
+                (CardZone::Graveyard, false) => "all graveyards",
+                (CardZone::Hand, true) => "your hand",
+                (CardZone::Hand, false) => "all hands",
+                (CardZone::Library, true) => "your library",
+                (CardZone::Library, false) => "all libraries",
+                (CardZone::Battlefield, _) => "the battlefield",
+            };
+            format!("the number of {} in {place}", what.replace(" you own", ""))
+        }
+        Amount::Calc(base, op) => {
+            let v = amount(base);
+            match op {
+                Calc::Plus(n) => format!("{v} plus {n}"),
+                Calc::Minus(n) => format!("{v} minus {n}"),
+                Calc::From(n) => format!("{n} minus {v}"),
+                Calc::Times(2) => format!("twice {v}"),
+                Calc::Times(n) => format!("{n} times {v}"),
+                Calc::HalfUp => format!("half {v}, rounded up"),
+                Calc::HalfDown => format!("half {v}, rounded down"),
+                Calc::AtMost(n) => format!("{v} (at most {n})"),
+                Calc::AtLeast(n) => format!("{v} (at least {n})"),
+            }
+        }
+        Amount::IfAtLeast {
+            test,
+            at_least,
+            then,
+            otherwise,
+        } => format!(
+            "{then} if {} is {at_least} or more, otherwise {otherwise}",
+            amount(test)
+        ),
+        Amount::Domain => "the number of basic land types among lands you control".into(),
+        Amount::Devotion(colors) => format!(
+            "your devotion to {}",
+            join(
+                colors.iter().map(|c| color(*c).to_string()).collect(),
+                "and"
+            )
+        ),
+        Amount::Greatest { of, what } => format!(
+            "the greatest {} among {}",
+            match what {
+                Measure::Power => "power",
+                Measure::Toughness => "toughness",
+                Measure::ManaValue => "mana value",
+            },
+            selector(of, true)
+        ),
+        Amount::HandSize => "the number of cards in your hand".into(),
+        Amount::LifeTotal => "your life total".into(),
     }
 }
 

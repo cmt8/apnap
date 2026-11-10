@@ -11,10 +11,10 @@
 
 use super::parse::{Face, Record, Script};
 use card_model::{
-    AbilityDef, Affected, Amount, BasicLandType, Body, CardDef, CardDest, CardType, CardZone,
+    AbilityDef, Affected, Amount, BasicLandType, Body, Calc, CardDef, CardDest, CardType, CardZone,
     Color, CombatRule, Condition, ContinuousEffect, Cost, CostChoice, CounterKind, DamageBy,
-    EachPlayerAction, Effect, Keyword, ManaCost, ManaProduce, ManaRestriction, ManaType, Mode,
-    ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, Signed, Supertype, Take,
+    EachPlayerAction, Effect, Keyword, ManaCost, ManaProduce, ManaRestriction, ManaType, Measure,
+    Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, Signed, Supertype, Take,
     TargetFilter, TargetGroup, TargetRef, Timing, Trigger, TriggerStep, Who,
 };
 use std::cell::RefCell;
@@ -110,6 +110,10 @@ struct Chain {
     effects: Vec<Effect>,
     /// "…where X is [amount]": the script variable that `Amount::X` stands for.
     x: Option<(String, Amount)>,
+    /// The instruction (its place in `effects`) that first uses that X: the amount is
+    /// worked out as that instruction is applied (CR 608.2h), not before the ones ahead
+    /// of it ("draw a card, then … equal to the number of cards in your hand").
+    x_at: usize,
     /// Some link said `Defined$ Targeted` — in Forge, every target of the whole chain.
     refers_to_targets: std::cell::Cell<bool>,
     /// "Two target creatures", "up to two target creatures": slots that are one "target".
@@ -472,6 +476,7 @@ impl<'a> Tx<'a> {
             _ => match &chain.x {
                 None => {
                     chain.x = Some((text.to_string(), a));
+                    chain.x_at = chain.effects.len();
                     Some(Amount::X)
                 }
                 Some((name, _)) if name == text => Some(Amount::X),
@@ -489,6 +494,52 @@ impl<'a> Tx<'a> {
             self.block(format!("expr:undefined {name}"));
             return None;
         };
+        self.expr_text(v, 0)
+    }
+
+    /// An expression: a value, optionally followed by one arithmetic suffix
+    /// (docs/forge/script-format.md §6.6: only the first `/…` counts).
+    fn expr_text(&mut self, v: &'a str, depth: u8) -> Option<Amount> {
+        if depth > 4 {
+            self.block("expr:too deep");
+            return None;
+        }
+        let (head, math) = match v.split_once('/') {
+            Some((h, m)) => (h, Some(m)),
+            None => (v, None),
+        };
+        let base = self.expr_head(head, v, depth)?;
+        let Some(math) = math else {
+            return Some(base);
+        };
+        let (op, n) = match math.split_once('.') {
+            Some((op, n)) => (op, n.parse::<u32>().ok()),
+            None => (math, None),
+        };
+        let calc = match (op, n) {
+            ("Plus", Some(n)) => Some(Calc::Plus(n)),
+            ("Minus", Some(n)) => Some(Calc::Minus(n)),
+            ("NMinus", Some(n)) => Some(Calc::From(n)),
+            ("Times", Some(n)) => Some(Calc::Times(n)),
+            ("LimitMax", Some(n)) => Some(Calc::AtMost(n)),
+            ("LimitMin", Some(n)) => Some(Calc::AtLeast(n)),
+            ("Twice", None) => Some(Calc::Times(2)),
+            ("Thrice", None) => Some(Calc::Times(3)),
+            ("HalfUp", None) => Some(Calc::HalfUp),
+            ("HalfDown", None) => Some(Calc::HalfDown),
+            _ => None,
+        };
+        match calc {
+            Some(calc) => Some(Amount::Calc(Box::new(base), calc)),
+            None => {
+                self.block(format!("expr:math {}", shape(op)));
+                None
+            }
+        }
+    }
+
+    /// The value part of an expression (`whole` is for naming a blocker).
+    fn expr_head(&mut self, v: &'a str, whole: &str, depth: u8) -> Option<Amount> {
         if v == "Count$xPaid" && self.has_x_cost {
             // In a spell or an activated ability: the X announced for it (CR 107.3a). In a
             // permanent's own trigger it is the X the permanent was cast with (CR 107.3m),
@@ -499,27 +550,103 @@ impl<'a> Tx<'a> {
             }
             return Some(Amount::X);
         }
-        if v == "TriggeredCard$CardPower" {
-            return Some(Amount::TriggeringPower);
+        if let Some(n) = v
+            .strip_prefix("Number$")
+            .and_then(|n| n.parse::<u32>().ok())
+        {
+            return Some(Amount::Fixed(n));
         }
-        // "the sacrificed creature's power": what was sacrificed to pay the cost.
-        if v == "Sacrificed$CardPower" {
-            return Some(Amount::SacrificedPower);
+        // Another variable, so that it can take a second arithmetic suffix.
+        if let Some(name) = v.strip_prefix("SVar$") {
+            let Some(inner) = self.svar(name) else {
+                self.block(format!("expr:undefined {name}"));
+                return None;
+            };
+            return self.expr_text(inner, depth + 1);
         }
-        if v == "TriggeredCard$CardToughness" {
-            return Some(Amount::TriggeringToughness);
+        match v {
+            "TriggeredCard$CardPower" => return Some(Amount::TriggeringPower),
+            "TriggeredCard$CardToughness" => return Some(Amount::TriggeringToughness),
+            // "the sacrificed creature's power": what was sacrificed to pay the cost.
+            "Sacrificed$CardPower" => return Some(Amount::SacrificedPower),
+            // The card the ability is on.
+            "Count$CardPower" => return Some(Amount::SourcePower),
+            "Count$CardToughness" => return Some(Amount::SourceToughness),
+            "Count$Domain" => return Some(Amount::Domain),
+            "Count$CardsInYourHand" => return Some(Amount::HandSize),
+            "Count$YourLifeTotal" => return Some(Amount::LifeTotal),
+            _ => {}
+        }
+        if let Some(c) = v.strip_prefix("Count$Devotion.").and_then(color) {
+            return Some(Amount::Devotion(vec![c]));
+        }
+        // `Count$Compare <variable> GE<n>.<then>.<otherwise>`.
+        if let Some(rest) = v.strip_prefix("Count$Compare ") {
+            let parsed = rest.split_once(' ').and_then(|(name, test)| {
+                let mut parts = test.strip_prefix("GE")?.split('.');
+                let at_least = parts.next()?.parse::<u32>().ok()?;
+                let then = parts.next()?.parse::<u32>().ok()?;
+                let otherwise = parts.next()?.parse::<u32>().ok()?;
+                parts
+                    .next()
+                    .is_none()
+                    .then_some((name, at_least, then, otherwise))
+            });
+            let Some((name, at_least, then, otherwise)) = parsed else {
+                self.block(format!("expr:{}", shape(whole)));
+                return None;
+            };
+            let Some(inner) = self.svar(name) else {
+                self.block(format!("expr:undefined {name}"));
+                return None;
+            };
+            let test = self.expr_text(inner, depth + 1)?;
+            return Some(Amount::IfAtLeast {
+                test: Box::new(test),
+                at_least,
+                then,
+                otherwise,
+            });
+        }
+        // Cards in a zone other than the battlefield: every player's, unless the filter
+        // says whose (`Card.YouOwn`).
+        for (prefix, zone) in [
+            ("Count$ValidGraveyard ", CardZone::Graveyard),
+            ("Count$ValidHand ", CardZone::Hand),
+            ("Count$ValidLibrary ", CardZone::Library),
+        ] {
+            if let Some(filter) = v.strip_prefix(prefix) {
+                if filter.contains('$') {
+                    self.block(format!("expr:{}", shape(whole)));
+                    return None;
+                }
+                let cards = self.card_alts(filter, true)?;
+                return Some(Amount::CardsIn { zone, cards });
+            }
         }
         if let Some(rest) = v.strip_prefix("Count$Valid ") {
             return match rest.split_once('$') {
-                None if !rest.contains('/') => self.selector(rest).map(Amount::Count),
+                None => self.selector(rest).map(Amount::Count),
                 Some((f, "CardPower")) => self.selector(f).map(Amount::TotalPower),
+                Some((f, "GreatestCardPower")) => self.selector(f).map(|of| Amount::Greatest {
+                    of,
+                    what: Measure::Power,
+                }),
+                Some((f, "GreatestCardToughness")) => self.selector(f).map(|of| Amount::Greatest {
+                    of,
+                    what: Measure::Toughness,
+                }),
+                Some((f, "GreatestCardManaCost")) => self.selector(f).map(|of| Amount::Greatest {
+                    of,
+                    what: Measure::ManaValue,
+                }),
                 _ => {
-                    self.block(format!("expr:{}", shape(v)));
+                    self.block(format!("expr:{}", shape(whole)));
                     None
                 }
             };
         }
-        self.block(format!("expr:{}", shape(v)));
+        self.block(format!("expr:{}", shape(whole)));
         None
     }
 
@@ -1525,7 +1652,7 @@ impl<'a> Tx<'a> {
         }
         let mut effects = chain.effects;
         if let Some((_, amount)) = chain.x {
-            effects.insert(0, Effect::SetX(amount));
+            effects.insert(chain.x_at.min(effects.len()), Effect::SetX(amount));
         }
         let effect = if effects.len() == 1 {
             effects.remove(0)
@@ -1695,7 +1822,7 @@ impl<'a> Tx<'a> {
             return Some(Amount::Fixed(n));
         }
         match self.expr(text)? {
-            a @ (Amount::Count(_) | Amount::TotalPower(_)) => Some(a),
+            a if a.stands_alone() => Some(a),
             Amount::X if own_x => Some(Amount::X),
             _ => {
                 self.block("expr:not countable by a replacement");
@@ -2925,7 +3052,7 @@ mod tests {
         assert!(b.contains("filter:Gremlin"), "{b:?}");
         // An expression form that isn't supported.
         let b = blockers(&format!(
-            "{base}A:SP$ DealDamage | ValidTgts$ Any | NumDmg$ X\nSVar:X:Count$YourLifeTotal/HalfUp"
+            "{base}A:SP$ DealDamage | ValidTgts$ Any | NumDmg$ X\nSVar:X:Count$YourPoisonCounters/ThirdUp"
         ));
         assert!(b.iter().any(|x| x.starts_with("expr:")), "{b:?}");
         // A keyword the engine doesn't have, an unknown line, a second face.

@@ -296,9 +296,33 @@ impl ResolveFrame {
             Amount::Fixed(n) => *n,
             Amount::X => self.x,
             Amount::SacrificedPower => self.sacrificed_power,
-            Amount::Count(_) | Amount::TotalPower(_) => {
-                crate::layers::count_amount(st, a, self.source, self.controller)
+            // Arithmetic and tests on amounts that may themselves need this resolution.
+            Amount::Calc(base, op) => op.apply(self.amount(st, base)),
+            Amount::IfAtLeast {
+                test,
+                at_least,
+                then,
+                otherwise,
+            } => {
+                if self.amount(st, test) >= *at_least {
+                    *then
+                } else {
+                    *otherwise
+                }
             }
+            Amount::SourceToughness => self
+                .source_chars(st)
+                .and_then(|c| c.toughness)
+                .unwrap_or(0)
+                .max(0) as u32,
+            Amount::Count(_)
+            | Amount::TotalPower(_)
+            | Amount::CardsIn { .. }
+            | Amount::Domain
+            | Amount::Devotion(_)
+            | Amount::Greatest { .. }
+            | Amount::HandSize
+            | Amount::LifeTotal => crate::layers::count_amount(st, a, self.source, self.controller),
             Amount::SourcePower => self
                 .source_chars(st)
                 .and_then(|c| c.power)

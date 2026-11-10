@@ -356,16 +356,7 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 for e in effects {
                     if let card_model::ContinuousEffect::ModifyPTBy { power, toughness } = e {
                         for a in [&power.amount, &toughness.amount] {
-                            let ok = match a {
-                                Amount::Fixed(_) => true,
-                                Amount::Count(s) => {
-                                    s.power_min.is_none()
-                                        && s.toughness_min.is_none()
-                                        && s.power_max.is_none()
-                                }
-                                _ => false,
-                            };
-                            if !ok {
+                            if !a.countable_in_layers() {
                                 p.push(at("a static ModifyPTBy can only count permanents \
                                            (not by power or toughness)"
                                     .into()));
@@ -432,7 +423,7 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 // (Its own X — "enters with X counters" — is the X it was cast with.)
                 let own_x = *replaces == Replaces::ThisEnters && card_has_x;
                 if let ReplaceWith::EntersWithCounted { amount, .. } = with
-                    && !matches!(amount, Amount::Count(_) | Amount::TotalPower(_))
+                    && !amount.stands_alone()
                     && !(own_x && *amount == Amount::X)
                 {
                     p.push(at(
@@ -537,13 +528,30 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         TargetRef::Target(i) => mode.targets.get(*i as usize),
         TargetRef::Players(_) | TargetRef::Object(_) => None,
     };
-    let amount = |a: &Amount, p: &mut dyn FnMut(String)| match a {
-        Amount::X if !has_x => {
-            p("Amount::X used but nothing defines X (no {X} in the cost, no SetX)".into());
+    #[allow(clippy::type_complexity)]
+    fn check_amount(
+        a: &Amount,
+        has_x: bool,
+        selector: &dyn Fn(&card_model::Selector, &mut dyn FnMut(String)),
+        p: &mut dyn FnMut(String),
+    ) {
+        match a {
+            Amount::X if !has_x => {
+                p("Amount::X used but nothing defines X (no {X} in the cost, no SetX)".into());
+            }
+            Amount::Count(s) | Amount::TotalPower(s) | Amount::Greatest { of: s, .. } => {
+                selector(s, p)
+            }
+            Amount::CardsIn { cards, .. } => cards.iter().for_each(|s| selector(s, p)),
+            Amount::Calc(base, _) => check_amount(base, has_x, selector, p),
+            Amount::IfAtLeast { test, .. } => check_amount(test, has_x, selector, p),
+            Amount::Devotion(colors) if colors.is_empty() => {
+                p("devotion to no color".into());
+            }
+            _ => {}
         }
-        Amount::Count(s) | Amount::TotalPower(s) => selector(s, p),
-        _ => {}
-    };
+    }
+    let amount = |a: &Amount, p: &mut dyn FnMut(String)| check_amount(a, has_x, &selector, p);
     let player = |r: &PlayerRef, p: &mut dyn FnMut(String)| {
         if let PlayerRef::Target(i) = r {
             match mode.targets.get(*i as usize) {

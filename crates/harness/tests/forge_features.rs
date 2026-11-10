@@ -2825,3 +2825,138 @@ fn target_groups_not_compiled() {
         ["targets:up-to group before other targets"]
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Amounts: cards in other zones, arithmetic, conditional values, domain, devotion (D-055).
+
+fn gain(name: &str, cost: &str, x: &str) -> String {
+    spell(
+        name,
+        cost,
+        "Instant",
+        &format!("A:SP$ GainLife | LifeAmount$ X | SpellDescription$ Text.\nSVar:X:{x}"),
+    )
+}
+
+// CR 608.2h (2026-11-06): an amount is worked out when the instruction that needs it is
+// applied — after the instructions before it. "Draw a card. You gain life equal to the
+// number of cards in your hand."
+#[test]
+fn an_amount_is_counted_when_its_instruction_is_applied() {
+    let cards = [spell(
+        "Test Insight Surge",
+        "U",
+        "Sorcery",
+        "A:SP$ Draw | NumCards$ 2 | SubAbility$ DBGain | SpellDescription$ Text.\n\
+         SVar:DBGain:DB$ GainLife | LifeAmount$ X\nSVar:X:Count$CardsInYourHand",
+    )];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Island"]);
+    sc.cards(P0, Zone::Hand, &["Test Insight Surge", "Forest"]);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Insight Surge").pay().pass_all();
+    // The Forest and the two cards drawn: 3 (not the 1 card that was there before).
+    assert_eq!(hand(&s, P0), 3);
+    assert_eq!(life(&s, P0), 43);
+}
+
+// Forge's expression language (docs/forge/script-format.md §6): `Count$ValidGraveyard`,
+// `Count$ValidHand`, arithmetic suffixes, `Count$Compare`, `SVar$`, `Number$`.
+#[test]
+fn counting_cards_in_other_zones_and_arithmetic() {
+    let cards = [
+        gain("Test Requiem", "W", "Count$ValidGraveyard Creature.YouOwn"),
+        gain("Test Lament", "W", "Count$ValidGraveyard Creature"),
+        gain("Test Doubling", "W", "Count$Valid Creature.YouCtrl/Twice"),
+        gain("Test Surplus", "W", "Count$Valid Creature.YouCtrl/Plus.3"),
+        gain("Test Halving", "W", "Count$ValidHand Card.YouOwn/HalfUp"),
+        // "3 if you control two or more creatures, otherwise 1", through another variable.
+        format!(
+            "{}\nSVar:Y:Count$Valid Creature.YouCtrl",
+            gain("Test Verdict", "W", "Count$Compare Y GE2.3.1")
+        ),
+        format!(
+            "{}\nSVar:Y:Count$Valid Creature.YouCtrl/Times.2",
+            gain("Test Chain", "W", "SVar$Y/Plus.1")
+        ),
+        gain("Test Seven", "W", "Number$7"),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let gained = |spell: &str, mine: usize| -> i32 {
+        let mut sc = scenario(&cards);
+        sc.cards(P0, Zone::Battlefield, &["Plains"]);
+        for _ in 0..mine {
+            sc.card(P0, Zone::Battlefield, "Test Elf");
+        }
+        sc.card(P1, Zone::Battlefield, "Test Golem");
+        sc.cards(P0, Zone::Graveyard, &["Test Elf", "Test Golem", "Forest"]);
+        sc.cards(P1, Zone::Graveyard, &["Test Elf"]);
+        // The spell and four more cards in hand.
+        sc.cards(
+            P0,
+            Zone::Hand,
+            &[spell, "Forest", "Forest", "Forest", "Forest"],
+        );
+        let mut s = Script::new(sc.build());
+        s.cast(spell).pay().pass_all();
+        life(&s, P0) - 40
+    };
+    assert_eq!(
+        gained("Test Requiem", 0),
+        2,
+        "creature cards in my graveyard"
+    );
+    assert_eq!(gained("Test Lament", 0), 3, "in all graveyards");
+    assert_eq!(gained("Test Doubling", 2), 4);
+    assert_eq!(gained("Test Surplus", 2), 5);
+    // Four cards in hand once the spell is on the stack.
+    assert_eq!(gained("Test Halving", 0), 2);
+    assert_eq!(gained("Test Verdict", 2), 3);
+    assert_eq!(gained("Test Verdict", 1), 1);
+    assert_eq!(gained("Test Chain", 2), 5);
+    assert_eq!(gained("Test Seven", 0), 7);
+    // Only the first arithmetic suffix counts in Forge; what isn't understood is named.
+    assert_eq!(
+        forge_test_blockers(&gain("Test Odd", "W", "Count$Valid Creature.YouCtrl/Pow.2")),
+        ["expr:math Pow"]
+    );
+}
+
+// CR 700.5 (devotion), "domain", and the greatest power among creatures you control.
+#[test]
+fn devotion_domain_and_the_greatest_power() {
+    let cards = [
+        gain("Test Piety", "W", "Count$Devotion.Green"),
+        gain("Test Dominion", "W", "Count$Domain"),
+        gain(
+            "Test Prowess",
+            "W",
+            "Count$Valid Creature.YouCtrl$GreatestCardPower",
+        ),
+        creature("Test Devotee", "G G", "Elf", "1/1", ""),
+        creature("Test Zealot", "1 G", "Elf", "4/4", ""),
+        // {G} in its cost, but not a permanent of mine: an opponent's.
+        creature("Test Heretic", "G", "Elf", "9/9", ""),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let gained = |spell: &str| -> i32 {
+        let mut sc = scenario(&cards);
+        sc.cards(
+            P0,
+            Zone::Battlefield,
+            &["Plains", "Plains", "Forest", "Swamp"],
+        );
+        sc.cards(P0, Zone::Battlefield, &["Test Devotee", "Test Zealot"]);
+        sc.cards(P1, Zone::Battlefield, &["Test Heretic", "Island"]);
+        sc.card(P0, Zone::Hand, spell);
+        let mut s = Script::new(sc.build());
+        s.cast(spell).pay().pass_all();
+        life(&s, P0) - 40
+    };
+    // {G}{G} + {1}{G}: three green mana symbols among my permanents.
+    assert_eq!(gained("Test Piety"), 3);
+    // Plains, Forest, Swamp: three basic land types among my lands.
+    assert_eq!(gained("Test Dominion"), 3);
+    assert_eq!(gained("Test Prowess"), 4);
+}

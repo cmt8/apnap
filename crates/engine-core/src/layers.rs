@@ -245,8 +245,103 @@ pub fn count_amount(
             .into_iter()
             .map(|id| chars(st, id).power.unwrap_or(0).max(0) as u32)
             .sum(),
+        Amount::CardsIn { zone, cards } => {
+            let fits = |id: &ObjectId| {
+                cards.is_empty() || {
+                    let c = chars(st, *id);
+                    cards
+                        .iter()
+                        .any(|s| matches(st, s, &c, st.object(*id), source, controller))
+                }
+            };
+            match zone {
+                card_model::CardZone::Battlefield => {
+                    st.zones.battlefield.iter().filter(|id| fits(id)).count() as u32
+                }
+                zone => {
+                    let zone = match zone {
+                        card_model::CardZone::Hand => Zone::Hand,
+                        card_model::CardZone::Library => Zone::Library,
+                        _ => Zone::Graveyard,
+                    };
+                    st.players
+                        .iter()
+                        .map(|p| {
+                            st.zones
+                                .list(zone, p.id)
+                                .iter()
+                                .filter(|id| fits(id))
+                                .count()
+                        })
+                        .sum::<usize>() as u32
+                }
+            }
+        }
+        Amount::Calc(base, op) => op.apply(count_amount(st, base, source, controller)),
+        Amount::IfAtLeast {
+            test,
+            at_least,
+            then,
+            otherwise,
+        } => {
+            if count_amount(st, test, source, controller) >= *at_least {
+                *then
+            } else {
+                *otherwise
+            }
+        }
+        // CR 305.6 / "domain".
+        Amount::Domain => {
+            let mut types: Vec<card_model::BasicLandType> = Vec::new();
+            for &id in &st.zones.battlefield {
+                let c = chars(st, id);
+                if c.controller == controller && c.is(CardType::Land) {
+                    for t in &c.land_types {
+                        if !types.contains(t) {
+                            types.push(*t);
+                        }
+                    }
+                }
+            }
+            types.len() as u32
+        }
+        // CR 700.5.
+        Amount::Devotion(colors) => st
+            .zones
+            .battlefield
+            .iter()
+            .map(|&id| chars(st, id))
+            .filter(|c| c.controller == controller)
+            .map(|c| {
+                c.mana_cost.as_ref().map_or(0, |m| {
+                    m.symbols
+                        .iter()
+                        .filter(|s| {
+                            matches!(s, card_model::ManaSymbol::Colored(x) if colors.contains(x))
+                        })
+                        .count() as u32
+                })
+            })
+            .sum(),
+        Amount::Greatest { of, what } => matching(st, of, source, controller)
+            .into_iter()
+            .map(|id| {
+                let c = chars(st, id);
+                match what {
+                    card_model::Measure::Power => c.power.unwrap_or(0).max(0) as u32,
+                    card_model::Measure::Toughness => c.toughness.unwrap_or(0).max(0) as u32,
+                    card_model::Measure::ManaValue => {
+                        c.mana_cost.as_ref().map_or(0, |m| m.mana_value())
+                    }
+                }
+            })
+            .max()
+            .unwrap_or(0),
+        Amount::HandSize => st.zones.list(Zone::Hand, controller).len() as u32,
+        Amount::LifeTotal => st.player(controller).life.max(0) as u32,
         Amount::X
         | Amount::SourcePower
+        | Amount::SourceToughness
         | Amount::TriggeringPower
         | Amount::TriggeringToughness
         | Amount::SacrificedPower => 0,
@@ -453,7 +548,25 @@ impl Walk<'_> {
                     .filter(|(id, c)| matches(self.st, sel, c, self.st.object(**id), e.source, you))
                     .count() as i32
             }
-            // card-db rejects anything else in a static ability.
+            // Nothing the walk is working out: cards in other zones, hands, life totals.
+            Amount::CardsIn { .. } | Amount::HandSize | Amount::LifeTotal => {
+                count_amount(self.st, a, e.source, self.you(e, view)) as i32
+            }
+            Amount::Calc(base, op) => op.apply(self.amount(base, e, view).max(0) as u32) as i32,
+            Amount::IfAtLeast {
+                test,
+                at_least,
+                then,
+                otherwise,
+            } => {
+                if self.amount(test, e, view) >= *at_least as i32 {
+                    *then as i32
+                } else {
+                    *otherwise as i32
+                }
+            }
+            // card-db rejects anything else in a static ability
+            // (`Amount::countable_in_layers`).
             _ => 0,
         }
     }

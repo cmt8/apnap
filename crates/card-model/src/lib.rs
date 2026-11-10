@@ -1231,6 +1231,122 @@ pub enum Amount {
     /// "the sacrificed creature's power": the total power, as they last existed on the
     /// battlefield, of the permanents sacrificed to pay this ability's cost (CR 608.2h).
     SacrificedPower,
+    /// The source's toughness (as [`Amount::SourcePower`]).
+    SourceToughness,
+    /// "the number of [cards] in [your graveyard / all graveyards / your hand …]". A card
+    /// outside the battlefield has its owner where a selector says "you control" (empty
+    /// `cards` = every card).
+    CardsIn {
+        zone: CardZone,
+        cards: Vec<Selector>,
+    },
+    /// An amount, then arithmetic: "twice the number of …", "… plus 1".
+    Calc(Box<Amount>, Calc),
+    /// "`then` if [test] is `at_least` or more, otherwise `otherwise`".
+    IfAtLeast {
+        test: Box<Amount>,
+        at_least: u32,
+        then: u32,
+        otherwise: u32,
+    },
+    /// Domain: the number of basic land types among lands you control.
+    Domain,
+    /// Your devotion to these colors (CR 700.5): the mana symbols of those colors in the
+    /// mana costs of permanents you control.
+    Devotion(Vec<Color>),
+    /// The greatest power / toughness / mana value among the matching permanents (0 if
+    /// there are none).
+    Greatest {
+        of: Selector,
+        what: Measure,
+    },
+    /// The number of cards in your hand.
+    HandSize,
+    /// Your life total (0 if it is negative).
+    LifeTotal,
+}
+
+impl Amount {
+    /// Can it be worked out from the game alone, without a spell or ability resolving
+    /// (no X, no source or triggering object, nothing sacrificed)? Then a replacement
+    /// effect can use it.
+    pub fn stands_alone(&self) -> bool {
+        match self {
+            Amount::Fixed(_)
+            | Amount::Count(_)
+            | Amount::TotalPower(_)
+            | Amount::CardsIn { .. }
+            | Amount::Domain
+            | Amount::Devotion(_)
+            | Amount::Greatest { .. }
+            | Amount::HandSize
+            | Amount::LifeTotal => true,
+            Amount::Calc(base, _) => base.stands_alone(),
+            Amount::IfAtLeast { test, .. } => test.stands_alone(),
+            Amount::X
+            | Amount::SourcePower
+            | Amount::SourceToughness
+            | Amount::TriggeringPower
+            | Amount::TriggeringToughness
+            | Amount::SacrificedPower => false,
+        }
+    }
+
+    /// Can a static ability's "+N/+N for each …" use it? It is re-counted inside the layer
+    /// walk (CR 613.4c), so it must not depend on what the walk is still working out:
+    /// permanents counted without looking at power or toughness, cards in other zones,
+    /// hand sizes and life totals, and arithmetic on those.
+    pub fn countable_in_layers(&self) -> bool {
+        match self {
+            Amount::Fixed(_) | Amount::HandSize | Amount::LifeTotal => true,
+            Amount::Count(s) => {
+                s.power_min.is_none() && s.toughness_min.is_none() && s.power_max.is_none()
+            }
+            Amount::CardsIn { zone, .. } => *zone != CardZone::Battlefield,
+            Amount::Calc(base, _) => base.countable_in_layers(),
+            Amount::IfAtLeast { test, .. } => test.countable_in_layers(),
+            _ => false,
+        }
+    }
+}
+
+/// Arithmetic on an [`Amount`]. Results never go below 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Calc {
+    Plus(u32),
+    Minus(u32),
+    /// `n` minus the amount.
+    From(u32),
+    Times(u32),
+    HalfUp,
+    HalfDown,
+    /// No more than.
+    AtMost(u32),
+    /// No less than.
+    AtLeast(u32),
+}
+
+impl Calc {
+    pub fn apply(self, v: u32) -> u32 {
+        match self {
+            Calc::Plus(n) => v.saturating_add(n),
+            Calc::Minus(n) => v.saturating_sub(n),
+            Calc::From(n) => n.saturating_sub(v),
+            Calc::Times(n) => v.saturating_mul(n),
+            Calc::HalfUp => v.div_ceil(2),
+            Calc::HalfDown => v / 2,
+            Calc::AtMost(n) => v.min(n),
+            Calc::AtLeast(n) => v.max(n),
+        }
+    }
+}
+
+/// What of a permanent is measured ([`Amount::Greatest`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Measure {
+    Power,
+    Toughness,
+    ManaValue,
 }
 
 /// CR 903.4: a card's color identity — the colors of mana symbols in its mana cost or rules
