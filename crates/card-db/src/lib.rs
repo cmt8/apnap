@@ -251,6 +251,25 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 ));
             }
         }
+        // Only an instant or sorcery spell's own effect says where the spell goes; "that
+        // card" needs a permanent that left the battlefield.
+        if !matches!(a, AbilityDef::Spell(_)) && format!("{a:?}").contains("ThisSpellTo") {
+            p.push(at("ThisSpellTo outside a spell ability".into()));
+        }
+        if format!("{a:?}").contains("TriggeringCard") {
+            let left = match a {
+                AbilityDef::Triggered { when, .. } => when
+                    .events()
+                    .iter()
+                    .all(|t| matches!(t, Trigger::Dies(_) | Trigger::Leaves(_))),
+                _ => false,
+            };
+            if !left {
+                p.push(at(
+                    "\"that card\" needs a trigger on a permanent leaving the battlefield".into(),
+                ));
+            }
+        }
         // "That player" and "that much" need an event that has them.
         let text = format!("{a:?}");
         for (word, needs_player) in [("TriggeringPlayer", true), ("TriggeringAmount", false)] {
@@ -817,6 +836,17 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         Effect::PutCountersAll { what, count, .. } => {
             selector(what, p);
             amount(count, p);
+        }
+        Effect::ThisSpellTo { to, .. } => {
+            if matches!(
+                to,
+                card_model::CardDest::Battlefield { .. } | card_model::CardDest::Graveyard
+            ) {
+                p(
+                    "a resolving spell goes to exile, a hand or a library, if not the graveyard"
+                        .into(),
+                );
+            }
         }
         Effect::PutCounters { what, count, .. } => {
             obj(what, p);

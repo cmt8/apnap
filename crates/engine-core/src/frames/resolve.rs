@@ -153,6 +153,10 @@ pub struct ResolveFrame {
     /// What else the triggering event carries ("that player", "that much").
     #[serde(default)]
     pub facts: crate::triggers::EventFacts,
+    /// Where the resolving spell goes instead of its owner's graveyard, and whether the
+    /// owner then shuffles ("exile this spell", "shuffle it into its owner's library").
+    #[serde(default)]
+    pub spell_to: Option<(card_model::CardDest, bool)>,
 }
 
 impl ResolveFrame {
@@ -170,6 +174,7 @@ impl ResolveFrame {
             work: Vec::new(),
             sacrificed_power: 0,
             facts: Default::default(),
+            spell_to: None,
         }
     }
 
@@ -266,6 +271,13 @@ impl ResolveFrame {
                 .get(&self.source)
                 .is_some_and(|o| !matches!(o.zone, Zone::Battlefield | Zone::Stack))
                 .then_some(self.source),
+            // The card the triggering permanent became, while it is still in the zone it
+            // went to (CR 400.7: anywhere else it is a different object).
+            ObjRef::TriggeringCard => self.facts.moved.filter(|id| {
+                st.objects
+                    .get(id)
+                    .is_some_and(|o| !matches!(o.zone, Zone::Battlefield | Zone::Stack))
+            }),
             // "It": only while it is still the object that triggered this (CR 400.7).
             ObjRef::Triggering => self.subject.filter(|id| {
                 st.objects
@@ -1540,6 +1552,10 @@ impl ResolveFrame {
                 }
                 Vec::new()
             }
+            Effect::ThisSpellTo { to, shuffle } => {
+                self.spell_to = Some((to, shuffle));
+                Vec::new()
+            }
             Effect::PutInto { what, to, shuffle } => {
                 if let Some(o) = self.obj(st, k, what) {
                     let owner = st.object(o).owner;
@@ -1624,7 +1640,21 @@ impl ResolveFrame {
         let id = self.object.expect("started");
         match st.stack_object(id).map(|s| s.kind.clone()) {
             Some(StackKind::Spell) => {
-                let mv = Proposed::moving(id, Zone::Graveyard, cause);
+                let mut mv = Proposed::moving(id, Zone::Graveyard, cause);
+                // CR 608.2n: a spell that resolved goes to its owner's graveyard, unless
+                // its own effect says where it goes.
+                if cause == MoveCause::Resolve
+                    && let Some((dest, then_shuffle)) = self.spell_to
+                    && let Proposed::Move {
+                        to,
+                        position,
+                        shuffle,
+                        ..
+                    } = &mut mv
+                {
+                    let (zone, at, _) = card_dest(dest);
+                    (*to, *position, *shuffle) = (zone, at, then_shuffle);
+                }
                 Flow::then(Frame::Apply(ApplyFrame::new(st, vec![mv])))
             }
             Some(StackKind::Ability { .. }) => {
@@ -1694,17 +1724,22 @@ fn card_fits(
         .any(|s| crate::layers::matches(st, s, &c, st.object(id), source, controller))
 }
 
-/// The proposed move of `object` to a destination.
-fn move_to(object: ObjectId, to: CardDest) -> Proposed {
+/// A destination as (zone, position in a library, enters tapped).
+fn card_dest(to: CardDest) -> (Zone, crate::zones::LibraryPosition, bool) {
     use crate::zones::LibraryPosition;
-    let (zone, at, enters_tapped) = match to {
+    match to {
         CardDest::Hand => (Zone::Hand, LibraryPosition::Top, false),
         CardDest::Battlefield { tapped } => (Zone::Battlefield, LibraryPosition::Top, tapped),
         CardDest::Graveyard => (Zone::Graveyard, LibraryPosition::Top, false),
         CardDest::Exile => (Zone::Exile, LibraryPosition::Top, false),
         CardDest::LibraryTop => (Zone::Library, LibraryPosition::Top, false),
         CardDest::LibraryBottom => (Zone::Library, LibraryPosition::Bottom, false),
-    };
+    }
+}
+
+/// The proposed move of `object` to a destination.
+fn move_to(object: ObjectId, to: CardDest) -> Proposed {
+    let (zone, at, enters_tapped) = card_dest(to);
     let mut mv = Proposed::moving(object, zone, MoveCause::Rule);
     if let Proposed::Move {
         position, tapped, ..

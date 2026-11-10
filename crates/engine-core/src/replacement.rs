@@ -305,6 +305,7 @@ fn applies(st: &GameState, source: ObjectId, replaces: &Replaces, ev: &Proposed)
                     crate::layers::Facts {
                         id: *object,
                         controller: controller.unwrap_or(o.owner),
+                        owner: o.owner,
                         is_token: o.is_token,
                         tapped: false,
                         attacking: false,

@@ -62,7 +62,7 @@ fn effect_polarity(e: &Effect) -> Polarity {
         | Effect::Dig { .. }
         | Effect::MoveAll { .. } => Polarity::Neutral,
         Effect::TapAll(_) | Effect::UntapAll(_) | Effect::SacrificeThis => Polarity::Neutral,
-        Effect::PutCountersAll { .. } => Polarity::Neutral,
+        Effect::PutCountersAll { .. } | Effect::ThisSpellTo { .. } => Polarity::Neutral,
         Effect::PutCounters { kind, .. } => match kind {
             CounterKind::PlusOne => Polarity::Help,
             CounterKind::MinusOne => Polarity::Harm,

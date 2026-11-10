@@ -1036,6 +1036,27 @@ Rules text: docs/rules-notes/603-triggered-abilities.md (last section).
   This is the first piece of the generated-text-versus-Oracle round trip.
 - 7,716 → 7,924 of 34,463 scripts (23.0%). Golden hashes unchanged.
 
+## D-059 Compiler batch 8 (breadth): the card a dead permanent became, self-moving spells, ownership (2026-11-10)
+Rules text: docs/rules-notes/702.29-cycling-113.6-ability-zones.md (last section).
+- **`ObjRef::TriggeringCard`** + `EventFacts::moved`: "when this dies, return it to its
+  owner's hand" — the object the permanent became in the graveyard, while it is still
+  there (CR 400.7). Forge's `Defined$ TriggeredNewCardLKICopy`; also `TriggeredCard` and
+  `Self` where the effect takes the card from the graveyard in a "dies" trigger.
+- **`Effect::ThisSpellTo { to, shuffle }`**: "exile this spell", "shuffle it into its
+  owner's library" — where the spell goes as it finishes resolving (CR 608.2n). Recorded
+  on the resolve frame and used when the spell leaves the stack by resolving.
+- A targeted card from a graveyard to a library (`PutInto`); `ValidTgtsDesc$` is text.
+- **Bug found by reading the sample, older than this batch: "you own" was compiled as "you
+  control"** (`Creature.YouOwn` in "is put into your graveyard from the battlefield").
+  `Selector::owner` now says whose card a permanent is; selector facts and last known
+  information carry the owner. Six compiled cards changed, all to their Oracle meaning.
+  An Oracle guard blocks a card that says "put into your graveyard from the battlefield"
+  where the script asks who controlled it.
+- A before/after diff of the engine's text of every compiled card
+  (`forge-coverage --sample 1`) shows exactly which cards a compiler change touches.
+- Golden state hashes re-blessed (`Selector` gained a field); event-log hashes unchanged.
+- 7,924 → 8,060 of 34,463 scripts (23.4%).
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

@@ -504,6 +504,10 @@ pub struct Selector {
     pub not_supertypes: Vec<Supertype>,
     /// "with toughness N or less".
     pub toughness_max: Option<i32>,
+    /// "A creature you own": who owns the permanent, whoever controls it (CR 108.3).
+    /// Not used for cards outside the battlefield, where `controller` is the owner.
+    #[serde(default)]
+    pub owner: Who,
 }
 
 impl Selector {
@@ -1264,6 +1268,15 @@ pub enum Effect {
         kind: CounterKind,
         count: Amount,
     },
+    /// "Exile [this spell]", "shuffle [this spell] into its owner's library", "return it
+    /// to its owner's hand": where the resolving instant or sorcery goes as it finishes
+    /// resolving, instead of its owner's graveyard (CR 608.2n).
+    ThisSpellTo {
+        to: CardDest,
+        /// Then its owner shuffles their library.
+        #[serde(default)]
+        shuffle: bool,
+    },
 }
 
 /// A zone an effect takes cards out of as it resolves.
@@ -1316,6 +1329,10 @@ pub enum ObjRef {
     /// battlefield (a graveyard, a hand): the source for as long as it is still that
     /// object (CR 400.7).
     ThisCard,
+    /// "Return it to its owner's hand", of a permanent whose leaving the battlefield
+    /// triggered the ability: the card it became in the zone it went to, for as long as it
+    /// is still there (CR 400.7).
+    TriggeringCard,
 }
 
 /// Which object deals the damage of a `DealDamage`.

@@ -4278,3 +4278,191 @@ fn words_of_the_oracle_text_the_script_leaves_out() {
     assert_eq!(s.count(|e| matches!(e, Event::Shuffled { .. })), shuffles);
     assert_eq!(s.kind(), ChoiceKind::Priority);
 }
+
+// ---------------------------------------------------------------------------------------
+// The card a dead permanent became; spells that go elsewhere; ownership (D-059).
+
+const SEIZURE: &str = "Name:Test Seizure\nManaCost:2 U U\nTypes:Enchantment Aura\nK:Enchant:Creature\n\
+    S:Mode$ Continuous | AffectedDefined$ Enchanted | GainControl$ You | Description$ Text.\nOracle:Text.";
+
+// CR 400.7, 603.6c (2026-11-06). Forge: `Defined$ TriggeredNewCardLKICopy` in a "dies"
+// trigger — "return it to its owner's hand": the card where it went, while it is there.
+// `Creature.YouOwn`: whose card it is, whoever controlled it (CR 108.3).
+#[test]
+fn the_card_a_dead_permanent_became() {
+    let cards = [
+        creature(
+            "Test Loyal Hound",
+            "W",
+            "Dog",
+            "1/1",
+            "T:Mode$ ChangesZone | Origin$ Battlefield | Destination$ Graveyard | ValidCard$ Card.Self | Execute$ TrigReturn | TriggerDescription$ Text.\n\
+             SVar:TrigReturn:DB$ ChangeZone | Origin$ Graveyard | Destination$ Hand | Defined$ TriggeredNewCardLKICopy",
+        ),
+        "Name:Test Mortician\nManaCost:B\nTypes:Enchantment\n\
+         T:Mode$ ChangesZone | Origin$ Battlefield | Destination$ Graveyard | ValidCard$ Creature.YouOwn | TriggerZones$ Battlefield | Execute$ TrigTop | TriggerDescription$ Text.\n\
+         SVar:TrigTop:DB$ ChangeZone | Origin$ Graveyard | Destination$ Library | LibraryPosition$ 0 | Defined$ TriggeredNewCardLKICopy\nOracle:Text."
+            .to_string(),
+        spell(
+            "Test Grave Purge",
+            "B",
+            "Instant",
+            "A:SP$ ChangeZone | Origin$ Graveyard | Destination$ Exile | ValidTgts$ Card | SpellDescription$ Text.",
+        ),
+        SMITE.to_string(),
+        SEIZURE.to_string(),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let settle = |s: &mut Script| {
+        drive_until(s, |s| {
+            s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+        })
+    };
+    // The Hound dies and comes back to its owner's hand.
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Swamp", "Swamp"]);
+    sc.card(P1, Zone::Battlefield, "Swamp");
+    sc.card(P0, Zone::Battlefield, "Test Loyal Hound");
+    sc.cards(P0, Zone::Hand, &["Test Smiting", "Test Smiting"]);
+    sc.card(P1, Zone::Hand, "Test Grave Purge");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Smiting").target("Test Loyal Hound").pay();
+    settle(&mut s);
+    assert!(s.find(P0, Zone::Hand, "Test Loyal Hound").is_some());
+    // Again — but in response to the trigger the card is exiled from the graveyard: the
+    // ability doesn't follow it there.
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Swamp"]);
+    sc.card(P1, Zone::Battlefield, "Swamp");
+    sc.card(P0, Zone::Battlefield, "Test Loyal Hound");
+    sc.card(P0, Zone::Hand, "Test Smiting");
+    sc.card(P1, Zone::Hand, "Test Grave Purge");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Smiting")
+        .target("Test Loyal Hound")
+        .pay()
+        .pass_all();
+    // The trigger is on the stack; the opponent responds.
+    drive_until(&mut s, |s| {
+        s.who() == P1 && s.kind() == ChoiceKind::Priority
+    });
+    assert_eq!(s.st.stack.len(), 1);
+    s.cast("Test Grave Purge").target("Test Loyal Hound").pay();
+    settle(&mut s);
+    assert!(s.find(P0, Zone::Exile, "Test Loyal Hound").is_some());
+    assert!(s.find(P0, Zone::Hand, "Test Loyal Hound").is_none());
+
+    // "A creature you own": my Elf under the opponent's control dies — into my graveyard,
+    // and the Mortician puts that card on top of my library. Their Golem under my control
+    // is not mine.
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Swamp", "Swamp", "Test Mortician"]);
+    let elf = sc.card(P0, Zone::Battlefield, "Test Elf");
+    let golem = sc.card(P1, Zone::Battlefield, "Test Golem");
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Seizure");
+    sc.attach(theirs, elf);
+    let mine = sc.card(P0, Zone::Battlefield, "Test Seizure");
+    sc.attach(mine, golem);
+    sc.cards(P0, Zone::Hand, &["Test Smiting", "Test Smiting"]);
+    let mut s = Script::new(sc.build());
+    assert_eq!(chars(&s.st, elf).controller, P1);
+    assert_eq!(chars(&s.st, golem).controller, P0);
+    s.cast("Test Smiting").target_object(golem).pay();
+    settle(&mut s);
+    assert!(s.find(P1, Zone::Graveyard, "Test Golem").is_some());
+    s.cast("Test Smiting").target_object(elf).pay();
+    settle(&mut s);
+    assert!(s.find(P0, Zone::Graveyard, "Test Elf").is_none());
+    let top = *s.st.zones.list(Zone::Library, P0).last().unwrap();
+    assert_eq!(s.name(top), "Test Elf");
+}
+
+// CR 608.2n (2026-11-06). Forge: `DB$ ChangeZone | Origin$ Stack | Destination$ Exile` and
+// `… Destination$ Library | Shuffle$ True | Defined$ Parent` on a spell: where the spell
+// goes as it finishes resolving. A countered spell goes to the graveyard as always.
+#[test]
+fn spells_that_go_somewhere_else_when_they_resolve() {
+    let cards = [
+        spell(
+            "Test Insight",
+            "U",
+            "Sorcery",
+            "A:SP$ Draw | NumCards$ 1 | SubAbility$ DBExile | SpellDescription$ Text.\n\
+             SVar:DBExile:DB$ ChangeZone | Origin$ Stack | Destination$ Exile",
+        ),
+        spell(
+            "Test Beacon",
+            "U",
+            "Sorcery",
+            "A:SP$ GainLife | LifeAmount$ 3 | SubAbility$ DBShuffle | SpellDescription$ Text.\n\
+             SVar:DBShuffle:DB$ ChangeZone | Origin$ Stack | Destination$ Library | Shuffle$ True | Defined$ Parent",
+        ),
+        spell(
+            "Test Negation",
+            "U",
+            "Instant",
+            "A:SP$ Counter | TargetType$ Spell | ValidTgts$ Card | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Island"; 3]);
+    sc.card(P1, Zone::Battlefield, "Island");
+    sc.cards(
+        P0,
+        Zone::Hand,
+        &["Test Insight", "Test Beacon", "Test Insight"],
+    );
+    sc.card(P1, Zone::Hand, "Test Negation");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Insight").pay().pass_all();
+    assert!(s.find(P0, Zone::Exile, "Test Insight").is_some());
+    assert!(s.find(P0, Zone::Graveyard, "Test Insight").is_none());
+    let (library, shuffles) = (
+        library_size(&s, P0),
+        s.count(|e| matches!(e, Event::Shuffled { .. })),
+    );
+    s.cast("Test Beacon").pay().pass_all();
+    assert_eq!(life(&s, P0), 43);
+    assert_eq!(library_size(&s, P0), library + 1);
+    assert_eq!(
+        s.count(|e| matches!(e, Event::Shuffled { .. })),
+        shuffles + 1
+    );
+    // Countered: it never resolves, so it goes where countered spells go.
+    s.cast("Test Insight").pay().pass();
+    s.cast("Test Negation")
+        .target("Test Insight")
+        .pay()
+        .pass_all();
+    assert!(s.find(P0, Zone::Graveyard, "Test Insight").is_some());
+}
+
+// Forge: `ChangeZone | Origin$ Graveyard | Destination$ Library` with a target — "put
+// target card from your graveyard on top of your library" (CR 401.4 for one card: no
+// order to choose).
+#[test]
+fn a_card_from_a_graveyard_to_a_library() {
+    let cards = [spell(
+        "Test Reclaiming",
+        "G",
+        "Sorcery",
+        "A:SP$ ChangeZone | Origin$ Graveyard | Destination$ Library | LibraryPosition$ 0 | ValidTgts$ Card.YouOwn | SpellDescription$ Text.",
+    )];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.card(P0, Zone::Battlefield, "Forest");
+    sc.card(P0, Zone::Graveyard, "Test Elf");
+    sc.card(P1, Zone::Graveyard, "Test Golem");
+    sc.card(P0, Zone::Hand, "Test Reclaiming");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Reclaiming");
+    // Only my own graveyard's card: with one legal target it is chosen at once.
+    if matches!(s.kind(), ChoiceKind::ChooseTargets { .. }) {
+        assert_eq!(target_names(&s), ["Test Elf"]);
+        s.target("Test Elf");
+    }
+    s.pay().pass_all();
+    let top = *s.st.zones.list(Zone::Library, P0).last().unwrap();
+    assert_eq!(s.name(top), "Test Elf");
+}

@@ -53,6 +53,10 @@ pub struct EventFacts {
     pub player: Option<PlayerId>,
     /// "That much": its amount (the damage dealt).
     pub amount: u32,
+    /// What the permanent that left the battlefield became in the zone it went to
+    /// ("return it to its owner's hand").
+    #[serde(default)]
+    pub moved: Option<ObjectId>,
 }
 
 /// Last known information about an object that left the battlefield (CR 113.7a, 608.2h),
@@ -62,6 +66,7 @@ pub struct Lki {
     pub card: CardDefId,
     pub chars: Characteristics,
     pub controller: PlayerId,
+    pub owner: PlayerId,
     pub is_token: bool,
     pub tapped: bool,
     /// Whether it was an attacking / a blocking creature ("whenever an attacking creature
@@ -79,6 +84,7 @@ pub(crate) fn snapshot(st: &GameState, id: ObjectId) -> Lki {
         card: o.card,
         chars: chars(st, id),
         controller: crate::layers::controller_of(st, id),
+        owner: o.owner,
         is_token: o.is_token,
         tapped: o.tapped,
         attacking,
@@ -204,6 +210,8 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
     let mut died: Vec<ObjectId> = Vec::new();
     // Everything that left the battlefield, for any zone (CR 603.6c).
     let mut left: Vec<ObjectId> = Vec::new();
+    // What each of them became where it went (CR 400.7).
+    let mut became: BTreeMap<ObjectId, ObjectId> = BTreeMap::new();
     let dealt: Vec<Dealt> = events
         .iter()
         .filter_map(|e| match e {
@@ -227,12 +235,14 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
     for e in events {
         if let Event::ZoneChange {
             old,
+            new,
             from: crate::zones::Zone::Battlefield,
             ..
         } = e
             && lki.contains_key(old)
         {
             left.push(*old);
+            became.insert(*old, *new);
         }
         if let Event::Cycled { player, card } = e {
             detect_cycled(st, *player, *card);
@@ -283,6 +293,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                         let facts = Facts {
                             id: e,
                             controller: c.controller,
+                            owner: o.owner,
                             is_token: o.is_token,
                             tapped: o.tapped,
                             attacking,
@@ -345,6 +356,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                         let facts = Facts {
                             id: *d,
                             controller: l.controller,
+                            owner: l.owner,
                             is_token: l.is_token,
                             tapped: l.tapped,
                             attacking: l.attacking,
@@ -367,7 +379,10 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                                 source_lki: src.lki.clone(),
                                 subject: Some(*d),
                                 subject_lki: Some(l.chars.clone()),
-                                facts: EventFacts::default(),
+                                facts: EventFacts {
+                                    moved: became.get(d).copied(),
+                                    ..EventFacts::default()
+                                },
                             });
                             conds.push(intervening_if.clone());
                         }
@@ -454,6 +469,7 @@ pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
                     let facts = Facts {
                         id: attacker,
                         controller: c.controller,
+                        owner: o.owner,
                         is_token: o.is_token,
                         tapped: o.tapped,
                         attacking: true,
@@ -510,6 +526,7 @@ fn object_hit(
             Facts {
                 id,
                 controller: l.controller,
+                owner: l.owner,
                 is_token: l.is_token,
                 tapped: l.tapped,
                 attacking: l.attacking,
@@ -522,6 +539,7 @@ fn object_hit(
         let facts = Facts {
             id,
             controller: c.controller,
+            owner: o.owner,
             is_token: o.is_token,
             tapped: o.tapped,
             attacking,
@@ -644,6 +662,7 @@ fn detect_damage(st: &mut GameState, dealt: &[Dealt], lki: &BTreeMap<ObjectId, L
                         facts: EventFacts {
                             player,
                             amount: g.amount,
+                            moved: None,
                         },
                     });
                     conds.push(intervening_if.clone());
@@ -776,6 +795,7 @@ mod tests {
         let facts = |id: u32| Facts {
             id: ObjectId(id),
             controller: you,
+            owner: you,
             is_token: false,
             tapped: false,
             attacking: false,

@@ -241,6 +241,7 @@ pub fn matches(
     let facts = Facts {
         id: o.id,
         controller: c.controller,
+        owner: o.owner,
         is_token: o.is_token,
         tapped: o.tapped,
         attacking,
@@ -265,6 +266,7 @@ pub fn combat_role(st: &GameState, id: ObjectId) -> (bool, bool) {
 pub struct Facts {
     pub id: ObjectId,
     pub controller: PlayerId,
+    pub owner: PlayerId,
     pub is_token: bool,
     pub tapped: bool,
     pub attacking: bool,
@@ -438,6 +440,7 @@ pub fn matches_parts(
     let Facts {
         id,
         controller: object_controller,
+        owner,
         is_token,
         tapped,
         attacking,
@@ -470,6 +473,11 @@ pub fn matches_parts(
             Who::Any => true,
             Who::You => object_controller == controller,
             Who::Opponent => object_controller != controller,
+        }
+        && match sel.owner {
+            Who::Any => true,
+            Who::You => owner == controller,
+            Who::Opponent => owner != controller,
         }
         && !(sel.other && id == source)
         && sel.token.is_none_or(|t| is_token == t)
@@ -1026,6 +1034,7 @@ mod tests {
         let facts = Facts {
             id: ObjectId(1),
             controller: you,
+            owner: you,
             is_token: false,
             tapped: false,
             attacking: false,

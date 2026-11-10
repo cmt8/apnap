@@ -33,7 +33,8 @@ pub struct Compiled {
 
 /// Parameters that never affect the rules: descriptions shown to players, prompts, and
 /// hints for Forge's AI. (docs/forge/script-format.md, "keys a translator can ignore".)
-const TEXT_ONLY: [&str; 15] = [
+const TEXT_ONLY: [&str; 16] = [
+    "ValidTgtsDesc",
     "ChangeTypeDesc",
     "ChangeNumDesc",
     "DefinedDesc",
@@ -140,6 +141,8 @@ struct Tx<'a> {
     trig: TrigCtx,
     /// The trigger being compiled is "you may" as a whole (`OptionalDecider$`).
     optional_trigger: bool,
+    /// Compiling the spell ability of an instant or sorcery ("exile this spell").
+    in_spell: bool,
     /// Additional costs of the spell, found on its `SP$` line.
     additional: Vec<AbilityDef>,
     /// The filter of the card's `K:Enchant:<filter>` line, if it is an Aura.
@@ -166,6 +169,10 @@ struct TrigCtx {
     source: bool,
     /// `TriggerCount$DamageAmount` ("that much").
     amount: bool,
+    /// A permanent died: `TriggeredNewCardLKICopy` is the card it became in the graveyard.
+    died: bool,
+    /// … and that permanent was the ability's own source.
+    died_self: bool,
 }
 
 impl Default for TrigCtx {
@@ -177,6 +184,8 @@ impl Default for TrigCtx {
             source_this: false,
             source: false,
             amount: false,
+            died: false,
+            died_self: false,
         }
     }
 }
@@ -193,6 +202,8 @@ impl TrigCtx {
                     source_this: *by == Some(ObjFilter::This),
                     source: player && *per != DamagePer::Recipient,
                     amount: true,
+                    died: false,
+                    died_self: false,
                 }
             }
             // Several events for one ability: only what all of them give.
@@ -205,11 +216,27 @@ impl TrigCtx {
                     source_this: all.iter().all(|c| c.source_this),
                     source: all.iter().all(|c| c.source),
                     amount: all.iter().all(|c| c.amount),
+                    died: all.iter().all(|c| c.died),
+                    died_self: all.iter().all(|c| c.died_self),
                 }
             }
+            Trigger::Dies(f) => TrigCtx {
+                died: true,
+                died_self: *f == ObjFilter::This,
+                ..TrigCtx::default()
+            },
             _ => TrigCtx::default(),
         }
     }
+}
+
+/// A selector for cards outside the battlefield: there a card has no controller, and the
+/// selector's `controller` stands for its owner ("a creature card you own in a graveyard").
+fn owned(mut s: Selector) -> Selector {
+    if s.owner != Who::Any {
+        s.controller = std::mem::take(&mut s.owner);
+    }
+    s
 }
 
 /// A cost names the card only where the ability works from: `{T}` and "sacrifice this" on
@@ -407,8 +434,12 @@ impl<'a> Tx<'a> {
             match p {
                 "Self" => this = true,
                 "Other" => s.other = true,
-                "YouCtrl" | "YouOwn" => s.controller = Who::You,
-                "OppCtrl" | "OppOwn" => s.controller = Who::Opponent,
+                "YouCtrl" => s.controller = Who::You,
+                "OppCtrl" => s.controller = Who::Opponent,
+                // Whose card it is, whoever controls it (CR 108.3). For cards outside
+                // the battlefield see `owned`.
+                "YouOwn" => s.owner = Who::You,
+                "OppOwn" => s.owner = Who::Opponent,
                 "!token" | "nonToken" => s.token = Some(false),
                 "token" => s.token = Some(true),
                 "Basic" => s.supertypes.push(Supertype::Basic),
@@ -551,7 +582,7 @@ impl<'a> Tx<'a> {
     /// "Permanent" is not "anything": it is a *permanent card* — not an instant or sorcery
     /// (CR 110.4a).
     fn card_selector(&mut self, text: &str) -> Option<Selector> {
-        let mut s = self.selector(text)?;
+        let mut s = owned(self.selector(text)?);
         let heads: Vec<&str> = text
             .split(',')
             .map(|a| a.trim().split('.').next().unwrap_or(""))
@@ -1362,10 +1393,55 @@ impl<'a> Tx<'a> {
                     rest_random,
                 }
             }
+            // "Exile [this spell]", "shuffle [it] into its owner's library": where the
+            // resolving spell goes instead of the graveyard (CR 608.2n).
+            "ChangeZone"
+                if rec.get("Origin") == Some("Stack")
+                    && self.in_spell
+                    && rec.get("ValidTgts").is_none()
+                    && matches!(rec.get("Defined"), None | Some("Self" | "Parent")) =>
+            {
+                rd.get("Origin");
+                rd.get("Defined");
+                let shuffle = match rd.get("Shuffle") {
+                    None => false,
+                    Some("True") => true,
+                    Some(_) => {
+                        self.block("param:ChangeZone.Shuffle");
+                        return None;
+                    }
+                };
+                let to = match rd.get("Destination") {
+                    Some("Exile") => CardDest::Exile,
+                    Some("Hand") => CardDest::Hand,
+                    Some("Library") => self.library_position(&rd)?,
+                    other => {
+                        self.block(format!("ChangeZone:Stack->{}", other.unwrap_or("?")));
+                        return None;
+                    }
+                };
+                Effect::ThisSpellTo { to, shuffle }
+            }
             "ChangeZone" => {
                 let origin = rd.get("Origin").unwrap_or("Battlefield");
                 let dest = rd.get("Destination");
+                // "Return it to its owner's hand", in an ability triggered by a permanent
+                // dying: the card it became in the graveyard.
+                let that_card = origin == "Graveyard"
+                    && triggered
+                    && rd.rec.get("ValidTgts").is_none()
+                    && match rd.rec.get("Defined") {
+                        Some(
+                            "TriggeredNewCardLKICopy" | "TriggeredCard" | "TriggeredCardLKICopy",
+                        ) => self.trig.died,
+                        None | Some("Self") => self.trig.died_self,
+                        _ => false,
+                    };
+                if that_card {
+                    rd.get("Defined");
+                }
                 let what = match self.target(&rd, chain, origin == "Graveyard") {
+                    _ if that_card => ObjRef::TriggeringCard,
                     Some(slot) => ObjRef::Target(slot),
                     // A permanent named some other way: "return this to its owner's hand"
                     // (the card itself is Forge's default).
@@ -1399,7 +1475,7 @@ impl<'a> Tx<'a> {
                     }
                     // "Put target creature on top of its owner's library", "shuffle it
                     // into its owner's library".
-                    ("Battlefield", Some("Library")) => {
+                    ("Battlefield" | "Graveyard", Some("Library")) => {
                         let to = self.library_position(&rd)?;
                         let shuffle = match rd.get("Shuffle") {
                             None => false,
@@ -1709,6 +1785,9 @@ impl<'a> Tx<'a> {
             let alt = alt.trim();
             match self.alt(alt)? {
                 Alt::Sel(mut s) => {
+                    if off_battlefield {
+                        s = owned(s);
+                    }
                     if off_battlefield && alt.split('.').next() == Some("Permanent") {
                         s.not_types.extend([CardType::Instant, CardType::Sorcery]);
                     }
@@ -2406,7 +2485,10 @@ impl<'a> Tx<'a> {
                         self.additional.push(AbilityDef::AdditionalCost(cost));
                     }
                 }
-                self.body(rec, false, "SP").map(AbilityDef::Spell)
+                self.in_spell = true;
+                let body = self.body(rec, false, "SP");
+                self.in_spell = false;
+                body.map(AbilityDef::Spell)
             }
             "AB" if api == "Mana" => {
                 let rd = Rd::new(rec, "Mana");
@@ -3232,6 +3314,7 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
         from_zone: ActivationZone::Battlefield,
         trig: TrigCtx::default(),
         optional_trigger: false,
+        in_spell: false,
         additional: Vec::new(),
         enchant: None,
         equipment: face.types.iter().any(|t| t == "Equipment"),
@@ -3605,6 +3688,24 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
         && !has_word(&compiled, "targets")
     {
         missing.push("another target");
+    }
+    // "Is put into your graveyard from the battlefield" is about whose card it is; the
+    // script may say whose creature it was.
+    for (says, has, word) in [
+        (
+            "into your graveyard from the battlefield",
+            "you own",
+            "put into your graveyard",
+        ),
+        (
+            "into an opponent's graveyard from the battlefield",
+            "an opponent owns",
+            "put into an opponent's graveyard",
+        ),
+    ] {
+        if plain.contains(says) && !compiled.contains(has) {
+            missing.push(word);
+        }
     }
     missing
 }

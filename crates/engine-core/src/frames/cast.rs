@@ -272,6 +272,7 @@ pub(crate) fn cost_reduction(st: &GameState, p: PlayerId, card: ObjectId) -> u32
     let facts = crate::layers::Facts {
         id: card,
         controller: p,
+        owner: st.object(card).owner,
         is_token: false,
         tapped: false,
         attacking: false,
@@ -331,6 +332,7 @@ fn may_spend(st: &GameState, p: PlayerId, r: &card_model::ManaRestriction, payee
             let facts = crate::layers::Facts {
                 id: card,
                 controller: p,
+                owner: st.object(card).owner,
                 is_token: false,
                 tapped: false,
                 attacking: false,

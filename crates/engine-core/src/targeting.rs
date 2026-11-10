@@ -120,6 +120,7 @@ pub fn card_matches(st: &GameState, id: ObjectId, sel: &card_model::Selector) ->
     let o = st.object(id);
     let what = card_model::Selector {
         controller: card_model::Who::Any,
+        owner: card_model::Who::Any,
         other: false,
         ..sel.clone()
     };
@@ -129,6 +130,7 @@ pub fn card_matches(st: &GameState, id: ObjectId, sel: &card_model::Selector) ->
         crate::layers::Facts {
             id,
             controller: o.owner,
+            owner: o.owner,
             is_token: o.is_token,
             tapped: false,
             attacking: false,

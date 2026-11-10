@@ -221,6 +221,7 @@ fn obj(mode: &Mode, r: ObjRef) -> String {
         ObjRef::This => "this permanent".into(),
         ObjRef::Triggering => "it".into(),
         ObjRef::ThisCard => "this card".into(),
+        ObjRef::TriggeringCard => "that card".into(),
     }
 }
 
@@ -319,6 +320,18 @@ fn selector(s: &Selector, plural: bool) -> String {
     out.push_str(&mana_value(s));
     if !s.names.is_empty() {
         out.push_str(&format!(" named {}", s.names.join(" or ")));
+    }
+    match s.owner {
+        Who::Any => {}
+        Who::You => out.push_str(" you own"),
+        Who::Opponent => out.push_str(if plural {
+            " your opponents own"
+        } else {
+            " an opponent owns"
+        }),
+    }
+    if s.owner != Who::Any && s.controller != Who::Any {
+        out.push_str(" and");
     }
     match s.controller {
         Who::Any => {}
@@ -797,6 +810,15 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                     ""
                 }
             )
+        }
+        Effect::ThisSpellTo { to, shuffle } => {
+            if *shuffle {
+                "shuffle this spell into its owner's library".to_string()
+            } else if *to == CardDest::Exile {
+                "exile this spell".to_string()
+            } else {
+                format!("put this spell {}", dest(*to, "its owner's"))
+            }
         }
         Effect::PutInto { what, to, shuffle } => {
             if *shuffle {
