@@ -2525,3 +2525,155 @@ fn other_permanents_enter_with_counters_for_each() {
         SVar:ChooseColor:DB$ ChooseColor | Defined$ You | SpellDescription$ Text.\nOracle:Text.";
     assert_eq!(forge_test_blockers(banner), ["kw:ETBReplacement"]);
 }
+
+// ---------------------------------------------------------------------------------------
+// "Look at the top N cards" (D-055).
+
+// CR 701.20e, 401.4 (2026-11-06). Forge: `Dig | DigNum$ 3 | ChangeValid$ Creature |
+// Optional$ True` — "look at the top three cards of your library; you may reveal a creature
+// card from among them and put it into your hand; put the rest on the bottom in any order".
+#[test]
+fn looking_at_the_top_cards_and_taking_one() {
+    let cards = [spell(
+        "Test Scouting",
+        "G",
+        "Sorcery",
+        "A:SP$ Dig | DigNum$ 3 | ChangeNum$ 1 | Optional$ True | ChangeValid$ Creature | SpellDescription$ Text.",
+    )];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Forest"]);
+    sc.card(P0, Zone::Library, "Test Giant"); // fourth from the top: not looked at
+    sc.card(P0, Zone::Library, "Test Golem");
+    sc.card(P0, Zone::Library, "Plains");
+    sc.card(P0, Zone::Library, "Test Elf"); // top: Elf, Plains, Golem, Giant, Forests…
+    sc.card(P0, Zone::Hand, "Test Scouting");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Scouting").pay().pass_all();
+    // Only the creatures among the three may be taken, and taking none is allowed.
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::ChooseCards));
+    assert_eq!(s.decision().prim, Primitive::PickN { min: 0, max: 1 });
+    assert_eq!(option_names(&s), ["Test Elf", "Test Golem"]);
+    // The player sees all three; the opponent sees none of them.
+    assert_eq!(engine_core::player_view(&s.st, P0).revealed.len(), 3);
+    assert!(engine_core::player_view(&s.st, P1).revealed.is_empty());
+    s.pick(
+        "the Golem",
+        |s, o| matches!(o, OptionDesc::Card { card } if s.name(*card) == "Test Golem"),
+    );
+    // The rest go to the bottom in an order the player chooses (last listed bottom-most).
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::OrderBottom));
+    assert_eq!(option_names(&s), ["Test Elf", "Plains"]);
+    s.respond(Response::Order(vec![1, 0]));
+    assert!(s.find(P0, Zone::Hand, "Test Golem").is_some());
+    let lib = library(&s, P0);
+    assert_eq!(lib[0], "Test Giant", "the fourth card is now on top");
+    assert_eq!(&lib[lib.len() - 2..], ["Plains", "Test Elf"]);
+    // The card taken for being a creature was revealed; what was looked at was not.
+    assert_eq!(
+        s.count(|e| matches!(e, Event::Revealed { cards, .. } if cards.len() == 1)),
+        1
+    );
+    assert_eq!(
+        s.count(
+            |e| matches!(e, Event::LookedAt { player, cards } if *player == P0 && cards.len() == 3)
+        ),
+        1
+    );
+}
+
+// Forge: `Dig | ValidTgts$ Player | DestinationZone$ Graveyard | LibraryPosition2$ 0` — "look
+// at the top two cards of target player's library; put one of them into their graveyard".
+// The caster looks and chooses, not the library's owner.
+#[test]
+fn looking_at_another_players_library() {
+    let cards = [spell(
+        "Test Espionage",
+        "U",
+        "Sorcery",
+        "A:SP$ Dig | ValidTgts$ Player | DestinationZone$ Graveyard | DigNum$ 2 | LibraryPosition2$ 0 | SpellDescription$ Text.",
+    )];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Island"]);
+    sc.card(P1, Zone::Library, "Test Golem");
+    sc.card(P1, Zone::Library, "Test Elf"); // P1's top: Elf, Golem
+    sc.card(P0, Zone::Hand, "Test Espionage");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Espionage").target_player(P1).pay().pass_all();
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::ChooseCards));
+    assert_eq!(s.decision().prim, Primitive::PickN { min: 1, max: 1 });
+    assert_eq!(option_names(&s), ["Test Elf", "Test Golem"]);
+    // The caster sees P1's cards; P1 doesn't get to look.
+    assert_eq!(engine_core::player_view(&s.st, P0).revealed.len(), 2);
+    assert!(engine_core::player_view(&s.st, P1).revealed.is_empty());
+    s.pick(
+        "the Elf",
+        |s, o| matches!(o, OptionDesc::Card { card } if s.name(*card) == "Test Elf"),
+    );
+    assert!(s.find(P1, Zone::Graveyard, "Test Elf").is_some());
+    assert_eq!(library(&s, P1)[0], "Test Golem", "the other stays on top");
+}
+
+// Forge: `Dig | Defined$ Player | Reveal$ True | ChangeNum$ All | ChangeValid$ Land |
+// DestinationZone$ Battlefield | Tapped$ True | DestinationZone2$ Exile` — "each player
+// reveals the top two cards of their library, puts all land cards revealed this way onto
+// the battlefield tapped, and exiles the rest". Nobody chooses anything.
+#[test]
+fn each_player_reveals_and_keeps_the_lands() {
+    let clearing = |extra: &str| {
+        spell(
+            "Test Clearing",
+            "G",
+            "Sorcery",
+            &format!(
+                "A:SP$ Dig | DigNum$ 2 | Defined$ Player | Reveal$ True | ChangeNum$ All | ChangeValid$ Land | DestinationZone$ Battlefield | Tapped$ True | DestinationZone2$ Exile{extra} | SpellDescription$ Text."
+            ),
+        )
+    };
+    let card = clearing("");
+    let mut sc = scenario(&[&card]);
+    sc.cards(P0, Zone::Battlefield, &["Forest"]);
+    sc.card(P0, Zone::Library, "Test Golem");
+    sc.card(P0, Zone::Library, "Plains");
+    sc.card(P1, Zone::Library, "Test Elf");
+    sc.card(P1, Zone::Library, "Test Giant");
+    sc.card(P0, Zone::Hand, "Test Clearing");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Clearing").pay().pass_all();
+    assert_eq!(s.kind(), ChoiceKind::Priority, "nothing to choose");
+    let plains = s.find(P0, Zone::Battlefield, "Plains").expect("the land");
+    assert!(s.st.object(plains).tapped);
+    assert!(s.find(P0, Zone::Exile, "Test Golem").is_some());
+    assert!(s.find(P1, Zone::Exile, "Test Elf").is_some());
+    assert!(s.find(P1, Zone::Exile, "Test Giant").is_some());
+    assert_eq!(
+        s.count(|e| matches!(e, Event::Revealed { cards, .. } if cards.len() == 2)),
+        2
+    );
+    // "Each player looks at … and puts one into their hand": Forge would have the caster
+    // choose for everyone, which is not what such a card says. Not compiled.
+    let each = spell(
+        "Test Sharing",
+        "U",
+        "Sorcery",
+        "A:SP$ Dig | DigNum$ 2 | Defined$ Player | SpellDescription$ Text.",
+    );
+    assert_eq!(forge_test_blockers(&each), ["Dig:each player chooses"]);
+    // A script that reveals where the card looks (or orders where the card says random)
+    // would play differently from the card: the card's text decides.
+    let look = "Name:Test Peeking\nManaCost:U\nTypes:Sorcery\n\
+        A:SP$ Dig | DigNum$ 3 | Reveal$ True | ChangeValid$ Creature | SpellDescription$ Text.\n\
+        Oracle:Look at the top three cards of your library. Put a creature card from among them into your hand and the rest on the bottom of your library in any order.";
+    assert_eq!(
+        forge_test_blockers(look),
+        ["Dig:look or reveal differs from the card"]
+    );
+    let order = look
+        .replace(" | Reveal$ True", "")
+        .replace("in any order", "in a random order");
+    assert_eq!(
+        forge_test_blockers(&order),
+        ["Dig:order of the rest differs from the card"]
+    );
+}

@@ -232,8 +232,21 @@ fn main() -> ExitCode {
             // `--sample N`: print every N-th compiled card as the engine understands it,
             // next to its Oracle text, for reading over.
             let sample = num(&args, "--sample", 0) as usize;
+            // `--with TEXT`: sample only among the cards whose text, as the engine understands
+            // them, contains TEXT (to read over what a new feature compiled).
+            let with = args
+                .iter()
+                .position(|a| a == "--with")
+                .and_then(|i| args.get(i + 1));
             if sample > 0 {
-                for (i, (name, c)) in lib.cards.iter().enumerate() {
+                let shown = lib.cards.iter().filter(|(_, c)| {
+                    with.is_none_or(|t| {
+                        card_model::describe::rules_text(&c.def)
+                            .iter()
+                            .any(|line| line.contains(t.as_str()))
+                    })
+                });
+                for (i, (name, c)) in shown.enumerate() {
                     if i % sample != sample / 2 {
                         continue;
                     }

@@ -92,3 +92,14 @@ Engine: every effect that moves cards without casting them goes through `Work::M
 which, for an Aura card headed to the battlefield, asks its controller-to-be what it will
 enchant (`ChoiceKind::AuraHost`; not a target, so hexproof and shroud don't matter) and
 leaves the card where it is if there is nothing it could enchant.
+
+## Looking at the top cards of a library (D-055)
+> 701.20e Some effects instruct a player to look at one or more cards. Looking at a card follows the same rules as revealing a card, except that the card is shown only to the specified player.
+
+> 401.4. If an effect puts two or more cards in a specific position in a library at the same time, the owner of those cards may arrange them in any order. That library’s owner doesn’t reveal the order in which the cards go into the library.
+
+Engine (`Work::Dig`): the effect's controller is the one who looks, picks and — where the
+effect puts cards back "in any order" — orders them, also in another player's library
+(401.4 gives the owner the order only for cards an effect simply puts there). The cards
+looked at are in that player's `PlayerView::revealed` while they decide and in their log
+(`Event::LookedAt`); other players learn only how many (`Event::LookedAtLibrary`).

@@ -618,9 +618,17 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             rest,
             rest_random,
         } => {
-            let who = player(mode, *who);
+            // The effect's controller looks and chooses, whoever's library it is. ("Each
+            // player reveals …" has nothing to choose.)
+            let each = matches!(who, PlayerRef::Each | PlayerRef::EachOpponent);
+            let owner = player(mode, *who);
+            let (who, their) = match (owner.as_str(), each) {
+                ("you", _) => ("you".to_string(), "your".to_string()),
+                (_, true) => (owner.clone(), "their".to_string()),
+                (_, false) => ("you".to_string(), format!("{owner}'s")),
+            };
             let you = who == "you";
-            let their = if you { "your" } else { "their" };
+            let their = their.as_str();
             let n = amount(count);
             let look = match (*reveal, you) {
                 (true, true) => "reveal",
@@ -653,7 +661,8 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 Take::UpTo(k) => format!("you may {shown}up to {k} {} from among them", noun(true)),
                 Take::All => format!("{shown}all {} from among them", noun(true)),
                 Take::Any => format!(
-                    "you may {shown}any number of {} from among them",
+                    "you may {}any number of {} from among them",
+                    if shown.is_empty() { "choose " } else { shown },
                     noun(true)
                 ),
             };

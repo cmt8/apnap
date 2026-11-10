@@ -879,6 +879,23 @@ play and test now; chosen over filling with basics because that plays badly.
   width, and image loading is reported in the side panel. `tests/layout.rs` holds this.
 - The log has room below its last line.
 
+## D-055 Compiler batch 4 (breadth): "look at the top N cards" and what followed (2026-11-10)
+The user's direction from here: the biggest blockers across all cards, not the precons.
+- **Dig** (`Effect::Dig` existed; now compiled): how many are taken (`ChangeNum`,
+  `Optional`), which (`ChangeValid`), where they and the rest go, reveal or look.
+  - *Engine fix found by reading the sample:* the effect's **controller** looks, picks and
+    orders, whoever's library it is ("look at the top two cards of target player's
+    library" had the library's owner doing it). `Work::Dig::chooser`, `Work::Place::by`.
+    What a player looks at is logged for that player only (`Event::LookedAt`, appended).
+  - Forge has the activator choose for every library; for "each player …" that is only
+    right when nobody has anything to choose, so anything else is a blocker.
+  - Three kinds of script-versus-card differences are checked against the card's Oracle
+    text and blocked: revealing where the card looks, looking where it reveals, and the
+    order of the rest (any order / random). Found in the first sample read (Forging the
+    Anchor, Sarkhan's Dragonfire).
+- `harness forge-coverage --sample N --with TEXT` reads over just the cards whose compiled
+  text contains TEXT.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

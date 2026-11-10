@@ -57,10 +57,12 @@ pub enum Work {
     },
     /// CR 701.24: these players shuffle their libraries.
     Shuffle { players: Vec<PlayerId> },
-    /// Put cards somewhere. Two or more going to the top or bottom of a library are put
-    /// there in an order their owner (`player`) chooses (CR 401.4), unless `random`.
+    /// Put cards somewhere. Two or more going to the top or bottom of `player`'s library
+    /// are put there in an order chosen by `by` — their owner (CR 401.4), or the player an
+    /// effect has put them there "in any order" — unless `random`.
     Place {
         player: PlayerId,
+        by: PlayerId,
         cards: Vec<ObjectId>,
         to: CardDest,
         random: bool,
@@ -74,10 +76,12 @@ pub enum Work {
         surveil: bool,
         looking: Vec<ObjectId>,
     },
-    /// "Look at the top `n` cards of your library; put some somewhere and the rest
-    /// somewhere else." `looking`: the cards, top first, once the player looks.
+    /// "Look at the top `n` cards of `player`'s library; put some somewhere and the rest
+    /// somewhere else." `chooser` — the effect's controller — looks, picks and orders.
+    /// `looking`: the cards, top first, once they look.
     Dig {
         player: PlayerId,
+        chooser: PlayerId,
         n: u32,
         spec: Box<DigSpec>,
         looking: Vec<ObjectId>,
@@ -542,6 +546,7 @@ impl ResolveFrame {
                             if !cards.is_empty() {
                                 self.work.push(Work::Place {
                                     player,
+                                    by: player,
                                     cards,
                                     to: spec.to,
                                     random: false,
@@ -573,6 +578,7 @@ impl ResolveFrame {
                 }
                 Work::Place {
                     player,
+                    by,
                     mut cards,
                     to,
                     random,
@@ -590,19 +596,16 @@ impl ResolveFrame {
                                 o => unreachable!("not a card: {o:?}"),
                             })
                             .collect();
-                    } else if library
-                        && cards.len() > 1
-                        && !random
-                        && !ordered
-                        && st.in_game(player)
-                    {
-                        // CR 401.4: their owner arranges them.
+                    } else if library && cards.len() > 1 && !random && !ordered && st.in_game(by) {
+                        // CR 401.4: their owner arranges them (or whoever the effect
+                        // lets put them there in any order).
                         let options = cards
                             .iter()
                             .map(|&card| OptionDesc::Card { card })
                             .collect();
                         self.work.push(Work::Place {
                             player,
+                            by,
                             cards,
                             to,
                             random,
@@ -615,7 +618,7 @@ impl ResolveFrame {
                         };
                         return Flow::ask(
                             Frame::Resolve(Box::new(self)),
-                            player,
+                            by,
                             kind,
                             Primitive::Order,
                             options,
@@ -698,6 +701,7 @@ impl ResolveFrame {
                         if rest.len() > 1 {
                             self.work.push(Work::Place {
                                 player,
+                                by: player,
                                 cards: rest,
                                 to: CardDest::LibraryTop,
                                 random: false,
@@ -707,6 +711,7 @@ impl ResolveFrame {
                         if !picked.is_empty() {
                             self.work.push(Work::Place {
                                 player,
+                                by: player,
                                 cards: picked,
                                 to: if surveil {
                                     CardDest::Graveyard
@@ -755,6 +760,7 @@ impl ResolveFrame {
                 }
                 Work::Dig {
                     player,
+                    chooser,
                     n,
                     spec,
                     mut looking,
@@ -763,7 +769,7 @@ impl ResolveFrame {
                         picked_cards(&inp)
                     } else {
                         looking = top_cards(st, player, n);
-                        if !st.in_game(player) || looking.is_empty() {
+                        if !st.in_game(player) || !st.in_game(chooser) || looking.is_empty() {
                             continue;
                         }
                         st.emit(Event::LookedAtLibrary {
@@ -773,6 +779,12 @@ impl ResolveFrame {
                         if spec.reveal {
                             st.emit(Event::Revealed {
                                 player,
+                                cards: looking.clone(),
+                            });
+                        } else {
+                            // CR 701.20e: only the player looking sees them.
+                            st.emit(Event::LookedAt {
+                                player: chooser,
                                 cards: looking.clone(),
                             });
                         }
@@ -799,13 +811,14 @@ impl ResolveFrame {
                                 .collect();
                             self.work.push(Work::Dig {
                                 player,
+                                chooser,
                                 n,
                                 spec,
                                 looking,
                             });
                             return Flow::ask(
                                 Frame::Resolve(Box::new(self)),
-                                player,
+                                chooser,
                                 ChoiceKind::ChooseCards,
                                 Primitive::PickN { min, max },
                                 options,
@@ -840,6 +853,7 @@ impl ResolveFrame {
                         if !rest.is_empty() {
                             self.work.push(Work::Place {
                                 player,
+                                by: chooser,
                                 cards: rest,
                                 to: spec.rest,
                                 random: spec.rest_random,
@@ -849,6 +863,7 @@ impl ResolveFrame {
                         if !taken.is_empty() {
                             self.work.push(Work::Place {
                                 player,
+                                by: chooser,
                                 cards: taken,
                                 to: spec.to,
                                 random: false,
@@ -1447,6 +1462,8 @@ impl ResolveFrame {
                 for player in self.players_apnap(st, k, who).into_iter().rev() {
                     self.work.push(Work::Dig {
                         player,
+                        // The effect's controller looks and chooses, whoever's library.
+                        chooser: self.controller,
                         n,
                         spec: Box::new(spec.clone()),
                         looking: Vec::new(),
@@ -1466,6 +1483,7 @@ impl ResolveFrame {
                     }
                     self.work.push(Work::Place {
                         player: owner,
+                        by: owner,
                         cards: vec![o],
                         to,
                         random: false,

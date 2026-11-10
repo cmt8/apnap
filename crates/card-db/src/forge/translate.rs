@@ -14,8 +14,8 @@ use card_model::{
     AbilityDef, Affected, Amount, BasicLandType, Body, CardDef, CardDest, CardType, CardZone,
     Color, CombatRule, Condition, ContinuousEffect, Cost, CostChoice, CounterKind, DamageBy,
     EachPlayerAction, Effect, Keyword, ManaCost, ManaProduce, ManaRestriction, ManaType, Mode,
-    ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, Signed, Supertype, TargetFilter,
-    TargetRef, Timing, Trigger, TriggerStep, Who,
+    ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, Signed, Supertype, Take,
+    TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -853,6 +853,128 @@ impl<'a> Tx<'a> {
                     && rec.get("Defined").is_none() =>
             {
                 self.choose_cards(&rd, chain, triggered)?
+            }
+            // "Look at / reveal the top N cards of your library; put some of them
+            // somewhere and the rest somewhere else" (docs/forge/effects.md §16).
+            "Dig" => {
+                let slot = self.target(&rd, chain, false);
+                let who = match slot {
+                    Some(i) => Some(PlayerRef::Target(i)),
+                    None => self.player(&rd, chain, triggered),
+                };
+                let count = rd.get("DigNum").and_then(|n| self.amount(n, chain));
+                let optional = match rd.get("Optional") {
+                    None => Some(false),
+                    Some("True") => Some(true),
+                    Some(_) => None,
+                };
+                // How many go to the first place: that many (as many as there are), "you
+                // may", every one that qualifies, or any number.
+                let take = match (rd.get("ChangeNum").unwrap_or("1"), optional) {
+                    ("All", Some(false)) => Some(Take::All),
+                    ("Any", Some(_)) | ("All", Some(true)) => Some(Take::Any),
+                    (n, Some(optional)) => n.parse::<u32>().ok().map(|n| match optional {
+                        true => Take::UpTo(n),
+                        false => Take::Exactly(n),
+                    }),
+                    (_, None) => None,
+                };
+                if take.is_none() {
+                    self.block("Dig:ChangeNum");
+                }
+                let valid = rd.get("ChangeValid");
+                let cards = match valid {
+                    None => Some(Vec::new()),
+                    Some(f) => self.card_alts(f, true),
+                };
+                // A library position is a literal here, and the bottom is the default.
+                let place = |tx: &mut Self,
+                             zone: Option<&str>,
+                             zone_default: &str,
+                             pos: Option<&str>,
+                             tapped: bool| {
+                    match (zone.unwrap_or(zone_default), pos) {
+                        ("Hand", None) => Some(CardDest::Hand),
+                        ("Graveyard", None) => Some(CardDest::Graveyard),
+                        ("Exile", None) => Some(CardDest::Exile),
+                        ("Battlefield", None) => Some(CardDest::Battlefield { tapped }),
+                        ("Library", None | Some("-1")) => Some(CardDest::LibraryBottom),
+                        ("Library", Some("0")) => Some(CardDest::LibraryTop),
+                        (z, _) => {
+                            tx.block(format!("Dig:to {z}"));
+                            None
+                        }
+                    }
+                };
+                let tapped = rd.get("Tapped").is_some();
+                let to = place(
+                    self,
+                    rd.get("DestinationZone"),
+                    "Hand",
+                    rd.get("LibraryPosition"),
+                    tapped,
+                );
+                if tapped && !matches!(to, Some(CardDest::Battlefield { .. })) {
+                    self.block("Dig:Tapped");
+                    return None;
+                }
+                let rest = place(
+                    self,
+                    rd.get("DestinationZone2"),
+                    "Library",
+                    rd.get("LibraryPosition2"),
+                    false,
+                );
+                let reveal = rd.get("Reveal").is_some();
+                let no_reveal = rd.get("NoReveal").is_some();
+                // Some scripts reveal every card where the card says "look at … you may
+                // reveal a [card] from among them": that shows opponents more than the
+                // card does.
+                // The same goes for looking where the card reveals, and for the order the
+                // rest is put back in. The card's own text decides.
+                let rest_random = rd.get("RestRandomOrder").is_some();
+                if let Some(o) = &self.face.oracle {
+                    let o = o.to_lowercase();
+                    let looks = o.contains("look at the top");
+                    let reveals = o.contains("reveal the top") || o.contains("reveals the top");
+                    if (reveal && looks && !reveals) || (!reveal && reveals && !looks) {
+                        self.block("Dig:look or reveal differs from the card");
+                        return None;
+                    }
+                    let to_library = matches!(
+                        rd.rec.get("DestinationZone2").unwrap_or("Library"),
+                        "Library"
+                    );
+                    if to_library && rest_random != o.contains("random order") {
+                        self.block("Dig:order of the rest differs from the card");
+                        return None;
+                    }
+                }
+                // Forge has the activator look, pick and order for every library. That is
+                // right for "target player's library"; for "each player …" it is only
+                // right when nobody has anything to decide.
+                let (who, take, to, rest) = (who?, take?, to?, rest?);
+                let in_library =
+                    |d: CardDest| matches!(d, CardDest::LibraryTop | CardDest::LibraryBottom);
+                if matches!(who, PlayerRef::Each | PlayerRef::EachOpponent)
+                    && (take != Take::All || in_library(to) || (in_library(rest) && !rest_random))
+                {
+                    self.block("Dig:each player chooses");
+                    return None;
+                }
+                Effect::Dig {
+                    who,
+                    count: count?,
+                    reveal,
+                    take,
+                    // Cards picked for what they are are shown, unless the script says
+                    // not ("put a card into your hand" needs no proof).
+                    reveal_taken: valid.is_some() && !no_reveal,
+                    cards: cards?,
+                    to,
+                    rest,
+                    rest_random,
+                }
             }
             "ChangeZone" => {
                 let origin = rd.get("Origin").unwrap_or("Battlefield");

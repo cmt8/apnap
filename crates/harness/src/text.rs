@@ -214,6 +214,18 @@ fn event_line(st: &Narrator, e: &Event, viewer: Option<PlayerId>) -> Option<Stri
         Event::Replaced { source } => {
             format!("  ({}'s replacement effect applies)", st.name(*source))
         }
+        Event::Revealed { player, cards } => {
+            let names: Vec<String> = cards.iter().map(|c| st.name(*c)).collect();
+            format!("  {} reveals {}", p(*player), names.join(", "))
+        }
+        // Hidden from everyone but the player who looked.
+        Event::LookedAt { player, cards } => {
+            if viewer.is_some_and(|v| v != *player) {
+                return None;
+            }
+            let names: Vec<String> = cards.iter().map(|c| st.name(*c)).collect();
+            format!("  {} looks at {}", p(*player), names.join(", "))
+        }
         Event::PlayerLost { player, reason } => format!("{} LOSES ({reason:?})", p(*player)),
         Event::GameOver { winner } => match winner {
             Some(w) => format!("== game over: {} wins ==", p(*w)),

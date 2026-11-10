@@ -271,4 +271,9 @@ pub enum Event {
         top: u32,
         bottom: u32,
     },
+    /// CR 701.20e: `player` looked at these cards (hidden from everyone else).
+    LookedAt {
+        player: PlayerId,
+        cards: Vec<ObjectId>,
+    },
 }
