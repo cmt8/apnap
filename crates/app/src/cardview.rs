@@ -213,7 +213,16 @@ pub struct CardLook<'a> {
     pub pile: u32,
     pub outline: Option<Stroke>,
     pub badges: &'a [Badge],
+    /// Painted this far from where it is laid out (an attacker stepping forward).
+    pub offset: Vec2,
+    /// Animate turning and stepping under this id (`None`: changes are instant).
+    pub motion: Option<egui::Id>,
+    /// Can be dragged onto something (a player to attack, a creature to block).
+    pub draggable: bool,
 }
+
+/// How long a card takes to turn or step forward, in seconds.
+const MOTION_TIME: f32 = 0.14;
 
 fn frame_color(def: &CardDef) -> Color32 {
     if def.card_types.contains(&CardType::Land) {
@@ -364,21 +373,46 @@ pub fn paint_proxy(ui: &egui::Ui, art: &mut Art, rect: Rect, def: &CardDef) {
 
 /// Paint the card image into `rect`, turned a quarter clockwise if `sideways`.
 fn paint_image(painter: &egui::Painter, tex: &TextureHandle, rect: Rect, sideways: bool) {
+    paint_image_turned(painter, tex, rect, if sideways { 1.0 } else { 0.0 });
+}
+
+/// Paint the card image centred in `rect`, turned `turn` quarters clockwise (0 = upright,
+/// 1 = tapped; in between while it is turning). `rect` has the shape of the card at rest.
+fn paint_image_turned(painter: &egui::Painter, tex: &TextureHandle, rect: Rect, turn: f32) {
     // On whole pixels, so a texture made for this size maps one to one.
     let rect = rect.round_to_pixels(painter.pixels_per_point());
-    if !sideways {
+    if turn <= 0.0 {
         painter.image(tex.id(), rect, full_uv(), Color32::WHITE);
         return;
     }
-    // The card's top edge ends up on the right.
-    let mut mesh = egui::Mesh::with_texture(tex.id());
-    let corners = [
-        (rect.left_top(), pos2(0.0, 1.0)),
-        (rect.right_top(), pos2(0.0, 0.0)),
-        (rect.right_bottom(), pos2(1.0, 0.0)),
-        (rect.left_bottom(), pos2(1.0, 1.0)),
+    let corners = if turn >= 1.0 {
+        // The card's top edge ends up on the right.
+        [
+            rect.right_top(),
+            rect.right_bottom(),
+            rect.left_bottom(),
+            rect.left_top(),
+        ]
+    } else {
+        // Mid-turn: the upright card rotated about the centre.
+        let long = rect.width().max(rect.height());
+        let half = vec2(long * CARD_ASPECT / 2.0, long / 2.0);
+        let (sin, cos) = (turn * std::f32::consts::FRAC_PI_2).sin_cos();
+        let c = rect.center();
+        [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].map(|(sx, sy)| {
+            let (x, y) = (sx * half.x, sy * half.y);
+            pos2(c.x + x * cos - y * sin, c.y + x * sin + y * cos)
+        })
+    };
+    // Corners are the card's own top-left, top-right, bottom-right, bottom-left.
+    let uvs = [
+        pos2(0.0, 0.0),
+        pos2(1.0, 0.0),
+        pos2(1.0, 1.0),
+        pos2(0.0, 1.0),
     ];
-    for (pos, uv) in corners {
+    let mut mesh = egui::Mesh::with_texture(tex.id());
+    for (pos, uv) in corners.into_iter().zip(uvs) {
         mesh.vertices.push(egui::epaint::Vertex {
             pos,
             uv,
@@ -387,6 +421,29 @@ fn paint_image(painter: &egui::Painter, tex: &TextureHandle, rect: Rect, sideway
     }
     mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
     painter.add(egui::Shape::mesh(mesh));
+}
+
+/// An arrow from `from` to `to` (an attack, a block, something being dragged).
+pub fn paint_arrow(painter: &egui::Painter, from: Pos2, to: Pos2, color: Color32, width: f32) {
+    let d = to - from;
+    let len = d.length();
+    if len < 4.0 {
+        return;
+    }
+    let dir = d / len;
+    let side = vec2(-dir.y, dir.x);
+    let head = (width * 3.2).min(len * 0.5);
+    let neck = to - dir * head;
+    let shadow = Color32::from_black_alpha(170);
+    for (w, c, grow) in [(width + 3.0, shadow, 1.5), (width, color, 0.0)] {
+        painter.line_segment([from, neck], Stroke::new(w, c));
+        let wing = head * 0.6 + grow;
+        painter.add(egui::Shape::convex_polygon(
+            vec![to + dir * grow, neck + side * wing, neck - side * wing],
+            c,
+            Stroke::NONE,
+        ));
+    }
 }
 
 /// The strip along a card's bottom edge with the artist and copyright line, as a fraction
@@ -455,9 +512,28 @@ pub fn card_widget(ui: &mut egui::Ui, art: &mut Art, look: &CardLook<'_>) -> Res
     let extra = look.pile.saturating_sub(1).min(4);
     let step = (upright.x * PILE_STEP).round();
     let size = one + vec2(extra as f32 * step, 0.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let sense = if look.draggable {
+        Sense::click_and_drag()
+    } else {
+        Sense::click()
+    };
+    let (rect, resp) = ui.allocate_exact_size(size, sense);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, look.label));
-    if !ui.is_rect_visible(rect) {
+    // Turning and stepping forward are animated; the layout itself changes at once.
+    let (turn, offset) = match look.motion {
+        Some(id) => {
+            let ctx = ui.ctx();
+            (
+                ctx.animate_bool_with_time(id.with("turn"), look.tapped, MOTION_TIME),
+                vec2(
+                    ctx.animate_value_with_time(id.with("x"), look.offset.x, MOTION_TIME),
+                    ctx.animate_value_with_time(id.with("y"), look.offset.y, MOTION_TIME),
+                ),
+            )
+        }
+        None => (if look.tapped { 1.0 } else { 0.0 }, look.offset),
+    };
+    if !ui.is_rect_visible(rect.expand(look.height)) {
         return resp;
     }
     let tex = if look.def.token {
@@ -465,12 +541,12 @@ pub fn card_widget(ui: &mut egui::Ui, art: &mut Art, look: &CardLook<'_>) -> Res
     } else {
         art.card(ui.ctx(), &look.def.name, width_px)
     };
-    let front = Rect::from_min_size(rect.min, one);
+    let front = Rect::from_min_size(rect.min, one).translate(offset);
     // The rest of a pile peeks out to the right, underneath.
     for i in (0..=extra).rev() {
         let r = front.translate(vec2(i as f32 * step, 0.0));
         match &tex {
-            Some(tex) => paint_image(ui.painter(), tex, r, look.tapped),
+            Some(tex) => paint_image_turned(ui.painter(), tex, r, turn),
             None => paint_proxy(ui, art, r, look.def),
         }
     }
@@ -494,7 +570,7 @@ pub fn card_widget(ui: &mut egui::Ui, art: &mut Art, look: &CardLook<'_>) -> Res
         )];
         paint_badges(
             ui.painter(),
-            Rect::from_min_max(pos2(rect.max.x - one.x, rect.min.y), rect.max),
+            Rect::from_min_max(pos2(rect.max.x - one.x, rect.min.y), rect.max).translate(offset),
             look.tapped,
             &b,
             font_size,

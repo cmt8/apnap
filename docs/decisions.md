@@ -436,6 +436,40 @@ symbols and the normal Scryfall card image.
 - Golden re-bless: only `state_hash` changed (the catalog is part of the state: `Selector`
   gained a field and `Test Wyrmling` was added); every `log_hash` is unchanged.
 
+## D-040 Playing on the table: combat planning, the grid, one main button (user request 2026-11-09)
+The user asked for play that is "more dynamic so everything isn't just clicking on a menu",
+named Arena's combat as the model, and asked for the four players in a grid.
+- **Combat is planned on the table and confirmed once.** The engine still asks about one
+  creature at a time (its protocol since M0; CR 508.1/509.1 declare as a whole). The app
+  finds out the whole declaration up front — `Session::declaration` answers "no" for each
+  creature on a *copy* of the game and records who is asked and what they may do — and the
+  human plans it in `combat::Plan`: click a creature to attack (click it again to stand it
+  down), click a player's name to choose who new attackers go at, click a blocker and then
+  its attacker, or drag a creature onto a player or an attacker; "All attack", "Clear", and
+  one button to confirm. `Session::declare` then gives the engine exactly those answers,
+  creature by creature. Nothing is sent before the confirmation, a plan can only hold
+  options the engine offered, and if the engine sends a block back as illegal (menace) the
+  app says why and the block is planned again. The look-ahead reveals nothing hidden (the
+  human's own creatures and public combat state) and never touches the real game.
+- **What it looks like.** Attackers step towards the middle of the table and blockers half
+  as far (declared or still planned); arrows show who blocks what and, when there is more
+  than one player to attack, who is attacked; a dragged creature trails an arrow. Cards
+  turn smoothly when they tap. Animation is off in tests (`App::animate`).
+- **The table.** Players sit clockwise in turn order: the viewer bottom left, the others
+  along the top and back along the bottom (`table_layout`; four players = a 2 x 2 grid, two
+  face each other, three put both opponents on top). Every seat has a row of lands at the
+  far edge and a row of everything else towards the middle. Card size is the largest at
+  which the whole table fits, letting rows wrap when that allows bigger cards
+  (`fit_card_height`); a player who is out keeps only a narrow seat.
+- **Options live where the thing is.** An option that belongs to a card or player drawn on
+  the table is chosen by clicking it (gold outline) and no longer also listed as a button;
+  the decision bar shows only what has no place on the table (pass, keep/mulligan, modes,
+  yes/no…). "List every option" in the top bar brings the full list back. The main action
+  — pass priority, confirm — is one large button, and the space bar presses it.
+- **Tests.** `tests/combat.rs` drives all of this with real pointer presses and drags at
+  the places the cards are drawn; the robot (`tests/robot.rs`) declares every attack and
+  block of its games that way too.
+
 ## D-039 Future scope: other 1v1 constructed formats (user note 2026-11-09)
 The user wants 1v1 **Modern, Legacy, Vintage, etc.** supported in future. Nothing is built
 for this yet; it is recorded so current work doesn't close the door:

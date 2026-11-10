@@ -5,12 +5,13 @@
 //! invariant 6). "Stops" are a UI concern (spec §6): the engine always asks, and the session
 //! answers trivial priority decisions for the human according to the configured stops.
 
+use engine_core::ObjectId;
 use engine_core::decision::{ChoiceKind, OptionDesc, PendingDecision, Primitive, Response};
 use engine_core::turn::Step;
 use engine_core::{Agent, GameState, IllegalResponse, PlayerId, PlayerView, player_view};
 use harness::text::Narrator;
 use harness::{Agents, Replay, Setup};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Steps at which the human is offered priority even when the stack is empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,6 +32,32 @@ impl Default for Stops {
             auto_pay: true,
         }
     }
+}
+
+/// The creature a per-creature decision is about (the attacker or blocker being asked).
+pub fn subject(d: &PendingDecision) -> Option<ObjectId> {
+    d.options.iter().find_map(|o| match o {
+        OptionDesc::Attack { attacker, .. } => Some(*attacker),
+        OptionDesc::Block { blocker, .. } => Some(*blocker),
+        _ => None,
+    })
+}
+
+/// One creature the human is asked about while declaring attackers or blockers, with what
+/// it may do (attack one of these players / block one of these attackers).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Candidate {
+    pub creature: ObjectId,
+    pub options: Vec<OptionDesc>,
+}
+
+/// A whole attack or block declaration. The engine asks about one creature at a time (CR
+/// 508.1 / 509.1 are declared as a whole; the engine's protocol is per creature); the UI
+/// lets the human plan all of it on the board and then answers creature by creature.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Declaration {
+    pub kind: ChoiceKind,
+    pub candidates: Vec<Candidate>,
 }
 
 pub struct Session {
@@ -155,6 +182,68 @@ impl Session {
             return Err(IllegalResponse::NoPendingDecision);
         }
         self.apply(r)
+    }
+
+    /// The declaration the human is in the middle of being asked for, from the creature
+    /// currently asked about onwards. Found by answering "no" for each creature on a copy
+    /// of the game; nothing here is hidden from the human (they are their own creatures).
+    pub fn declaration(&self) -> Option<Declaration> {
+        let kind = self.human_decision()?.kind;
+        if !matches!(
+            kind,
+            ChoiceKind::DeclareAttackers | ChoiceKind::DeclareBlockers
+        ) {
+            return None;
+        }
+        let mut sim = self.st.clone();
+        let mut candidates = Vec::new();
+        while let Some(d) = sim.pending.clone() {
+            if Some(d.player) != self.human || d.kind != kind || candidates.len() >= 1_000 {
+                break;
+            }
+            let Some(creature) = subject(&d) else {
+                break;
+            };
+            // An illegal block declaration starts over (CR 734): the same creature again.
+            if candidates
+                .iter()
+                .any(|c: &Candidate| c.creature == creature)
+            {
+                break;
+            }
+            candidates.push(Candidate {
+                creature,
+                options: d.options,
+            });
+            if engine_core::step(&mut sim, Response::Pick(Vec::new())).is_err() {
+                break;
+            }
+        }
+        Some(Declaration { kind, candidates })
+    }
+
+    /// Answer a whole declaration: `choices` gives the option chosen for each creature that
+    /// attacks or blocks; every other creature asked about doesn't.
+    pub fn declare(
+        &mut self,
+        choices: &BTreeMap<ObjectId, OptionDesc>,
+    ) -> Result<(), IllegalResponse> {
+        let Some(declaration) = self.declaration() else {
+            return Err(IllegalResponse::NoPendingDecision);
+        };
+        for c in &declaration.candidates {
+            let Some(d) = self.human_decision().cloned() else {
+                break;
+            };
+            if d.kind != declaration.kind || subject(&d) != Some(c.creature) {
+                break;
+            }
+            let pick = choices
+                .get(&c.creature)
+                .and_then(|o| d.options.iter().position(|x| x == o));
+            self.apply(Response::Pick(pick.into_iter().collect()))?;
+        }
+        Ok(())
     }
 
     /// Start passing priority automatically for the rest of this turn.

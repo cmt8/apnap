@@ -5,6 +5,7 @@
 
 use crate::art::Art;
 use crate::cardview::{self, Badge, CardLook, Corner};
+use crate::combat::Plan;
 use crate::session::Session;
 use card_model::describe;
 use card_model::{AbilityDef, CardCatalog, CardDefId, CardType, CounterKind};
@@ -15,6 +16,7 @@ use engine_core::turn::Step;
 use engine_core::view::{ObjectView, PlayerView};
 use engine_core::{ObjectId, PlayerId};
 use harness::{Agents, Replay, Setup};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -85,6 +87,15 @@ pub struct App {
     resume_at: Option<Instant>,
     /// The card under the pointer, shown enlarged next to it.
     pub zoomed: Option<Preview>,
+    /// The attack or block being planned on the board (see `combat`).
+    pub plan: Option<Plan>,
+    /// Also show a button for every option that can be chosen by clicking the board.
+    pub list_options: bool,
+    /// Animate cards turning and stepping forward.
+    pub animate: bool,
+    /// Where things were drawn last frame (for tests that use the pointer).
+    pub card_rects: BTreeMap<ObjectId, egui::Rect>,
+    pub player_rects: BTreeMap<PlayerId, egui::Rect>,
 }
 
 /// The card shown enlarged next to the pointer.
@@ -126,9 +137,15 @@ enum Action {
     PassTurn,
     ToMenu,
     Save,
-    ToggleStop { mine: bool, step: Step },
+    ToggleStop {
+        mine: bool,
+        step: Step,
+    },
     AutoPay(bool),
     Pace(u64),
+    ListOptions(bool),
+    /// Confirm the planned attack or block.
+    Declare,
     ReplayStep(usize),
     ReplayPlay(bool),
 }
@@ -155,15 +172,22 @@ impl App {
             pace_ms,
             resume_at: None,
             zoomed: None,
+            plan: None,
+            list_options: false,
+            animate: true,
+            card_rects: BTreeMap::new(),
+            player_rects: BTreeMap::new(),
         };
         app.refresh_saves();
         app
     }
 
     /// An app that keeps its saved games in `dir`, never touches the network or the image
-    /// cache, and doesn't pause for AI actions (tests).
+    /// cache, and doesn't pause for AI actions or animate (tests).
     pub fn with_saves_dir(dir: PathBuf) -> Self {
-        App::new(dir, Art::disabled(), 0)
+        let mut app = App::new(dir, Art::disabled(), 0);
+        app.animate = false;
+        app
     }
 
     pub fn refresh_saves(&mut self) {
@@ -210,6 +234,7 @@ impl App {
         self.status.clear();
         self.decision_id = u64::MAX;
         self.zoomed = None;
+        self.plan = None;
         self.resume_at = None;
     }
 
@@ -309,7 +334,7 @@ pub fn prompt(kind: ChoiceKind) -> &'static str {
 }
 
 /// The card or player an option belongs to. For attack/block decisions the option is
-/// anchored to what is being attacked/blocked (the creature asked about is the subject).
+/// anchored to what is being attacked/blocked.
 pub fn anchor(o: &OptionDesc) -> Option<Anchor> {
     Some(match o {
         OptionDesc::PlayLand { card }
@@ -335,15 +360,6 @@ pub fn anchor(o: &OptionDesc) -> Option<Anchor> {
         | OptionDesc::Shield { .. }
         | OptionDesc::Accept
         | OptionDesc::Decline => return None,
-    })
-}
-
-/// The creature a per-creature decision is about (the attacker or blocker being asked).
-fn subject(d: &PendingDecision) -> Option<ObjectId> {
-    d.options.iter().find_map(|o| match o {
-        OptionDesc::Attack { attacker, .. } => Some(*attacker),
-        OptionDesc::Block { blocker, .. } => Some(*blocker),
-        _ => None,
     })
 }
 
@@ -436,10 +452,12 @@ struct Ctx<'a> {
     view: &'a PlayerView,
     cat: &'a CardCatalog,
     decision: Option<&'a PendingDecision>,
-    subject: Option<ObjectId>,
     focus: Option<Anchor>,
     /// Options chosen so far in a multi-select decision.
     picked: &'a [usize],
+    /// The attack or block being planned, if that is what the human is doing.
+    plan: Option<&'a Plan>,
+    animate: bool,
 }
 
 impl Ctx<'_> {
@@ -464,6 +482,17 @@ struct Pointer {
     /// The options of the card or player that was clicked.
     clicked: Option<Vec<usize>>,
     hovered: Option<Hover>,
+    /// While planning combat: a creature that was clicked, a player that was clicked.
+    plan_click: Option<ObjectId>,
+    player_click: Option<PlayerId>,
+    /// A creature being dragged, and where the pointer is.
+    dragging: Option<(ObjectId, egui::Pos2)>,
+    /// A creature that was dropped, and where.
+    dropped: Option<(ObjectId, egui::Pos2)>,
+    /// Where each permanent and each player's area and header were drawn.
+    cards: BTreeMap<ObjectId, egui::Rect>,
+    players: BTreeMap<PlayerId, egui::Rect>,
+    headers: BTreeMap<PlayerId, egui::Rect>,
 }
 
 /// The card under the pointer.
@@ -582,12 +611,17 @@ fn badges(cx: &Ctx<'_>, o: &ObjectView, place: Place) -> Vec<Badge> {
     }
     let creature = o.card_types.contains(&CardType::Creature);
     let combat = v.combat.as_ref();
-    let attacking = combat.and_then(|c| c.attackers.iter().find(|a| a.attacker == o.id));
-    let blocking = combat.is_some_and(|c| c.attackers.iter().any(|a| a.blockers.contains(&o.id)));
-    if let Some(a) = attacking {
+    // Declared (the engine's combat state) or planned (not confirmed yet).
+    let attacking = combat
+        .and_then(|c| c.attackers.iter().find(|a| a.attacker == o.id))
+        .map(|a| a.defender)
+        .or_else(|| cx.plan.and_then(|p| p.attacks(o.id)));
+    let blocking = combat.is_some_and(|c| c.attackers.iter().any(|a| a.blockers.contains(&o.id)))
+        || cx.plan.is_some_and(|p| p.blocks(o.id).is_some());
+    if let Some(defender) = attacking {
         out.push(Badge::new(
             Corner::TopRight,
-            format!("ATK P{}", a.defender.0),
+            format!("ATK P{}", defender.0),
             RED,
             Color32::WHITE,
         ));
@@ -641,6 +675,13 @@ fn badges(cx: &Ctx<'_>, o: &ObjectView, place: Place) -> Vec<Badge> {
 }
 
 /// Draw a card — or a pile of identical ones, `group[0]` in front.
+/// How far a creature in combat steps towards the middle of the table, in card heights.
+const ATTACK_STEP: f32 = 0.16;
+const BLOCK_STEP: f32 = 0.08;
+
+/// Draw a card — or a pile of identical ones, `group[0]` in front. `forward` is the
+/// direction (+1 down, -1 up) creatures in combat step in; 0 where that doesn't apply.
+#[allow(clippy::too_many_arguments)]
 fn card(
     ui: &mut egui::Ui,
     art: &mut Art,
@@ -648,6 +689,7 @@ fn card(
     group: &[&ObjectView],
     place: Place,
     height: f32,
+    forward: f32,
     ptr: &mut Pointer,
 ) {
     let o = group[0];
@@ -658,16 +700,41 @@ fn card(
         .unwrap_or_default();
     let focused = group.iter().any(|m| cx.focus == Some(Anchor::Obj(m.id)));
     let chosen = opts.iter().any(|i| cx.picked.contains(i));
-    let is_subject = group.iter().any(|m| cx.subject == Some(m.id));
-    let outline = if focused || chosen {
+    let on_battlefield = place == Place::Battlefield;
+    // Combat being planned on the board.
+    let plan = cx.plan.filter(|_| on_battlefield);
+    let candidate = plan.is_some_and(|p| p.candidate(o.id).is_some());
+    let planned = plan.is_some_and(|p| p.choices.contains_key(&o.id));
+    let waiting = plan.is_some_and(|p| p.selected == Some(o.id));
+    let blockable = plan.is_some_and(|p| p.selected.is_some_and(|b| p.can_block(b, o.id)));
+    let outline = if focused || chosen || waiting {
         Some(Stroke::new(3.0, Color32::WHITE))
-    } else if !opts.is_empty() {
+    } else if planned {
+        let color = if plan.is_some_and(Plan::attacking) {
+            RED
+        } else {
+            BLUE
+        };
+        Some(Stroke::new(3.0, color))
+    } else if !opts.is_empty() || candidate || blockable {
         Some(Stroke::new(2.5, GOLD))
-    } else if is_subject {
-        Some(Stroke::new(2.5, BLUE))
     } else {
         None
     };
+    // Attackers step forward, blockers half as far (declared or planned).
+    let combat = cx.view.combat.as_ref().filter(|_| on_battlefield);
+    let attacking = combat.is_some_and(|c| c.attackers.iter().any(|a| a.attacker == o.id))
+        || plan.is_some_and(|p| p.attacks(o.id).is_some());
+    let blocking = combat.is_some_and(|c| c.attackers.iter().any(|a| a.blockers.contains(&o.id)))
+        || plan.is_some_and(|p| p.blocks(o.id).is_some());
+    let step = if attacking {
+        ATTACK_STEP
+    } else if blocking {
+        BLOCK_STEP
+    } else {
+        0.0
+    };
+    let offset = vec2(0.0, (forward * step * height).round());
     let mut label = card_text(o, cx.cat);
     if group.len() > 1 {
         label.push_str(&format!("\nx{}", group.len()));
@@ -676,12 +743,18 @@ fn card(
         def: cx.cat.get(o.card),
         label: &label,
         height,
-        tapped: o.tapped && place == Place::Battlefield,
+        tapped: o.tapped && on_battlefield,
         pile: group.len() as u32,
         outline,
         badges: &badges(cx, o, place),
+        offset,
+        motion: (cx.animate && on_battlefield).then(|| egui::Id::unique(("card", o.id.0))),
+        draggable: candidate,
     };
     let resp = cardview::card_widget(ui, art, &look);
+    if on_battlefield {
+        ptr.cards.insert(o.id, resp.rect.translate(offset));
+    }
     if resp.hovered() {
         let pv = Preview {
             card: o.card,
@@ -693,7 +766,20 @@ fn card(
             in_hand: place == Place::Hand,
         });
     }
-    if resp.clicked() && !opts.is_empty() {
+    if plan.is_some() {
+        if resp.clicked() {
+            ptr.plan_click = Some(o.id);
+        }
+        let pointer = ui.input(|i| i.pointer.interact_pos());
+        if let Some(pos) = pointer {
+            if resp.dragged() {
+                ptr.dragging = Some((o.id, pos));
+            }
+            if resp.drag_stopped() {
+                ptr.dropped = Some((o.id, pos));
+            }
+        }
+    } else if resp.clicked() && !opts.is_empty() {
         ptr.clicked = Some(opts);
     }
 }
@@ -711,7 +797,6 @@ fn piles<'a>(cx: &Ctx<'_>, lands: &[&'a ObjectView]) -> Vec<Vec<&'a ObjectView>>
                 .battlefield
                 .iter()
                 .any(|x| x.attached_to == Some(o.id))
-            && cx.subject != Some(o.id)
     };
     let key = |o: &ObjectView| {
         (
@@ -788,57 +873,98 @@ fn rows<'a>(cx: &Ctx<'a>, p: PlayerId) -> Rows<'a> {
 const CARD_GAP: f32 = 6.0;
 
 impl Rows<'_> {
-    /// How wide the two rows are: (width in card heights, width that doesn't scale).
-    fn extents(&self) -> [(f32, f32); 2] {
+    /// The width of each thing in the two rows (nonlands, lands), in card heights.
+    fn items(&self) -> [Vec<f32>; 2] {
         let one = |o: &ObjectView| {
             if o.tapped { 1.0 } else { cardview::CARD_ASPECT }
         };
-        let mut top = (0.0, 0.0);
-        for _ in &self.command {
-            top.0 += cardview::CARD_ASPECT;
-            top.1 += CARD_GAP;
-        }
-        for o in &self.others {
-            top.0 += one(o);
-            top.1 += CARD_GAP;
-        }
-        let mut lands = (0.0, 0.0);
-        for g in &self.lands {
-            let peek =
-                (g.len() as f32 - 1.0).min(4.0) * cardview::PILE_STEP * cardview::CARD_ASPECT;
-            lands.0 += one(g[0]) + peek;
-            lands.1 += CARD_GAP;
-        }
+        let mut top: Vec<f32> = self.command.iter().map(|_| cardview::CARD_ASPECT).collect();
+        top.extend(self.others.iter().map(|o| one(o)));
+        let lands = self
+            .lands
+            .iter()
+            .map(|g| {
+                let peek =
+                    (g.len() as f32 - 1.0).min(4.0) * cardview::PILE_STEP * cardview::CARD_ASPECT;
+                one(g[0]) + peek
+            })
+            .collect();
         [top, lands]
     }
 }
 
-/// The tallest card (the viewer's; opponents' are `OPPONENT_SCALE` of it) at which every
-/// player's permanents fit across `width` without wrapping.
-fn height_that_fits(cx: &Ctx<'_>, width: f32) -> f32 {
-    let v = cx.view;
-    let mut best = f32::INFINITY;
-    for (i, pl) in v.players.iter().enumerate() {
-        if pl.has_lost {
-            continue;
+/// One seat at the table, for working out how big the cards can be: how wide it is, and
+/// the widths (in card heights) of the things in its two rows.
+#[derive(Clone, Debug, Default)]
+pub struct SeatSize {
+    pub width: f32,
+    pub rows: [Vec<f32>; 2],
+    /// The player has left the game: the seat is just their line.
+    pub out: bool,
+}
+
+/// Space a seat needs besides its cards: the player's line and the frame.
+const SEAT_HEADER: f32 = 34.0;
+const SEAT_MARGIN: f32 = 7.0;
+const SEAT_GAP: f32 = 6.0;
+/// How wide the seat of a player who has left the game is.
+const OUT_SEAT_WIDTH: f32 = 260.0;
+/// Card heights the table chooses between.
+const CARD_MIN: f32 = 84.0;
+const CARD_MAX: f32 = 380.0;
+
+/// How many lines a row takes at card height `card` when it wraps at `width`.
+fn row_lines(items: &[f32], card: f32, width: f32) -> usize {
+    // A separator and a little air.
+    let width = width - 24.0;
+    let (mut lines, mut used) = (1, 0.0);
+    for w in items {
+        let w = w * card + CARD_GAP;
+        if used > 0.0 && used + w > width {
+            lines += 1;
+            used = 0.0;
         }
-        let p = PlayerId(i as u8);
-        let [top, lands] = rows(cx, p).extents();
-        // Separators and the frame around the area.
-        let slack = 44.0;
-        let candidates = if p == v.viewer {
-            vec![(top, 1.0), (lands, 1.0)]
-        } else {
-            // Opponents: both in one row, smaller.
-            vec![((top.0 + lands.0, top.1 + lands.1), OPPONENT_SCALE)]
-        };
-        for ((units, fixed), scale) in candidates {
-            if units > 0.0 {
-                best = best.min((width - fixed - slack) / units / scale);
-            }
-        }
+        used += w;
     }
-    best
+    lines
+}
+
+/// The height of the whole table (`grid` = its rows of seats) at card height `card`.
+pub fn table_height(grid: &[Vec<SeatSize>], card: f32) -> f32 {
+    let seat = |s: &SeatSize| {
+        let lines: usize = if s.out {
+            0
+        } else {
+            s.rows.iter().map(|r| row_lines(r, card, s.width)).sum()
+        };
+        SEAT_HEADER + 2.0 * SEAT_MARGIN + lines as f32 * (card + CARD_GAP) + SEAT_GAP
+    };
+    grid.iter()
+        .map(|seats| seats.iter().map(seat).fold(0.0, f32::max) + SEAT_GAP)
+        .sum()
+}
+
+/// The tallest card at which the whole table fits in `available` height — rows may wrap if
+/// that lets the cards be bigger. If it can't fit even with the smallest cards, the
+/// smallest it is, and the table scrolls.
+pub fn fit_card_height(grid: &[Vec<SeatSize>], available: f32) -> f32 {
+    let mut card = CARD_MAX;
+    while card > CARD_MIN && table_height(grid, card) > available {
+        card -= 4.0;
+    }
+    card.max(CARD_MIN)
+}
+
+/// Where the players sit: the viewer bottom left, the others clockwise in turn order —
+/// along the top from left to right, then back along the bottom from the right. Returns
+/// the top and the bottom row as offsets from the viewer in turn order (0 = the viewer).
+/// Two players face each other; three put both opponents on top.
+pub fn table_layout(players: usize) -> (Vec<usize>, Vec<usize>) {
+    let cols = players.div_ceil(2).max(1);
+    let top: Vec<usize> = (1..players.min(cols + 1)).collect();
+    let mut bottom = vec![0];
+    bottom.extend((cols + 1..players).rev());
+    (top, bottom)
 }
 
 /// A row of cards that wraps, centred vertically so sideways cards line up.
@@ -857,7 +983,8 @@ fn player_area(
     cx: &Ctx<'_>,
     p: PlayerId,
     height: f32,
-    compact: bool,
+    // In the top half of the table: lands at the far edge, creatures step downwards.
+    top: bool,
     ptr: &mut Pointer,
 ) {
     let v = cx.view;
@@ -877,13 +1004,35 @@ fn player_area(
     }
     let opts = cx.options_at(Anchor::Player(p));
     let active = v.active == p;
-    ui.horizontal(|ui| {
+    // Planning an attack with more than one player to attack: players are clickable, and
+    // the one new attackers are sent at is marked.
+    let attackable = cx
+        .plan
+        .filter(|plan| plan.attacking())
+        .map(Plan::defenders)
+        .filter(|d| d.len() > 1 && d.contains(&p));
+    let is_target = attackable.is_some() && cx.plan.and_then(|plan| plan.target) == Some(p);
+    let header = ui.horizontal_wrapped(|ui| {
         let text = RichText::new(head).strong().size(14.0).color(if active {
             GOLD
         } else {
             Color32::from_gray(225)
         });
-        let resp = if opts.is_empty() {
+        let resp = if attackable.is_some() {
+            let stroke = if is_target {
+                Stroke::new(3.0, RED)
+            } else {
+                Stroke::new(2.0, GOLD)
+            };
+            let r = ui.add(egui::Button::new(text).stroke(stroke));
+            if r.clicked() {
+                ptr.player_click = Some(p);
+            }
+            if is_target {
+                ui.label(RichText::new("attacking this player").strong().color(RED));
+            }
+            r
+        } else if opts.is_empty() {
             ui.label(text)
         } else {
             let stroke = if cx.focus == Some(Anchor::Player(p)) {
@@ -933,6 +1082,7 @@ fn player_area(
             );
         }
     });
+    ptr.headers.insert(p, header.response.rect);
     if pl.has_lost {
         // CR 800.4a: everything they owned has left the game; only the header remains.
         return;
@@ -942,31 +1092,27 @@ fn player_area(
         others: ordered,
         lands,
     } = rows(cx, p);
+    let forward = if top { 1.0 } else { -1.0 };
     let draw_others = |ui: &mut egui::Ui, art: &mut Art, ptr: &mut Pointer| {
         for o in &command {
-            card(ui, art, cx, &[*o], Place::Command, height, ptr);
+            card(ui, art, cx, &[*o], Place::Command, height, 0.0, ptr);
         }
         if !command.is_empty() && !ordered.is_empty() {
             ui.separator();
         }
         for o in &ordered {
-            card(ui, art, cx, &[*o], Place::Battlefield, height, ptr);
+            card(ui, art, cx, &[*o], Place::Battlefield, height, forward, ptr);
         }
     };
     let draw_lands = |ui: &mut egui::Ui, art: &mut Art, ptr: &mut Pointer| {
         for g in &lands {
-            card(ui, art, cx, g, Place::Battlefield, height, ptr);
+            card(ui, art, cx, g, Place::Battlefield, height, forward, ptr);
         }
     };
-    if compact {
-        // An opponent: everything in one row, lands last.
-        card_row(ui, height, |ui| {
-            draw_others(ui, art, ptr);
-            if !lands.is_empty() && (!ordered.is_empty() || !command.is_empty()) {
-                ui.separator();
-            }
-            draw_lands(ui, art, ptr);
-        });
+    // Creatures face the middle of the table; lands sit behind them.
+    if top {
+        card_row(ui, height, |ui| draw_lands(ui, art, ptr));
+        card_row(ui, height, |ui| draw_others(ui, art, ptr));
     } else {
         card_row(ui, height, |ui| draw_others(ui, art, ptr));
         card_row(ui, height, |ui| draw_lands(ui, art, ptr));
@@ -1072,6 +1218,7 @@ fn top_bar(
     art: &Art,
     playing: bool,
     pace_ms: u64,
+    list_options: bool,
     actions: &mut Vec<Action>,
 ) {
     ui.horizontal_wrapped(|ui| {
@@ -1122,6 +1269,17 @@ fn top_bar(
             let mut auto = s.stops.auto_pay;
             if ui.checkbox(&mut auto, "Auto-pay mana").changed() {
                 actions.push(Action::AutoPay(auto));
+            }
+            let mut list = list_options;
+            if ui
+                .checkbox(&mut list, "List every option")
+                .on_hover_text(
+                    "Also show a button for each thing you can do by clicking a card or a \
+                     player.",
+                )
+                .changed()
+            {
+                actions.push(Action::ListOptions(list));
             }
             ui.separator();
             ui.label("Opponents act:");
@@ -1292,6 +1450,9 @@ fn side_panel(ui: &mut egui::Ui, art: &mut Art, cx: &Ctx<'_>, s: &Session, ptr: 
                 pile: 1,
                 outline: (!opts.is_empty()).then_some(Stroke::new(2.5, GOLD)),
                 badges: &[],
+                offset: egui::Vec2::ZERO,
+                motion: None,
+                draggable: false,
             };
             let resp = cardview::card_widget(ui, art, &look);
             if resp.hovered() {
@@ -1329,6 +1490,78 @@ fn side_panel(ui: &mut egui::Ui, art: &mut Art, cx: &Ctx<'_>, s: &Session, ptr: 
         });
 }
 
+/// The main thing to do right now: a big button, also triggered by the space bar.
+fn primary_button(ui: &mut egui::Ui, label: &str) -> bool {
+    let text = RichText::new(label)
+        .strong()
+        .size(15.0)
+        .color(Color32::WHITE);
+    let button = egui::Button::new(text)
+        .fill(Color32::from_rgb(172, 92, 22))
+        .min_size(vec2(0.0, 30.0));
+    let clicked = ui.add(button).on_hover_text("Space").clicked();
+    let space = !ui.ctx().egui_wants_keyboard_input()
+        && ui.input(|i| i.key_pressed(egui::Key::Space) && i.modifiers.is_none());
+    clicked || space
+}
+
+/// Is the thing an option belongs to drawn on the board, where it can be clicked?
+fn on_board(v: &PlayerView, a: Anchor) -> bool {
+    match a {
+        Anchor::Player(p) => p.index() < v.players.len(),
+        Anchor::Obj(id) => {
+            v.hand.iter().any(|o| o.id == id)
+                || v.battlefield.iter().any(|o| o.id == id)
+                || v.command.iter().any(|o| o.id == id)
+                || v.stack.iter().any(|s| s.id == id)
+        }
+    }
+}
+
+/// Planning an attack or a block: the creatures are chosen on the board; this is the hint
+/// and the buttons.
+fn plan_panel(app: &mut App, ui: &mut egui::Ui, cx: &Ctx<'_>, actions: &mut Vec<Action>) {
+    let Some(plan) = app.plan.as_mut() else {
+        return;
+    };
+    let name = |id: ObjectId| find_object(cx.view, id).map_or("it", |o| o.name.as_str());
+    let (title, hint) = if plan.attacking() {
+        let hint = match (plan.defenders().len(), plan.target) {
+            (n, Some(t)) if n > 1 => format!(
+                "Click your creatures to attack P{}. Click another player's name — or drag a \
+                 creature onto their side — to attack someone else.",
+                t.0
+            ),
+            _ => "Click the creatures that attack.".to_string(),
+        };
+        ("Declare attackers", hint)
+    } else {
+        let hint = match plan.selected {
+            Some(b) => format!("Now click the attacker {} blocks.", name(b)),
+            None => "Click a creature, then the attacker it blocks — or drag it onto the \
+                     attacker."
+                .to_string(),
+        };
+        ("Declare blockers", hint)
+    };
+    ui.strong(RichText::new(title).size(15.0).color(GOLD));
+    ui.horizontal_wrapped(|ui| {
+        if primary_button(ui, &plan.confirm_label()) {
+            actions.push(Action::Declare);
+        }
+        if plan.attacking()
+            && plan.choices.len() < plan.candidates.len()
+            && ui.button("All attack").clicked()
+        {
+            plan.all_attack();
+        }
+        if !plan.choices.is_empty() && ui.button("Clear").clicked() {
+            plan.clear();
+        }
+        ui.weak(hint);
+    });
+}
+
 /// The decision panel: prompt plus a button for every option, by primitive.
 fn decision_panel(
     app: &mut App,
@@ -1337,13 +1570,18 @@ fn decision_panel(
     cx: &Ctx<'_>,
     actions: &mut Vec<Action>,
 ) {
+    if app.plan.is_some() {
+        plan_panel(app, ui, cx, actions);
+        return;
+    }
     let Some(d) = cx.decision else {
         return;
     };
+    // Options that belong to a card or player on the board are chosen there; they get a
+    // button too only if the player asks for the full list.
+    let listed =
+        |i: usize| app.list_options || !anchor(&d.options[i]).is_some_and(|a| on_board(cx.view, a));
     let mut title = prompt(d.kind).to_string();
-    if let Some(o) = cx.subject.and_then(|id| find_object(cx.view, id)) {
-        title.push_str(&format!(" — {}", o.name));
-    }
     if let (
         ChoiceKind::ChooseTargets { .. }
         | ChoiceKind::ChooseModes
@@ -1366,11 +1604,22 @@ fn decision_panel(
                 Some(a) => (0..labels.len())
                     .filter(|&i| anchor(&d.options[i]) == Some(a))
                     .collect(),
-                None => (0..labels.len()).collect(),
+                None => (0..labels.len()).filter(|&i| listed(i)).collect(),
+            };
+            let on_the_board = match app.focus {
+                Some(_) => 0,
+                None => labels.len() - shown.len(),
             };
             ui.horizontal_wrapped(|ui| {
                 for i in shown {
-                    if cardview::rich_button(ui, art, &labels[i], false).clicked() {
+                    // Passing priority is the main button (and the space bar).
+                    let pass = d.kind == ChoiceKind::Priority && d.options[i] == OptionDesc::Pass;
+                    let clicked = if pass {
+                        primary_button(ui, &labels[i])
+                    } else {
+                        cardview::rich_button(ui, art, &labels[i], false).clicked()
+                    };
+                    if clicked {
                         actions.push(Action::Respond(Response::Pick(vec![i])));
                     }
                 }
@@ -1390,6 +1639,17 @@ fn decision_panel(
                 if d.kind == ChoiceKind::Priority && ui.button("Pass until end of turn").clicked() {
                     actions.push(Action::PassTurn);
                 }
+                if on_the_board > 0 {
+                    ui.weak(match d.kind {
+                        ChoiceKind::Priority => {
+                            "Cards you can play or use are outlined in gold: click one."
+                        }
+                        ChoiceKind::ChooseTargets { .. } => {
+                            "Click a target: they are outlined in gold."
+                        }
+                        _ => "Click one of the cards or players outlined in gold.",
+                    });
+                }
             });
         }
         Primitive::PickN { min, max } => {
@@ -1403,7 +1663,12 @@ fn decision_panel(
                 app.picked.len()
             ));
             ui.horizontal_wrapped(|ui| {
+                let mut on_the_board = false;
                 for (i, label) in labels.iter().enumerate() {
+                    if !listed(i) {
+                        on_the_board = true;
+                        continue;
+                    }
                     let on = app.picked.contains(&i);
                     if cardview::rich_button(ui, art, label, on).clicked() {
                         if on {
@@ -1413,13 +1678,22 @@ fn decision_panel(
                         }
                     }
                 }
+                let ok = (*min..=*max).contains(&app.picked.len());
+                let confirmed = if ok {
+                    primary_button(ui, "Confirm")
+                } else {
+                    ui.add_enabled(false, egui::Button::new("Confirm"));
+                    false
+                };
+                if confirmed {
+                    let mut p = app.picked.clone();
+                    p.sort_unstable();
+                    actions.push(Action::Respond(Response::Pick(p)));
+                }
+                if on_the_board {
+                    ui.weak("Click the cards outlined in gold; click again to take one back.");
+                }
             });
-            let ok = (*min..=*max).contains(&app.picked.len());
-            if ui.add_enabled(ok, egui::Button::new("Confirm")).clicked() {
-                let mut p = app.picked.clone();
-                p.sort_unstable();
-                actions.push(Action::Respond(Response::Pick(p)));
-            }
         }
         Primitive::PickNumber { min, max } => {
             app.number = app.number.clamp(*min, *max);
@@ -1577,15 +1851,37 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
     }
     let view = session.view();
     let decision = session.human_decision().cloned();
+    // Attacks and blocks are planned on the board as a whole (`combat`), not answered one
+    // creature at a time.
+    let planning = decision.as_ref().is_some_and(|d| {
+        matches!(
+            d.kind,
+            ChoiceKind::DeclareAttackers | ChoiceKind::DeclareBlockers
+        )
+    });
+    if !planning {
+        app.plan = None;
+    } else if app
+        .plan
+        .as_ref()
+        .is_none_or(|p| p.decision_id != session.st.decision_count)
+    {
+        app.plan = session
+            .declaration()
+            .map(|d| Plan::new(session.st.decision_count, d));
+    }
     let cat = session.st.catalog.clone();
     let picked = app.picked.clone();
+    let plan = app.plan.clone();
     let cx = Ctx {
         view: &view,
         cat: &cat,
-        decision: decision.as_ref(),
-        subject: decision.as_ref().and_then(subject),
+        // While planning, the per-creature question itself isn't shown.
+        decision: decision.as_ref().filter(|_| plan.is_none()),
         focus: app.focus,
         picked: &picked,
+        plan: plan.as_ref(),
+        animate: app.animate,
     };
     let mut actions: Vec<Action> = Vec::new();
     let mut ptr = Pointer::default();
@@ -1598,6 +1894,7 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
             art,
             app.replay_playing,
             app.pace_ms,
+            app.list_options,
             &mut actions,
         );
     });
@@ -1655,50 +1952,124 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
                 vec2(w, hand_h),
             );
             ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
-                card(ui, art, &cx, &[o], Place::Hand, hand_h, &mut ptr);
+                card(ui, art, &cx, &[o], Place::Hand, hand_h, 0.0, &mut ptr);
             });
         }
         ui.add_space(4.0);
     });
     egui::CentralPanel::default().show(ui, |ui| {
         let n = view.players.len();
-        // Card height: opponents get one row each, the viewer two; fill the panel.
-        // Players who have left the game keep only their header line.
-        let opponents = view
-            .players
+        let seat = |k: usize| PlayerId(((view.viewer.index() + k) % n) as u8);
+        let (top, bottom) = table_layout(n);
+        let grid: Vec<(Vec<PlayerId>, bool)> = [(top, true), (bottom, false)]
+            .into_iter()
+            .filter(|(seats, _)| !seats.is_empty())
+            .map(|(seats, is_top)| (seats.into_iter().map(seat).collect(), is_top))
+            .collect();
+        // The players still in the game share their row equally; a player who is out
+        // keeps only a narrow seat.
+        let gap = SEAT_GAP;
+        let margin = SEAT_MARGIN; // the frame around a seat: its inner margin and its line
+        let out = |p: &PlayerId| view.players[p.index()].has_lost;
+        let mut widths = BTreeMap::new();
+        for (seats, _) in &grid {
+            let total = ui.available_width() - gap * (seats.len() as f32 - 1.0);
+            let equal = (total / seats.len() as f32).floor();
+            let gone = seats.iter().filter(|p| out(p)).count();
+            let narrow = equal.min(OUT_SEAT_WIDTH);
+            let live = seats.len() - gone;
+            let wide = if live == 0 {
+                equal
+            } else {
+                ((total - narrow * gone as f32) / live as f32).floor()
+            };
+            for p in seats {
+                let w = if out(p) && live > 0 { narrow } else { wide };
+                widths.insert(*p, w - 2.0 * margin);
+            }
+        }
+        // Every seat has two rows of cards (which may wrap); the cards are as big as lets
+        // the whole table fit.
+        let sizes: Vec<Vec<SeatSize>> = grid
             .iter()
-            .enumerate()
-            .filter(|(i, pl)| *i != view.viewer.index() && !pl.has_lost)
-            .count();
-        let chrome = n as f32 * 48.0;
-        let rows = opponents as f32 * OPPONENT_SCALE + 2.0;
-        // As tall as the panel allows, but not so tall that a row has to wrap — unless
-        // that would make the cards tiny, in which case rows wrap and the board scrolls.
-        let by_height = (ui.available_height() - chrome) / rows;
-        let by_width = height_that_fits(&cx, ui.available_width());
-        let height = by_height
-            .min(by_width.max(MIN_UNWRAPPED_HEIGHT))
-            .clamp(84.0, 380.0);
+            .map(|(seats, _)| {
+                seats
+                    .iter()
+                    .map(|p| SeatSize {
+                        width: widths[p],
+                        rows: if out(p) {
+                            Default::default()
+                        } else {
+                            rows(&cx, *p).items()
+                        },
+                        out: out(p),
+                    })
+                    .collect()
+            })
+            .collect();
+        let height = fit_card_height(&sizes, ui.available_height());
+        let seat_height = SEAT_HEADER + 2.0 * (height + gap);
         egui::ScrollArea::vertical()
             .id_salt("board")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                // Opponents in turn order after the viewer, then the viewer at the bottom.
-                for k in 1..=n {
-                    let p = PlayerId(((view.viewer.index() + k) % n) as u8);
-                    let me = k == n;
-                    let mut frame = egui::Frame::group(ui.style());
-                    if view.active == p {
-                        frame = frame.stroke(Stroke::new(1.5, GOLD));
-                    }
-                    frame.show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        let h = if me { height } else { height * OPPONENT_SCALE };
-                        player_area(ui, art, &cx, p, h.round(), !me, &mut ptr);
+                ui.spacing_mut().item_spacing = vec2(gap, gap);
+                for (seats, is_top) in &grid {
+                    ui.horizontal_top(|ui| {
+                        for &p in seats {
+                            let mut frame = egui::Frame::group(ui.style()).inner_margin(6.0);
+                            if view.active == p {
+                                frame = frame.stroke(Stroke::new(1.5, GOLD));
+                            }
+                            let inner = frame.show(ui, |ui| {
+                                // (The frame inherits the row's left-to-right layout.)
+                                ui.vertical(|ui| {
+                                    ui.set_width(widths[&p]);
+                                    if !out(&p) {
+                                        ui.set_min_height(seat_height);
+                                    }
+                                    player_area(ui, art, &cx, p, height, *is_top, &mut ptr);
+                                });
+                            });
+                            ptr.players.insert(p, inner.response.rect);
+                        }
                     });
                 }
             });
     });
+
+    // Combat planned with the pointer: clicks, then anything dragged and dropped.
+    if let Some(plan) = app.plan.as_mut() {
+        if let Some(id) = ptr.plan_click {
+            if plan.candidate(id).is_some() {
+                plan.click_creature(id);
+            } else {
+                plan.click_attacker(id);
+            }
+        }
+        if let Some(p) = ptr.player_click {
+            plan.click_player(p);
+        }
+        if let Some((id, pos)) = ptr.dropped {
+            if plan.attacking() {
+                let onto = ptr.players.iter().find(|(_, r)| r.contains(pos));
+                if let Some((&p, _)) = onto {
+                    plan.drop_on_player(id, p);
+                }
+            } else {
+                let onto = ptr
+                    .cards
+                    .iter()
+                    .find(|(other, r)| **other != id && r.contains(pos));
+                if let Some((&other, _)) = onto {
+                    plan.drop_on_creature(id, other);
+                }
+            }
+        }
+    }
+    combat_arrows(ui.ctx(), &view, app.plan.as_ref(), &ptr);
+    app.card_rects = std::mem::take(&mut ptr.cards);
+    app.player_rects = std::mem::take(&mut ptr.players);
 
     app.zoomed = ptr.hovered.map(|h| h.card);
     if let Some(hover) = ptr.hovered {
@@ -1749,6 +2120,26 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
                 app.pace_ms = ms;
                 app.resume_at = None;
             }
+            Action::ListOptions(on) => app.list_options = on,
+            Action::Declare => {
+                if let Some(plan) = app.plan.take() {
+                    match session.declare(&plan.choices) {
+                        Err(e) => app.status = format!("That isn't a legal answer: {e}"),
+                        // Asked again straight away: the engine sent the blocks back.
+                        Ok(())
+                            if session
+                                .human_decision()
+                                .is_some_and(|d| d.kind == plan.kind && !plan.attacking()) =>
+                        {
+                            app.status = "Those blocks aren't legal: a creature with menace \
+                                          can't be blocked by just one creature. Declare \
+                                          blockers again."
+                                .into();
+                        }
+                        Ok(()) => app.status.clear(),
+                    }
+                }
+            }
             Action::ReplayStep(n) => {
                 session.pump(n);
             }
@@ -1759,11 +2150,79 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
     false
 }
 
-/// Cards aren't shrunk below this just to keep a row from wrapping.
-const MIN_UNWRAPPED_HEIGHT: f32 = 132.0;
+/// The point on the edge of `rect` nearest to `toward` along the line from its centre.
+fn edge_point(rect: egui::Rect, toward: egui::Pos2) -> egui::Pos2 {
+    let c = rect.center();
+    let d = toward - c;
+    let sx = if d.x.abs() > f32::EPSILON {
+        rect.width() / 2.0 / d.x.abs()
+    } else {
+        f32::INFINITY
+    };
+    let sy = if d.y.abs() > f32::EPSILON {
+        rect.height() / 2.0 / d.y.abs()
+    } else {
+        f32::INFINITY
+    };
+    let s = sx.min(sy);
+    if s.is_finite() { c + d * s.min(1.0) } else { c }
+}
 
-/// Opponents' cards are drawn a little smaller than the viewer's.
-const OPPONENT_SCALE: f32 = 0.8;
+/// Arrows over the table: who attacks whom (when there is more than one player to attack),
+/// who blocks what, and the creature being dragged. Declared combat is drawn softer than
+/// what is still being planned.
+fn combat_arrows(ctx: &egui::Context, view: &PlayerView, plan: Option<&Plan>, ptr: &Pointer) {
+    let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("combat arrows"));
+    let painter = ctx.layer_painter(layer);
+    let between = |from: egui::Rect, to: egui::Rect, color: Color32, width: f32| {
+        let a = edge_point(from, to.center());
+        let b = edge_point(to, from.center());
+        cardview::paint_arrow(&painter, a, b, color, width);
+    };
+    let several_to_attack = view.players.iter().filter(|p| !p.has_lost).count() > 2;
+    let soft = |c: Color32| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 190);
+    if let Some(combat) = &view.combat {
+        for a in &combat.attackers {
+            let Some(&attacker) = ptr.cards.get(&a.attacker) else {
+                continue;
+            };
+            if several_to_attack && let Some(&header) = ptr.headers.get(&a.defender) {
+                between(attacker, header, soft(RED), 3.5);
+            }
+            for b in &a.blockers {
+                if let Some(&blocker) = ptr.cards.get(b) {
+                    between(blocker, attacker, soft(BLUE), 3.5);
+                }
+            }
+        }
+    }
+    if let Some(plan) = plan {
+        for (creature, choice) in &plan.choices {
+            let Some(&from) = ptr.cards.get(creature) else {
+                continue;
+            };
+            match choice {
+                OptionDesc::Attack { defender, .. } if plan.defenders().len() > 1 => {
+                    if let Some(&header) = ptr.headers.get(defender) {
+                        between(from, header, RED, 4.5);
+                    }
+                }
+                OptionDesc::Block { attacker, .. } => {
+                    if let Some(&to) = ptr.cards.get(attacker) {
+                        between(from, to, BLUE, 4.5);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some((creature, pos)) = ptr.dragging
+        && let Some(&from) = ptr.cards.get(&creature)
+        && !from.contains(pos)
+    {
+        cardview::paint_arrow(&painter, edge_point(from, pos), pos, Color32::WHITE, 4.5);
+    }
+}
 
 /// Draw the whole app.
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
@@ -1805,6 +2264,69 @@ mod tests {
         );
         // Nothing printed to compare with (a land that became a creature).
         assert_eq!(pt_badge((None, None), (1, 1)), Some(Color32::WHITE));
+    }
+
+    #[test]
+    fn players_sit_clockwise_around_the_table() {
+        // (top row, bottom row), as places after the viewer in turn order; 0 = the viewer.
+        assert_eq!(table_layout(2), (vec![1], vec![0]));
+        assert_eq!(table_layout(3), (vec![1, 2], vec![0]));
+        // Four: a 2 x 2 grid — viewer bottom left, then clockwise.
+        assert_eq!(table_layout(4), (vec![1, 2], vec![0, 3]));
+        assert_eq!(table_layout(5), (vec![1, 2, 3], vec![0, 4]));
+        assert_eq!(table_layout(6), (vec![1, 2, 3], vec![0, 5, 4]));
+        for n in 2..=8 {
+            let (top, bottom) = table_layout(n);
+            let mut all: Vec<usize> = top.iter().chain(&bottom).copied().collect();
+            all.sort_unstable();
+            assert_eq!(
+                all,
+                (0..n).collect::<Vec<_>>(),
+                "{n} players, each seated once"
+            );
+            assert_eq!(bottom[0], 0, "the viewer is bottom left");
+        }
+    }
+
+    #[test]
+    fn cards_are_as_big_as_lets_the_table_fit() {
+        let seat = |creatures: usize, lands: usize| SeatSize {
+            width: 1100.0,
+            rows: [
+                vec![cardview::CARD_ASPECT; creatures],
+                vec![cardview::CARD_ASPECT; lands],
+            ],
+            out: false,
+        };
+        // An empty table: the biggest cards that fit four rows into the height.
+        let empty = vec![vec![seat(0, 0), seat(0, 0)], vec![seat(0, 0), seat(0, 0)]];
+        let h = fit_card_height(&empty, 1000.0);
+        assert!(table_height(&empty, h) <= 1000.0);
+        assert!(
+            table_height(&empty, h + 4.0) > 1000.0,
+            "not the biggest: {h}"
+        );
+        assert!((180.0..=230.0).contains(&h), "{h}");
+        // Plenty of room: capped.
+        assert_eq!(fit_card_height(&empty, 5000.0), CARD_MAX);
+        // A crowded seat: cards shrink (or its rows wrap) so that it still fits.
+        let crowded = vec![vec![seat(30, 8), seat(2, 3)], vec![seat(4, 4), seat(0, 0)]];
+        let c = fit_card_height(&crowded, 1000.0);
+        assert!(c < h && c >= CARD_MIN, "{c}");
+        assert!(table_height(&crowded, c) <= 1000.0);
+        // Impossible: the smallest size, and the table scrolls.
+        let absurd = vec![vec![seat(400, 0)], vec![seat(400, 0)]];
+        assert_eq!(fit_card_height(&absurd, 600.0), CARD_MIN);
+        // A row of seats whose players are all out needs only their lines.
+        let gone = SeatSize {
+            out: true,
+            ..seat(0, 0)
+        };
+        let half_empty = vec![vec![gone.clone(), gone], vec![seat(0, 0), seat(0, 0)]];
+        assert!(fit_card_height(&half_empty, 1000.0) > h + 100.0);
+        // Wrapping: 30 cards 60 wide (+ gap) in 1100 are two lines.
+        assert_eq!(row_lines(&[0.5; 30], 120.0, 1100.0), 2);
+        assert_eq!(row_lines(&[], 120.0, 1100.0), 1);
     }
 
     #[test]

@@ -87,8 +87,10 @@ cargo run -p harness -- coverage [--verbose]              # which precon cards a
   `--agents random|heuristic|h-vs-r`,
   `script::Script` test driver, determinism/golden/property/rules tests.
 - `crates/app` — the desktop app: `session.rs` (game + AI seats + stops + save/replay, no
-  graphics), `ui.rs` (egui view: layout, decisions, pacing, the enlarged card next to the
-  pointer), `cardview.rs` (card widget: image or drawn proxy, badges, mana-symbol text),
+  graphics; `declaration`/`declare` = a whole attack or block), `ui.rs` (egui view: the
+  table grid, decisions, pacing, the enlarged card next to the pointer), `combat.rs`
+  (planning attacks/blocks on the table, D-040), `cardview.rs` (card widget: image or
+  drawn proxy, badges, motion, arrows, mana-symbol text),
   `art.rs` (Scryfall images/symbols: worker threads + cache, one texture per exact pixel
   size; `Art::disabled()` in tests), tests driven headlessly with
   egui_kittest (D-036, D-037). `card-db/src/images.rs` = image/symbol paths + download.
@@ -103,10 +105,10 @@ cargo run -p harness -- coverage [--verbose]              # which precon cards a
 Decisions: D-034 (precons: Calling All Angels, Wretched Ranks, Reign of Dragons,
 Tramplesaurus Rex), D-035 (real-card pipeline; Scryfall data only in the user's cache),
 D-037 (card images, mana symbols, proxies, AI pacing), D-038 (subtype selectors; `real-Np`
-interim decks).
+interim decks), D-040 (combat planned on the table, players in a grid, one main button).
 Order: groundwork (DONE: frozen decklists, `harness fetch-cards`, `harness coverage`,
 real-card script format) → egui app (DONE: D-036; mouse-only, save/load/replay; card
-images + mana symbols + paced AI turns: D-037) → cards deck by deck until `harness
+images + mana symbols + paced AI turns: D-037; Arena-style combat + table grid: D-040) → cards deck by deck until `harness
 coverage` is 100% (IN PROGRESS: 27 real cards verified = 31/275 deck slots; playable now
 as the `real-Np` decks. NEXT: the vocabulary most cards wait on — tokens for real cards,
 attack/damage triggers, sacrifice/discard costs, mass destroy/damage, exile, "may",

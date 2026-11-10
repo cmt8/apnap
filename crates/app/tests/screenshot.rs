@@ -62,6 +62,8 @@ fn render_menu_and_mid_game() {
     let catalog = h.state().session.as_ref().unwrap().st.catalog.clone();
     let mut brain = ai::HeuristicAgent::new(5, catalog);
     let mut shots = 0;
+    // (attacks, blocks) pictured so far.
+    let mut combat_shots = (0, 0);
     for i in 0..400 {
         h.run_ok();
         let s = h.state_mut().session.as_mut().unwrap();
@@ -89,6 +91,43 @@ fn render_menu_and_mid_game() {
                 h.run_ok();
             }
             shot(&mut h, dir.join(format!("game-{i:03}.png")));
+        }
+        // Combat as it looks while it is being planned on the table: everything attacks,
+        // or every creature that can blocks the first attacker it could.
+        let planning = matches!(
+            d.kind,
+            engine_core::ChoiceKind::DeclareAttackers | engine_core::ChoiceKind::DeclareBlockers
+        );
+        let attacking = d.kind == engine_core::ChoiceKind::DeclareAttackers;
+        let wanted = if attacking {
+            combat_shots.0 < 3 && i > 20
+        } else {
+            combat_shots.1 < 4
+        };
+        if planning
+            && wanted
+            && let Some(plan) = h.state_mut().plan.as_mut()
+        {
+            if plan.attacking() {
+                plan.all_attack();
+            } else {
+                for c in plan.candidates.clone() {
+                    if let Some(engine_core::OptionDesc::Block { attacker, .. }) = c.options.first()
+                    {
+                        plan.drop_on_creature(c.creature, *attacker);
+                    }
+                }
+            }
+            let what = if plan.attacking() { "attack" } else { "block" };
+            if !plan.choices.is_empty() {
+                if attacking {
+                    combat_shots.0 += 1;
+                } else {
+                    combat_shots.1 += 1;
+                }
+                h.remove_cursor();
+                shot(&mut h, dir.join(format!("{what}-{i:03}.png")));
+            }
         }
         let s = h.state_mut().session.as_mut().unwrap();
         let r = brain.decide(&player_view(&s.st, PlayerId(0)), &d);
