@@ -1,0 +1,23 @@
+RealCard(
+    oracle_id: "0a147009-a57c-4ac1-ab81-d8bd8b737631",
+    name: "Scourge of Valkas",
+    verified: true,
+    tests: ["scourge_of_valkas_burns_for_each_dragon"],
+    keywords: [Flying],
+    abilities: [
+        Triggered(
+            when: Enters(ThisOr((subtypes: ["Dragon"], controller: You))),
+            body: Effect((
+                targets: [AnyTarget],
+                effect: Seq([
+                    SetX(Count((subtypes: ["Dragon"], controller: You))),
+                    DealDamage(to: Target(0), amount: X, by: Triggering),
+                ]),
+            )),
+        ),
+        Activated(
+            cost: (mana: Some("{R}")),
+            body: Effect((effect: Apply(what: This, effects: [ModifyPT(1, 0)], until_end_of_turn: true))),
+        ),
+    ],
+)

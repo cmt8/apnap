@@ -30,8 +30,8 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use card_model::{
-    AbilityDef, Affected, BasicLandType, CardDef, CardType, Color, ContinuousEffect, CounterKind,
-    Keyword, ManaCost, Selector, Supertype, Who,
+    AbilityDef, AbilityId, Affected, Amount, BasicLandType, CardDef, CardDefId, CardType, Color,
+    Condition, ContinuousEffect, CounterKind, Keyword, ManaCost, Selector, Supertype, Who,
 };
 use core::cell::RefCell;
 use core::fmt;
@@ -48,16 +48,23 @@ pub struct Characteristics {
     pub subtypes: Vec<String>,
     pub land_types: Vec<BasicLandType>,
     pub keywords: Vec<Keyword>,
-    /// Indices of the printed abilities the object still has (layer 6 can remove them).
-    pub abilities: Vec<u16>,
+    /// The abilities the object has: the printed ones it still has (layer 6 can remove
+    /// them) and the ones other objects or effects give it (CR 113.2c). The same ability
+    /// can be listed more than once: given twice, it is had twice (CR 113.2c).
+    pub abilities: Vec<AbilityId>,
     pub power: Option<i32>,
     pub toughness: Option<i32>,
     /// Layer 2 (CR 613.1b). Off the battlefield/stack: the owner.
     pub controller: PlayerId,
+    /// It lost all abilities (layer 6) — also the "{T}: Add [mana]" its basic land types
+    /// give it (CR 305.6: an ability it has, though no text says so).
+    #[serde(default)]
+    pub land_abilities_lost: bool,
 }
 
 impl Characteristics {
-    pub fn printed(d: &CardDef, controller: PlayerId) -> Self {
+    /// `card` is `d`'s id in the catalog.
+    pub fn printed(card: CardDefId, d: &CardDef, controller: PlayerId) -> Self {
         Characteristics {
             controller,
             name: d.name.clone(),
@@ -68,9 +75,12 @@ impl Characteristics {
             subtypes: d.creature_types.clone(),
             land_types: d.land_types.clone(),
             keywords: d.keywords.clone(),
-            abilities: (0..d.abilities.len() as u16).collect(),
+            abilities: (0..d.abilities.len() as u16)
+                .map(|i| AbilityId::printed(card, i))
+                .collect(),
             power: d.power,
             toughness: d.toughness,
+            land_abilities_lost: false,
         }
     }
 
@@ -80,6 +90,21 @@ impl Characteristics {
 
     pub fn has(&self, k: Keyword) -> bool {
         self.keywords.contains(&k)
+    }
+
+    /// Does it have this subtype (CR 205.3)? Basic land types are subtypes too: "Mountains
+    /// you control" counts every land with the type Mountain.
+    pub fn has_subtype(&self, name: &str) -> bool {
+        self.subtypes.iter().any(|s| s == name)
+            || self.land_types.iter().any(|t| {
+                name == match t {
+                    BasicLandType::Plains => "Plains",
+                    BasicLandType::Island => "Island",
+                    BasicLandType::Swamp => "Swamp",
+                    BasicLandType::Mountain => "Mountain",
+                    BasicLandType::Forest => "Forest",
+                }
+            })
     }
 
     /// CR 110.4: permanent card types.
@@ -99,9 +124,11 @@ impl Characteristics {
 
 type View = BTreeMap<ObjectId, Characteristics>;
 
-/// Memo of the layered battlefield view, keyed by `GameState::generation`.
+/// Memo of the layered battlefield view, keyed by `GameState::generation`. The flag says
+/// the view is being worked out right now: nothing asked from inside the layer walk may
+/// need the finished view (see [`chars`]).
 #[derive(Clone, Default)]
-pub struct LayerCache(RefCell<Option<(u64, Arc<View>)>>);
+pub struct LayerCache(RefCell<Option<(u64, Arc<View>)>>, core::cell::Cell<bool>);
 
 impl fmt::Debug for LayerCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -116,7 +143,41 @@ pub fn chars(st: &GameState, id: ObjectId) -> Characteristics {
     {
         return c.clone();
     }
-    Characteristics::printed(st.card_def(id), st.object(id).controller)
+    let o = st.object(id);
+    let def = st.card_def(id);
+    let mut c = Characteristics::printed(o.card, def, o.controller);
+    // Inside the layer walk only what is printed is looked at for a card that isn't on
+    // the battlefield (its types — never its power or toughness: card-db sees to that), and
+    // working out its "*" could need the very view being built.
+    if st.layer_cache.1.get() {
+        return c;
+    }
+    // CR 604.3: characteristic-defining abilities function in every zone.
+    for a in &def.abilities {
+        if let AbilityDef::Static {
+            affected: Affected::This,
+            effects,
+            ..
+        } = a
+        {
+            for e in effects {
+                if let ContinuousEffect::SetPTBy { power, toughness } = e {
+                    let you = if o.zone == Zone::Stack {
+                        o.controller
+                    } else {
+                        o.owner
+                    };
+                    if let Some(p) = power {
+                        c.power = Some(count_amount(st, p, id, you) as i32);
+                    }
+                    if let Some(t) = toughness {
+                        c.toughness = Some(count_amount(st, t, id, you) as i32);
+                    }
+                }
+            }
+        }
+    }
+    c
 }
 
 /// Notice permanents whose layered controller changed since the engine last looked, and
@@ -148,13 +209,12 @@ pub fn controller_of(st: &GameState, id: ObjectId) -> PlayerId {
     o.controller
 }
 
-/// The printed abilities `id` currently has, with their indices.
-pub fn abilities(st: &GameState, id: ObjectId) -> Vec<(u16, &AbilityDef)> {
-    let def = st.card_def(id);
+/// The abilities `id` currently has — printed on it or given to it — with their names.
+pub fn abilities(st: &GameState, id: ObjectId) -> Vec<(AbilityId, &AbilityDef)> {
     chars(st, id)
         .abilities
         .into_iter()
-        .map(|i| (i, &def.abilities[i as usize]))
+        .map(|a| (a, st.catalog.ability(a)))
         .collect()
 }
 
@@ -165,7 +225,13 @@ pub fn view(st: &GameState) -> Arc<View> {
     {
         return v.clone();
     }
+    debug_assert!(
+        !st.layer_cache.1.get(),
+        "the layered view was asked for while it was being worked out"
+    );
+    st.layer_cache.1.set(true);
     let v = Arc::new(compute(st));
+    st.layer_cache.1.set(false);
     *st.layer_cache.0.borrow_mut() = Some((st.generation, v.clone()));
     v
 }
@@ -173,35 +239,268 @@ pub fn view(st: &GameState) -> Arc<View> {
 /// Does object `o` (with characteristics `c`) match `sel`, relative to an ability whose
 /// source is `source`, controlled by `controller`?
 pub fn matches(
+    st: &GameState,
     sel: &Selector,
     c: &Characteristics,
     o: &GameObject,
     source: ObjectId,
     controller: PlayerId,
 ) -> bool {
-    matches_parts(sel, c, o.id, c.controller, o.is_token, source, controller)
+    let (attacking, blocking) = combat_role(st, o.id);
+    let facts = Facts {
+        id: o.id,
+        controller: c.controller,
+        owner: o.owner,
+        is_token: o.is_token,
+        tapped: o.tapped,
+        attacking,
+        blocking,
+    };
+    matches_parts(sel, c, facts, source, controller)
+}
+
+/// Is `id` an attacking creature / a blocking creature right now (CR 506.4)?
+pub fn combat_role(st: &GameState, id: ObjectId) -> (bool, bool) {
+    match &st.combat {
+        None => (false, false),
+        Some(c) => (
+            c.attackers.iter().any(|a| a.attacker == id),
+            c.attackers.iter().any(|a| a.blockers.contains(&id)),
+        ),
+    }
+}
+
+/// What a selector looks at besides an object's characteristics.
+#[derive(Clone, Copy, Debug)]
+pub struct Facts {
+    pub id: ObjectId,
+    pub controller: PlayerId,
+    pub owner: PlayerId,
+    pub is_token: bool,
+    pub tapped: bool,
+    pub attacking: bool,
+    pub blocking: bool,
+}
+
+/// The permanents an amount counts, if it counts permanents ("the number of …", possibly
+/// with arithmetic on it).
+fn counted_selector(a: &card_model::Amount) -> Option<&Selector> {
+    use card_model::Amount;
+    match a {
+        Amount::Count(s) => Some(s),
+        Amount::Calc(base, _) => counted_selector(base),
+        Amount::IfAtLeast { test, .. } => counted_selector(test),
+        _ => None,
+    }
+}
+
+/// An amount read off the battlefield ("the number of …", "the total power of …"); 0 for
+/// amounts that depend on a resolving spell or ability.
+pub fn count_amount(
+    st: &GameState,
+    a: &card_model::Amount,
+    source: ObjectId,
+    controller: PlayerId,
+) -> u32 {
+    use card_model::Amount;
+    match a {
+        Amount::Fixed(n) => *n,
+        Amount::Count(sel) => matching(st, sel, source, controller).len() as u32,
+        Amount::TotalPower(sel) => matching(st, sel, source, controller)
+            .into_iter()
+            .map(|id| chars(st, id).power.unwrap_or(0).max(0) as u32)
+            .sum(),
+        Amount::CardsIn { zone, cards } => {
+            // A card outside the battlefield is looked at as printed unless its power or
+            // toughness is asked about (then a characteristic-defining ability counts,
+            // CR 604.3). The layer walk only ever gets here the first way.
+            let by_pt = cards.iter().any(|s| s.looks_at_pt());
+            let fits = |id: &ObjectId| {
+                cards.is_empty() || {
+                    let o = st.object(*id);
+                    let c = if by_pt || o.zone == Zone::Battlefield {
+                        chars(st, *id)
+                    } else {
+                        Characteristics::printed(o.card, st.card_def(*id), o.owner)
+                    };
+                    cards
+                        .iter()
+                        .any(|s| matches(st, s, &c, st.object(*id), source, controller))
+                }
+            };
+            match zone {
+                card_model::CardZone::Battlefield => {
+                    st.zones.battlefield.iter().filter(|id| fits(id)).count() as u32
+                }
+                zone => {
+                    let zone = match zone {
+                        card_model::CardZone::Hand => Zone::Hand,
+                        card_model::CardZone::Library => Zone::Library,
+                        _ => Zone::Graveyard,
+                    };
+                    st.players
+                        .iter()
+                        .map(|p| {
+                            st.zones
+                                .list(zone, p.id)
+                                .iter()
+                                .filter(|id| fits(id))
+                                .count()
+                        })
+                        .sum::<usize>() as u32
+                }
+            }
+        }
+        Amount::Calc(base, op) => op.apply(count_amount(st, base, source, controller)),
+        Amount::IfAtLeast {
+            test,
+            at_least,
+            then,
+            otherwise,
+        } => {
+            if count_amount(st, test, source, controller) >= *at_least {
+                *then
+            } else {
+                *otherwise
+            }
+        }
+        // CR 305.6 / "domain".
+        Amount::Domain => {
+            let mut types: Vec<card_model::BasicLandType> = Vec::new();
+            for &id in &st.zones.battlefield {
+                let c = chars(st, id);
+                if c.controller == controller && c.is(CardType::Land) {
+                    for t in &c.land_types {
+                        if !types.contains(t) {
+                            types.push(*t);
+                        }
+                    }
+                }
+            }
+            types.len() as u32
+        }
+        // CR 700.5.
+        Amount::Devotion(colors) => st
+            .zones
+            .battlefield
+            .iter()
+            .map(|&id| chars(st, id))
+            .filter(|c| c.controller == controller)
+            .map(|c| {
+                c.mana_cost.as_ref().map_or(0, |m| {
+                    m.symbols
+                        .iter()
+                        .filter(|s| {
+                            matches!(s, card_model::ManaSymbol::Colored(x) if colors.contains(x))
+                        })
+                        .count() as u32
+                })
+            })
+            .sum(),
+        Amount::Greatest { of, what } => matching(st, of, source, controller)
+            .into_iter()
+            .map(|id| {
+                let c = chars(st, id);
+                match what {
+                    card_model::Measure::Power => c.power.unwrap_or(0).max(0) as u32,
+                    card_model::Measure::Toughness => c.toughness.unwrap_or(0).max(0) as u32,
+                    card_model::Measure::ManaValue => {
+                        c.mana_cost.as_ref().map_or(0, |m| m.mana_value())
+                    }
+                }
+            })
+            .max()
+            .unwrap_or(0),
+        Amount::HandSize => st.zones.list(Zone::Hand, controller).len() as u32,
+        Amount::LifeTotal => st.player(controller).life.max(0) as u32,
+        Amount::X
+        | Amount::SourcePower
+        | Amount::SourceToughness
+        | Amount::TriggeringPower
+        | Amount::TriggeringToughness
+        | Amount::TriggeringAmount
+        | Amount::SacrificedPower => 0,
+    }
+}
+
+/// Every permanent matching `sel` right now, in battlefield (timestamp) order.
+pub fn matching(
+    st: &GameState,
+    sel: &Selector,
+    source: ObjectId,
+    controller: PlayerId,
+) -> Vec<ObjectId> {
+    st.zones
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| matches(st, sel, &chars(st, id), st.object(id), source, controller))
+        .collect()
 }
 
 /// [`matches`] for an object that may no longer exist (last known information).
 pub fn matches_parts(
     sel: &Selector,
     c: &Characteristics,
-    id: ObjectId,
-    object_controller: PlayerId,
-    is_token: bool,
+    facts: Facts,
     source: ObjectId,
     controller: PlayerId,
 ) -> bool {
+    let Facts {
+        id,
+        controller: object_controller,
+        owner,
+        is_token,
+        tapped,
+        attacking,
+        blocking,
+    } = facts;
     (sel.types.is_empty() || sel.types.iter().any(|t| c.is(*t)))
         && !sel.not_types.iter().any(|t| c.is(*t))
         && sel.supertypes.iter().all(|s| c.supertypes.contains(s))
+        && (sel.subtypes.is_empty() || sel.subtypes.iter().any(|s| c.has_subtype(s)))
+        && !sel.not_subtypes.iter().any(|s| c.has_subtype(s))
+        && (sel.colors.is_empty() || sel.colors.iter().any(|x| c.colors.contains(x)))
+        && sel
+            .power_min
+            .is_none_or(|n| c.power.is_some_and(|p| p >= n))
+        && sel
+            .toughness_min
+            .is_none_or(|n| c.toughness.is_some_and(|t| t >= n))
+        && sel.tapped.is_none_or(|t| tapped == t)
+        // "attacking or blocking": either is enough when both are asked for.
+        && match (sel.attacking, sel.blocking) {
+            (Some(true), Some(true)) => attacking || blocking,
+            (a, b) => a.is_none_or(|a| attacking == a) && b.is_none_or(|b| blocking == b),
+        }
+        && sel.keywords.iter().all(|k| c.has(*k))
+        && !sel.not_keywords.iter().any(|k| c.has(*k))
+        && sel
+            .power_max
+            .is_none_or(|n| c.power.is_some_and(|p| p <= n))
         && match sel.controller {
             Who::Any => true,
             Who::You => object_controller == controller,
             Who::Opponent => object_controller != controller,
         }
+        && match sel.owner {
+            Who::Any => true,
+            Who::You => owner == controller,
+            Who::Opponent => owner != controller,
+        }
         && !(sel.other && id == source)
         && sel.token.is_none_or(|t| is_token == t)
+        && {
+            // CR 202.3: no mana cost is mana value 0.
+            let mv = c.mana_cost.as_ref().map_or(0, |m| m.mana_value());
+            sel.mana_value_min.is_none_or(|n| mv >= n) && sel.mana_value_max.is_none_or(|n| mv <= n)
+        }
+        && (sel.names.is_empty() || sel.names.contains(&c.name))
+        && !sel.not_colors.iter().any(|x| c.colors.contains(x))
+        && !sel.not_supertypes.iter().any(|x| c.supertypes.contains(x))
+        && sel
+            .toughness_max
+            .is_none_or(|n| c.toughness.is_some_and(|t| t <= n))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -240,17 +539,25 @@ fn layer_of(e: &ContinuousEffect) -> Layer {
         ContinuousEffect::SetColors(_) => Layer::L5,
         ContinuousEffect::AddKeywords(_)
         | ContinuousEffect::LoseKeywords(_)
-        | ContinuousEffect::LoseAllAbilities => Layer::L6,
+        | ContinuousEffect::LoseAllAbilities
+        | ContinuousEffect::GrantAbilities(_) => Layer::L6,
+        ContinuousEffect::SetPTBy { .. } => Layer::L7a,
         ContinuousEffect::SetPT(..) => Layer::L7b,
-        ContinuousEffect::ModifyPT(..) => Layer::L7c,
+        ContinuousEffect::ModifyPT(..) | ContinuousEffect::ModifyPTBy { .. } => Layer::L7c,
         ContinuousEffect::SwitchPT => Layer::L7d,
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Key {
-    Static { source: ObjectId, index: u16 },
+    /// Printed static ability `index` of `source`.
+    Static {
+        source: ObjectId,
+        index: u16,
+    },
     Resolved(u32),
+    /// A static ability an object was given in this walk (layer 6), numbered as found.
+    Granted(u32),
 }
 
 /// One continuous effect taking part in the walk.
@@ -261,6 +568,13 @@ struct Eff<'a> {
     controller: PlayerId,
     parts: &'a [ContinuousEffect],
     affected: Aff<'a>,
+    /// "as long as …": a static effect exists only while this holds.
+    cond: Option<&'a Condition>,
+    /// The card the effect is written on: `GrantAbilities` names abilities of its
+    /// `granted` list.
+    card: CardDefId,
+    /// For a static ability: the ability its source must still have (invariant 4).
+    held: Option<AbilityId>,
 }
 
 enum Aff<'a> {
@@ -274,18 +588,125 @@ struct Walk<'a> {
     st: &'a GameState,
     /// CR 613.6: static effects that already applied in an earlier layer, with their set.
     started: BTreeMap<Key, Vec<ObjectId>>,
+    /// Given static abilities that were lost again before they applied. (Being given the
+    /// same ability once more makes a new effect, not this one.)
+    lost: Vec<Key>,
 }
 
 impl Walk<'_> {
     fn exists(&self, e: &Eff<'_>, view: &View) -> bool {
-        match e.key {
-            Key::Resolved(_) => true,
-            Key::Static { source, index } => {
+        match e.held {
+            None => true,
+            Some(held) => {
                 self.started.contains_key(&e.key)
-                    || view
-                        .get(&source)
-                        .is_some_and(|c| c.abilities.contains(&index))
+                    || (!self.lost.contains(&e.key)
+                        && view
+                            .get(&e.source)
+                            .is_some_and(|c| c.abilities.contains(&held))
+                        && self.holds(e, view))
             }
+        }
+    }
+
+    /// Does the effect's "as long as" condition hold, judged by the view as computed so
+    /// far? (Never through `chars`: that would be this computation calling itself.)
+    fn holds(&self, e: &Eff<'_>, view: &View) -> bool {
+        let Some(cond) = e.cond else {
+            return true;
+        };
+        let you = self.you(e, view);
+        let count = |sel: &Selector| {
+            view.iter()
+                .filter(|(id, c)| matches(self.st, sel, c, self.st.object(**id), e.source, you))
+                .count()
+        };
+        match cond {
+            Condition::LifeAtMost(n) => self.st.player(you).life <= *n,
+            Condition::LifeAtLeast(n) => self.st.player(you).life >= *n,
+            Condition::Control { what, at_least } => count(what) >= *at_least as usize,
+            Condition::ControlAtMost { what, at_most } => count(what) <= *at_most as usize,
+            // Cards in a graveyard have their printed characteristics.
+            Condition::CardsInGraveyard { cards, at_least } => {
+                self.st
+                    .zones
+                    .list(Zone::Graveyard, you)
+                    .iter()
+                    .filter(|&&id| crate::targeting::card_matches(self.st, id, cards))
+                    .count()
+                    >= *at_least as usize
+            }
+            Condition::YourTurn => self.st.turn.active == you,
+            Condition::NotYourTurn => self.st.turn.active != you,
+            Condition::HandAtMost(n) => self.st.zones.hands[you.index()].len() <= *n as usize,
+            // (card-db: only amounts the walk can count in place.)
+            Condition::Compare { amount, cmp, n } => {
+                cmp.holds(self.amount(amount, e, view).max(0) as u32, *n)
+            }
+        }
+    }
+
+    /// The value of "+N" in a static "+N/+N for each …" right now.
+    fn amount(&self, a: &Amount, e: &Eff<'_>, view: &View) -> i32 {
+        match a {
+            Amount::Fixed(n) => *n as i32,
+            Amount::Count(sel) => {
+                let you = self.you(e, view);
+                view.iter()
+                    .filter(|(id, c)| matches(self.st, sel, c, self.st.object(**id), e.source, you))
+                    .count() as i32
+            }
+            // Lands' types are settled in layer 4, mana costs are never changed.
+            Amount::Domain => {
+                let you = self.you(e, view);
+                let mut types: Vec<card_model::BasicLandType> = Vec::new();
+                for c in view.values() {
+                    if c.controller == you && c.is(CardType::Land) {
+                        for t in &c.land_types {
+                            if !types.contains(t) {
+                                types.push(*t);
+                            }
+                        }
+                    }
+                }
+                types.len() as i32
+            }
+            Amount::Devotion(colors) => {
+                let you = self.you(e, view);
+                view.values()
+                    .filter(|c| c.controller == you)
+                    .map(|c| {
+                        c.mana_cost.as_ref().map_or(0, |m| {
+                            m.symbols
+                                .iter()
+                                .filter(|s| {
+                                    matches!(s, card_model::ManaSymbol::Colored(x)
+                                        if colors.contains(x))
+                                })
+                                .count() as i32
+                        })
+                    })
+                    .sum()
+            }
+            // Nothing the walk is working out: cards in other zones, hands, life totals.
+            Amount::CardsIn { .. } | Amount::HandSize | Amount::LifeTotal => {
+                count_amount(self.st, a, e.source, self.you(e, view)) as i32
+            }
+            Amount::Calc(base, op) => op.apply(self.amount(base, e, view).max(0) as u32) as i32,
+            Amount::IfAtLeast {
+                test,
+                at_least,
+                then,
+                otherwise,
+            } => {
+                if self.amount(test, e, view) >= *at_least as i32 {
+                    *then as i32
+                } else {
+                    *otherwise as i32
+                }
+            }
+            // card-db rejects anything else in a static ability
+            // (`Amount::countable_in_layers`).
+            _ => 0,
         }
     }
 
@@ -293,7 +714,9 @@ impl Walk<'_> {
     /// have changed it), or the controller of a resolved effect.
     fn you(&self, e: &Eff<'_>, view: &View) -> PlayerId {
         match e.key {
-            Key::Static { .. } => view.get(&e.source).map_or(e.controller, |c| c.controller),
+            Key::Static { .. } | Key::Granted(_) => {
+                view.get(&e.source).map_or(e.controller, |c| c.controller)
+            }
             Key::Resolved(_) => e.controller,
         }
     }
@@ -322,7 +745,7 @@ impl Walk<'_> {
             Aff::Dynamic(Affected::All(sel)) => {
                 let you = self.you(e, view);
                 view.iter()
-                    .filter(|(id, c)| matches(sel, c, self.st.object(**id), e.source, you))
+                    .filter(|(id, c)| matches(self.st, sel, c, self.st.object(**id), e.source, you))
                     .map(|(id, _)| *id)
                     .collect()
             }
@@ -341,6 +764,49 @@ impl Walk<'_> {
     fn apply(&self, e: &Eff<'_>, layer: Layer, set: &[ObjectId], view: &mut View) {
         let you = self.you(e, view);
         for part in e.parts.iter().filter(|p| layer_of(p) == layer) {
+            // "+X/+X for each …" in a static ability: counted now (CR 611.3a: it isn't
+            // locked in), before anything is changed.
+            let counted;
+            let part = match part {
+                // CR 613.4a: a characteristic-defining ability sets power and/or toughness.
+                ContinuousEffect::SetPTBy { power, toughness } => {
+                    let p = power.as_ref().map(|a| self.amount(a, e, view));
+                    let t = toughness.as_ref().map(|a| self.amount(a, e, view));
+                    for id in set {
+                        if let Some(c) = view.get_mut(id) {
+                            if let Some(p) = p {
+                                c.power = Some(p);
+                            }
+                            if let Some(t) = t {
+                                c.toughness = Some(t);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // CR 113.2c: the object has the ability (once more, if it had it).
+                ContinuousEffect::GrantAbilities(indices) => {
+                    for id in set {
+                        if let Some(c) = view.get_mut(id) {
+                            c.abilities.extend(indices.iter().map(|&index| AbilityId {
+                                card: e.card,
+                                index,
+                                granted: true,
+                            }));
+                        }
+                    }
+                    continue;
+                }
+                ContinuousEffect::ModifyPTBy { power, toughness } => {
+                    let value = |s: &card_model::Signed| {
+                        let n = self.amount(&s.amount, e, view);
+                        if s.negative { -n } else { n }
+                    };
+                    counted = ContinuousEffect::ModifyPT(value(power), value(toughness));
+                    &counted
+                }
+                other => other,
+            };
             for id in set {
                 if let Some(c) = view.get_mut(id) {
                     apply_part(c, part, you);
@@ -349,11 +815,61 @@ impl Walk<'_> {
         }
     }
 
+    /// Can anything still change whether `a` exists or what it applies to? Not for a
+    /// resolved effect (it exists until it ends and its set was locked in, CR 611.2c), nor
+    /// for a static effect that began applying in an earlier layer (CR 613.6).
+    fn can_depend(&self, a: &Eff<'_>) -> bool {
+        a.held.is_some() && !self.started.contains_key(&a.key)
+    }
+
+    /// A cheap, conservative pre-check for [`Walk::depends`]: could what `b` does in this
+    /// layer change `a`'s existence or the set `a` applies to? `false` only when it
+    /// certainly can't — then the full comparison (which copies the whole view) is skipped.
+    /// Without this, many effects in one layer cost a copy of the view per pair of them.
+    fn could_matter(a: &Eff<'_>, b: &Eff<'_>, layer: Layer) -> bool {
+        let affected = match a.affected {
+            Aff::Dynamic(Affected::All(sel)) => Some(sel),
+            // "This" and "enchanted": the set doesn't look at characteristics. Only the
+            // ability's existence can change.
+            Aff::Dynamic(Affected::This | Affected::Enchanted) => None,
+            Aff::Locked(_) => return false,
+        };
+        // The permanents an "as long as" condition counts are looked at the same way.
+        let counted = match a.cond {
+            Some(Condition::Control { what, .. } | Condition::ControlAtMost { what, .. }) => {
+                Some(what)
+            }
+            Some(Condition::Compare { amount, .. }) => counted_selector(amount),
+            _ => None,
+        };
+        b.parts.iter().filter(|p| layer_of(p) == layer).any(|p| {
+            [affected, counted].into_iter().flatten().any(|s| match p {
+                ContinuousEffect::AddTypes { .. } => true,
+                ContinuousEffect::SetColors(_) => !s.colors.is_empty(),
+                ContinuousEffect::AddKeywords(_) | ContinuousEffect::LoseKeywords(_) => {
+                    !s.keywords.is_empty() || !s.not_keywords.is_empty()
+                }
+                ContinuousEffect::SetPT(..)
+                | ContinuousEffect::SetPTBy { .. }
+                | ContinuousEffect::ModifyPT(..)
+                | ContinuousEffect::ModifyPTBy { .. }
+                | ContinuousEffect::SwitchPT => s.looks_at_pt(),
+                ContinuousEffect::LoseAllAbilities | ContinuousEffect::GainControl => true,
+                // No selector looks at abilities other than keywords.
+                ContinuousEffect::GrantAbilities(_) => false,
+            }) || matches!(
+                p,
+                // The ability itself can be removed; whose it is changes "you".
+                ContinuousEffect::LoseAllAbilities | ContinuousEffect::GainControl
+            )
+        })
+    }
+
     /// CR 613.8a: does `a` depend on `b`? (Same layer is given.) Applying `b` would change
     /// `a`'s existence or what it applies to. What our effects *do* never depends on other
     /// effects, and no CDAs exist yet (613.8a(c)).
     fn depends(&self, a: &Eff<'_>, b: &Eff<'_>, layer: Layer, view: &View) -> bool {
-        if a.key == b.key {
+        if a.key == b.key || !self.can_depend(a) || !Self::could_matter(a, b, layer) {
             return false;
         }
         let before = (self.exists(a, view), self.affected(a, view));
@@ -394,6 +910,7 @@ fn apply_part(c: &mut Characteristics, part: &ContinuousEffect, you: PlayerId) {
         ContinuousEffect::LoseAllAbilities => {
             c.keywords.clear();
             c.abilities.clear();
+            c.land_abilities_lost = true;
         }
         ContinuousEffect::SetPT(p, t) => {
             c.power = Some(*p);
@@ -405,6 +922,12 @@ fn apply_part(c: &mut Characteristics, part: &ContinuousEffect, you: PlayerId) {
                 *tg += t;
             }
         }
+        // Fixed into a `ModifyPT` when the effect began (frames::resolve); never stored.
+        ContinuousEffect::ModifyPTBy { .. } => {}
+        // Counted by the walk (`Walk::apply`).
+        ContinuousEffect::SetPTBy { .. } => {}
+        // Done by the walk, which knows the card the abilities are written on.
+        ContinuousEffect::GrantAbilities(_) => {}
         ContinuousEffect::SwitchPT => {
             if let (Some(p), Some(t)) = (c.power, c.toughness) {
                 c.power = Some(t);
@@ -420,9 +943,10 @@ fn compute(st: &GameState) -> View {
         .battlefield
         .iter()
         .map(|&id| {
+            let o = st.object(id);
             (
                 id,
-                Characteristics::printed(st.card_def(id), st.object(id).controller),
+                Characteristics::printed(o.card, st.card_def(id), o.controller),
             )
         })
         .collect();
@@ -433,8 +957,14 @@ fn compute(st: &GameState) -> View {
     for &id in &st.zones.battlefield {
         let o = st.object(id);
         for (i, a) in st.card_def(id).abilities.iter().enumerate() {
-            if let AbilityDef::Static { affected, effects } = a {
+            if let AbilityDef::Static {
+                affected,
+                effects,
+                only_if,
+            } = a
+            {
                 effs.push(Eff {
+                    cond: only_if.as_ref(),
                     key: Key::Static {
                         source: id,
                         index: i as u16,
@@ -445,6 +975,8 @@ fn compute(st: &GameState) -> View {
                     controller: o.controller,
                     parts: effects,
                     affected: Aff::Dynamic(affected),
+                    card: o.card,
+                    held: Some(AbilityId::printed(o.card, i as u16)),
                 });
             }
         }
@@ -456,7 +988,9 @@ fn compute(st: &GameState) -> View {
     let mut walk = Walk {
         st,
         started: BTreeMap::new(),
+        lost: Vec::new(),
     };
+    let mut granted = 0;
     for layer in LAYERS {
         let mut pending: Vec<usize> = (0..effs.len())
             .filter(|&i| effs[i].parts.iter().any(|p| layer_of(p) == layer))
@@ -477,9 +1011,12 @@ fn compute(st: &GameState) -> View {
                 live.iter()
                     .copied()
                     .filter(|&a| {
-                        !live
-                            .iter()
-                            .any(|&b| b != a && walk.depends(&effs[a], &effs[b], layer, &view))
+                        // Most effects can't depend on anything (see `can_depend`): only
+                        // the others are compared with every live effect.
+                        !walk.can_depend(&effs[a])
+                            || !live
+                                .iter()
+                                .any(|&b| b != a && walk.depends(&effs[a], &effs[b], layer, &view))
                     })
                     .collect()
             };
@@ -491,10 +1028,77 @@ fn compute(st: &GameState) -> View {
                 .expect("non-empty");
             let set = walk.affected(&effs[pick], &view);
             walk.apply(&effs[pick], layer, &set, &mut view);
-            if let Key::Static { .. } = effs[pick].key {
+            pending.retain(|&i| i != pick);
+            if layer == Layer::L6 {
+                let here = |p: &&ContinuousEffect| layer_of(p) == layer;
+                // Abilities that were given and are lost before they applied.
+                if effs[pick]
+                    .parts
+                    .iter()
+                    .filter(here)
+                    .any(|p| matches!(p, ContinuousEffect::LoseAllAbilities))
+                {
+                    for e in &effs {
+                        if matches!(e.key, Key::Granted(_))
+                            && set.contains(&e.source)
+                            && !walk.started.contains_key(&e.key)
+                            && !walk.lost.contains(&e.key)
+                        {
+                            walk.lost.push(e.key);
+                        }
+                    }
+                }
+                // A static ability that was just given starts to work (CR 113.2c). Its
+                // parts in earlier layers never apply: the walk is past them.
+                let given: Vec<AbilityId> = effs[pick]
+                    .parts
+                    .iter()
+                    .filter(here)
+                    .filter_map(|p| match p {
+                        ContinuousEffect::GrantAbilities(indices) => Some(indices),
+                        _ => None,
+                    })
+                    .flatten()
+                    .map(|&index| AbilityId {
+                        card: effs[pick].card,
+                        index,
+                        granted: true,
+                    })
+                    .collect();
+                for &ability in &given {
+                    let AbilityDef::Static {
+                        affected,
+                        effects,
+                        only_if,
+                    } = st.catalog.ability(ability)
+                    else {
+                        continue;
+                    };
+                    for &source in set.iter().filter(|o| view.contains_key(o)) {
+                        let o = st.object(source);
+                        effs.push(Eff {
+                            key: Key::Granted(granted),
+                            // CR 613.7a: the later of its object's timestamp and that of
+                            // the effect that gave the ability.
+                            timestamp: o.timestamp.max(effs[pick].timestamp),
+                            source,
+                            controller: o.controller,
+                            parts: effects,
+                            affected: Aff::Dynamic(affected),
+                            cond: only_if.as_ref(),
+                            card: ability.card,
+                            held: Some(ability),
+                        });
+                        granted += 1;
+                        if effects.iter().any(|p| layer_of(p) == layer) {
+                            pending.push(effs.len() - 1);
+                        }
+                    }
+                }
+            }
+            if effs[pick].held.is_some() {
                 walk.started.entry(effs[pick].key).or_insert(set);
             }
-            pending.retain(|&i| i != pick);
         }
         if layer == Layer::L7c {
             // CR 613.4c / 122.1a: +1/+1 and -1/-1 counters.
@@ -520,5 +1124,70 @@ fn resolved(ci: &ContinuousInstance) -> Eff<'_> {
         controller: ci.controller,
         parts: &ci.effects,
         affected: Aff::Locked(&ci.affected),
+        cond: None,
+        card: ci.card,
+        held: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CR 205.3i: basic land types are subtypes, so a selector for "Mountains" matches a
+    /// land with the type Mountain (and a creature type is still found the usual way).
+    #[test]
+    fn selectors_treat_basic_land_types_as_subtypes() {
+        let you = PlayerId(0);
+        let land = Characteristics::printed(
+            CardDefId(0),
+            &CardDef {
+                name: "Test Peak".into(),
+                card_types: alloc::vec![CardType::Land],
+                land_types: alloc::vec![BasicLandType::Mountain, BasicLandType::Forest],
+                ..CardDef::default()
+            },
+            you,
+        );
+        assert!(land.has_subtype("Mountain") && land.has_subtype("Forest"));
+        assert!(!land.has_subtype("Island") && !land.has_subtype("Elf"));
+        let facts = Facts {
+            id: ObjectId(1),
+            controller: you,
+            owner: you,
+            is_token: false,
+            tapped: false,
+            attacking: false,
+            blocking: false,
+        };
+        let mountains = Selector {
+            subtypes: alloc::vec!["Mountain".into()],
+            controller: card_model::Who::You,
+            ..Selector::default()
+        };
+        assert!(matches_parts(&mountains, &land, facts, ObjectId(9), you));
+        let non_mountain = Selector {
+            not_subtypes: alloc::vec!["Mountain".into()],
+            ..Selector::default()
+        };
+        assert!(!matches_parts(
+            &non_mountain,
+            &land,
+            facts,
+            ObjectId(9),
+            you
+        ));
+        let elf = Characteristics::printed(
+            CardDefId(1),
+            &CardDef {
+                name: "Test Elf".into(),
+                card_types: alloc::vec![CardType::Creature],
+                creature_types: alloc::vec!["Elf".into()],
+                ..CardDef::default()
+            },
+            you,
+        );
+        assert!(elf.has_subtype("Elf") && !elf.has_subtype("Mountain"));
+        assert!(!matches_parts(&mountains, &elf, facts, ObjectId(9), you));
     }
 }

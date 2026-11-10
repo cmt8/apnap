@@ -1,0 +1,10 @@
+RealCard(
+    oracle_id: "97b477d8-2e05-475e-8ed6-7d680cb21cd9",
+    name: "Fire Diamond",
+    verified: true,
+    tests: ["diamonds_enter_tapped_and_tap_for_their_color"],
+    abilities: [
+        Replacement(replaces: ThisEnters, with: EntersTapped),
+        Mana(cost: (tap: true), produce: One(Red)),
+    ],
+)

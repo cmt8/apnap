@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "13279222-422d-4447-9451-2463b0c714c6",
+    name: "Garruk's Packleader",
+    verified: true,
+    tests: ["garruks_packleader_may_draw_for_big_creatures"],
+    abilities: [
+        Triggered(
+            when: Enters(Matching((types: [Creature], controller: You, other: true, power_min: Some(3)))),
+            body: Effect((effect: May(Draw(who: You, amount: Fixed(1))))),
+        ),
+    ],
+)

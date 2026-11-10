@@ -33,14 +33,25 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
     Apply batch performed (D-025).
 12. Illegal responses are rejected before any mutation (state hash unchanged).
 13. No Wizards/Scryfall assets in the repo (card data/images are fetched at runtime into the
-    XDG cache). Test cards are invented ("Test …"). Prior-art engines (Forge, XMage,
-    MTG-Ichor, phase-rs, …) are design references only — never copy their code.
+    XDG cache). Test cards are invented ("Test …"). The project is GPL-3.0-or-later (D-046):
+    Forge's card scripts (GPL v3) are compiled into our cards, and its sources may be read
+    to learn what a script feature means — but the scripts are fetched into the cache, not
+    committed (they contain card names and Oracle text), and engine code is written for
+    this engine, not transplanted. Non-GPL-compatible engines stay design references only.
+15. The Forge compiler (`card_db::forge`) never drops or guesses: a card compiles only if
+    every line, parameter, filter property and expression of its script is understood;
+    anything else is a named blocker. A word in a filter is a subtype only if it is a
+    known subtype. Every script feature the compiler accepts needs a test of its meaning.
 
 ## Conventions
 - Library: index 0 = bottom, last = top. Stack/graveyard: last = top. Battlefield: timestamp order.
 - `Response::Pick` is a set; ordered answers use `Order`. `MulliganBottom/Order`: last listed
   ends up bottom-most.
 - Events contain hidden info (engine truth); redact before showing to a player (D-014).
+- An ability is named by `AbilityId { card, index, granted }` — where its text is written —
+  never by a bare index into its object's card: an object can have abilities of other
+  cards (`CardDef::granted`, `ContinuousEffect::GrantAbilities`, D-064), and have one twice.
+  Read abilities through `layers::abilities(st, id)` and `st.catalog.ability(id)`.
 - New dependency in engine-core/card-model ⇒ add to `PURE_ALLOWLIST` in `crates/xtask` AND
   log a decision. Must be `no_std`-capable with `default-features = false`.
 
@@ -58,6 +69,16 @@ cargo run -p harness -- play [--setup cmd-4p] [--seed N]  # you (P0) vs random a
 cargo run --release -p harness -- fuzz --setup cmd-4p --agents h-vs-r --games 200   # AI strength
 cargo run -p harness -- run --seed 42 --save-replay r.json && cargo run -p harness -- replay r.json
 cargo run -p harness -- bless                             # ONLY when a hash change is intended; review why
+cargo run --release -p app                                # the desktop app (you are P0); downloads card images into ~/.cache/apnap
+APNAP_SHOT_DIR=/tmp/shots cargo test -p app --test screenshot -- --ignored   # render the UI to PNGs (APNAP_SHOT_SETUP="<menu label>", APNAP_SHOT_SIZE=2560x1440)
+cargo run --release -p harness -- fuzz --setup real-4p --games 1000 --threads 8      # real-card decks
+cargo run --release -p harness -- fuzz --setup precon-4p --games 200 --threads 8     # the four precons, as far as they compile (D-053); first entry in the app's menu
+cargo run -p harness -- fetch-cards                       # printed data for the precons + basics -> ~/.cache/apnap (tests need it)
+cargo run -p harness -- coverage [--verbose]              # which precon cards are scripted/verified
+cargo run --release -p harness -- fetch-forge             # Forge's card scripts (pinned commit) -> ~/.cache/apnap/forge (git, network)
+cargo run --release -p harness -- forge-coverage [--top N] [--families] [--sample N [--with TEXT]] [--why TEXT [--all]]   # how many of ALL cards compile; what blocks the rest (--families: by kind of feature); --why lists the cards behind a blocker
+cargo run --release -p harness -- fuzz --setup forge-4p --games 400 --threads 8      # random decks drawn from EVERY compiled card (finds what precon decks never reach)
+APNAP_TRACE=1 cargo run --release -p harness -- run --seed N --setup forge-4p        # a game that doesn't end: where it is, every 2,000 decisions
 ```
 
 ## Definition of done for any change
@@ -72,21 +93,97 @@ cargo run -p harness -- bless                             # ONLY when a hash cha
   (chokepoint, move_object, LeaveGame = 800.4a), `sba.rs`, `layers.rs` (chars; printed-only until M2),
   `decision.rs`, `events.rs`, `state.rs`, `view.rs`, `rng.rs`, `hash.rs`.
 - `crates/card-model` — card vocabulary types (no_std; externally tagged; ManaCost as text).
-- `crates/cards` — RON card scripts `data/<letter>/<slug>.ron` and `decks/*.ron` (invented
-  "Test …" cards + basic lands). Adding a file? Add it to `CARDS`/`DECKS` (a test checks).
+- `crates/cards` — `data/` (self-contained: invented "Test …" cards, tokens, basics),
+  `scripts/` (real cards: behaviour only, D-035), `decks/*.ron`. Embedded by `build.rs`.
+- `crates/card-db/src/forge/` — `parse.rs` (lossless reader of Forge scripts),
+  `translate.rs` (the compiler; `Blockers`), `mod.rs` (pinned commit, fetch, paths).
 - `crates/card-db` — parses + validates RON into a `CardCatalog` (strict mode rejects
-  unverified cards; every verified card must name existing tests). Scryfall import: M4.
+  unverified cards; every verified card must name existing tests); `scryfall.rs` (runtime
+  fetch + cache), `real.rs` (script + printed data -> CardDef).
 - `crates/ai` — agents: RandomAgent, HeuristicAgent (D-033). `crates/harness` — CLI, `Setup`
-  (m0 / m1-Np / m2-Np / cmd-Np), `--agents random|heuristic|h-vs-r`,
+  (m0 / m1-Np / m2-Np / cmd-Np / real-Np = decks of verified real cards, D-038 /
+  precon-Np = the precons minus the cards that don't compile yet, D-053),
+  `--agents random|heuristic|h-vs-r`,
   `script::Script` test driver, determinism/golden/property/rules tests.
-- `crates/app` — stub until M4. `crates/xtask` — check-deps.
+- `crates/app` — the desktop app: `session.rs` (game + AI seats + stops + save/replay, no
+  graphics; `declaration`/`declare` = a whole attack or block), `ui.rs` (egui view: the
+  table grid, decisions, pacing, the enlarged card next to the pointer), `combat.rs`
+  (planning attacks/blocks on the table, D-040), `cardview.rs` (card widget: image or
+  drawn proxy, badges, motion, arrows, mana-symbol text),
+  `art.rs` (Scryfall images/symbols: worker threads + cache, one texture per exact pixel
+  size; tokens pictured by Scryfall's token cards; `Art::disabled()` in tests),
+  `session.rs` also answers for the human where MTGO would (stops, own spell on top of
+  the stack, F4/F6 yields: D-054), tests driven headlessly with
+  egui_kittest (D-036, D-037). `card-db/src/images.rs` = image/symbol paths + download.
+- `crates/xtask` — check-deps.
 - Engine extras: `stack.rs` (StackObject), `targeting.rs` (choose + 608.2b legality in one
   place), `frames/cast.rs` (601.2/602.2, and putting triggers on the stack), `frames/resolve.rs`
   (work list), `replacement.rs` + `frames/apply.rs` (614–616 pipeline), `triggers.rs` +
   `frames/put_triggers.rs` (603), `frames/check.rs` (117.5/704.3), `effects.rs` (resolved
   continuous effects, shields), `testing.rs` (feature `test-support`: scenario builder, D-022).
 
-## Current milestone: M3 — DONE (2026-11-09). Next: M4 (do not start without the user's OK).
+## Direction (2026-11-09, D-046): every real card, by compiling Forge's scripts
+The user's goal is "every non-silver bordered card ever printed, for the most part,
+eventually". Forge scripts 33,248 of Scryfall's 33,499 real cards with ~760 top-level
+features (184 effect APIs, 131 trigger modes, 105 static modes, 35 replacement events, 243
+keywords, 41 cost kinds, a filter language, an expression language). `card_db::forge`
+compiles those scripts into `CardDef`s. **Work loop:** run `harness forge-coverage`, take
+the blocker that alone stops the most cards, read what it means in `docs/forge/` (and
+Forge's Java under `~/.cache/apnap/forge/repo` — sparse-checkout more of it as needed),
+extend the vocabulary/engine *generally* (not for one card), add its test, re-run. Read a
+`--sample` of compiled cards against their Oracle text after every step: it is how
+mis-compilations were found. The 90 hand-scripted cards are the regression set
+(`tests/forge_compile.rs`: the compiler must reproduce each of them).
+Status (D-064): 9,115 of 34,463 scripts compile (26.4%); about 10,500 more are one feature
+away. Precons: `harness coverage --verbose` lists what blocks the rest. Feature tests live in `crates/harness/tests/forge_features.rs`: invented cards written
+in Forge's format, compiled by `harness::forge_test_catalog` and played (`forge_test_blockers`
+for "this must not compile"). Four guards catch compiler holes — keep them: a line that
+yields nothing without a named blocker is `unexplained:*`; every compiled card goes through
+`card_db::validate` (`invalid:*`); the compiled card is read back against its Oracle text
+for words Forge scripts leave out (`oracle:*`: "may", "another target"); and the `forge-Np`
+soak plays random decks of all of them.
+References written from Forge's sources: `docs/forge/script-format.md` (file format, costs,
+filters, `Defined$`, expressions), `effects.md` (every effect API), and
+`triggers-statics-replacements-keywords.md`. Read the relevant section before compiling a
+feature: Forge's defaults are often not what the key names suggest (flags are tested for
+presence, `Defined$ Targeted` means every target of the chain, a trigger that runs an
+`AB$` with a cost is "you may pay", triggers without `TriggerZones$` work from any zone).
+Not built yet: the full generated-text-vs-Oracle round trip (a word-level guard exists),
+multi-face cards, searching another player's library, "X target creatures", mana abilities
+that cost mana (signets) or make different mana at once, counters other than +1/+1 and
+-1/-1, "as this enters, choose …", regeneration, abilities given to cards that aren't on
+the battlefield, "becomes tapped" and "becomes the target" triggers, protection, Forge's
+"Effect" objects, Sagas (the end of D-064 ranks them). `forge-coverage --families` ranks what is left by kind of feature.
+
+## Current milestone: M4 — IN PROGRESS (started 2026-11-09), branch `m4-wip`
+Decisions: D-034 (precons: Calling All Angels, Wretched Ranks, Reign of Dragons,
+Tramplesaurus Rex), D-035 (real-card pipeline; Scryfall data only in the user's cache),
+D-037 (card images, mana symbols, proxies, AI pacing), D-038 (subtype selectors; `real-Np`
+interim decks), D-040 (combat planned on the table, players in a grid, one main button),
+D-041 (card batch 2: mass effects, permanent targets, exile, tokens, attack triggers).
+Tokens are named per CR 111.4 ("Zombie Token") and referenced from scripts by `key`.
+Order: groundwork (DONE: frozen decklists, `harness fetch-cards`, `harness coverage`,
+real-card script format) → egui app (DONE: D-036; mouse-only, save/load/replay; card
+images + mana symbols + paced AI turns: D-037; Arena-style combat + table grid: D-040) → cards deck by deck until `harness
+coverage` is 100% (IN PROGRESS: 88 of 254 real cards verified; three of the four
+commanders (Lathliss, Ghalta, and Giada/Gisa still missing); playable now as the three
+`real-Np` decks; batches logged as D-038, D-041..D-045. NEXT,
+in order of cards unlocked: costs that need a choice (sacrifice another creature, discard,
+pay life) and additional costs on spells, with Treasure/Clue tokens; "may"; damage and combat-damage triggers; hexproof/indestructible/ward; multi-mana
+abilities (payment feasibility rework, D-021); graveyard targets; equipment; cycling and
+flashback; monarch; the one-off cards. Each card needs a script, a test, and never an
+approximation) → precon setups in the app menu, 10,000-game soak.
+Real-card scripts hold behaviour only: no Oracle text in them, not even in comments.
+Real-card work needs `cargo run -p harness -- fetch-cards` once (network).
+Acceptance (spec §13 M4): coverage 100% verified, each card >= 1 test, 10,000 AI 4-player
+games clean, the app playable by mouse with a widget per ChoiceKind, save/load/replay in app.
+
+### Future scope (not M4)
+The user wants 1v1 Modern, Legacy, Vintage etc. later (D-039): formats are configuration
+(GameConfig + per-format deck legality in card-db), never engine forks; don't hard-code
+Commander or the precon pool anywhere new.
+
+## Previous milestone: M3 — DONE (2026-11-09).
 M3 delivered: combat keywords (first/double strike, trample + deathtouch, lifelink, vigilance,
 menace; D-031), Auras + layer-2 control with summoning-sickness tracking (D-029/D-030),
 Commander (903: command zone, tax, commander damage, 903.9a SBA choice, 903.9b optional

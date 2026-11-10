@@ -1,0 +1,22 @@
+RealCard(
+    oracle_id: "70fa209f-5e79-44de-81ce-1d8d0d8c1006",
+    name: "Cemetery Reaper",
+    verified: true,
+    tests: ["cemetery_reaper_exiles_a_creature_card_for_a_zombie"],
+    abilities: [
+        Static(
+            affected: All((types: [Creature], subtypes: ["Zombie"], controller: You, other: true)),
+            effects: [ModifyPT(1, 1)],
+        ),
+        Activated(
+            cost: (mana: Some("{2}{B}"), tap: true),
+            body: Effect((
+                targets: [CardInGraveyard(cards: (types: [Creature]), whose: Any)],
+                effect: Seq([
+                    Exile(what: Target(0)),
+                    CreateToken(token: "b_2_2_zombie", count: Fixed(1), who: You),
+                ]),
+            )),
+        ),
+    ],
+)

@@ -18,6 +18,27 @@ jobs:
       - run: rustup toolchain install   # reads rust-toolchain.toml
       - run: rustup target add thumbv7em-none-eabihf
       - uses: Swatinem/rust-cache@v2
+      - name: system libraries for the desktop app (eframe)
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      # Printed card data for the precons is fetched from Scryfall into the runner's temp
+      # directory (never the repository); cached across runs, keyed by the decklists.
+      - name: card data cache location
+        shell: bash
+        run: echo "APNAP_CACHE_DIR=$RUNNER_TEMP/apnap-cache" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/apnap-cache
+          key: cards-${{ runner.os }}-${{ hashFiles('crates/cards/decks/precon_*.ron', 'crates/card-db/src/forge/mod.rs') }}
+      - name: fetch printed card data (Scryfall) and Forge's card scripts (pinned commit)
+        run: |
+          cargo run --release -p harness --locked -- fetch-cards
+          cargo run --release -p harness --locked -- fetch-forge
+          cargo run --release -p harness --locked -- fetch-bulk
+      # Both reports compile Forge's scripts, so they come after the fetches.
+      - name: coverage of the precons, and compile coverage over all cards
+        run: |
+          cargo run --release -p harness --locked -- coverage
+          cargo run --release -p harness --locked -- forge-coverage --top 25
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy
@@ -36,12 +57,18 @@ jobs:
           cargo run -p harness --locked -- determinism --setup m1-4p --seed 42 --runs 3
           cargo run -p harness --locked -- determinism --setup m2-4p --seed 42 --runs 3
           cargo run -p harness --locked -- determinism --setup cmd-4p --seed 42 --runs 3
-      - name: Soak — 1,000 four-player random-agent games each (M1 and M2 decks), 0 panics / stuck games
+      - name: Soak — 1,000 four-player random-agent games per deck set (plus heuristic-AI games), 0 panics / stuck games
         run: |
           cargo run --release -p harness --locked -- fuzz --setup m1-4p --games 1000 --threads 4
           cargo run --release -p harness --locked -- fuzz --setup m2-4p --games 1000 --threads 4
           cargo run --release -p harness --locked -- fuzz --setup cmd-4p --games 1000 --threads 4
           cargo run --release -p harness --locked -- fuzz --setup cmd-4p --agents heuristic --games 200 --threads 4
+          cargo run --release -p harness --locked -- fuzz --setup real-4p --games 1000 --threads 4
+          cargo run --release -p harness --locked -- fuzz --setup real-4p --agents heuristic --games 200 --threads 4
+          # Random decks drawn from every card that compiles from Forge's scripts (D-047).
+          cargo run --release -p harness --locked -- fuzz --setup forge-4p --games 1000 --threads 4
+          cargo run --release -p harness --locked -- fuzz --setup forge-2p --games 1000 --threads 4
+          cargo run -p harness --locked -- determinism --setup forge-4p --seed 42 --runs 3
 
   cross-platform:
     name: tests + golden hashes (${{ matrix.os }})
@@ -54,6 +81,18 @@ jobs:
       - uses: actions/checkout@v4
       - run: rustup toolchain install   # reads rust-toolchain.toml
       - uses: Swatinem/rust-cache@v2
+      - name: card data cache location
+        shell: bash
+        run: echo "APNAP_CACHE_DIR=$RUNNER_TEMP/apnap-cache" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/apnap-cache
+          key: cards-${{ runner.os }}-${{ hashFiles('crates/cards/decks/precon_*.ron', 'crates/card-db/src/forge/mod.rs') }}
+      - name: fetch printed card data (Scryfall) and Forge's card scripts
+        run: |
+          cargo run -p harness --locked -- fetch-cards
+          cargo run -p harness --locked -- fetch-forge
+          cargo run -p harness --locked -- fetch-bulk
       # The golden test pins event/state hashes generated on Linux: passing here proves
       # bit-for-bit determinism across platforms.
       - run: cargo test --workspace --locked

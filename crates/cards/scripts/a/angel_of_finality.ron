@@ -1,0 +1,13 @@
+RealCard(
+    oracle_id: "48d14b5c-711a-4f8a-9de5-55415cb7a79a",
+    name: "Angel of Finality",
+    verified: true,
+    tests: ["angel_of_finality_exiles_a_graveyard"],
+    keywords: [Flying],
+    abilities: [
+        Triggered(
+            when: Enters(This),
+            body: Effect((targets: [Player], effect: ExileGraveyard(who: Target(0)))),
+        ),
+    ],
+)

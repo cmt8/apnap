@@ -1,0 +1,13 @@
+RealCard(
+    oracle_id: "f3abd4d1-a975-4e85-8684-aa0fce029670",
+    name: "Grave Titan",
+    verified: true,
+    tests: ["grave_titan_makes_zombies_when_it_enters_or_attacks"],
+    keywords: [Deathtouch],
+    abilities: [
+        Triggered(
+            when: Any([Enters(This), Attacks(This)]),
+            body: Effect((effect: CreateToken(token: "b_2_2_zombie", count: Fixed(2), who: You))),
+        ),
+    ],
+)

@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "4457ed35-7c10-48c8-9776-456485fdf070",
+    name: "Lightning Bolt",
+    verified: true,
+    tests: ["lightning_bolt_deals_three_to_any_target"],
+    abilities: [
+        Spell(Effect((
+            targets: [AnyTarget],
+            effect: DealDamage(to: Target(0), amount: Fixed(3)),
+        ))),
+    ],
+)

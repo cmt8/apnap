@@ -14,7 +14,7 @@ use crate::stack::Target;
 use crate::state::GameState;
 use crate::zones::{LibraryPosition, Zone};
 use alloc::vec::Vec;
-use card_model::{AbilityDef, CardDefId, CounterKind, ReplaceWith, Replaces};
+use card_model::{AbilityDef, AbilityId, CardDefId, CounterKind, ReplaceWith, Replaces};
 use serde::{Deserialize, Serialize};
 
 /// Why an object is moving (for events and for "destroy" vs other moves, CR 701.8b).
@@ -36,6 +36,8 @@ pub enum MoveCause {
     Fizzled,
     /// CR 305.1
     PlayLand,
+    /// CR 702.29c: discarded to pay the cost of its own cycling ability.
+    Cycle,
 }
 
 /// A game event that hasn't happened yet (CR 614.1: replacement effects watch for events
@@ -123,8 +125,13 @@ impl Proposed {
 /// Identifies one replacement/prevention effect, so it applies at most once per event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum RepKey {
-    /// Replacement ability `index` of `source` (a permanent, or the entering object itself).
-    Static { source: ObjectId, index: u16 },
+    /// Replacement ability `ability` of `source` (a permanent, or the entering object
+    /// itself); `nth` tells apart the times `source` has that ability.
+    Static {
+        source: ObjectId,
+        ability: AbilityId,
+        nth: u8,
+    },
     /// A prevention shield (CR 615.7).
     Shield(u32),
     /// CR 903.9b: "If a commander would be put into its owner's hand or library from
@@ -183,11 +190,18 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
     let mut out = Vec::new();
     for &source in &st.zones.battlefield {
         // CLAUDE.md invariant 4: only abilities the source currently has.
-        for (index, a) in abilities(st, source) {
+        let has = abilities(st, source);
+        for (k, (ability, a)) in has.iter().enumerate() {
             if let AbilityDef::Replacement { replaces, .. } = a
-                && applies(st, source, *replaces, &p.event)
+                && applies(st, source, replaces, &p.event)
             {
-                out.push(RepKey::Static { source, index });
+                // An ability the source was given twice is two effects.
+                let nth = has[..k].iter().filter(|(b, _)| b == ability).count() as u8;
+                out.push(RepKey::Static {
+                    source,
+                    ability: *ability,
+                    nth,
+                });
             }
         }
     }
@@ -211,7 +225,8 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
             {
                 out.push(RepKey::Static {
                     source: *object,
-                    index: i as u16,
+                    ability: AbilityId::printed(st.object(*object).card, i as u16),
+                    nth: 0,
                 });
             }
         }
@@ -243,7 +258,7 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
     out
 }
 
-fn applies(st: &GameState, source: ObjectId, replaces: Replaces, ev: &Proposed) -> bool {
+fn applies(st: &GameState, source: ObjectId, replaces: &Replaces, ev: &Proposed) -> bool {
     let you = crate::layers::controller_of(st, source);
     match (replaces, ev) {
         (
@@ -285,6 +300,34 @@ fn applies(st: &GameState, source: ObjectId, replaces: Replaces, ev: &Proposed) 
                 ..
             },
         ) => *object == source && st.object(source).zone == Zone::Battlefield,
+        // CR 614.12: checked against the permanent as it would exist on the battlefield.
+        (
+            Replaces::OtherEnters(sel),
+            Proposed::Move {
+                object,
+                to: Zone::Battlefield,
+                controller,
+                ..
+            },
+        ) => st.objects.get(object).is_some_and(|o| {
+            o.zone != Zone::Battlefield
+                && *object != source
+                && crate::layers::matches_parts(
+                    sel,
+                    &crate::layers::chars(st, *object),
+                    crate::layers::Facts {
+                        id: *object,
+                        controller: controller.unwrap_or(o.owner),
+                        owner: o.owner,
+                        is_token: o.is_token,
+                        tapped: false,
+                        attacking: false,
+                        blocking: false,
+                    },
+                    source,
+                    you,
+                )
+        }),
         _ => false,
     }
 }
@@ -343,13 +386,31 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
             }
             Some(ev)
         }
-        RepKey::Static { source, index } => {
-            let AbilityDef::Replacement { with, .. } =
-                &st.card_def(source).abilities[index as usize]
-            else {
+        RepKey::Static {
+            source, ability, ..
+        } => {
+            let AbilityDef::Replacement { with, .. } = st.catalog.ability(ability) else {
                 unreachable!()
             };
-            let with = *with;
+            let mut with = with.clone();
+            // "…for each …": counted now, before the permanent has entered.
+            if let ReplaceWith::EntersWithCounted { kind, amount } = &with {
+                let you = match (&ev, st.object(source).zone) {
+                    (_, Zone::Battlefield) => crate::layers::controller_of(st, source),
+                    // Its own "enters with": whoever will control it.
+                    (Proposed::Move { controller, .. }, _) => {
+                        controller.unwrap_or(st.object(source).owner)
+                    }
+                    _ => st.object(source).owner,
+                };
+                let n = match amount {
+                    // CR 107.3m: the X the permanent spell was cast with (0 if it isn't
+                    // entering from the stack).
+                    card_model::Amount::X => st.stack_object(source).map_or(0, |so| so.x),
+                    amount => crate::layers::count_amount(st, amount, source, you),
+                };
+                with = ReplaceWith::EntersWithCounters { kind: *kind, n };
+            }
             st.emit(crate::events::Event::Replaced { source });
             Some(modify(ev, with))
         }
@@ -357,7 +418,7 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
 }
 
 fn modify(mut ev: Proposed, with: ReplaceWith) -> Proposed {
-    match (&mut ev, with) {
+    match (&mut ev, &with) {
         (Proposed::CreateTokens { count, .. }, ReplaceWith::Twice)
         | (Proposed::PutCounters { count, .. }, ReplaceWith::Twice) => *count *= 2,
         (Proposed::Move { counters, .. }, ReplaceWith::Twice) => {
@@ -387,7 +448,9 @@ fn modify(mut ev: Proposed, with: ReplaceWith) -> Proposed {
         }
         (Proposed::Move { tapped, .. }, ReplaceWith::EntersTapped) => *tapped = true,
         (Proposed::Move { counters, .. }, ReplaceWith::EntersWithCounters { kind, n }) => {
-            counters.push((kind, n))
+            if *n > 0 {
+                counters.push((*kind, *n))
+            }
         }
         (e, w) => unreachable!("{w:?} can't modify {e:?} (applicability checked)"),
     }

@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "c2153115-bc12-458d-baeb-538ec61e1242",
+    name: "Always Watching",
+    verified: true,
+    tests: ["always_watching_pumps_nontoken_creatures_only"],
+    abilities: [
+        Static(
+            affected: All((types: [Creature], controller: You, token: Some(false))),
+            effects: [ModifyPT(1, 1), AddKeywords([Vigilance])],
+        ),
+    ],
+)

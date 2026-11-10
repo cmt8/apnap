@@ -214,6 +214,18 @@ fn event_line(st: &Narrator, e: &Event, viewer: Option<PlayerId>) -> Option<Stri
         Event::Replaced { source } => {
             format!("  ({}'s replacement effect applies)", st.name(*source))
         }
+        Event::Revealed { player, cards } => {
+            let names: Vec<String> = cards.iter().map(|c| st.name(*c)).collect();
+            format!("  {} reveals {}", p(*player), names.join(", "))
+        }
+        // Hidden from everyone but the player who looked.
+        Event::LookedAt { player, cards } => {
+            if viewer.is_some_and(|v| v != *player) {
+                return None;
+            }
+            let names: Vec<String> = cards.iter().map(|c| st.name(*c)).collect();
+            format!("  {} looks at {}", p(*player), names.join(", "))
+        }
         Event::PlayerLost { player, reason } => format!("{} LOSES ({reason:?})", p(*player)),
         Event::GameOver { winner } => match winner {
             Some(w) => format!("== game over: {} wins ==", p(*w)),
@@ -297,6 +309,21 @@ fn view_name(v: &PlayerView, id: ObjectId) -> String {
     if let Some(s) = v.stack.iter().find(|s| s.id == id) {
         return stack_name(s);
     }
+    // Cards that aren't on the table: say where they are.
+    for pl in &v.players {
+        if let Some(o) = pl.graveyard.iter().find(|o| o.id == id) {
+            return format!("{} (in {}'s graveyard)", o.name, p(pl.id));
+        }
+    }
+    if let Some(o) = v.exile.iter().find(|o| o.id == id) {
+        return format!("{} (exiled)", o.name);
+    }
+    if let Some(o) = v.command.iter().find(|o| o.id == id) {
+        return format!("{} (command zone)", o.name);
+    }
+    if let Some(o) = v.revealed.iter().find(|o| o.id == id) {
+        return o.name.clone();
+    }
     format!("#{}", id.0)
 }
 
@@ -320,9 +347,19 @@ pub fn option_line(v: &PlayerView, o: &OptionDesc) -> String {
         OptionDesc::Pass => "pass".into(),
         OptionDesc::PlayLand { card } => format!("play {}", view_name(v, *card)),
         OptionDesc::CastSpell { card } => format!("cast {}", view_name(v, *card)),
-        OptionDesc::TapForMana { source, mana } => {
-            format!("tap {} for {mana:?}", view_name(v, *source))
-        }
+        OptionDesc::TapForMana {
+            source,
+            mana,
+            ability,
+        } => match ability {
+            None => format!("tap {} for {mana:?}", view_name(v, *source)),
+            Some(a) => format!(
+                "tap {} for {mana:?} ({}ability {})",
+                view_name(v, *source),
+                if a.granted { "granted " } else { "" },
+                a.index
+            ),
+        },
         OptionDesc::Player { player } => p(*player),
         OptionDesc::Keep => "keep".into(),
         OptionDesc::Mulligan => "mulligan".into(),
@@ -338,23 +375,35 @@ pub fn option_line(v: &PlayerView, o: &OptionDesc) -> String {
             )
         }
         OptionDesc::DamageRecipient { object } => view_name(v, *object),
-        OptionDesc::ActivateAbility { source, index } => {
-            format!("activate {} (ability {index})", view_name(v, *source))
+        OptionDesc::ActivateAbility { source, ability } => {
+            format!(
+                "activate {} ({}ability {})",
+                view_name(v, *source),
+                if ability.granted { "granted " } else { "" },
+                ability.index
+            )
         }
         OptionDesc::Mode { index } => format!("mode {index}"),
         OptionDesc::Target { target } => format!("target {}", target_name(v, target)),
         OptionDesc::Mana { mana } => mana.symbol().into(),
-        OptionDesc::Replacement { source, index } => {
+        OptionDesc::Replacement {
+            source, ability, ..
+        } => {
             format!(
-                "apply {}'s replacement effect ({index})",
-                view_name(v, *source)
+                "apply {}'s replacement effect ({})",
+                view_name(v, *source),
+                ability.index
             )
         }
         OptionDesc::Shield { id } => format!("prevention shield #{id}"),
         OptionDesc::Accept => "yes".into(),
         OptionDesc::Decline => "no".into(),
-        OptionDesc::Trigger { source, index } => {
-            format!("{}'s triggered ability ({index})", view_name(v, *source))
+        OptionDesc::Trigger { source, ability } => {
+            format!(
+                "{}'s triggered ability ({})",
+                view_name(v, *source),
+                ability.index
+            )
         }
     }
 }

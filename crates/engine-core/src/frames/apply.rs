@@ -35,6 +35,12 @@ impl ApplyFrame {
         let rank = |p| order.iter().position(|q| *q == p).unwrap_or(order.len());
         let mut queue: Vec<(usize, Pending)> = events
             .into_iter()
+            // CR 702.12b: a permanent with indestructible can't be destroyed — the event
+            // doesn't happen (CR 614.17), so nothing can replace it either.
+            .filter(|event| {
+                !matches!(event, Proposed::Move { object, cause: MoveCause::Destroy, .. }
+                    if crate::layers::chars(st, *object).has(card_model::Keyword::Indestructible))
+            })
             .map(|event| {
                 (
                     rank(affected_player(st, &event)),
@@ -70,9 +76,18 @@ impl ApplyFrame {
     pub(crate) fn run(mut self, st: &mut GameState, input: Option<Input>) -> Flow {
         if let Some(inp) = input {
             match inp.picked_one().cloned() {
-                Some(OptionDesc::Replacement { source, index }) => {
-                    self.apply_front(st, RepKey::Static { source, index })
-                }
+                Some(OptionDesc::Replacement {
+                    source,
+                    ability,
+                    nth,
+                }) => self.apply_front(
+                    st,
+                    RepKey::Static {
+                        source,
+                        ability,
+                        nth,
+                    },
+                ),
                 Some(OptionDesc::Shield { id }) => self.apply_front(st, RepKey::Shield(id)),
                 Some(OptionDesc::Accept) => self.apply_front(st, RepKey::CommanderReturn),
                 // Declining an optional effect: it won't be offered again for this event.
@@ -95,9 +110,15 @@ impl ApplyFrame {
                     let mut options: Vec<OptionDesc> = many
                         .iter()
                         .map(|k| match *k {
-                            RepKey::Static { source, index } => {
-                                OptionDesc::Replacement { source, index }
-                            }
+                            RepKey::Static {
+                                source,
+                                ability,
+                                nth,
+                            } => OptionDesc::Replacement {
+                                source,
+                                ability,
+                                nth,
+                            },
                             RepKey::Shield(id) => OptionDesc::Shield { id },
                             RepKey::CommanderReturn => OptionDesc::Accept,
                         })
@@ -133,6 +154,24 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
                 .is_some_and(|o| o.zone == Zone::Battlefield)
         {
             lki.insert(*object, snapshot(st, *object));
+        }
+    }
+    // CR 608.2h: …and the object that triggered them ("it", "that creature").
+    for (id, l) in &lki {
+        let abilities: Vec<ObjectId> = st
+            .stack
+            .iter()
+            .filter(|s| s.subject == Some(*id) && s.subject_lki.is_none())
+            .map(|s| s.id)
+            .collect();
+        for ability in abilities {
+            execute(
+                st,
+                GameAction::RecordSubjectLki {
+                    ability,
+                    chars: l.chars.clone(),
+                },
+            );
         }
     }
     // CR 113.7a: abilities on the stack remember a source that is leaving.
@@ -196,6 +235,17 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
                         player: owner,
                         card: new,
                     }),
+                    // CR 702.29c–d: cycling a card is discarding it.
+                    MoveCause::Cycle => {
+                        st.emit(Event::Discarded {
+                            player: owner,
+                            card: new,
+                        });
+                        st.emit(Event::Cycled {
+                            player: owner,
+                            card: new,
+                        });
+                    }
                     MoveCause::Sacrifice => st.emit(Event::Sacrificed {
                         player: was_controller,
                         object: new,

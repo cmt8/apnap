@@ -11,7 +11,7 @@ use crate::replacement::Proposed;
 use crate::state::{AttackInfo, CombatState, GameState};
 use alloc::vec;
 use alloc::vec::Vec;
-use card_model::{CardType, Keyword};
+use card_model::{AbilityDef, Affected, CardType, CombatRule, Keyword};
 use serde::{Deserialize, Serialize};
 
 fn creatures_controlled_by(st: &GameState, p: PlayerId) -> Vec<ObjectId> {
@@ -24,6 +24,120 @@ fn creatures_controlled_by(st: &GameState, p: PlayerId) -> Vec<ObjectId> {
             c.controller == p && c.is(CardType::Creature)
         })
         .collect()
+}
+
+/// Every combat restriction in force (CR 508.1c, 509.1b): the static abilities permanents
+/// currently have (CLAUDE.md invariant 4), with their source and its controller.
+fn combat_rules(st: &GameState) -> Vec<(ObjectId, PlayerId, &Affected, &CombatRule)> {
+    let mut out = Vec::new();
+    for &id in &st.zones.battlefield {
+        for (_, a) in crate::layers::abilities(st, id) {
+            if let AbilityDef::CombatRule { affected, rule } = a {
+                out.push((id, crate::layers::controller_of(st, id), affected, rule));
+            }
+        }
+    }
+    out
+}
+
+/// Is `obj` one of the permanents a rule of `source` applies to?
+fn rule_affects(
+    st: &GameState,
+    source: ObjectId,
+    controller: PlayerId,
+    affected: &Affected,
+    obj: ObjectId,
+) -> bool {
+    match affected {
+        Affected::This => obj == source,
+        Affected::Enchanted => st.object(source).attached_to == Some(obj),
+        Affected::All(sel) => {
+            crate::layers::matches(st, sel, &chars(st, obj), st.object(obj), source, controller)
+        }
+    }
+}
+
+/// CR 508.1c: is `creature` forbidden to attack ("can't attack")?
+fn cant_attack(st: &GameState, creature: ObjectId) -> bool {
+    combat_rules(st)
+        .into_iter()
+        .any(|(src, ctl, affected, rule)| {
+            matches!(rule, CombatRule::CantAttack) && rule_affects(st, src, ctl, affected, creature)
+        })
+}
+
+/// CR 509.1b: is `creature` forbidden to block at all ("can't block")?
+fn cant_block(st: &GameState, creature: ObjectId) -> bool {
+    combat_rules(st)
+        .into_iter()
+        .any(|(src, ctl, affected, rule)| {
+            matches!(rule, CombatRule::CantBlock) && rule_affects(st, src, ctl, affected, creature)
+        })
+}
+
+/// CR 509.1b: may `blocker` block `attacker` (which attacks `defender`), as far as evasion
+/// abilities go? (Menace counts blockers and is checked on the whole declaration.)
+pub(crate) fn can_block(
+    st: &GameState,
+    blocker: ObjectId,
+    attacker: ObjectId,
+    defender: PlayerId,
+) -> bool {
+    let (a, b) = (chars(st, attacker), chars(st, blocker));
+    let artifact = b.is(CardType::Artifact);
+    // CR 702.9b: flying — only by flying and/or reach.
+    if a.has(Keyword::Flying) && !(b.has(Keyword::Flying) || b.has(Keyword::Reach)) {
+        return false;
+    }
+    // CR 702.36b: fear — only by artifact and/or black creatures.
+    if a.has(Keyword::Fear) && !(artifact || b.colors.contains(&card_model::Color::Black)) {
+        return false;
+    }
+    // CR 702.13b: intimidate — only by artifact creatures and/or creatures that share a
+    // color with it.
+    if a.has(Keyword::Intimidate) && !(artifact || b.colors.iter().any(|c| a.colors.contains(c))) {
+        return false;
+    }
+    // CR 702.28b: shadow — only by shadow, and shadow blocks only shadow.
+    if a.has(Keyword::Shadow) != b.has(Keyword::Shadow) {
+        return false;
+    }
+    // CR 702.31b: horsemanship — only by horsemanship.
+    if a.has(Keyword::Horsemanship) && !b.has(Keyword::Horsemanship) {
+        return false;
+    }
+    // "Can't be blocked [by …]" and "can't block [creatures …]".
+    for (src, ctl, affected, rule) in combat_rules(st) {
+        let matches = |sel: &card_model::Selector, obj: ObjectId| {
+            crate::layers::matches(st, sel, &chars(st, obj), st.object(obj), src, ctl)
+        };
+        let forbidden = match rule {
+            CombatRule::CantBeBlocked { by } => {
+                rule_affects(st, src, ctl, affected, attacker)
+                    && by.as_ref().is_none_or(|sel| matches(sel, blocker))
+            }
+            CombatRule::CantBlockAttackers(sel) => {
+                rule_affects(st, src, ctl, affected, blocker) && matches(sel, attacker)
+            }
+            CombatRule::CantAttack | CombatRule::CantBlock => false,
+        };
+        if forbidden {
+            return false;
+        }
+    }
+    // CR 702.14c: landwalk — not at all while the defending player controls such a land.
+    for k in &a.keywords {
+        if let Keyword::Landwalk(t) = k {
+            let has_land = st.zones.battlefield.iter().any(|&id| {
+                let c = chars(st, id);
+                c.controller == defender && c.is(CardType::Land) && c.land_types.contains(t)
+            });
+            if has_land {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,7 +155,12 @@ impl DeclareAttackersFrame {
             .into_iter()
             .filter(|&id| {
                 let o = st.object(id);
-                !o.tapped && (!o.summoning_sick || chars(st, id).has(card_model::Keyword::Haste))
+                let c = chars(st, id);
+                // CR 702.3b: a creature with defender can't attack.
+                !o.tapped
+                    && (!o.summoning_sick || c.has(Keyword::Haste))
+                    && !c.has(Keyword::Defender)
+                    && !cant_attack(st, id)
             })
             .collect();
         DeclareAttackersFrame {
@@ -96,6 +215,11 @@ impl DeclareAttackersFrame {
             st.emit(Event::AttackerDeclared { attacker, defender });
         }
         st.combat = Some(combat);
+        // "Attacking creatures you control get …": the layered view depends on combat.
+        st.generation += 1;
+        // CR 508.1m: abilities that trigger on attackers being declared trigger now.
+        let attackers: Vec<ObjectId> = self.chosen.iter().map(|(a, _)| *a).collect();
+        crate::triggers::detect_attacks(st, &attackers);
         Flow::done()
     }
 }
@@ -146,8 +270,6 @@ impl DeclareBlockersFrame {
             if let Some(&blocker) = self.candidates.get(self.next) {
                 // CR 509.1a: block one creature attacking that player. CR 509.1b / 702.9b:
                 // a creature with flying can't be blocked except by flying and/or reach.
-                let bc = chars(st, blocker);
-                let can_block_flyer = bc.has(Keyword::Flying) || bc.has(Keyword::Reach);
                 let options: Vec<OptionDesc> = st
                     .combat
                     .as_ref()
@@ -155,7 +277,7 @@ impl DeclareBlockersFrame {
                     .attackers
                     .iter()
                     .filter(|a| a.defender == defender)
-                    .filter(|a| can_block_flyer || !chars(st, a.attacker).has(Keyword::Flying))
+                    .filter(|a| can_block(st, blocker, a.attacker, defender))
                     .map(|a| OptionDesc::Block {
                         blocker,
                         attacker: a.attacker,
@@ -197,9 +319,12 @@ impl DeclareBlockersFrame {
             a.blocked = true;
             a.blockers.push(blocker);
         }
+        st.generation += 1;
         for &(blocker, attacker) in &self.chosen {
             st.emit(Event::BlockerDeclared { blocker, attacker });
         }
+        // CR 509.1h–i: abilities that trigger on blockers being declared trigger now.
+        crate::triggers::detect_blocks(st, &self.chosen);
         Flow::done()
     }
 
@@ -224,7 +349,7 @@ impl DeclareBlockersFrame {
         self.candidates = match self.defenders.get(self.defender_idx) {
             Some(&d) => creatures_controlled_by(st, d)
                 .into_iter()
-                .filter(|&id| !st.object(id).tapped)
+                .filter(|&id| !st.object(id).tapped && !cant_block(st, id))
                 .collect(),
             None => Vec::new(),
         };

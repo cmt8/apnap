@@ -1,0 +1,19 @@
+RealCard(
+    oracle_id: "7714af0e-41d9-4609-967f-27233b46055f",
+    name: "Lord of the Undead",
+    verified: true,
+    tests: ["lord_of_the_undead_pumps_zombies_and_recovers_them"],
+    abilities: [
+        Static(
+            affected: All((types: [Creature], subtypes: ["Zombie"], other: true)),
+            effects: [ModifyPT(1, 1)],
+        ),
+        Activated(
+            cost: (mana: Some("{1}{B}"), tap: true),
+            body: Effect((
+                targets: [CardInGraveyard(cards: (subtypes: ["Zombie"]), whose: You)],
+                effect: ReturnToHand(what: Target(0)),
+            )),
+        ),
+    ],
+)

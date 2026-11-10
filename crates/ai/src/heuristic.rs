@@ -42,17 +42,52 @@ fn effect_polarity(e: &Effect) -> Polarity {
         | Effect::Counter { .. }
         | Effect::LoseLife { .. }
         | Effect::ReturnToHand { .. }
+        | Effect::Exile { .. }
+        | Effect::ExileGraveyard { .. }
+        | Effect::Tap { .. }
         | Effect::DamageEachPlayer { .. } => Polarity::Harm,
+        // Pointed at a player, these are meant for an opponent.
+        Effect::Discard { who, .. }
+        | Effect::DiscardHand { who }
+        | Effect::Sacrifice { who, .. } => match who {
+            card_model::PlayerRef::Target(_) => Polarity::Harm,
+            _ => Polarity::Neutral,
+        },
+        Effect::Untap { .. } | Effect::AttachThis { .. } => Polarity::Help,
+        // Putting a permanent into its owner's library or hand: aimed at an opponent's.
+        Effect::PutInto { .. } => Polarity::Harm,
+        Effect::ChooseCards { .. }
+        | Effect::Scry { .. }
+        | Effect::Surveil { .. }
+        | Effect::Dig { .. }
+        | Effect::MoveAll { .. } => Polarity::Neutral,
+        Effect::TapAll(_) | Effect::UntapAll(_) | Effect::SacrificeThis => Polarity::Neutral,
+        Effect::PutCountersAll { .. } | Effect::ThisSpellTo { .. } => Polarity::Neutral,
         Effect::PutCounters { kind, .. } => match kind {
             CounterKind::PlusOne => Polarity::Help,
             CounterKind::MinusOne => Polarity::Harm,
         },
         Effect::Apply { effects, .. } => continuous_polarity(effects),
+        Effect::May(inner) => effect_polarity(inner),
+        // What happens either way: paying, or not paying.
+        Effect::Pay { paid, unpaid, .. } => match effect_polarity(unpaid) {
+            Polarity::Neutral => effect_polarity(paid),
+            p => p,
+        },
+        Effect::Together(v) => v.first().map_or(Polarity::Neutral, effect_polarity),
         Effect::GainLife { .. }
+        | Effect::AddMana { .. }
+        | Effect::ReturnToBattlefield { .. }
         | Effect::Draw { .. }
         | Effect::CreateToken { .. }
         | Effect::PreventNext { .. } => Polarity::Help,
-        Effect::EachPlayer(_) => Polarity::Neutral,
+        // No target to be for or against: these hit everything that matches.
+        Effect::EachPlayer(_)
+        | Effect::DestroyAll(_)
+        | Effect::DamageEach { .. }
+        | Effect::ApplyAll { .. }
+        | Effect::Mill { .. }
+        | Effect::SetX(_) => Polarity::Neutral,
     }
 }
 
@@ -76,10 +111,21 @@ fn continuous_polarity(effects: &[ContinuousEffect]) -> Polarity {
                     Polarity::Help
                 };
             }
-            ContinuousEffect::AddKeywords(_) | ContinuousEffect::AddTypes { .. } => {
+            ContinuousEffect::ModifyPTBy { power, toughness } => {
+                return if power.negative || toughness.negative {
+                    Polarity::Harm
+                } else {
+                    Polarity::Help
+                };
+            }
+            ContinuousEffect::AddKeywords(_)
+            | ContinuousEffect::AddTypes { .. }
+            | ContinuousEffect::GrantAbilities(_) => {
                 return Polarity::Help;
             }
-            ContinuousEffect::SetColors(_) | ContinuousEffect::SwitchPT => {}
+            ContinuousEffect::SetColors(_)
+            | ContinuousEffect::SwitchPT
+            | ContinuousEffect::SetPTBy { .. } => {}
         }
     }
     Polarity::Neutral
@@ -90,7 +136,19 @@ fn kw_value(k: Keyword) -> i64 {
         Keyword::DoubleStrike => 4,
         Keyword::Flying | Keyword::Deathtouch => 3,
         Keyword::FirstStrike | Keyword::Trample | Keyword::Lifelink | Keyword::Menace => 2,
-        Keyword::Vigilance | Keyword::Haste | Keyword::Reach | Keyword::Flash => 1,
+        Keyword::Indestructible => 4,
+        Keyword::Hexproof | Keyword::Shroud => 2,
+        Keyword::Fear
+        | Keyword::Intimidate
+        | Keyword::Landwalk(_)
+        | Keyword::Shadow
+        | Keyword::Horsemanship => 2,
+        Keyword::Vigilance
+        | Keyword::Haste
+        | Keyword::Reach
+        | Keyword::Flash
+        | Keyword::Flanking => 1,
+        Keyword::Defender => -1,
     }
 }
 
@@ -127,12 +185,23 @@ pub struct HeuristicAgent {
     /// The plan for the current combat's blocks: blocker → attacker.
     block_plan: BTreeMap<ObjectId, ObjectId>,
     block_key: Option<(u32, Vec<ObjectId>)>,
+    /// The blockers already asked about in this combat. Being asked about one again means
+    /// the declaration was illegal (a planned block wasn't possible, leaving a creature
+    /// with menace blocked by one) and must be made anew.
+    block_asked: Vec<ObjectId>,
     /// The plan for the current combat's attacks: attacker → defender.
     attack_plan: BTreeMap<ObjectId, PlayerId>,
     attack_key: Option<u32>,
     /// The modes chosen for the spell currently being cast (targets come next).
     last_modes: Vec<u8>,
+    /// How often each ability was activated this turn (`ability_turn`). An ability that
+    /// costs nothing would otherwise be activated every time this player has priority.
+    ability_uses: BTreeMap<(ObjectId, card_model::AbilityId), u8>,
+    ability_turn: u32,
 }
+
+/// How many times the heuristic agent activates one ability in a turn.
+const ABILITY_USES_PER_TURN: u8 = 3;
 
 impl HeuristicAgent {
     pub fn new(seed: u64, catalog: Arc<CardCatalog>) -> Self {
@@ -141,9 +210,12 @@ impl HeuristicAgent {
             fallback: RandomAgent::new(seed),
             block_plan: BTreeMap::new(),
             block_key: None,
+            block_asked: Vec::new(),
             attack_plan: BTreeMap::new(),
             attack_key: None,
             last_modes: Vec::new(),
+            ability_uses: BTreeMap::new(),
+            ability_turn: 0,
         }
     }
 
@@ -166,6 +238,8 @@ impl HeuristicAgent {
             .chain(&v.command)
             .chain(&v.exile)
             .chain(v.players.iter().flat_map(|p| &p.graveyard))
+            // Cards the pending decision lets this player look at (a library search…).
+            .chain(&v.revealed)
             .find(|o| o.id == id)
     }
 
@@ -214,6 +288,7 @@ impl HeuristicAgent {
                         .unwrap_or_default();
                     Body::Effect(card_model::Mode {
                         targets: vec![f],
+                        groups: Vec::new(),
                         effect: Effect::Apply {
                             what: card_model::ObjRef::Target(0),
                             effects,
@@ -222,7 +297,7 @@ impl HeuristicAgent {
                     })
                 })
             }),
-            Some(i) => match &def.abilities[i as usize] {
+            Some(a) => match self.catalog.ability(a) {
                 AbilityDef::Activated { body, .. } | AbilityDef::Triggered { body, .. } => {
                     Some(body.clone())
                 }
@@ -294,11 +369,11 @@ impl HeuristicAgent {
         &self,
         v: &PlayerView,
         card: card_model::CardDefId,
-        ability: Option<u16>,
+        ability: Option<card_model::AbilityId>,
     ) -> i64 {
         let def = self.catalog.get(card);
         let body = match ability {
-            Some(i) => match &def.abilities[i as usize] {
+            Some(a) => match self.catalog.ability(a) {
                 AbilityDef::Activated { body, .. } => Some(body.clone()),
                 _ => None,
             },
@@ -365,7 +440,10 @@ impl HeuristicAgent {
                     )
                     .chain(v.stack.iter().map(|s| Target::Object(s.id)))
                     .collect();
-                if matches!(m.targets[0], card_model::TargetFilter::Spell) {
+                if matches!(
+                    m.targets[0],
+                    card_model::TargetFilter::Spell | card_model::TargetFilter::SpellMatching(_)
+                ) {
                     cands.retain(
                         |t| matches!(t, Target::Object(id) if v.stack.iter().any(|s| s.id == *id)),
                     );
@@ -383,6 +461,10 @@ impl HeuristicAgent {
 
     fn priority(&mut self, v: &PlayerView, d: &PendingDecision) -> Response {
         let me = Self::me(v);
+        if self.ability_turn != v.turn_number {
+            self.ability_turn = v.turn_number;
+            self.ability_uses.clear();
+        }
         // 1. Play a land (prefer one that doesn't enter tapped: basics first).
         let lands: Vec<usize> = d
             .options
@@ -423,10 +505,16 @@ impl HeuristicAgent {
                     }
                     self.spell_score(v, ov.card, None) + if ov.is_commander { 20 } else { 0 }
                 }
-                OptionDesc::ActivateAbility { source, index } => match Self::find(v, *source) {
-                    Some(ov) => self.spell_score(v, ov.card, Some(*index)) - 5,
-                    None => continue,
-                },
+                OptionDesc::ActivateAbility { source, ability } => {
+                    let used = self.ability_uses.get(&(*source, *ability)).copied();
+                    if used.unwrap_or(0) >= ABILITY_USES_PER_TURN {
+                        continue;
+                    }
+                    match Self::find(v, *source) {
+                        Some(ov) => self.spell_score(v, ov.card, Some(*ability)) - 5,
+                        None => continue,
+                    }
+                }
                 _ => continue,
             };
             if s > 0 && best.is_none_or(|(b, _)| s > b) {
@@ -434,7 +522,12 @@ impl HeuristicAgent {
             }
         }
         match best {
-            Some((_, i)) => Response::Pick(vec![i]),
+            Some((_, i)) => {
+                if let OptionDesc::ActivateAbility { source, ability } = &d.options[i] {
+                    *self.ability_uses.entry((*source, *ability)).or_insert(0) += 1;
+                }
+                Response::Pick(vec![i])
+            }
             None => Response::Pick(vec![
                 d.options
                     .iter()
@@ -637,7 +730,18 @@ impl HeuristicAgent {
             .unwrap_or_default();
         if self.block_key.as_ref() != Some(&(v.turn_number, key.clone())) {
             self.block_key = Some((v.turn_number, key));
+            self.block_asked.clear();
             self.plan_blocks(v);
+        }
+        // The plan doesn't know every restriction on blocking; the engine does. If the
+        // declaration came back as illegal, declare no blocks: that is always legal, and
+        // repeating the plan would never end.
+        if let Some(OptionDesc::Block { blocker, .. }) = d.options.first() {
+            if self.block_asked.contains(blocker) {
+                self.block_plan.clear();
+            } else {
+                self.block_asked.push(*blocker);
+            }
         }
         let pick = d.options.iter().position(|o| {
             matches!(o, OptionDesc::Block { blocker, attacker }
@@ -824,6 +928,31 @@ impl Agent for HeuristicAgent {
             (ChoiceKind::Sacrifice, Primitive::PickN { min, .. }) => {
                 self.pick_worst(v, d, *min, value)
             }
+            // A search, or cards to put somewhere from hand: as many as allowed, the most
+            // expensive first.
+            (ChoiceKind::SearchLibrary | ChoiceKind::ChooseCards, Primitive::PickN { max, .. }) => {
+                let mut ranked: Vec<(i64, usize)> = d
+                    .options
+                    .iter()
+                    .enumerate()
+                    .map(|(i, o)| match o {
+                        OptionDesc::Card { card } => (
+                            Self::find(v, *card).map_or(0, |c| i64::from(c.mana_value)),
+                            i,
+                        ),
+                        _ => (0, i),
+                    })
+                    .collect();
+                ranked.sort_by_key(|(v, i)| (std::cmp::Reverse(*v), *i));
+                let mut picks: Vec<usize> = ranked.iter().take(*max).map(|(_, i)| *i).collect();
+                picks.sort_unstable();
+                Response::Pick(picks)
+            }
+            // Scry and surveil: keep what is there (the least a player must do).
+            (
+                ChoiceKind::ScryBottom | ChoiceKind::SurveilGraveyard,
+                Primitive::PickN { min, .. },
+            ) => Response::Pick((0..*min).collect()),
             (ChoiceKind::LegendRule, _) => {
                 let best = d
                     .options
@@ -882,7 +1011,25 @@ impl Agent for HeuristicAgent {
                 }
                 Response::Allocate(alloc)
             }
-            (ChoiceKind::PayMana, Primitive::PickN { .. }) => Response::Pick(vec![0]),
+            (ChoiceKind::PayMana, Primitive::PickN { .. }) => {
+                // Tap what stays before sacrificing what doesn't (Treasure).
+                let keeps = |o: &OptionDesc| match o {
+                    OptionDesc::TapForMana { ability, .. } => ability.is_none_or(|a| {
+                        !matches!(self.catalog.ability(a),
+                            AbilityDef::Mana { cost, .. } if cost.sacrifice_self)
+                    }),
+                    _ => true,
+                };
+                Response::Pick(vec![d.options.iter().position(keeps).unwrap_or(0)])
+            }
+            // Paying is nearly always right: it is offered only when it can be afforded,
+            // and it buys the effect or stops the harm.
+            (ChoiceKind::PayUnlessCost, _) => Response::Pick(vec![
+                d.options
+                    .iter()
+                    .position(|o| matches!(o, OptionDesc::Accept))
+                    .unwrap_or(0),
+            ]),
             _ => return self.fallback.decide(v, d),
         };
         if d.validate(&r).is_ok() {

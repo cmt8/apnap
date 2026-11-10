@@ -22,24 +22,118 @@ use crate::zones::Zone;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
+use card_model::ContinuousEffect;
 use card_model::{
-    AbilityDef, Amount, Body, CardType, EachPlayerAction, Effect, Keyword, ObjRef, PlayerRef,
-    TargetFilter, TargetRef,
+    AbilityDef, Amount, Body, CardType, DamageBy, EachPlayerAction, Effect, Keyword, ObjRef,
+    PlayerRef, TargetFilter, TargetRef,
 };
+use card_model::{CardDest, CardZone, Take};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Work {
     /// Perform `effect` for the `k`-th chosen mode (targets = `targets[k]`).
-    Eval { k: usize, effect: Effect },
+    Eval { k: usize, effect: Box<Effect> },
+    /// "You may [effect]": ask the controller, then perform it or not.
+    May { k: usize, effect: Box<Effect> },
     /// CR 101.4: players choose in APNAP order (later players know earlier choices,
     /// 101.4b); then all the actions happen simultaneously.
     EachPlayerChoose {
-        action: EachPlayerAction,
+        choice: PlayerChoice,
+        /// How many each player chooses (all they can, if fewer).
+        n: u32,
         order: Vec<PlayerId>,
         next: usize,
         chosen: Vec<(PlayerId, Vec<ObjectId>)>,
     },
+    /// Players choose cards in a zone of their own, in APNAP order, and then all the
+    /// chosen cards are put somewhere at once (CR 101.4). In a library this is a search
+    /// (CR 701.23; several players: 701.23i).
+    ChooseCards {
+        spec: Box<ChooseSpec>,
+        order: Vec<PlayerId>,
+        next: usize,
+        chosen: Vec<(PlayerId, Vec<ObjectId>)>,
+    },
+    /// CR 701.24: these players shuffle their libraries.
+    Shuffle { players: Vec<PlayerId> },
+    /// Put cards somewhere. Two or more going to the top or bottom of `player`'s library
+    /// are put there in an order chosen by `by` — their owner (CR 401.4), or the player an
+    /// effect has put them there "in any order" — unless `random`.
+    Place {
+        player: PlayerId,
+        by: PlayerId,
+        cards: Vec<ObjectId>,
+        to: CardDest,
+        random: bool,
+        ordered: bool,
+    },
+    /// CR 701.22 (scry) / 701.25 (surveil) for `players`, one after the other; the first
+    /// is deciding about the cards in `looking` (top card first).
+    Scry {
+        players: Vec<PlayerId>,
+        n: u32,
+        surveil: bool,
+        looking: Vec<ObjectId>,
+    },
+    /// "Look at the top `n` cards of `player`'s library; put some somewhere and the rest
+    /// somewhere else." `chooser` — the effect's controller — looks, picks and orders.
+    /// `looking`: the cards, top first, once they look.
+    Dig {
+        player: PlayerId,
+        chooser: PlayerId,
+        n: u32,
+        spec: Box<DigSpec>,
+        looking: Vec<ObjectId>,
+    },
+    /// Zone changes about to be proposed. An Aura that would be put onto the battlefield
+    /// without being cast needs something to enchant first (CR 303.4f–g); `checked` moves
+    /// have been looked at.
+    Move {
+        moves: Vec<Proposed>,
+        checked: usize,
+    },
+    /// CR 118.12: `player` may pay `cost` now; then `paid` or `unpaid` is performed.
+    Pay {
+        k: usize,
+        player: PlayerId,
+        cost: Box<card_model::Cost>,
+        paid: Box<Effect>,
+        unpaid: Box<Effect>,
+    },
+}
+
+/// The fixed part of a [`Work::ChooseCards`] (amounts already worked out, CR 608.2h).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChooseSpec {
+    pub from: CardZone,
+    pub cards: Vec<card_model::Selector>,
+    pub count: u32,
+    pub must: bool,
+    pub to: CardDest,
+    pub reveal: bool,
+    pub shuffle: bool,
+}
+
+/// The fixed part of a [`Work::Dig`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DigSpec {
+    pub reveal: bool,
+    pub take: Take,
+    pub cards: Vec<card_model::Selector>,
+    pub to: CardDest,
+    pub reveal_taken: bool,
+    pub rest: CardDest,
+    pub rest_random: bool,
+}
+
+/// What each player picks in a [`Work::EachPlayerChoose`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlayerChoice {
+    /// CR 701.9: cards from their hand to discard.
+    Discard,
+    /// CR 701.21: permanents they control that match, to sacrifice.
+    Sacrifice(Box<card_model::Selector>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,11 +145,33 @@ pub struct ResolveFrame {
     pub source: ObjectId,
     /// The ability's source as it last existed, if it has left the battlefield.
     pub source_lki: Option<Characteristics>,
+    /// The object whose event triggered this ability, and its last known information.
+    #[serde(default)]
+    pub subject: Option<ObjectId>,
+    #[serde(default)]
+    pub subject_lki: Option<Characteristics>,
     pub x: u32,
     pub targets: Vec<Vec<Target>>,
     pub filters: Vec<Vec<TargetFilter>>,
     /// Remaining work; last = next.
     pub work: Vec<Work>,
+    /// The total power of what was sacrificed to pay for this (CR 608.2h).
+    #[serde(default)]
+    pub sacrificed_power: u32,
+    /// What else the triggering event carries ("that player", "that much").
+    #[serde(default)]
+    pub facts: crate::triggers::EventFacts,
+    /// Where the resolving spell goes instead of its owner's graveyard, and whether the
+    /// owner then shuffles ("exile this spell", "shuffle it into its owner's library").
+    #[serde(default)]
+    pub spell_to: Option<(card_model::CardDest, bool)>,
+    /// Who controlled each target that was legal as resolution began (`[k][slot]`): "its
+    /// controller" still means that player once the target is gone (CR 608.2h).
+    #[serde(default)]
+    pub target_controllers: Vec<Vec<Option<PlayerId>>>,
+    /// The card the resolving text is written on: the spell's, or the ability's (which
+    /// is another card's than its source's when the ability was given to the source).
+    pub card: card_model::CardDefId,
 }
 
 impl ResolveFrame {
@@ -65,35 +181,103 @@ impl ResolveFrame {
             controller: PlayerId(0),
             source: ObjectId(0),
             source_lki: None,
+            subject: None,
+            subject_lki: None,
             x: 0,
             targets: Vec::new(),
             filters: Vec::new(),
             work: Vec::new(),
+            sacrificed_power: 0,
+            facts: Default::default(),
+            spell_to: None,
+            target_controllers: Vec::new(),
+            card: card_model::CardDefId(0),
         }
     }
 
+    /// Everything `r` stands for right now: objects and players.
+    fn recipients(&self, st: &GameState, k: usize, r: TargetRef) -> Vec<Target> {
+        match r {
+            TargetRef::Target(_) => self.target(st, k, r).into_iter().collect(),
+            TargetRef::Players(p) => self
+                .players(st, k, p)
+                .into_iter()
+                .map(Target::Player)
+                .collect(),
+            TargetRef::Object(o) => self.obj(st, k, o).into_iter().map(Target::Object).collect(),
+        }
+    }
+
+    /// The players `r` stands for, in APNAP order (CR 101.4).
+    fn players_apnap(&self, st: &GameState, k: usize, r: PlayerRef) -> Vec<PlayerId> {
+        let who = self.players(st, k, r);
+        st.apnap_order()
+            .into_iter()
+            .filter(|p| who.contains(p))
+            .collect()
+    }
+
     fn target(&self, st: &GameState, k: usize, r: TargetRef) -> Option<Target> {
-        let TargetRef::Target(i) = r;
+        let TargetRef::Target(i) = r else {
+            return None;
+        };
         let t = *self.targets.get(k)?.get(i as usize)?;
         // CR 608.2b: illegal targets aren't affected.
         is_legal(
             st,
-            self.filters[k][i as usize],
+            &self.filters[k][i as usize],
             t,
             self.controller,
             self.object,
+            self.ability_source(),
         )
         .then_some(t)
     }
 
-    fn player(&self, st: &GameState, k: usize, r: PlayerRef) -> Option<PlayerId> {
+    /// The players an effect applies to (none if a targeted player is no longer legal).
+    fn players(&self, st: &GameState, k: usize, r: PlayerRef) -> Vec<PlayerId> {
         match r {
-            PlayerRef::You => st.in_game(self.controller).then_some(self.controller),
-            PlayerRef::Target(i) => match self.target(st, k, TargetRef::Target(i))? {
-                Target::Player(p) => Some(p),
-                Target::Object(_) => None,
+            PlayerRef::You => st
+                .in_game(self.controller)
+                .then_some(self.controller)
+                .into_iter()
+                .collect(),
+            PlayerRef::Target(i) => match self.target(st, k, TargetRef::Target(i)) {
+                Some(Target::Player(p)) => vec![p],
+                _ => Vec::new(),
             },
+            // In turn order from the controller (CR 101.4); the effects are simultaneous.
+            PlayerRef::EachOpponent => st.opponents(self.controller),
+            PlayerRef::Each => st.apnap_order(),
+            PlayerRef::TriggeringController => self
+                .subject_chars(st)
+                .map(|c| c.controller)
+                .filter(|p| st.in_game(*p))
+                .into_iter()
+                .collect(),
+            PlayerRef::TriggeringPlayer => self
+                .facts
+                .player
+                .filter(|p| st.in_game(*p))
+                .into_iter()
+                .collect(),
+            // The controller of the targeted spell or permanent, as resolution began —
+            // even if the target is gone by now (CR 608.2h).
+            PlayerRef::ControllerOf(i) => self
+                .target_controllers
+                .get(k)
+                .and_then(|c| c.get(i as usize))
+                .copied()
+                .flatten()
+                .filter(|p| st.in_game(*p))
+                .into_iter()
+                .collect(),
         }
+    }
+
+    /// The one player an effect applies to (effects that can't be spread over several).
+    fn player(&self, st: &GameState, k: usize, r: PlayerRef) -> Option<PlayerId> {
+        self.players(st, k, r).into_iter().next()
     }
 
     /// An object the effect refers to, if it's still where the effect expects it.
@@ -108,7 +292,32 @@ impl ResolveFrame {
                 .get(&self.source)
                 .is_some_and(|o| o.zone == Zone::Battlefield)
                 .then_some(self.source),
+            // "This card", off the battlefield: while it is still the same object there
+            // (CR 400.7).
+            ObjRef::ThisCard => st
+                .objects
+                .get(&self.source)
+                .is_some_and(|o| !matches!(o.zone, Zone::Battlefield | Zone::Stack))
+                .then_some(self.source),
+            // The card the triggering permanent became, while it is still in the zone it
+            // went to (CR 400.7: anywhere else it is a different object).
+            ObjRef::TriggeringCard => self.facts.moved.filter(|id| {
+                st.objects
+                    .get(id)
+                    .is_some_and(|o| !matches!(o.zone, Zone::Battlefield | Zone::Stack))
+            }),
+            // "It": only while it is still the object that triggered this (CR 400.7).
+            ObjRef::Triggering => self.subject.filter(|id| {
+                st.objects
+                    .get(id)
+                    .is_some_and(|o| o.zone == Zone::Battlefield)
+            }),
         }
+    }
+
+    /// For an ability: the object it is on ("another target …" is other than it).
+    fn ability_source(&self) -> Option<ObjectId> {
+        (self.object != Some(self.source)).then_some(self.source)
     }
 
     /// The source's current characteristics, or its last known ones (CR 608.2h, 113.7a).
@@ -120,10 +329,64 @@ impl ResolveFrame {
         }
     }
 
-    fn amount(&self, st: &GameState, a: Amount) -> u32 {
+    /// The triggering object's current characteristics, or its last known ones.
+    fn subject_chars(&self, st: &GameState) -> Option<Characteristics> {
+        match self.subject {
+            Some(id)
+                if st
+                    .objects
+                    .get(&id)
+                    .is_some_and(|o| o.zone == Zone::Battlefield) =>
+            {
+                Some(chars(st, id))
+            }
+            _ => self.subject_lki.clone(),
+        }
+    }
+
+    fn amount(&self, st: &GameState, a: &Amount) -> u32 {
         match a {
-            Amount::Fixed(n) => n,
+            Amount::TriggeringPower => self
+                .subject_chars(st)
+                .and_then(|c| c.power)
+                .unwrap_or(0)
+                .max(0) as u32,
+            Amount::TriggeringToughness => self
+                .subject_chars(st)
+                .and_then(|c| c.toughness)
+                .unwrap_or(0)
+                .max(0) as u32,
+            Amount::Fixed(n) => *n,
             Amount::X => self.x,
+            Amount::SacrificedPower => self.sacrificed_power,
+            Amount::TriggeringAmount => self.facts.amount,
+            // Arithmetic and tests on amounts that may themselves need this resolution.
+            Amount::Calc(base, op) => op.apply(self.amount(st, base)),
+            Amount::IfAtLeast {
+                test,
+                at_least,
+                then,
+                otherwise,
+            } => {
+                if self.amount(st, test) >= *at_least {
+                    *then
+                } else {
+                    *otherwise
+                }
+            }
+            Amount::SourceToughness => self
+                .source_chars(st)
+                .and_then(|c| c.toughness)
+                .unwrap_or(0)
+                .max(0) as u32,
+            Amount::Count(_)
+            | Amount::TotalPower(_)
+            | Amount::CardsIn { .. }
+            | Amount::Domain
+            | Amount::Devotion(_)
+            | Amount::Greatest { .. }
+            | Amount::HandSize
+            | Amount::LifeTotal => crate::layers::count_amount(st, a, self.source, self.controller),
             Amount::SourcePower => self
                 .source_chars(st)
                 .and_then(|c| c.power)
@@ -132,10 +395,42 @@ impl ResolveFrame {
         }
     }
 
+    /// CR 608.2h: amounts in a one-shot continuous effect are worked out once, as it begins.
+    fn fix_amounts(&self, st: &GameState, effects: Vec<ContinuousEffect>) -> Vec<ContinuousEffect> {
+        effects
+            .into_iter()
+            .map(|e| match e {
+                ContinuousEffect::ModifyPTBy { power, toughness } => {
+                    let value = |s: &card_model::Signed| {
+                        let n = self.amount(st, &s.amount) as i32;
+                        if s.negative { -n } else { n }
+                    };
+                    ContinuousEffect::ModifyPT(value(&power), value(&toughness))
+                }
+                other => other,
+            })
+            .collect()
+    }
+
     fn damage(&self, st: &GameState, target: DamageTarget, amount: u32) -> Proposed {
-        let c = self.source_chars(st);
+        self.damage_by(st, DamageBy::This, target, amount)
+    }
+
+    /// CR 608.2h: "If an ability states that an object does something, it's the object as
+    /// it exists — or as it most recently existed — that does it, not the ability."
+    fn damage_by(
+        &self,
+        st: &GameState,
+        by: DamageBy,
+        target: DamageTarget,
+        amount: u32,
+    ) -> Proposed {
+        let (source, c) = match (by, self.subject) {
+            (DamageBy::Triggering, Some(subject)) => (subject, self.subject_chars(st)),
+            _ => (self.source, self.source_chars(st)),
+        };
         Proposed::Damage {
-            source: self.source,
+            source,
             deathtouch: c.as_ref().is_some_and(|c| c.has(Keyword::Deathtouch)),
             lifelink: c.as_ref().is_some_and(|c| c.has(Keyword::Lifelink)),
             target,
@@ -153,7 +448,7 @@ impl ResolveFrame {
         while let Some(item) = self.work.pop() {
             match item {
                 Work::Eval { k, effect } => {
-                    let events = self.eval(st, k, effect);
+                    let events = self.eval(st, k, *effect);
                     if !events.is_empty() {
                         let apply = ApplyFrame::new(st, events);
                         return Flow::Continue(vec![
@@ -162,8 +457,68 @@ impl ResolveFrame {
                         ]);
                     }
                 }
+                Work::Pay {
+                    k,
+                    player,
+                    cost,
+                    paid,
+                    unpaid,
+                } => match input.take() {
+                    // CR 118.3: a player can't pay a cost they can't pay in full; then
+                    // there is nothing to ask.
+                    None if st.in_game(player)
+                        && super::cast::can_pay(st, player, self.source, &cost) =>
+                    {
+                        self.work.push(Work::Pay {
+                            k,
+                            player,
+                            cost,
+                            paid,
+                            unpaid,
+                        });
+                        return Flow::ask_one(
+                            Frame::Resolve(Box::new(self)),
+                            player,
+                            ChoiceKind::PayUnlessCost,
+                            vec![OptionDesc::Accept, OptionDesc::Decline],
+                        );
+                    }
+                    None => self.work.push(Work::Eval { k, effect: unpaid }),
+                    Some(inp) => {
+                        if matches!(inp.picked_one(), Some(OptionDesc::Accept)) {
+                            // The payment runs first (mana abilities, choices); this
+                            // resolution carries on with `paid` after it.
+                            let source = self.source;
+                            self.work.push(Work::Eval { k, effect: paid });
+                            return Flow::Continue(vec![
+                                Frame::Resolve(Box::new(self)),
+                                Frame::Cast(super::cast::CastFrame::payment(player, source, *cost)),
+                            ]);
+                        }
+                        self.work.push(Work::Eval { k, effect: unpaid });
+                    }
+                },
+                Work::May { k, effect } => match input.take() {
+                    None if st.in_game(self.controller) => {
+                        let controller = self.controller;
+                        self.work.push(Work::May { k, effect });
+                        return Flow::ask_one(
+                            Frame::Resolve(Box::new(self)),
+                            controller,
+                            ChoiceKind::MayAbility,
+                            vec![OptionDesc::Accept, OptionDesc::Decline],
+                        );
+                    }
+                    None => {}
+                    Some(inp) => {
+                        if matches!(inp.picked_one(), Some(OptionDesc::Accept)) {
+                            self.work.push(Work::Eval { k, effect });
+                        }
+                    }
+                },
                 Work::EachPlayerChoose {
-                    action,
+                    choice,
+                    n,
                     order,
                     mut next,
                     mut chosen,
@@ -181,15 +536,17 @@ impl ResolveFrame {
                         next += 1;
                     }
                     while let Some(&p) = order.get(next) {
-                        let (kind, n, pool) = each_player_options(st, action, p);
-                        let n = n.min(pool.len());
+                        let (kind, pool) =
+                            each_player_options(st, &choice, p, self.source, self.controller);
+                        let n = (n as usize).min(pool.len());
                         if !st.in_game(p) || n == 0 {
                             chosen.push((p, Vec::new()));
                             next += 1;
                             continue;
                         }
                         self.work.push(Work::EachPlayerChoose {
-                            action,
+                            choice,
+                            n: n as u32,
                             order,
                             next,
                             chosen,
@@ -207,9 +564,9 @@ impl ResolveFrame {
                         );
                     }
                     // All players have chosen: the actions happen simultaneously.
-                    let cause = match action {
-                        EachPlayerAction::Discard(_) => MoveCause::Discard,
-                        _ => MoveCause::Sacrifice,
+                    let cause = match choice {
+                        PlayerChoice::Discard => MoveCause::Discard,
+                        PlayerChoice::Sacrifice(_) => MoveCause::Sacrifice,
                     };
                     let events: Vec<Proposed> = chosen
                         .into_iter()
@@ -224,9 +581,499 @@ impl ResolveFrame {
                         ]);
                     }
                 }
+                Work::ChooseCards {
+                    spec,
+                    order,
+                    mut next,
+                    mut chosen,
+                } => {
+                    if let Some(inp) = input.take() {
+                        chosen.push((order[next], picked_cards(&inp)));
+                        next += 1;
+                    }
+                    while let Some(&p) = order.get(next) {
+                        if !st.in_game(p) {
+                            next += 1;
+                            continue;
+                        }
+                        let library = spec.from == CardZone::Library;
+                        if library {
+                            // CR 701.23a: the player looks at every card in the library.
+                            st.emit(Event::SearchedLibrary { player: p });
+                        }
+                        let mut pool: Vec<ObjectId> = zone_cards(st, spec.from, p)
+                            .into_iter()
+                            .filter(|&id| {
+                                card_fits(st, id, &spec.cards, self.source, self.controller)
+                            })
+                            .collect();
+                        if library {
+                            // Offered by name: the order of the library isn't part of
+                            // what a search is for.
+                            pool.sort_by(|a, b| {
+                                (&st.card_def(*a).name, *a).cmp(&(&st.card_def(*b).name, *b))
+                            });
+                        }
+                        let max = (spec.count as usize).min(pool.len());
+                        // CR 701.23b: cards with a stated quality needn't be found;
+                        // 701.23d: a plain quantity must be (as many as possible).
+                        let min = if spec.must { max } else { 0 };
+                        if max == 0 || (min == max && max == pool.len()) {
+                            pool.truncate(max);
+                            chosen.push((p, pool));
+                            next += 1;
+                            continue;
+                        }
+                        let kind = if library {
+                            ChoiceKind::SearchLibrary
+                        } else {
+                            ChoiceKind::ChooseCards
+                        };
+                        let options = pool
+                            .into_iter()
+                            .map(|card| OptionDesc::Card { card })
+                            .collect();
+                        self.work.push(Work::ChooseCards {
+                            spec,
+                            order,
+                            next,
+                            chosen,
+                        });
+                        return Flow::ask(
+                            Frame::Resolve(Box::new(self)),
+                            p,
+                            kind,
+                            Primitive::PickN { min, max },
+                            options,
+                        );
+                    }
+                    // Everyone has chosen.
+                    let players: Vec<PlayerId> = chosen.iter().map(|(p, _)| *p).collect();
+                    if spec.reveal {
+                        for (player, cards) in &chosen {
+                            if !cards.is_empty() {
+                                st.emit(Event::Revealed {
+                                    player: *player,
+                                    cards: cards.clone(),
+                                });
+                            }
+                        }
+                    }
+                    let to_library =
+                        matches!(spec.to, CardDest::LibraryTop | CardDest::LibraryBottom);
+                    let within = to_library && spec.from == CardZone::Library;
+                    // Work is done last-pushed first. CR 701.24b: "search, shuffle, then
+                    // put the card on top" shuffles before the found cards are placed;
+                    // otherwise the shuffle comes after the cards have left.
+                    if spec.shuffle && !within {
+                        self.work.push(Work::Shuffle {
+                            players: players.clone(),
+                        });
+                    }
+                    if to_library {
+                        for (player, cards) in chosen.into_iter().rev() {
+                            if !cards.is_empty() {
+                                self.work.push(Work::Place {
+                                    player,
+                                    by: player,
+                                    cards,
+                                    to: spec.to,
+                                    random: false,
+                                    ordered: false,
+                                });
+                            }
+                        }
+                    } else {
+                        // All at once (CR 101.4).
+                        self.work.push(Work::Move {
+                            moves: chosen
+                                .into_iter()
+                                .flat_map(|(_, cards)| cards)
+                                .map(|o| move_to(o, spec.to))
+                                .collect(),
+                            checked: 0,
+                        });
+                    }
+                    if spec.shuffle && within {
+                        self.work.push(Work::Shuffle { players });
+                    }
+                }
+                Work::Shuffle { players } => {
+                    for player in players {
+                        if st.in_game(player) {
+                            execute(st, GameAction::Shuffle { player });
+                        }
+                    }
+                }
+                Work::Place {
+                    player,
+                    by,
+                    mut cards,
+                    to,
+                    random,
+                    ordered,
+                } => {
+                    let top = to == CardDest::LibraryTop;
+                    let library = top || to == CardDest::LibraryBottom;
+                    if let Some(inp) = input.take() {
+                        // The answer orders the options, which were these cards.
+                        cards = inp
+                            .order()
+                            .iter()
+                            .map(|&i| match &inp.decision.options[i] {
+                                OptionDesc::Card { card } => *card,
+                                o => unreachable!("not a card: {o:?}"),
+                            })
+                            .collect();
+                    } else if library && cards.len() > 1 && !random && !ordered && st.in_game(by) {
+                        // CR 401.4: their owner arranges them (or whoever the effect
+                        // lets put them there in any order).
+                        let options = cards
+                            .iter()
+                            .map(|&card| OptionDesc::Card { card })
+                            .collect();
+                        self.work.push(Work::Place {
+                            player,
+                            by,
+                            cards,
+                            to,
+                            random,
+                            ordered: true,
+                        });
+                        let kind = if top {
+                            ChoiceKind::ScryOrder
+                        } else {
+                            ChoiceKind::OrderBottom
+                        };
+                        return Flow::ask(
+                            Frame::Resolve(Box::new(self)),
+                            by,
+                            kind,
+                            Primitive::Order,
+                            options,
+                        );
+                    }
+                    cards.retain(|c| st.objects.contains_key(c));
+                    // Cards already in that library stay in it (and stay the same
+                    // objects); anything else changes zones.
+                    let (staying, moving): (Vec<ObjectId>, Vec<ObjectId>) =
+                        cards.into_iter().partition(|c| {
+                            let o = st.object(*c);
+                            library && o.zone == Zone::Library && o.owner == player
+                        });
+                    if !staying.is_empty() {
+                        let (top, bottom) = if top {
+                            (staying, Vec::new())
+                        } else {
+                            (Vec::new(), staying)
+                        };
+                        execute(
+                            st,
+                            GameAction::ArrangeLibrary {
+                                player,
+                                top,
+                                bottom,
+                                random_bottom: random,
+                            },
+                        );
+                    }
+                    if !moving.is_empty() {
+                        // Each card put on a library goes on top of (or under) the ones
+                        // before it: the first listed must end up on top, the last listed
+                        // bottom-most.
+                        let moves: Vec<Proposed> = if top {
+                            moving.into_iter().rev().map(|o| move_to(o, to)).collect()
+                        } else {
+                            moving.into_iter().map(|o| move_to(o, to)).collect()
+                        };
+                        self.work.push(Work::Move { moves, checked: 0 });
+                    }
+                }
+                Work::Scry {
+                    mut players,
+                    n,
+                    surveil,
+                    looking,
+                } => {
+                    if let Some(inp) = input.take() {
+                        let player = players.remove(0);
+                        let picked = picked_cards(&inp);
+                        let rest: Vec<ObjectId> = looking
+                            .iter()
+                            .copied()
+                            .filter(|c| !picked.contains(c))
+                            .collect();
+                        let (count, away) = (looking.len() as u32, picked.len() as u32);
+                        st.emit(if surveil {
+                            Event::Surveilled {
+                                player,
+                                count,
+                                graveyard: away,
+                            }
+                        } else {
+                            Event::Scried {
+                                player,
+                                count,
+                                bottom: away,
+                            }
+                        });
+                        // Last pushed is done first: the cards that leave the top, then
+                        // the order of the rest, then the next player.
+                        if !players.is_empty() {
+                            self.work.push(Work::Scry {
+                                players,
+                                n,
+                                surveil,
+                                looking: Vec::new(),
+                            });
+                        }
+                        if rest.len() > 1 {
+                            self.work.push(Work::Place {
+                                player,
+                                by: player,
+                                cards: rest,
+                                to: CardDest::LibraryTop,
+                                random: false,
+                                ordered: false,
+                            });
+                        }
+                        if !picked.is_empty() {
+                            self.work.push(Work::Place {
+                                player,
+                                by: player,
+                                cards: picked,
+                                to: if surveil {
+                                    CardDest::Graveyard
+                                } else {
+                                    CardDest::LibraryBottom
+                                },
+                                random: false,
+                                ordered: false,
+                            });
+                        }
+                        continue;
+                    }
+                    while let Some(&player) = players.first() {
+                        let looking = top_cards(st, player, n);
+                        if !st.in_game(player) || looking.is_empty() {
+                            players.remove(0);
+                            continue;
+                        }
+                        st.emit(Event::LookedAtLibrary {
+                            player,
+                            count: looking.len() as u32,
+                        });
+                        let options: Vec<OptionDesc> = looking
+                            .iter()
+                            .map(|&card| OptionDesc::Card { card })
+                            .collect();
+                        let max = options.len();
+                        self.work.push(Work::Scry {
+                            players,
+                            n,
+                            surveil,
+                            looking,
+                        });
+                        return Flow::ask(
+                            Frame::Resolve(Box::new(self)),
+                            player,
+                            if surveil {
+                                ChoiceKind::SurveilGraveyard
+                            } else {
+                                ChoiceKind::ScryBottom
+                            },
+                            Primitive::PickN { min: 0, max },
+                            options,
+                        );
+                    }
+                }
+                Work::Dig {
+                    player,
+                    chooser,
+                    n,
+                    spec,
+                    mut looking,
+                } => {
+                    let taken: Vec<ObjectId> = if let Some(inp) = input.take() {
+                        picked_cards(&inp)
+                    } else {
+                        looking = top_cards(st, player, n);
+                        if !st.in_game(player) || !st.in_game(chooser) || looking.is_empty() {
+                            continue;
+                        }
+                        st.emit(Event::LookedAtLibrary {
+                            player,
+                            count: looking.len() as u32,
+                        });
+                        if spec.reveal {
+                            st.emit(Event::Revealed {
+                                player,
+                                cards: looking.clone(),
+                            });
+                        } else {
+                            // CR 701.20e: only the player looking sees them.
+                            st.emit(Event::LookedAt {
+                                player: chooser,
+                                cards: looking.clone(),
+                            });
+                        }
+                        let fit: Vec<ObjectId> = looking
+                            .iter()
+                            .copied()
+                            .filter(|&id| {
+                                card_fits(st, id, &spec.cards, self.source, self.controller)
+                            })
+                            .collect();
+                        let (min, max) = match spec.take {
+                            Take::All => (fit.len(), fit.len()),
+                            Take::Exactly(k) => {
+                                let m = (k as usize).min(fit.len());
+                                (m, m)
+                            }
+                            Take::UpTo(k) => (0, (k as usize).min(fit.len())),
+                            Take::Any => (0, fit.len()),
+                        };
+                        if max > 0 && !(min == max && max == fit.len()) {
+                            let options = fit
+                                .into_iter()
+                                .map(|card| OptionDesc::Card { card })
+                                .collect();
+                            self.work.push(Work::Dig {
+                                player,
+                                chooser,
+                                n,
+                                spec,
+                                looking,
+                            });
+                            return Flow::ask(
+                                Frame::Resolve(Box::new(self)),
+                                chooser,
+                                ChoiceKind::ChooseCards,
+                                Primitive::PickN { min, max },
+                                options,
+                            );
+                        }
+                        // Nothing to decide: none can be taken, or all of them must be.
+                        if max == 0 { Vec::new() } else { fit }
+                    };
+                    let rest: Vec<ObjectId> = looking
+                        .iter()
+                        .copied()
+                        .filter(|c| !taken.contains(c))
+                        .collect();
+                    if spec.reveal_taken && !spec.reveal && !taken.is_empty() {
+                        st.emit(Event::Revealed {
+                            player,
+                            cards: taken.clone(),
+                        });
+                    }
+                    let in_library =
+                        |d: CardDest| matches!(d, CardDest::LibraryTop | CardDest::LibraryBottom);
+                    if !in_library(spec.to) && !in_library(spec.rest) {
+                        // Both piles leave the library: at once.
+                        let moves: Vec<Proposed> = taken
+                            .into_iter()
+                            .map(|o| move_to(o, spec.to))
+                            .chain(rest.into_iter().map(|o| move_to(o, spec.rest)))
+                            .collect();
+                        self.work.push(Work::Move { moves, checked: 0 });
+                    } else {
+                        // Last pushed is done first: the taken cards, then the rest.
+                        if !rest.is_empty() {
+                            self.work.push(Work::Place {
+                                player,
+                                by: chooser,
+                                cards: rest,
+                                to: spec.rest,
+                                random: spec.rest_random,
+                                ordered: false,
+                            });
+                        }
+                        if !taken.is_empty() {
+                            self.work.push(Work::Place {
+                                player,
+                                by: chooser,
+                                cards: taken,
+                                to: spec.to,
+                                random: false,
+                                ordered: false,
+                            });
+                        }
+                    }
+                }
+                Work::Move {
+                    mut moves,
+                    mut checked,
+                } => {
+                    if let Some(inp) = input.take() {
+                        let host = match inp.picked_one() {
+                            Some(OptionDesc::Card { card }) => *card,
+                            o => unreachable!("not an Aura host: {o:?}"),
+                        };
+                        if let Some(Proposed::Move { attach_to, .. }) = moves.get_mut(checked) {
+                            *attach_to = Some(host);
+                        }
+                        checked += 1;
+                    }
+                    while checked < moves.len() {
+                        let Some((chooser, mut hosts)) = aura_hosts(st, &moves[checked]) else {
+                            checked += 1;
+                            continue;
+                        };
+                        match hosts.len() {
+                            // CR 303.4g: with nothing to enchant it stays where it is.
+                            0 => {
+                                moves.remove(checked);
+                            }
+                            1 => {
+                                if let Proposed::Move { attach_to, .. } = &mut moves[checked] {
+                                    *attach_to = hosts.pop();
+                                }
+                                checked += 1;
+                            }
+                            // CR 303.4f: the player putting it onto the battlefield chooses.
+                            _ => {
+                                let options = hosts
+                                    .into_iter()
+                                    .map(|card| OptionDesc::Card { card })
+                                    .collect();
+                                self.work.push(Work::Move { moves, checked });
+                                return Flow::ask_one(
+                                    Frame::Resolve(Box::new(self)),
+                                    chooser,
+                                    ChoiceKind::AuraHost,
+                                    options,
+                                );
+                            }
+                        }
+                    }
+                    if !moves.is_empty() {
+                        let apply = ApplyFrame::new(st, moves);
+                        return Flow::Continue(vec![
+                            Frame::Resolve(Box::new(self)),
+                            Frame::Apply(apply),
+                        ]);
+                    }
+                }
             }
         }
         self.finish(st)
+    }
+
+    /// The cards in hidden zones that the player answering this frame's pending decision
+    /// is looking at (CR 701.20e, 701.23a) beyond the ones offered as options: a library
+    /// being searched, the cards a scry or a "look at the top N cards" shows.
+    pub fn shown(&self, st: &GameState) -> Vec<ObjectId> {
+        match self.work.last() {
+            Some(Work::ChooseCards {
+                spec, order, next, ..
+            }) if spec.from == CardZone::Library => order
+                .get(*next)
+                .map(|p| st.zones.libraries[p.index()].clone())
+                .unwrap_or_default(),
+            Some(Work::Scry { looking, .. } | Work::Dig { looking, .. }) => looking.clone(),
+            _ => Vec::new(),
+        }
     }
 
     /// CR 608.2a–b and 608.3. Returns `Some` if resolution ends here.
@@ -235,8 +1082,16 @@ impl ResolveFrame {
         self.object = Some(top.id);
         self.controller = top.controller;
         self.x = top.x;
+        self.sacrificed_power = top.sacrificed_power;
+        self.facts = top.facts;
+        self.card = match &top.kind {
+            StackKind::Spell => st.object(top.id).card,
+            StackKind::Ability { ability, .. } => ability.card,
+        };
         self.targets = top.targets.clone();
         self.source_lki = top.source_lki.clone();
+        self.subject = top.subject;
+        self.subject_lki = top.subject_lki.clone();
         let body: Body = match &top.kind {
             StackKind::Spell => {
                 self.source = top.id;
@@ -248,7 +1103,7 @@ impl ResolveFrame {
                         let target = top.targets.first().and_then(|t| t.first()).copied();
                         match target {
                             Some(t @ Target::Object(o))
-                                if is_legal(st, filter, t, top.controller, Some(top.id)) =>
+                                if is_legal(st, &filter, t, top.controller, Some(top.id), None) =>
                             {
                                 attach = Some(o)
                             }
@@ -279,13 +1134,10 @@ impl ResolveFrame {
                     .expect("instants and sorceries have a spell ability")
             }
             StackKind::Ability {
-                source,
-                source_card,
-                index,
-                ..
+                source, ability, ..
             } => {
                 self.source = *source;
-                match &st.catalog.get(*source_card).abilities[*index as usize] {
+                match st.catalog.ability(*ability) {
                     AbilityDef::Activated { body, .. } => body.clone(),
                     AbilityDef::Triggered {
                         body,
@@ -293,7 +1145,7 @@ impl ResolveFrame {
                         ..
                     } => {
                         // CR 603.4 / 608.2a: re-check an intervening "if" on resolution.
-                        if !condition_holds(st, *intervening_if, top.controller) {
+                        if !condition_holds(st, intervening_if.as_ref(), top.controller, *source) {
                             execute(st, GameAction::RemoveAbility { ability: top.id });
                             return Some(Flow::done());
                         }
@@ -314,18 +1166,42 @@ impl ResolveFrame {
         for (k, ts) in self.targets.iter().enumerate() {
             for (i, &t) in ts.iter().enumerate() {
                 any = true;
-                any_legal |= is_legal(st, self.filters[k][i], t, self.controller, Some(top.id));
+                any_legal |= is_legal(
+                    st,
+                    &self.filters[k][i],
+                    t,
+                    self.controller,
+                    Some(top.id),
+                    self.ability_source(),
+                );
             }
         }
         if any && !any_legal {
             st.emit(Event::Fizzled { object: top.id });
             return Some(self.leave_stack(st, MoveCause::Fizzled));
         }
+        self.target_controllers = (0..self.targets.len())
+            .map(|k| {
+                (0..self.targets[k].len())
+                    .map(|i| match self.target(st, k, TargetRef::Target(i as u8)) {
+                        Some(Target::Object(o)) => {
+                            st.stack_object(o).map(|s| s.controller).or_else(|| {
+                                st.objects
+                                    .get(&o)
+                                    .filter(|x| x.zone == Zone::Battlefield)
+                                    .map(|_| chars(st, o).controller)
+                            })
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect();
         // CR 700.2: chosen modes are performed in printed order (modes are stored sorted).
         for (k, &m) in top.modes.iter().enumerate().rev() {
             self.work.push(Work::Eval {
                 k,
-                effect: body.modes()[m as usize].effect.clone(),
+                effect: Box::new(body.modes()[m as usize].effect.clone()),
             });
         }
         None
@@ -336,49 +1212,151 @@ impl ResolveFrame {
         match effect {
             Effect::Seq(v) => {
                 for e in v.into_iter().rev() {
-                    self.work.push(Work::Eval { k, effect: e });
+                    self.work.push(Work::Eval {
+                        k,
+                        effect: Box::new(e),
+                    });
                 }
                 Vec::new()
             }
-            Effect::DealDamage { to, amount } => {
-                let amount = self.amount(st, amount);
-                match self.target(st, k, to) {
-                    Some(Target::Player(p)) => {
-                        vec![self.damage(st, DamageTarget::Player(p), amount)]
-                    }
-                    Some(Target::Object(o)) => {
-                        vec![self.damage(st, DamageTarget::Object(o), amount)]
-                    }
-                    None => Vec::new(),
-                }
+            // One event: what each instruction would do, all at once.
+            Effect::Together(v) => v.into_iter().flat_map(|e| self.eval(st, k, e)).collect(),
+            Effect::DealDamage { to, amount, by } => {
+                let amount = self.amount(st, &amount);
+                // Several recipients ("to each opponent") are dealt damage at once.
+                self.recipients(st, k, to)
+                    .into_iter()
+                    .map(|t| {
+                        let t = match t {
+                            Target::Player(p) => DamageTarget::Player(p),
+                            Target::Object(o) => DamageTarget::Object(o),
+                        };
+                        self.damage_by(st, by, t, amount)
+                    })
+                    .collect()
             }
             Effect::DamageEachPlayer { amount } => {
-                let amount = self.amount(st, amount);
+                let amount = self.amount(st, &amount);
                 st.apnap_order()
                     .into_iter()
                     .map(|p| self.damage(st, DamageTarget::Player(p), amount))
                     .collect()
             }
-            Effect::Draw { who, amount } => match self.player(st, k, who) {
-                Some(player) => (0..self.amount(st, amount))
-                    .map(|_| Proposed::Draw { player })
-                    .collect(),
+            Effect::Draw { who, amount } => {
+                let n = self.amount(st, &amount);
+                self.players(st, k, who)
+                    .into_iter()
+                    .flat_map(|player| (0..n).map(move |_| Proposed::Draw { player }))
+                    .collect()
+            }
+            Effect::GainLife { who, amount } => {
+                let amount = self.amount(st, &amount);
+                self.players(st, k, who)
+                    .into_iter()
+                    .map(|player| Proposed::GainLife { player, amount })
+                    .collect()
+            }
+            Effect::LoseLife { who, amount } => {
+                let amount = self.amount(st, &amount);
+                self.players(st, k, who)
+                    .into_iter()
+                    .map(|player| Proposed::LoseLife { player, amount })
+                    .collect()
+            }
+            Effect::SetX(amount) => {
+                self.x = self.amount(st, &amount);
+                Vec::new()
+            }
+            // CR 106.4: the mana goes to the player's pool. (Not a mana ability: this is
+            // a spell or an ability on the stack, CR 605.5.)
+            Effect::AddMana { who, mana, amount } => {
+                let amount = self.amount(st, &amount);
+                for player in self.players(st, k, who) {
+                    for _ in 0..amount {
+                        execute(st, GameAction::AddMana { player, mana });
+                    }
+                }
+                Vec::new()
+            }
+            Effect::May(effect) => {
+                self.work.push(Work::May { k, effect });
+                Vec::new()
+            }
+            Effect::ReturnToBattlefield { what } => {
+                // Through `Work::Move`: an Aura returning this way needs something to
+                // enchant (CR 303.4f–g).
+                if let Some(o) = self.obj(st, k, what) {
+                    self.work.push(Work::Move {
+                        moves: vec![Proposed::moving(o, Zone::Battlefield, MoveCause::Rule)],
+                        checked: 0,
+                    });
+                }
+                Vec::new()
+            }
+            Effect::DestroyAll(sel) => {
+                crate::layers::matching(st, &sel, self.source, self.controller)
+                    .into_iter()
+                    .map(|o| Proposed::moving(o, Zone::Graveyard, MoveCause::Destroy))
+                    .collect()
+            }
+            Effect::DamageEach { each, amount } => {
+                let amount = self.amount(st, &amount);
+                crate::layers::matching(st, &each, self.source, self.controller)
+                    .into_iter()
+                    .map(|o| self.damage(st, DamageTarget::Object(o), amount))
+                    .collect()
+            }
+            Effect::Exile { what } => match self.obj(st, k, what) {
+                // CR 701.13a
+                Some(o) => vec![Proposed::moving(o, Zone::Exile, MoveCause::Rule)],
                 None => Vec::new(),
             },
-            Effect::GainLife { who, amount } => match self.player(st, k, who) {
-                Some(player) => vec![Proposed::GainLife {
-                    player,
-                    amount: self.amount(st, amount),
-                }],
-                None => Vec::new(),
-            },
-            Effect::LoseLife { who, amount } => match self.player(st, k, who) {
-                Some(player) => vec![Proposed::LoseLife {
-                    player,
-                    amount: self.amount(st, amount),
-                }],
-                None => Vec::new(),
-            },
+            Effect::ExileGraveyard { who } => self
+                .players(st, k, who)
+                .into_iter()
+                .flat_map(|p| st.zones.list(Zone::Graveyard, p).clone())
+                .map(|o| Proposed::moving(o, Zone::Exile, MoveCause::Rule))
+                .collect(),
+            Effect::Mill { who, amount } => {
+                // CR 701.17a: the top N cards (the library's last entries), all at once.
+                let n = self.amount(st, &amount) as usize;
+                self.players(st, k, who)
+                    .into_iter()
+                    .flat_map(|p| {
+                        let library = st.zones.list(Zone::Library, p);
+                        let take = n.min(library.len());
+                        library[library.len() - take..]
+                            .iter()
+                            .rev()
+                            .copied()
+                            .collect::<Vec<_>>()
+                    })
+                    .map(|o| Proposed::moving(o, Zone::Graveyard, MoveCause::Rule))
+                    .collect()
+            }
+            Effect::ApplyAll {
+                affected,
+                effects,
+                until_end_of_turn,
+            } => {
+                // CR 611.2c: the affected set is locked in now.
+                let affected = crate::layers::matching(st, &affected, self.source, self.controller);
+                let effects = self.fix_amounts(st, effects);
+                if !affected.is_empty() {
+                    execute(
+                        st,
+                        GameAction::AddContinuous {
+                            source: self.source,
+                            controller: self.controller,
+                            affected,
+                            effects,
+                            until_end_of_turn,
+                            card: self.card,
+                        },
+                    );
+                }
+                Vec::new()
+            }
             Effect::Counter { what } => match self.target(st, k, what) {
                 // CR 701.6a: a countered spell is put into its owner's graveyard.
                 Some(Target::Object(spell)) => {
@@ -405,17 +1383,28 @@ impl ResolveFrame {
                 match self.player(st, k, who) {
                     Some(controller) => vec![Proposed::CreateTokens {
                         token,
-                        count: self.amount(st, count),
+                        count: self.amount(st, &count),
                         controller,
                     }],
                     None => Vec::new(),
                 }
             }
+            Effect::PutCountersAll { what, kind, count } => {
+                let count = self.amount(st, &count);
+                crate::layers::matching(st, &what, self.source, self.controller)
+                    .into_iter()
+                    .map(|object| Proposed::PutCounters {
+                        object,
+                        kind,
+                        count,
+                    })
+                    .collect()
+            }
             Effect::PutCounters { what, kind, count } => match self.obj(st, k, what) {
                 Some(object) => vec![Proposed::PutCounters {
                     object,
                     kind,
-                    count: self.amount(st, count),
+                    count: self.amount(st, &count),
                 }],
                 None => Vec::new(),
             },
@@ -425,6 +1414,7 @@ impl ResolveFrame {
                 until_end_of_turn,
             } => {
                 // CR 611.2c: the affected set is locked in now.
+                let effects = self.fix_amounts(st, effects);
                 if let Some(o) = self.obj(st, k, what) {
                     execute(
                         st,
@@ -434,6 +1424,7 @@ impl ResolveFrame {
                             affected: vec![o],
                             effects,
                             until_end_of_turn,
+                            card: self.card,
                         },
                     );
                 }
@@ -451,14 +1442,292 @@ impl ResolveFrame {
                 .flat_map(|player| (0..n).map(move |_| Proposed::Draw { player }))
                 .collect(),
             Effect::EachPlayer(action) => {
+                let (choice, n) = match action {
+                    EachPlayerAction::Discard(n) => (PlayerChoice::Discard, n),
+                    EachPlayerAction::SacrificeCreature(n) => (
+                        PlayerChoice::Sacrifice(Box::new(card_model::Selector {
+                            types: vec![CardType::Creature],
+                            ..Default::default()
+                        })),
+                        n,
+                    ),
+                    EachPlayerAction::Draw(_) => unreachable!("handled above"),
+                };
                 self.work.push(Work::EachPlayerChoose {
-                    action,
+                    choice,
+                    n,
                     order: st.apnap_order(),
                     next: 0,
                     chosen: Vec::new(),
                 });
                 Vec::new()
             }
+            // CR 701.26: only an untapped permanent can be tapped, only a tapped one untapped.
+            Effect::Tap { what } => {
+                if let Some(object) = self.obj(st, k, what)
+                    && !st.object(object).tapped
+                {
+                    execute(st, GameAction::Tap { object });
+                }
+                Vec::new()
+            }
+            Effect::Untap { what } => {
+                if let Some(object) = self.obj(st, k, what)
+                    && st.object(object).tapped
+                {
+                    execute(st, GameAction::Untap { object });
+                }
+                Vec::new()
+            }
+            Effect::TapAll(sel) => {
+                for object in crate::layers::matching(st, &sel, self.source, self.controller) {
+                    if !st.object(object).tapped {
+                        execute(st, GameAction::Tap { object });
+                    }
+                }
+                Vec::new()
+            }
+            Effect::UntapAll(sel) => {
+                for object in crate::layers::matching(st, &sel, self.source, self.controller) {
+                    if st.object(object).tapped {
+                        execute(st, GameAction::Untap { object });
+                    }
+                }
+                Vec::new()
+            }
+            Effect::Discard { who, amount } => {
+                let n = self.amount(st, &amount);
+                self.work.push(Work::EachPlayerChoose {
+                    choice: PlayerChoice::Discard,
+                    n,
+                    order: self.players_apnap(st, k, who),
+                    next: 0,
+                    chosen: Vec::new(),
+                });
+                Vec::new()
+            }
+            Effect::DiscardHand { who } => self
+                .players_apnap(st, k, who)
+                .into_iter()
+                .flat_map(|p| st.zones.hands[p.index()].clone())
+                .map(|card| Proposed::moving(card, Zone::Graveyard, MoveCause::Discard))
+                .collect(),
+            Effect::Sacrifice { who, what, amount } => {
+                let n = self.amount(st, &amount);
+                self.work.push(Work::EachPlayerChoose {
+                    choice: PlayerChoice::Sacrifice(Box::new(what)),
+                    n,
+                    order: self.players_apnap(st, k, who),
+                    next: 0,
+                    chosen: Vec::new(),
+                });
+                Vec::new()
+            }
+            // CR 701.3 / 702.6a: attach this permanent (an Equipment) to the object.
+            Effect::AttachThis { to } => {
+                let here = st
+                    .objects
+                    .get(&self.source)
+                    .is_some_and(|o| o.zone == Zone::Battlefield);
+                if here
+                    && let Some(to) = self.obj(st, k, to)
+                    && to != self.source
+                    // CR 301.5c: an Equipment that is also a creature can't equip.
+                    && !chars(st, self.source).is(CardType::Creature)
+                    && chars(st, to).is(CardType::Creature)
+                    // CR 701.3b: attaching it to what it is already on does nothing.
+                    && st.object(self.source).attached_to != Some(to)
+                {
+                    execute(
+                        st,
+                        GameAction::Attach {
+                            aura: self.source,
+                            to,
+                        },
+                    );
+                    // CR 701.3c: a new timestamp.
+                    execute(
+                        st,
+                        GameAction::NewTimestamp {
+                            object: self.source,
+                        },
+                    );
+                }
+                Vec::new()
+            }
+            // CR 701.21a: a player can sacrifice only a permanent they control.
+            Effect::SacrificeThis => {
+                let mine = st
+                    .objects
+                    .get(&self.source)
+                    .is_some_and(|o| o.zone == Zone::Battlefield)
+                    && crate::layers::controller_of(st, self.source) == self.controller;
+                if mine {
+                    vec![Proposed::moving(
+                        self.source,
+                        Zone::Graveyard,
+                        MoveCause::Sacrifice,
+                    )]
+                } else {
+                    Vec::new()
+                }
+            }
+            Effect::ChooseCards {
+                who,
+                from,
+                cards,
+                count,
+                must,
+                to,
+                reveal,
+                shuffle,
+            } => {
+                // CR 608.2h: how many is worked out once, now.
+                let count = self.amount(st, &count);
+                self.work.push(Work::ChooseCards {
+                    spec: Box::new(ChooseSpec {
+                        from,
+                        cards,
+                        count,
+                        must,
+                        to,
+                        reveal,
+                        shuffle,
+                    }),
+                    order: self.players_apnap(st, k, who),
+                    next: 0,
+                    chosen: Vec::new(),
+                });
+                Vec::new()
+            }
+            Effect::Scry { who, amount } => {
+                self.scry(st, k, who, &amount, false);
+                Vec::new()
+            }
+            Effect::Surveil { who, amount } => {
+                self.scry(st, k, who, &amount, true);
+                Vec::new()
+            }
+            Effect::Dig {
+                who,
+                count,
+                reveal,
+                take,
+                cards,
+                to,
+                reveal_taken,
+                rest,
+                rest_random,
+            } => {
+                let n = self.amount(st, &count);
+                let spec = DigSpec {
+                    reveal,
+                    take,
+                    cards,
+                    to,
+                    reveal_taken,
+                    rest,
+                    rest_random,
+                };
+                for player in self.players_apnap(st, k, who).into_iter().rev() {
+                    self.work.push(Work::Dig {
+                        player,
+                        // The effect's controller looks and chooses, whoever's library.
+                        chooser: self.controller,
+                        n,
+                        spec: Box::new(spec.clone()),
+                        looking: Vec::new(),
+                    });
+                }
+                Vec::new()
+            }
+            Effect::ThisSpellTo { to, shuffle } => {
+                self.spell_to = Some((to, shuffle));
+                Vec::new()
+            }
+            Effect::Pay {
+                who,
+                cost,
+                paid,
+                unpaid,
+            } => {
+                match self.player(st, k, who) {
+                    Some(player) => self.work.push(Work::Pay {
+                        k,
+                        player,
+                        cost: Box::new(cost),
+                        paid,
+                        unpaid,
+                    }),
+                    // Nobody to pay: it isn't paid.
+                    None => self.work.push(Work::Eval { k, effect: unpaid }),
+                }
+                Vec::new()
+            }
+            Effect::PutInto { what, to, shuffle } => {
+                if let Some(o) = self.obj(st, k, what) {
+                    let owner = st.object(o).owner;
+                    // CR 701.24c: "shuffle it into its owner's library" shuffles that
+                    // library whatever becomes of the object on the way.
+                    if shuffle {
+                        self.work.push(Work::Shuffle {
+                            players: vec![owner],
+                        });
+                    }
+                    self.work.push(Work::Place {
+                        player: owner,
+                        by: owner,
+                        cards: vec![o],
+                        to,
+                        random: false,
+                        ordered: false,
+                    });
+                }
+                Vec::new()
+            }
+            Effect::MoveAll {
+                from,
+                whose,
+                cards,
+                to,
+                shuffle,
+            } => {
+                let players = self.players_apnap(st, k, whose);
+                let mut found: Vec<ObjectId> = Vec::new();
+                for &p in &players {
+                    found.extend(
+                        zone_cards(st, from, p)
+                            .into_iter()
+                            .filter(|&id| card_fits(st, id, &cards, self.source, self.controller)),
+                    );
+                }
+                // Permanents in timestamp order whoever controls them.
+                if from == CardZone::Battlefield {
+                    found.sort_by_key(|id| st.zones.battlefield.iter().position(|b| b == id));
+                }
+                if shuffle {
+                    self.work.push(Work::Shuffle { players });
+                }
+                self.work.push(Work::Move {
+                    moves: found.into_iter().map(|o| move_to(o, to)).collect(),
+                    checked: 0,
+                });
+                Vec::new()
+            }
+        }
+    }
+
+    /// CR 701.22 / 701.25: the players scry (or surveil) N.
+    fn scry(&mut self, st: &GameState, k: usize, who: PlayerRef, amount: &Amount, surveil: bool) {
+        let n = self.amount(st, amount);
+        // CR 701.22b / 701.25c: scry 0 and surveil 0 aren't events.
+        if n > 0 {
+            self.work.push(Work::Scry {
+                players: self.players_apnap(st, k, who),
+                n,
+                surveil,
+                looking: Vec::new(),
+            });
         }
     }
 
@@ -479,7 +1748,21 @@ impl ResolveFrame {
         let id = self.object.expect("started");
         match st.stack_object(id).map(|s| s.kind.clone()) {
             Some(StackKind::Spell) => {
-                let mv = Proposed::moving(id, Zone::Graveyard, cause);
+                let mut mv = Proposed::moving(id, Zone::Graveyard, cause);
+                // CR 608.2n: a spell that resolved goes to its owner's graveyard, unless
+                // its own effect says where it goes.
+                if cause == MoveCause::Resolve
+                    && let Some((dest, then_shuffle)) = self.spell_to
+                    && let Proposed::Move {
+                        to,
+                        position,
+                        shuffle,
+                        ..
+                    } = &mut mv
+                {
+                    let (zone, at, _) = card_dest(dest);
+                    (*to, *position, *shuffle) = (zone, at, then_shuffle);
+                }
                 Flow::then(Frame::Apply(ApplyFrame::new(st, vec![mv])))
             }
             Some(StackKind::Ability { .. }) => {
@@ -491,22 +1774,135 @@ impl ResolveFrame {
     }
 }
 
+/// The cards picked in a `PickN` over cards.
+fn picked_cards(inp: &Input) -> Vec<ObjectId> {
+    inp.picked()
+        .into_iter()
+        .map(|o| match o {
+            OptionDesc::Card { card } => *card,
+            o => unreachable!("not a card: {o:?}"),
+        })
+        .collect()
+}
+
+/// The top `n` cards of `player`'s library (all of it, if smaller), top card first.
+fn top_cards(st: &GameState, player: PlayerId, n: u32) -> Vec<ObjectId> {
+    let library = st.zones.list(Zone::Library, player);
+    let take = (n as usize).min(library.len());
+    library[library.len() - take..]
+        .iter()
+        .rev()
+        .copied()
+        .collect()
+}
+
+/// `player`'s cards in a zone: what they own there, or the permanents they control. In
+/// the zone's own order.
+fn zone_cards(st: &GameState, zone: CardZone, player: PlayerId) -> Vec<ObjectId> {
+    match zone {
+        CardZone::Library => st.zones.list(Zone::Library, player).clone(),
+        CardZone::Hand => st.zones.list(Zone::Hand, player).clone(),
+        CardZone::Graveyard => st.zones.list(Zone::Graveyard, player).clone(),
+        CardZone::Battlefield => st
+            .zones
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|&id| crate::layers::controller_of(st, id) == player)
+            .collect(),
+    }
+}
+
+/// Does the card or permanent match any of the selectors (no selectors: anything does)?
+/// Outside the battlefield a card has its printed characteristics and its owner stands in
+/// for its controller.
+fn card_fits(
+    st: &GameState,
+    id: ObjectId,
+    selectors: &[card_model::Selector],
+    source: ObjectId,
+    controller: PlayerId,
+) -> bool {
+    if selectors.is_empty() {
+        return true;
+    }
+    let c = chars(st, id);
+    selectors
+        .iter()
+        .any(|s| crate::layers::matches(st, s, &c, st.object(id), source, controller))
+}
+
+/// A destination as (zone, position in a library, enters tapped).
+fn card_dest(to: CardDest) -> (Zone, crate::zones::LibraryPosition, bool) {
+    use crate::zones::LibraryPosition;
+    match to {
+        CardDest::Hand => (Zone::Hand, LibraryPosition::Top, false),
+        CardDest::Battlefield { tapped } => (Zone::Battlefield, LibraryPosition::Top, tapped),
+        CardDest::Graveyard => (Zone::Graveyard, LibraryPosition::Top, false),
+        CardDest::Exile => (Zone::Exile, LibraryPosition::Top, false),
+        CardDest::LibraryTop => (Zone::Library, LibraryPosition::Top, false),
+        CardDest::LibraryBottom => (Zone::Library, LibraryPosition::Bottom, false),
+    }
+}
+
+/// The proposed move of `object` to a destination.
+fn move_to(object: ObjectId, to: CardDest) -> Proposed {
+    let (zone, at, enters_tapped) = card_dest(to);
+    let mut mv = Proposed::moving(object, zone, MoveCause::Rule);
+    if let Proposed::Move {
+        position, tapped, ..
+    } = &mut mv
+    {
+        *position = at;
+        *tapped = enters_tapped;
+    }
+    mv
+}
+
+/// CR 303.4f: if `mv` puts an Aura card onto the battlefield without saying what it
+/// enchants, the player who will control it and what it could legally enchant.
+fn aura_hosts(st: &GameState, mv: &Proposed) -> Option<(PlayerId, Vec<ObjectId>)> {
+    let Proposed::Move {
+        object,
+        to: Zone::Battlefield,
+        controller,
+        attach_to: None,
+        ..
+    } = mv
+    else {
+        return None;
+    };
+    let o = st.objects.get(object)?;
+    if matches!(o.zone, Zone::Battlefield | Zone::Stack) {
+        return None;
+    }
+    let filter = st.card_def(*object).enchant()?;
+    let chooser = controller.unwrap_or(o.owner);
+    let hosts = st
+        .zones
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            crate::targeting::describes(st, &filter, Target::Object(id), chooser, None, None)
+        })
+        .collect();
+    Some((chooser, hosts))
+}
+
 /// The decision kind, count, and choosable objects for one player's part of an
 /// each-player choice.
 fn each_player_options(
     st: &GameState,
-    action: EachPlayerAction,
+    choice: &PlayerChoice,
     p: PlayerId,
-) -> (ChoiceKind, usize, Vec<ObjectId>) {
-    match action {
-        EachPlayerAction::Discard(n) => (
-            ChoiceKind::Discard,
-            n as usize,
-            st.zones.hands[p.index()].clone(),
-        ),
-        EachPlayerAction::SacrificeCreature(n) => (
+    source: ObjectId,
+    controller: PlayerId,
+) -> (ChoiceKind, Vec<ObjectId>) {
+    match choice {
+        PlayerChoice::Discard => (ChoiceKind::Discard, st.zones.hands[p.index()].clone()),
+        PlayerChoice::Sacrifice(sel) => (
             ChoiceKind::Sacrifice,
-            n as usize,
             // CR 701.21a: only permanents they control.
             st.zones
                 .battlefield
@@ -514,10 +1910,10 @@ fn each_player_options(
                 .copied()
                 .filter(|&id| {
                     let c = chars(st, id);
-                    c.controller == p && c.is(CardType::Creature)
+                    c.controller == p
+                        && crate::layers::matches(st, sel, &c, st.object(id), source, controller)
                 })
                 .collect(),
         ),
-        EachPlayerAction::Draw(_) => unreachable!("Draw has no choice"),
     }
 }

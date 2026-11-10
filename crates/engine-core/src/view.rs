@@ -2,7 +2,8 @@
 //! only ever see this, never `GameState` (CLAUDE.md invariant 6). Opponents' hands and all
 //! libraries are counts only.
 
-use crate::decision::PendingDecision;
+use crate::decision::{OptionDesc, PendingDecision};
+use crate::frames::Frame;
 use crate::ids::CardInstanceId;
 use crate::ids::{ObjectId, PlayerId};
 use crate::layers::chars;
@@ -10,6 +11,7 @@ use crate::mana::ManaPool;
 use crate::stack::{StackKind, Target};
 use crate::state::{CombatState, GameState};
 use crate::turn::Step;
+use crate::zones::Zone;
 use alloc::string::String;
 use alloc::vec::Vec;
 use card_model::{CardType, CounterKind, Keyword};
@@ -36,6 +38,19 @@ pub struct ObjectView {
     pub is_commander: bool,
     pub card_instance: CardInstanceId,
     pub attached_to: Option<ObjectId>,
+    /// Abilities it has that aren't printed on its card: given to it by other objects or
+    /// effects (public: the text is the giving card's).
+    #[serde(default)]
+    pub granted: Vec<card_model::AbilityId>,
+}
+
+/// A commander designation (CR 903.3): public for the whole game, wherever the card is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommanderInfo {
+    pub owner: PlayerId,
+    pub card_instance: CardInstanceId,
+    pub card: card_model::CardDefId,
+    pub name: String,
 }
 
 /// A spell or ability on the stack.
@@ -49,8 +64,8 @@ pub struct StackView {
     pub name: String,
     /// The spell's card, or the ability's source card.
     pub card: card_model::CardDefId,
-    /// For abilities: the ability's index on `card`.
-    pub ability: Option<u16>,
+    /// For abilities: the ability's text (of `card`, or of the card that gave it).
+    pub ability: Option<card_model::AbilityId>,
     pub modes: Vec<u8>,
     pub x: u32,
     pub targets: Vec<Target>,
@@ -63,7 +78,11 @@ pub struct PlayerPublic {
     pub has_lost: bool,
     pub hand_size: usize,
     pub library_size: usize,
+    /// All unspent mana, restricted or not.
     pub mana_pool: ManaPool,
+    /// How much of `mana_pool` can only be spent in certain ways (CR 106.6).
+    #[serde(default)]
+    pub restricted_mana: [u32; 6],
     pub graveyard: Vec<ObjectView>,
     /// CR 903.10a: combat damage taken from each commander card.
     pub commander_damage: Vec<(CardInstanceId, u32)>,
@@ -86,9 +105,17 @@ pub struct PlayerView {
     pub exile: Vec<ObjectView>,
     /// The command zone (public).
     pub command: Vec<ObjectView>,
+    /// CR 903.3: every commander in the game (public): owner, card, name.
+    pub commanders: Vec<CommanderInfo>,
     pub combat: Option<CombatState>,
     /// The pending decision, if it is the viewer's.
     pub decision: Option<PendingDecision>,
+    /// Cards in hidden zones that the viewer is looking at for the pending decision (CR
+    /// 701.20e): the cards it offers that aren't otherwise in this view, and the rest of
+    /// what the effect lets the player see — the library being searched (CR 701.23a), the
+    /// cards a scry looks at. Empty unless the decision is the viewer's.
+    #[serde(default)]
+    pub revealed: Vec<ObjectView>,
 }
 
 fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
@@ -112,6 +139,7 @@ fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
         is_commander: st.is_commander(id),
         card_instance: o.card_instance,
         attached_to: o.attached_to,
+        granted: c.abilities.iter().copied().filter(|a| a.granted).collect(),
     }
 }
 
@@ -134,7 +162,20 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
                 has_lost: p.has_lost,
                 hand_size: st.zones.hands[p.id.index()].len(),
                 library_size: st.zones.libraries[p.id.index()].len(),
-                mana_pool: p.mana_pool,
+                mana_pool: {
+                    let mut pool = p.mana_pool;
+                    for r in &p.restricted_mana {
+                        pool.add(r.mana, r.amount);
+                    }
+                    pool
+                },
+                restricted_mana: {
+                    let mut a = [0u32; 6];
+                    for r in &p.restricted_mana {
+                        a[r.mana.index()] += r.amount;
+                    }
+                    a
+                },
                 graveyard: views(st, &st.zones.graveyards[p.id.index()]),
                 commander_damage: p.commander_damage.iter().map(|(c, n)| (*c, *n)).collect(),
                 commander_casts: p.commander_casts.iter().map(|(c, n)| (*c, *n)).collect(),
@@ -158,7 +199,7 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
                 },
                 ability: match &so.kind {
                     StackKind::Spell => None,
-                    StackKind::Ability { index, .. } => Some(*index),
+                    StackKind::Ability { ability, .. } => Some(*ability),
                 },
                 name: match &so.kind {
                     StackKind::Spell => st.card_def(so.id).name.clone(),
@@ -173,7 +214,56 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
             .collect(),
         exile: views(st, &st.zones.exile),
         command: views(st, &st.zones.command),
+        commanders: st
+            .commanders
+            .iter()
+            .map(|&(owner, card_instance)| {
+                let card = st
+                    .commander_cards
+                    .get(&card_instance)
+                    .copied()
+                    .unwrap_or(card_model::CardDefId(0));
+                CommanderInfo {
+                    owner,
+                    card_instance,
+                    card,
+                    name: st.catalog.get(card).name.clone(),
+                }
+            })
+            .collect(),
         combat: st.combat.clone(),
         decision: st.pending.clone().filter(|d| d.player == viewer),
+        revealed: views(st, &shown_to(st, viewer)),
     }
+}
+
+/// The hidden cards the pending decision shows to `viewer` (none if it isn't theirs).
+fn shown_to(st: &GameState, viewer: PlayerId) -> Vec<ObjectId> {
+    let Some(d) = st.pending.as_ref().filter(|d| d.player == viewer) else {
+        return Vec::new();
+    };
+    let hidden = |id: &ObjectId| {
+        st.objects.get(id).is_some_and(|o| match o.zone {
+            Zone::Library => true,
+            Zone::Hand => o.owner != viewer,
+            _ => false,
+        })
+    };
+    let mut out: Vec<ObjectId> = d
+        .options
+        .iter()
+        .filter_map(|o| match o {
+            OptionDesc::Card { card } => Some(*card),
+            _ => None,
+        })
+        .filter(hidden)
+        .collect();
+    if let Some(Frame::Resolve(f)) = st.frames.last() {
+        let mut more = f.shown(st);
+        more.retain(|id| hidden(id) && !out.contains(id));
+        // By name: what the player learns is which cards these are, not their order.
+        more.sort_by(|a, b| (&st.card_def(*a).name, *a).cmp(&(&st.card_def(*b).name, *b)));
+        out.extend(more);
+    }
+    out
 }

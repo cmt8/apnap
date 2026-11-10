@@ -1,0 +1,15 @@
+RealCard(
+    oracle_id: "60bc63dc-ac9f-4a2f-aef5-c90d0aa31553",
+    name: "Thrashing Brontodon",
+    verified: true,
+    tests: ["thrashing_brontodon_is_sacrificed_to_destroy_an_artifact_or_enchantment"],
+    abilities: [
+        Activated(
+            cost: (mana: Some("{1}"), sacrifice_self: true),
+            body: Effect((
+                targets: [Permanent([(types: [Artifact, Enchantment])])],
+                effect: Destroy(what: Target(0)),
+            )),
+        ),
+    ],
+)

@@ -1,0 +1,15 @@
+RealCard(
+    oracle_id: "c6207f6a-a624-4754-88f5-dbe700c841ff",
+    name: "Sign in Blood",
+    verified: true,
+    tests: ["sign_in_blood_can_target_any_player"],
+    abilities: [
+        Spell(Effect((
+            targets: [Player],
+            effect: Seq([
+                Draw(who: Target(0), amount: Fixed(2)),
+                LoseLife(who: Target(0), amount: Fixed(2)),
+            ]),
+        ))),
+    ],
+)

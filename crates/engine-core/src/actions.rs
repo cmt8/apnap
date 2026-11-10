@@ -15,8 +15,11 @@ use crate::stack::{StackKind, StackObject, Target};
 use crate::state::GameState;
 use crate::zones::{LibraryPosition, Zone};
 use alloc::vec::Vec;
-use card_model::{CardDefId, ContinuousEffect, CounterKind};
+use card_model::{AbilityId, CardDefId, ContinuousEffect, CounterKind};
 
+// An action is built and executed on the spot, never stored: the size of the largest
+// variant (the one that carries last known information) doesn't matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GameAction {
     /// CR 400.7: the moved object becomes a new object.
@@ -59,6 +62,8 @@ pub enum GameAction {
         affected: Vec<ObjectId>,
         effects: Vec<ContinuousEffect>,
         until_end_of_turn: bool,
+        /// The card the effects are written on.
+        card: CardDefId,
     },
     /// CR 615.7: create a prevention shield.
     AddShield {
@@ -76,6 +81,14 @@ pub enum GameAction {
     Attach {
         aura: ObjectId,
         to: ObjectId,
+    },
+    /// CR 701.3c: a permanent attached to a different object gets a new timestamp.
+    NewTimestamp {
+        object: ObjectId,
+    },
+    /// CR 704.5n: an Equipment becomes unattached (it stays on the battlefield).
+    Unattach {
+        object: ObjectId,
     },
     /// CR 613.1b / 302.6: a permanent's (layered) controller changed; it is summoning sick
     /// for its new controller.
@@ -150,9 +163,19 @@ pub enum GameAction {
         controller: PlayerId,
         source: ObjectId,
         source_card: CardDefId,
-        index: u16,
+        ability: AbilityId,
         triggered: bool,
         source_lki: Option<Characteristics>,
+        /// The object whose event triggered the ability, and its last known information.
+        subject: Option<ObjectId>,
+        subject_lki: Option<Characteristics>,
+        facts: crate::triggers::EventFacts,
+    },
+    /// CR 608.2h: an ability on the stack remembers the triggering object as it last
+    /// existed, once that object leaves the battlefield.
+    RecordSubjectLki {
+        ability: ObjectId,
+        chars: Characteristics,
     },
     /// CR 601.2b–c: record the announced modes, X and targets of a stack object.
     SetStackChoices {
@@ -168,6 +191,37 @@ pub enum GameAction {
     /// CR 800.4a: a player leaves a multiplayer game.
     LeaveGame {
         player: PlayerId,
+    },
+    /// CR 401.4 / 701.22a: put cards that are in `player`'s library on its top and/or its
+    /// bottom. They stay in the library, so they stay the same objects (CR 400.7 is about
+    /// changing zones).
+    ArrangeLibrary {
+        player: PlayerId,
+        /// The first listed ends up on top.
+        top: Vec<ObjectId>,
+        /// The last listed ends up bottom-most.
+        bottom: Vec<ObjectId>,
+        /// The bottom cards go in a random order instead of the listed one.
+        random_bottom: bool,
+    },
+    /// CR 106.6: add one mana that can only be spent as mana ability `ability` says.
+    AddRestrictedMana {
+        player: PlayerId,
+        mana: ManaType,
+        ability: AbilityId,
+    },
+    /// CR 106.6: `amount` of the restricted mana at `entry` is about to pay for something
+    /// it may be spent on: it joins the rest of the pool, to be paid with it.
+    ReleaseRestrictedMana {
+        player: PlayerId,
+        entry: u32,
+        amount: u32,
+    },
+    /// CR 608.2h: record on a stack object the total power of what was sacrificed to pay
+    /// for it ("where X is the sacrificed creature's power").
+    SetSacrificedPower {
+        object: ObjectId,
+        power: u32,
     },
 }
 
@@ -262,6 +316,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             affected,
             effects,
             until_end_of_turn,
+            card,
         } => {
             let id = st.next_effect_id;
             st.next_effect_id += 1;
@@ -274,6 +329,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 affected,
                 effects,
                 until_end_of_turn,
+                card,
             });
             st.emit(Event::ContinuousEffectBegan { id, source });
             ActionResult::Done
@@ -309,16 +365,41 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             st.emit(Event::Attached { aura, to });
             ActionResult::Done
         }
+        GameAction::NewTimestamp { object } => {
+            let t = st.alloc_timestamp();
+            st.object_mut(object).timestamp = t;
+            ActionResult::Done
+        }
+        GameAction::Unattach { object } => {
+            st.object_mut(object).attached_to = None;
+            st.emit(Event::Unattached { object });
+            ActionResult::Done
+        }
         GameAction::ControlChanged { object, controller } => {
             let o = st.object_mut(object);
             o.last_controller = controller;
             o.summoning_sick = true;
+            // CR 506.4: a permanent whose controller changes is removed from combat. (An
+            // attacker it was blocking stays blocked, CR 509.1h.)
+            if let Some(c) = st.combat.as_mut() {
+                c.attackers.retain(|a| a.attacker != object);
+                for a in &mut c.attackers {
+                    a.blockers.retain(|b| *b != object);
+                }
+                st.generation += 1;
+            }
             st.emit(Event::ControlChanged { object, controller });
             ActionResult::Done
         }
         GameAction::RecordSourceLki { ability, chars } => {
             if let Some(so) = st.stack.iter_mut().find(|s| s.id == ability) {
                 so.source_lki = Some(chars);
+            }
+            ActionResult::Done
+        }
+        GameAction::RecordSubjectLki { ability, chars } => {
+            if let Some(so) = st.stack.iter_mut().find(|s| s.id == ability) {
+                so.subject_lki = Some(chars);
             }
             ActionResult::Done
         }
@@ -334,6 +415,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 return ActionResult::Drew(None);
             };
             let new = perform_move(st, top, Zone::Hand, LibraryPosition::Top, None);
+            st.player_mut(player).drawn_this_turn += 1;
             st.emit(Event::Drew { player, card: new });
             ActionResult::Drew(Some(new))
         }
@@ -373,9 +455,56 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             });
             ActionResult::Done
         }
+        GameAction::AddRestrictedMana {
+            player,
+            mana,
+            ability,
+        } => {
+            let pool = &mut st.player_mut(player).restricted_mana;
+            match pool
+                .iter_mut()
+                .find(|r| r.mana == mana && r.ability == ability)
+            {
+                Some(r) => r.amount += 1,
+                None => pool.push(crate::state::RestrictedMana {
+                    mana,
+                    amount: 1,
+                    ability,
+                }),
+            }
+            st.emit(Event::ManaAdded { player, mana });
+            ActionResult::Done
+        }
+        GameAction::ReleaseRestrictedMana {
+            player,
+            entry,
+            amount,
+        } => {
+            let pl = st.player_mut(player);
+            let r = &mut pl.restricted_mana[entry as usize];
+            debug_assert!(r.amount >= amount);
+            r.amount -= amount;
+            let mana = r.mana;
+            pl.mana_pool.add(mana, amount);
+            pl.restricted_mana.retain(|r| r.amount > 0);
+            ActionResult::Done
+        }
+        GameAction::SetSacrificedPower { object, power } => {
+            if let Some(so) = st.stack.iter_mut().find(|s| s.id == object) {
+                so.sacrificed_power = power;
+            }
+            ActionResult::Done
+        }
         GameAction::EmptyManaPool { player } => {
+            let restricted: u32 = st
+                .player(player)
+                .restricted_mana
+                .iter()
+                .map(|r| r.amount)
+                .sum();
+            st.player_mut(player).restricted_mana.clear();
             let pool = &mut st.player_mut(player).mana_pool;
-            let amount = pool.total();
+            let amount = pool.total() + restricted;
             *pool = Default::default();
             if amount > 0 {
                 st.emit(Event::ManaEmptied { player, amount });
@@ -443,9 +572,12 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             controller,
             source,
             source_card,
-            index,
+            ability,
             triggered,
             source_lki,
+            subject,
+            subject_lki,
+            facts,
         } => {
             let id = st.alloc_object_id();
             st.stack.push(StackObject {
@@ -454,13 +586,17 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 kind: StackKind::Ability {
                     source,
                     source_card,
-                    index,
+                    ability,
                     triggered,
                 },
                 source_lki,
+                subject,
+                subject_lki,
                 modes: Vec::new(),
                 x: 0,
                 targets: Vec::new(),
+                sacrificed_power: 0,
+                facts,
             });
             st.emit(Event::AbilityActivated {
                 player: controller,
@@ -492,6 +628,32 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
         }
         GameAction::LeaveGame { player } => {
             leave_game(st, player);
+            ActionResult::Done
+        }
+        GameAction::ArrangeLibrary {
+            player,
+            top,
+            mut bottom,
+            random_bottom,
+        } => {
+            let mut lib = core::mem::take(&mut st.zones.libraries[player.index()]);
+            let here = |id: &ObjectId| lib.contains(id);
+            let top: Vec<ObjectId> = top.into_iter().filter(here).collect();
+            bottom.retain(|id| lib.contains(id) && !top.contains(id));
+            if random_bottom {
+                st.rng.shuffle(&mut bottom);
+            }
+            lib.retain(|id| !top.contains(id) && !bottom.contains(id));
+            // Index 0 is the bottom of a library and the last entry its top.
+            let mut arranged: Vec<ObjectId> = bottom.iter().rev().copied().collect();
+            arranged.append(&mut lib);
+            arranged.extend(top.iter().rev().copied());
+            st.zones.libraries[player.index()] = arranged;
+            st.emit(Event::LibraryArranged {
+                player,
+                top: top.len() as u32,
+                bottom: bottom.len() as u32,
+            });
             ActionResult::Done
         }
     }
@@ -602,9 +764,13 @@ fn perform_move(
             controller,
             kind: StackKind::Spell,
             source_lki: None,
+            subject: None,
+            subject_lki: None,
             modes: Vec::new(),
             x: 0,
             targets: Vec::new(),
+            sacrificed_power: 0,
+            facts: Default::default(),
         });
     } else {
         let list = st.zones.list_mut(to, old.owner);
@@ -669,5 +835,6 @@ fn leave_game(st: &mut GameState, p: PlayerId) {
     }
     // Their mana pool and life no longer matter; priority is handled by the priority frame.
     st.player_mut(p).mana_pool = Default::default();
+    st.player_mut(p).restricted_mana.clear();
     st.emit(Event::PlayerLeftGame { player: p });
 }

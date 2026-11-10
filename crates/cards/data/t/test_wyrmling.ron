@@ -1,0 +1,13 @@
+// A vanilla Dragon, for effects that look at the creature type.
+CardScript(
+    verified: true,
+    tests: ["crucible_of_fire_pumps_your_dragon_creatures"],
+    card: (
+        name: "Test Wyrmling",
+        mana_cost: Some("{1}{R}"),
+        card_types: [Creature],
+        creature_types: ["Dragon"],
+        power: Some(2),
+        toughness: Some(2),
+    ),
+)

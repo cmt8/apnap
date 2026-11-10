@@ -6,6 +6,11 @@
 //!   replay PATH
 //!   watch [--setup S] [--seed N]       narrate a random-agent game
 //!   play [--setup S] [--seed N] [--save-replay PATH]   you (P0) vs random agents
+//!   fetch-cards                        download the precons' printed card data into the cache
+//!   coverage [--verbose]               per-precon script/verification status
+//!   fetch-forge                        clone Forge's card scripts (pinned commit) into the cache
+//!   fetch-bulk                         Scryfall's Oracle card file (every card) into the cache
+//!   forge-coverage [--top N]           how many Forge scripts compile; what blocks the rest
 //!   bless                              rewrite crates/harness/tests/golden/games.txt
 
 use engine_core::{Agent, ChoiceKind, OptionDesc, PendingDecision, PlayerId, Primitive, Response};
@@ -30,6 +35,37 @@ fn setup(args: &[String], default: Setup) -> Setup {
     flag(args, "--setup").map_or(default, |v| {
         Setup::parse(&v).unwrap_or_else(|| panic!("bad --setup {v} (use m0 or m1-Np)"))
     })
+}
+
+/// The feature a blocker belongs to: "param:trig Drawn.Number" and "trig:Drawn …" are both
+/// the trigger mode `trig:Drawn`; "param:Pump.KW" is the effect `api:Pump`.
+fn family(blocker: &str) -> String {
+    let word = |s: &str| {
+        s.split(|c: char| !c.is_ascii_alphanumeric())
+            .next()
+            .unwrap_or(s)
+            .to_string()
+    };
+    if let Some(rest) = blocker.strip_prefix("param:") {
+        return match rest.split_once(' ') {
+            Some((kind @ ("trig" | "static" | "repl"), rest)) => format!("{kind}:{}", word(rest)),
+            _ => format!("api:{}", word(rest)),
+        };
+    }
+    match blocker.split_once(':') {
+        Some((kind @ ("trig" | "static" | "repl" | "kw" | "api" | "cost"), rest)) => {
+            format!("{kind}:{}", word(rest))
+        }
+        Some((kind, _)) if !kind.contains(' ') => {
+            // "Dig:each player chooses", "ChangeZone:no-target": the effect.
+            if kind.chars().next().is_some_and(char::is_uppercase) {
+                format!("api:{kind}")
+            } else {
+                blocker.to_string()
+            }
+        }
+        _ => blocker.to_string(),
+    }
 }
 
 fn main() -> ExitCode {
@@ -119,7 +155,7 @@ fn main() -> ExitCode {
             let threads = num(&args, "--threads", 4) as usize;
             let results = harness::fuzz_with(opts, seed, games, threads);
             let mut wins = vec![0u64; usize::from(opts.setup.players())];
-            let mut failed = 0;
+            let (mut failed, mut runaway) = (0u64, 0u64);
             let (mut turns, mut decisions, mut draws) = (0u64, 0u64, 0u64);
             for (s, r) in &results {
                 match r {
@@ -131,15 +167,20 @@ fn main() -> ExitCode {
                             wins[w.index()] += 1;
                         }
                     }
+                    // A board that grows without bound: abandoned, not a failure.
+                    Err(e @ harness::HarnessError::Runaway { .. }) => {
+                        runaway += 1;
+                        eprintln!("seed={s} abandoned: {e}");
+                    }
                     Err(e) => {
                         failed += 1;
                         eprintln!("seed={s} FAILED: {e}");
                     }
                 }
             }
-            let ok = results.len() as u64 - failed;
+            let ok = results.len() as u64 - failed - runaway;
             println!(
-                "fuzz {}: {} games, {ok} ok, {failed} failed, {draws} draws, avg turns {:.1}, avg decisions {:.0}",
+                "fuzz {}: {} games, {ok} ok, {failed} failed, {runaway} abandoned (runaway board), {draws} draws, avg turns {:.1}, avg decisions {:.0}",
                 opts.setup.label(),
                 results.len(),
                 turns as f64 / ok.max(1) as f64,
@@ -151,6 +192,293 @@ fn main() -> ExitCode {
             } else {
                 ExitCode::FAILURE
             }
+        }
+        "fetch-cards" => {
+            // Downloads printed card data for the precon pool into the user's cache
+            // (never into the repository).
+            let names = harness::scryfall_card_names();
+            match card_db::scryfall::fetch(&names) {
+                Ok((data, fetched)) => {
+                    println!(
+                        "{} cards needed, {fetched} downloaded, {} now cached in {}",
+                        names.len(),
+                        data.cards.len(),
+                        card_db::scryfall::cache_dir().display()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("fetch failed: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "fetch-forge" => match card_db::forge::fetch() {
+            Ok(n) => {
+                println!(
+                    "{n} Forge card scripts at commit {} in {}",
+                    &card_db::forge::FORGE_COMMIT[..8],
+                    card_db::forge::repo_dir().display()
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("fetch failed: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        "fetch-bulk" => match card_db::scryfall::fetch_bulk() {
+            Ok(bytes) => {
+                println!(
+                    "Scryfall Oracle card file: {:.1} MB in {}",
+                    bytes as f64 / 1e6,
+                    card_db::scryfall::cache_dir().display()
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("fetch failed: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        "forge-coverage" => {
+            // How many of Forge's card scripts compile, and which missing feature blocks
+            // the most cards (decisions.md D-046).
+            let bulk = card_db::scryfall::load_bulk();
+            if let Err(e) = &bulk {
+                eprintln!("(no cross-check against Scryfall: {e})");
+            }
+            let lib = match card_db::forge::Library::load(
+                &card_db::forge::cards_dir(),
+                &card_db::forge::tokens_dir(),
+                bulk.as_ref().ok(),
+            ) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let top = num(&args, "--top", 40) as usize;
+            // `--sample N`: print every N-th compiled card as the engine understands it,
+            // next to its Oracle text, for reading over.
+            let sample = num(&args, "--sample", 0) as usize;
+            // `--with TEXT`: sample only among the cards whose text, as the engine understands
+            // them, contains TEXT (to read over what a new feature compiled).
+            let with = args
+                .iter()
+                .position(|a| a == "--with")
+                .and_then(|i| args.get(i + 1));
+            if sample > 0 {
+                let shown = lib.cards.iter().filter(|(_, c)| {
+                    with.is_none_or(|t| {
+                        card_model::describe::rules_text(&c.def)
+                            .iter()
+                            .any(|line| line.contains(t.as_str()))
+                    })
+                });
+                for (i, (name, c)) in shown.enumerate() {
+                    if i % sample != sample / 2 {
+                        continue;
+                    }
+                    let oracle = bulk
+                        .as_ref()
+                        .ok()
+                        .and_then(|d| d.get(name))
+                        .and_then(|c| c.oracle_text.clone())
+                        .unwrap_or_default();
+                    println!(
+                        "== {} | {} | {}\n   oracle: {}\n   engine: {}",
+                        name,
+                        c.def
+                            .mana_cost
+                            .as_ref()
+                            .map_or(String::new(), |m| m.to_text()),
+                        card_model::describe::type_line(&c.def),
+                        oracle.replace('\n', " / "),
+                        card_model::describe::rules_text(&c.def).join(" / ")
+                    );
+                }
+            }
+            // `--why <text>`: the blocked cards with a blocker containing <text>, each with
+            // everything that blocks it.
+            if let Some(i) = args.iter().position(|a| a == "--why")
+                && let Some(text) = args.get(i + 1)
+            {
+                let hits: Vec<_> = lib
+                    .blocked
+                    .iter()
+                    .filter(|(_, b)| b.iter().any(|x| x.contains(text.as_str())))
+                    .collect();
+                // The first 60, or with `--all` every one.
+                let limit = if args.iter().any(|a| a == "--all") {
+                    usize::MAX
+                } else {
+                    60
+                };
+                for (name, b) in hits.iter().take(limit) {
+                    let all: Vec<&str> = b.iter().map(String::as_str).collect();
+                    println!("{name}: {}", all.join(" | "));
+                }
+                println!("({} cards)", hits.len());
+                return ExitCode::SUCCESS;
+            }
+            let total = lib.cards.len() + lib.blocked.len();
+            println!(
+                "{} of {total} Forge card scripts compile ({:.1}%); {} unreadable; tokens: {} of {} compile",
+                lib.cards.len(),
+                100.0 * lib.cards.len() as f64 / total.max(1) as f64,
+                lib.unreadable,
+                lib.tokens.len(),
+                lib.tokens.len() + lib.blocked_tokens.len(),
+            );
+            if let Ok(bulk) = &bulk {
+                // The cards that matter: real ones, per Scryfall.
+                let real: Vec<&String> = bulk
+                    .cards
+                    .iter()
+                    .filter(|(_, c)| c.is_real())
+                    .map(|(n, _)| n)
+                    .collect();
+                let front = |n: &str| n.split(" // ").next().unwrap_or(n).to_string();
+                let ok = real
+                    .iter()
+                    .filter(|n| lib.cards.contains_key(&front(n)))
+                    .count();
+                let none = real
+                    .iter()
+                    .filter(|n| {
+                        !lib.cards.contains_key(&front(n)) && !lib.blocked.contains_key(&front(n))
+                    })
+                    .count();
+                println!(
+                    "{ok} of {} real cards (per Scryfall) compile ({:.1}%); Forge has no script for {none}",
+                    real.len(),
+                    100.0 * ok as f64 / real.len().max(1) as f64
+                );
+            }
+            // How many cards each blocker stops, and for how many it is the only one.
+            // `--families`: rank the kinds of feature instead of the single blockers. A
+            // trigger mode, static mode, effect or keyword counts together with its own
+            // parameters ("trig:Drawn" with "param:trig Drawn.ValidCard"), which never
+            // block alone.
+            if args.iter().any(|a| a == "--families") {
+                let mut rows: std::collections::BTreeMap<String, (usize, usize)> =
+                    Default::default();
+                for blockers in lib.blocked.values() {
+                    let mut fams: Vec<String> = blockers.iter().map(|b| family(b)).collect();
+                    fams.sort();
+                    fams.dedup();
+                    for f in &fams {
+                        let e = rows.entry(f.clone()).or_default();
+                        e.0 += 1;
+                        if fams.len() == 1 {
+                            e.1 += 1;
+                        }
+                    }
+                }
+                let mut rows: Vec<(String, (usize, usize))> = rows.into_iter().collect();
+                rows.sort_by_key(|a| std::cmp::Reverse((a.1.1, a.1.0)));
+                println!("family — cards it alone blocks / cards it blocks at all");
+                for (name, (all, alone)) in rows.iter().take(top) {
+                    println!("  {alone:6} / {all:6}  {name}");
+                }
+                return ExitCode::SUCCESS;
+            }
+            let mut blocks: std::collections::BTreeMap<&str, (usize, usize)> = Default::default();
+            let mut one_away = 0usize;
+            for blockers in lib.blocked.values() {
+                if blockers.len() == 1 {
+                    one_away += 1;
+                }
+                for b in blockers {
+                    let e = blocks.entry(b.as_str()).or_default();
+                    e.0 += 1;
+                    if blockers.len() == 1 {
+                        e.1 += 1;
+                    }
+                }
+            }
+            println!("{one_away} cards are one feature away");
+            let mut rows: Vec<(&str, (usize, usize))> = blocks.into_iter().collect();
+            rows.sort_by_key(|a| std::cmp::Reverse((a.1.1, a.1.0)));
+            if top > 0 {
+                println!("\nblocker — cards it alone blocks / cards it blocks at all");
+            }
+            for (name, (all, alone)) in rows.iter().take(top) {
+                println!("  {alone:6} / {all:6}  {name}");
+            }
+            println!("  ({} distinct blockers)", rows.len());
+            // Features that only ever block together (an Aura needs both "enchant" and
+            // "enchanted creature gets…") never show up as "alone": list the sets of two
+            // or three blockers that are all that stops the most cards.
+            let mut sets: std::collections::BTreeMap<Vec<&str>, usize> = Default::default();
+            for blockers in lib.blocked.values() {
+                if (2..=3).contains(&blockers.len()) {
+                    *sets
+                        .entry(blockers.iter().map(String::as_str).collect())
+                        .or_default() += 1;
+                }
+            }
+            let mut sets: Vec<(Vec<&str>, usize)> = sets.into_iter().collect();
+            sets.sort_by_key(|(names, n)| (std::cmp::Reverse(*n), names.clone()));
+            if top > 0 {
+                println!("\nsets of two or three blockers — cards they alone block together");
+            }
+            for (names, n) in sets.iter().take(top / 2) {
+                println!("  {n:6}  {}", names.join("  +  "));
+            }
+            ExitCode::SUCCESS
+        }
+        "coverage" => {
+            // The four precons: how many of each deck's cards compile from Forge's scripts.
+            let lib = match harness::try_forge_library() {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let base = harness::catalog();
+            let verbose = args.iter().any(|a| a == "--verbose");
+            let (mut total, mut done) = (0usize, 0usize);
+            for file in harness::PRECON_DECKS {
+                let d = harness::precon_list(file);
+                let names: Vec<String> = d
+                    .commander
+                    .iter()
+                    .cloned()
+                    .chain(d.cards.iter().map(|(_, n)| n.clone()))
+                    .collect();
+                let mut ok = 0;
+                let mut lines = Vec::new();
+                for n in &names {
+                    if base.find(n).is_some() || lib.cards.contains_key(n) {
+                        ok += 1;
+                    } else {
+                        let why = lib
+                            .blocked
+                            .get(n)
+                            .map_or("Forge has no script".to_string(), |b| {
+                                b.iter().cloned().collect::<Vec<_>>().join(", ")
+                            });
+                        lines.push(format!("    {n}: {why}"));
+                    }
+                }
+                total += names.len();
+                done += ok;
+                println!("{}: {ok}/{} cards compile", d.name, names.len());
+                if verbose {
+                    for l in lines {
+                        println!("{l}");
+                    }
+                }
+            }
+            println!(
+                "total: {done}/{total} deck slots ({}%)",
+                done * 100 / total.max(1)
+            );
+            ExitCode::SUCCESS
         }
         "watch" => {
             let seed = num(&args, "--seed", 42);
@@ -245,7 +573,9 @@ fn play(args: &[String]) -> ExitCode {
     let kind = flag(args, "--agents").map_or(harness::Agents::Heuristic, |a| {
         harness::Agents::parse(&a).expect("bad --agents")
     });
-    let mut bots: Vec<Box<dyn Agent>> = (0..setup.players()).map(|s| kind.make(seed, s)).collect();
+    let mut bots: Vec<Box<dyn Agent>> = (0..setup.players())
+        .map(|s| kind.make(seed, s, &st.catalog))
+        .collect();
     let mut responses = Vec::new();
     println!(
         "apnap terminal play ({}) — you are P0 vs {} AI opponent(s), seed {seed}. 'q' quits.",

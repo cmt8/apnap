@@ -9,6 +9,7 @@ fn setup_strategy() -> impl Strategy<Value = Setup> {
         (2u8..=4).prop_map(|players| Setup::M1 { players }),
         (2u8..=4).prop_map(|players| Setup::M2 { players }),
         (2u8..=4).prop_map(|players| Setup::Commander { players }),
+        (2u8..=4).prop_map(|players| Setup::Real { players }),
     ]
 }
 

@@ -11,6 +11,9 @@
 
 extern crate alloc;
 
+pub mod describe;
+
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
@@ -20,6 +23,28 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CardDefId(pub u32);
+
+/// One ability text in a catalog: ability `index` of card `card` — of the abilities
+/// printed on it, or (`granted`) of the abilities it gives to other objects
+/// ([`CardDef::granted`]). An object can have abilities of other cards (CR 113.2c), so
+/// an ability is never named by a bare index into its object's own card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct AbilityId {
+    pub card: CardDefId,
+    pub index: u16,
+    pub granted: bool,
+}
+
+impl AbilityId {
+    /// Printed ability `index` of `card`.
+    pub fn printed(card: CardDefId, index: u16) -> Self {
+        AbilityId {
+            card,
+            index,
+            granted: false,
+        }
+    }
+}
 
 /// The five colors (CR 105.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -257,13 +282,20 @@ pub struct CardDef {
     pub colors: Option<Vec<Color>>,
     /// A token definition (CR 111): only created by effects, never in decks.
     pub token: bool,
+    /// What effects call this definition when its name isn't unique: several different
+    /// tokens are all named "Dragon" (CR 111.4), so they are told apart by key.
+    pub key: Option<String>,
+    /// Abilities this card gives to other objects (or to itself) rather than has: the
+    /// quoted text in "enchanted creature has \"{T}: …\"". Referred to by index from
+    /// [`ContinuousEffect::GrantAbilities`]; the object that gets one is its source.
+    pub granted: Vec<AbilityDef>,
 }
 
 impl CardDef {
     /// CR 702.5a: the Aura's enchant restriction, if any.
     pub fn enchant(&self) -> Option<TargetFilter> {
         self.abilities.iter().find_map(|a| match a {
-            AbilityDef::Enchant(f) => Some(*f),
+            AbilityDef::Enchant(f) => Some(f.clone()),
             _ => None,
         })
     }
@@ -287,6 +319,15 @@ impl CardDef {
 
     pub fn has_type(&self, t: CardType) -> bool {
         self.card_types.contains(&t)
+    }
+
+    /// The ability `id` names on this card (`id.card` is this card).
+    pub fn ability(&self, id: AbilityId) -> &AbilityDef {
+        if id.granted {
+            &self.granted[id.index as usize]
+        } else {
+            &self.abilities[id.index as usize]
+        }
     }
 
     pub fn has_keyword(&self, k: Keyword) -> bool {
@@ -327,9 +368,38 @@ pub enum Keyword {
     Haste,
     /// CR 702.17: can block creatures with flying.
     Reach,
+    /// CR 702.3: can't attack.
+    Defender,
+    /// CR 702.36: can't be blocked except by artifact and/or black creatures.
+    Fear,
+    /// CR 702.11: can't be the target of spells or abilities its controller's opponents
+    /// control.
+    Hexproof,
+    /// CR 702.12: can't be destroyed.
+    Indestructible,
+    /// CR 702.13: can't be blocked except by artifact creatures and/or creatures that
+    /// share a color with it.
+    Intimidate,
+    /// CR 702.18: can't be the target of spells or abilities.
+    Shroud,
+    /// CR 702.14: "[type]walk" — can't be blocked as long as the defending player controls
+    /// a land of that type.
+    Landwalk(BasicLandType),
+    /// CR 702.28b: can't be blocked by creatures without shadow, and can't block creatures
+    /// without it.
+    Shadow,
+    /// CR 702.31b: can't be blocked by creatures without horsemanship.
+    Horsemanship,
+    /// CR 702.25a: "Whenever this creature becomes blocked by a creature without
+    /// flanking, the blocking creature gets -1/-1 until end of turn." The keyword marks
+    /// who has it; the trigger is an ability of the card.
+    Flanking,
 }
 
 /// One ability printed on a card (CR 113).
+// Card definitions are built once when the catalog loads and then only read; the size
+// difference between variants costs nothing that matters.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AbilityDef {
     /// The spell ability of an instant or sorcery (CR 113.3a).
@@ -339,10 +409,35 @@ pub enum AbilityDef {
         cost: Cost,
         #[serde(default)]
         timing: Timing,
+        /// "Activate only if [condition]" (for the ability's controller).
+        #[serde(default)]
+        only_if: Option<Condition>,
         body: Body,
+        /// The zone the card must be in for the ability to be activated (CR 113.6).
+        #[serde(default)]
+        from: ActivationZone,
+        /// A cycling ability (CR 702.29a, 702.29f: typecycling is cycling). Discarding
+        /// the card to pay for it is "cycling" it (CR 702.29c).
+        #[serde(default)]
+        cycling: bool,
     },
-    /// An activated mana ability (CR 605.1a). M1: the cost must be exactly `{T}`.
-    Mana { cost: Cost, produce: ManaProduce },
+    /// A static ability: "[Selector] spells you cast cost {N} less to cast" (generic mana
+    /// only, CR 118.7a). The selector is matched against the spell being cast.
+    CostReduction { spells: Selector, amount: u32 },
+    /// "This spell costs {N} less to cast[, where N is …]": functions while it is cast.
+    SelfCostReduction(Amount),
+    /// An activated mana ability (CR 605.1a). Its cost is `{T}`, optionally with
+    /// "sacrifice this" (Treasure, CR 111.10a).
+    Mana {
+        cost: Cost,
+        produce: ManaProduce,
+        /// "Activate only if [condition]" (CR 602.5b).
+        #[serde(default)]
+        only_if: Option<Condition>,
+        /// "Spend this mana only …" (CR 106.6).
+        #[serde(default)]
+        spend: Option<ManaRestriction>,
+    },
     /// A triggered ability (CR 603): "[When/Whenever/At] `when`, [if `intervening_if`,] `body`."
     Triggered {
         when: Trigger,
@@ -355,6 +450,10 @@ pub enum AbilityDef {
     Static {
         affected: Affected,
         effects: Vec<ContinuousEffect>,
+        /// "… as long as [condition]" / "during your turn, …": the effect exists only
+        /// while this holds for the source's controller.
+        #[serde(default)]
+        only_if: Option<Condition>,
     },
     /// A static ability generating a replacement effect (CR 614).
     Replacement {
@@ -364,6 +463,30 @@ pub enum AbilityDef {
     /// CR 702.5: "Enchant [filter]" — what an Aura spell targets and what the Aura can
     /// enchant (CR 303.4a).
     Enchant(TargetFilter),
+    /// "As an additional cost to cast this spell, [sacrifice a creature / discard a card /
+    /// pay N life]" (CR 601.2b, 601.2f). Only the non-mana parts of the cost are used.
+    AdditionalCost(Cost),
+    /// A static ability restricting how the `affected` creatures attack or block
+    /// (CR 508.1c, 509.1b): "can't attack", "can't block", "can't be blocked".
+    CombatRule {
+        affected: Affected,
+        rule: CombatRule,
+    },
+}
+
+/// What a [`AbilityDef::CombatRule`] forbids its affected creatures.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CombatRule {
+    /// "can't attack"
+    CantAttack,
+    /// "can't block"
+    CantBlock,
+    /// "can't be blocked" (`by: None`), or "can't be blocked by [creatures matching]". The
+    /// selector is relative to the ability's source and controller.
+    CantBeBlocked { by: Option<Selector> },
+    /// "can't block [attackers matching]" ("can block only creatures with flying" is
+    /// "can't block creatures without flying").
+    CantBlockAttackers(Selector),
 }
 
 /// Whose / which player, relative to the ability's controller.
@@ -384,11 +507,62 @@ pub struct Selector {
     /// Must have none of these card types ("noncreature").
     pub not_types: Vec<CardType>,
     pub supertypes: Vec<Supertype>,
+    /// Must have at least one of these subtypes (empty = any): "Dinosaurs", "Dragon
+    /// creatures". Subtypes are compared as the object currently has them (CR 205.3).
+    pub subtypes: Vec<String>,
+    /// Must have none of these subtypes ("non-Dragon", "non-Zombie").
+    pub not_subtypes: Vec<String>,
+    /// Must be at least one of these colors (empty = any): "black creatures".
+    pub colors: Vec<Color>,
+    /// "with power N or greater" / "with toughness N or greater". Read from the object's
+    /// final characteristics, so these are for targets, triggers, conditions and one-shot
+    /// effects — not for the affected set of a static ability (card-db rejects that).
+    pub power_min: Option<i32>,
+    pub toughness_min: Option<i32>,
+    /// `Some(true)` = tapped only, `Some(false)` = untapped only.
+    pub tapped: Option<bool>,
+    /// Must have all of these keywords ("with flying").
+    pub keywords: Vec<Keyword>,
     pub controller: Who,
     /// "another" / "other": excludes the ability's own source.
     pub other: bool,
     /// `Some(false)` = nontoken.
     pub token: Option<bool>,
+    /// "attacking" (CR 506.4: from being declared as an attacker until it is removed from
+    /// combat or combat ends) / not attacking.
+    pub attacking: Option<bool>,
+    /// "blocking" / not blocking.
+    pub blocking: Option<bool>,
+    /// "with power N or less".
+    pub power_max: Option<i32>,
+    /// "without flying": has none of these keywords.
+    pub not_keywords: Vec<Keyword>,
+    /// "with mana value N or greater" / "N or less" (CR 202.3; both = "exactly N").
+    pub mana_value_min: Option<u32>,
+    pub mana_value_max: Option<u32>,
+    /// Must have one of these names ("a card named …"; empty = any).
+    pub names: Vec<String>,
+    /// Must be none of these colors ("nonblack").
+    pub not_colors: Vec<Color>,
+    /// Must have none of these supertypes ("nonbasic", "nonlegendary").
+    pub not_supertypes: Vec<Supertype>,
+    /// "with toughness N or less".
+    pub toughness_max: Option<i32>,
+    /// "A creature you own": who owns the permanent, whoever controls it (CR 108.3).
+    /// Not used for cards outside the battlefield, where `controller` is the owner.
+    #[serde(default)]
+    pub owner: Who,
+}
+
+impl Selector {
+    /// Does it ask about power or toughness? Those are final only after the whole layer
+    /// walk, so such a selector can't be used inside it (CR 613.4).
+    pub fn looks_at_pt(&self) -> bool {
+        self.power_min.is_some()
+            || self.power_max.is_some()
+            || self.toughness_min.is_some()
+            || self.toughness_max.is_some()
+    }
 }
 
 /// What a trigger condition or replacement watches: the source itself, or matching objects.
@@ -396,9 +570,16 @@ pub struct Selector {
 pub enum ObjFilter {
     This,
     Matching(Selector),
+    /// "this creature or another [selector]": the source itself whatever it is, or any
+    /// *other* object matching the selector.
+    ThisOr(Selector),
+    /// "Enchanted creature", "equipped creature": the permanent the source is attached to.
+    Host,
 }
 
 /// Trigger conditions (CR 603.1). M2 vocabulary.
+// Built once when the catalog loads, then only read.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Trigger {
     /// CR 603.6a: "When/Whenever [filter] enters".
@@ -413,7 +594,110 @@ pub enum Trigger {
         by: Who,
         #[serde(default)]
         types: Vec<CardType>,
+        /// "… a noncreature spell", "a Spirit or Arcane spell", "a multicolored spell":
+        /// the spell is one of `types` or matches one of these (both empty = any spell).
+        /// What the spell is on the stack is compared; who controls it is `by`.
+        #[serde(default)]
+        spells: Vec<Selector>,
     },
+    /// CR 508.1m: "Whenever [filter] attacks" — it is declared as an attacker.
+    Attacks(ObjFilter),
+    /// One ability with several trigger events: "Whenever this creature enters or attacks".
+    Any(Vec<Trigger>),
+    /// CR 702.29c: "When you cycle this card" (`this`) — it triggers from wherever the card
+    /// went — or "Whenever [who] cycles a card", watched from the battlefield.
+    Cycles { by: Who, this: bool },
+    /// CR 603.6c: "When/Whenever [filter] leaves the battlefield" — for any zone; looks
+    /// back in time (CR 603.10a).
+    Leaves(ObjFilter),
+    /// Damage being dealt (CR 120): "whenever this creature deals combat damage to a
+    /// player", "whenever a creature you control deals damage to an opponent", "whenever
+    /// this creature is dealt damage". In the ability, "that player" is the player dealt
+    /// damage and "that much" the amount; "it"/"that creature" (`ObjRef::Triggering`) is
+    /// the permanent dealt damage, or — when a player was dealt it — the source of the
+    /// damage.
+    Damage {
+        /// What dealt it (`None`: any source).
+        by: Option<ObjFilter>,
+        to: DamageTo,
+        /// Only combat damage (`Some(true)`), only noncombat damage (`Some(false)`), or
+        /// either.
+        combat: Option<bool>,
+        per: DamagePer,
+    },
+    /// CR 702.83b, 506.5: "Whenever [filter] attacks alone" — it is the only creature
+    /// declared as an attacker.
+    AttacksAlone(ObjFilter),
+    /// "Whenever [who] attacks [with N or more creatures]": once for a declaration of
+    /// attackers (CR 508.1) with at least `at_least` attackers that match `with` (any
+    /// attacker, if `None`).
+    PlayerAttacks {
+        by: Who,
+        with: Option<Selector>,
+        at_least: u32,
+    },
+    /// "Whenever [who] gains life" (CR 119.9); "that much" is the life gained.
+    GainsLife(Who),
+    /// "Whenever [who] loses life" — damage included (CR 119.3); "that much" is the loss.
+    LosesLife(Who),
+    /// "Whenever [who] draws a card" (CR 121.1); `nth`: only their Nth card of the turn
+    /// ("whenever you draw your second card each turn").
+    Draws { who: Who, nth: Option<u32> },
+    /// "Whenever [who] discards a card" (CR 701.9); "it" is the card, where it went.
+    Discards(Who),
+    /// "Whenever [who] sacrifices [a permanent]" (CR 701.21); looks back (CR 603.10a).
+    Sacrifices { who: Who, what: ObjFilter },
+    /// CR 509.1h: "Whenever [filter] blocks" — once, however many creatures it blocks.
+    Blocks(ObjFilter),
+    /// CR 509.1h: "Whenever [filter] becomes blocked" — once, by however many creatures.
+    BecomesBlocked(ObjFilter),
+    /// "Whenever [filter] attacks and isn't blocked": no blocker was declared for it.
+    Unblocked(ObjFilter),
+    /// "Whenever [blocker] blocks [attacker]" / "whenever [attacker] becomes blocked by
+    /// [blocker]": once for each such pair. "It"/"that creature" is the blocker — or the
+    /// attacker, where the blocker is this permanent (or what it is attached to).
+    BlockedBy {
+        attacker: ObjFilter,
+        blocker: ObjFilter,
+    },
+}
+
+/// What a damage trigger's damage was dealt to.
+// Built once when the catalog loads, then only read.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DamageTo {
+    /// A player or a permanent.
+    Anything,
+    Player(Who),
+    Permanent(ObjFilter),
+}
+
+/// How damage dealt at the same time counts for a damage trigger (CR 510.2: combat damage
+/// is dealt simultaneously; CR 120.9: "that much" is only the damage of the sources asked
+/// for).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DamagePer {
+    /// Once for each source and each recipient: "whenever this creature deals damage to a
+    /// player".
+    Each,
+    /// Once for each recipient, whatever number of sources: "whenever this creature is
+    /// dealt damage", "whenever one or more creatures you control deal combat damage to a
+    /// player".
+    Recipient,
+    /// Once for each source, whatever number of recipients: "whenever this creature deals
+    /// damage".
+    Source,
+}
+
+impl Trigger {
+    /// The single trigger events this ability watches for.
+    pub fn events(&self) -> Vec<&Trigger> {
+        match self {
+            Trigger::Any(v) => v.iter().flat_map(Trigger::events).collect(),
+            other => alloc::vec![other],
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -421,15 +705,76 @@ pub enum TriggerStep {
     Upkeep,
     DrawStep,
     EndStep,
+    /// "At the beginning of combat" (the beginning of combat step, CR 507).
+    BeginCombat,
+    /// "At end of combat" (as the end of combat step begins, CR 511.2).
+    EndCombat,
+    /// "At the beginning of [the] precombat main phase" (CR 505.1).
+    PrecombatMain,
+    /// "At the beginning of [the] postcombat main phase".
+    PostcombatMain,
 }
 
 /// An intervening "if" clause (CR 603.4), evaluated for the ability's controller.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Condition {
     LifeAtMost(i32),
     LifeAtLeast(i32),
+    /// "if you control N or more [selector]" (the selector is relative to the ability's
+    /// controller and source).
+    Control {
+        what: Selector,
+        at_least: u32,
+    },
+    /// "if you have N or more [cards] in your graveyard" (card types and subtypes only).
+    CardsInGraveyard {
+        cards: Selector,
+        at_least: u32,
+    },
+    /// "during your turn" / "during turns other than yours".
+    YourTurn,
+    NotYourTurn,
+    /// "as long as there are N or fewer [selector]" on the battlefield ("you control no
+    /// untapped lands" is `at_most: 0`).
+    ControlAtMost {
+        what: Selector,
+        at_most: u32,
+    },
+    /// "as long as you have N or fewer cards in hand" (hellbent is `0`).
+    HandAtMost(u32),
+    /// "if [something counted] is N or more / N or less / exactly N / not N": "if you
+    /// control exactly one creature", "if there are four or more card types among …".
+    /// The amount must stand alone (`Amount::stands_alone`); in a static ability it must
+    /// be countable inside the layer walk (`Amount::countable_in_layers`).
+    Compare {
+        amount: Amount,
+        cmp: Cmp,
+        n: u32,
+    },
 }
 
+/// How a counted amount is compared with a number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Cmp {
+    AtLeast,
+    AtMost,
+    Exactly,
+    Not,
+}
+
+impl Cmp {
+    pub fn holds(self, value: u32, n: u32) -> bool {
+        match self {
+            Cmp::AtLeast => value >= n,
+            Cmp::AtMost => value <= n,
+            Cmp::Exactly => value == n,
+            Cmp::Not => value != n,
+        }
+    }
+}
+
+// Built once when the catalog loads, then only read (as `AbilityDef`).
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Affected {
     /// The source permanent itself.
@@ -469,10 +814,31 @@ pub enum ContinuousEffect {
     ModifyPT(i32, i32),
     /// Layer 7d: switch power and toughness.
     SwitchPT,
+    /// Layer 7c: "+X/+X" (or "-X/-0" …) with amounts that are worked out when the spell or
+    /// ability resolves and then stay fixed (CR 608.2h). Only in one-shot effects (`Apply`,
+    /// `ApplyAll`): the engine turns it into a plain `ModifyPT` as the effect begins.
+    ModifyPTBy {
+        power: Box<Signed>,
+        toughness: Box<Signed>,
+    },
+    /// Layer 7a: a characteristic-defining ability (CR 604.3, 613.4a) — "this creature's
+    /// power and toughness are each equal to the number of …". Only in a static ability
+    /// that affects its own source; it functions in every zone. `None` leaves that
+    /// characteristic as printed ("*/4").
+    SetPTBy {
+        power: Option<Box<Amount>>,
+        toughness: Option<Box<Amount>>,
+    },
+    /// Layer 6: "has [quoted ability]" / "gains [quoted ability]" (CR 113.2c) — the
+    /// abilities with these indices in [`CardDef::granted`] of the card this effect is
+    /// written on. The affected object is the source of what it gains.
+    GrantAbilities(Vec<u16>),
 }
 
 /// Events a static replacement effect watches for (CR 614). M2 vocabulary.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+// Built once when the catalog loads, then only read (as `AbilityDef`).
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Replaces {
     /// "If an effect would create one or more tokens under your control" (CR 614.16).
     CreateTokens,
@@ -485,9 +851,14 @@ pub enum Replaces {
     ThisDies,
     /// "This permanent enters …" (CR 614.1c–d): a self ETB replacement.
     ThisEnters,
+    /// "Each other [selector] enters …" (CR 614.1c): another permanent matching the
+    /// selector — as it would exist on the battlefield (CR 614.12), relative to this
+    /// ability's source and controller — would enter the battlefield.
+    OtherEnters(Selector),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ReplaceWith {
     /// "… twice that many … instead" (tokens or counters).
     Twice,
@@ -499,6 +870,19 @@ pub enum ReplaceWith {
     EntersTapped,
     /// "enters with N [kind] counters".
     EntersWithCounters { kind: CounterKind, n: u32 },
+    /// "enters with a [kind] counter on it for each …": counted as the event is modified
+    /// (so not counting the permanent that is entering), relative to the controller of
+    /// the ability's source. For the permanent itself, `Amount::X` is the X it was cast
+    /// with (CR 107.3m).
+    EntersWithCounted { kind: CounterKind, amount: Amount },
+}
+
+/// An amount with a sign: "+X" or "-X".
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Signed {
+    #[serde(default)]
+    pub negative: bool,
+    pub amount: Amount,
 }
 
 /// Counter kinds (CR 122). M2: the two P/T counters.
@@ -511,6 +895,9 @@ pub enum CounterKind {
 }
 
 /// What a spell or ability does: either a single effect or a modal choice (CR 700.2).
+// Card definitions are built once when the catalog loads and then only read; the size
+// difference between variants costs nothing that matters.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Body {
     Effect(Mode),
@@ -542,10 +929,34 @@ pub struct Mode {
     #[serde(default)]
     pub targets: Vec<TargetFilter>,
     pub effect: Effect,
+    /// One "target" word that takes several targets ("two target creatures", "up to two
+    /// target creatures"): see [`TargetGroup`].
+    #[serde(default)]
+    pub groups: Vec<TargetGroup>,
+}
+
+/// The slots `first .. first + count` of a mode's targets are one instance of the word
+/// "target" (CR 115.3): they have the same filter, must be different objects or players,
+/// and at least `min` of them are chosen. A group with `min < count` ("up to …") must be
+/// the mode's last slots: slots left empty are simply not there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TargetGroup {
+    pub first: u8,
+    pub count: u8,
+    pub min: u8,
+}
+
+impl Mode {
+    /// The group slot `i` belongs to, if any.
+    pub fn group_of(&self, i: usize) -> Option<&TargetGroup> {
+        self.groups
+            .iter()
+            .find(|g| (g.first as usize..g.first as usize + g.count as usize).contains(&i))
+    }
 }
 
 /// What a single target may be (CR 115).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TargetFilter {
     /// CR 115.4: a creature, player, planeswalker or battle (M1: creature or player).
     AnyTarget,
@@ -554,10 +965,37 @@ pub enum TargetFilter {
     Opponent,
     /// A spell on the stack.
     Spell,
+    /// A permanent matching any one of the selectors: "target artifact or enchantment",
+    /// "target nonartifact creature", "target artifact, enchantment, or creature with
+    /// power 4 or greater". `controller` is relative to the spell or ability's controller;
+    /// `other` isn't meaningful for a target.
+    Permanent(Vec<Selector>),
+    /// A card in a graveyard: "target creature card from your graveyard", "target Zombie
+    /// card from your graveyard", "target creature card from a graveyard". Only the card
+    /// types and subtypes of `cards` are looked at; `whose` is whose graveyard.
+    CardInGraveyard {
+        cards: Selector,
+        whose: Who,
+    },
+    /// A spell on the stack with these qualities: "target creature spell", "target
+    /// noncreature spell", "target instant or sorcery spell". Only the card types,
+    /// subtypes and colors of the selector are looked at.
+    SpellMatching(Selector),
 }
 
 impl TargetFilter {
-    pub fn allows_players(self) -> bool {
+    /// Can an object effect (destroy, exile, return…) be pointed at this slot?
+    pub fn allows_permanents(&self) -> bool {
+        matches!(
+            self,
+            TargetFilter::AnyTarget
+                | TargetFilter::Creature
+                | TargetFilter::Permanent(_)
+                | TargetFilter::CardInGraveyard { .. }
+        )
+    }
+
+    pub fn allows_players(&self) -> bool {
         matches!(
             self,
             TargetFilter::AnyTarget | TargetFilter::Player | TargetFilter::Opponent
@@ -571,6 +1009,41 @@ pub struct Cost {
     pub mana: Option<ManaCost>,
     /// `{T}`
     pub tap: bool,
+    /// "Sacrifice this [permanent]" (CR 701.21: its controller moves it to its owner's
+    /// graveyard; it can't be regenerated or otherwise saved, but the move is replaceable).
+    pub sacrifice_self: bool,
+    /// "Sacrifice N [permanents]": ones the player controls, chosen as the cost is paid
+    /// (CR 601.2h, 701.21a).
+    pub sacrifice: Option<CostChoice>,
+    /// "Discard N [cards]" from the player's hand, chosen as the cost is paid.
+    pub discard: Option<CostChoice>,
+    /// "Pay N life" (CR 119.4: only a player with at least that much life can).
+    pub life: u32,
+    /// "Discard this card": for an ability activated from the hand (CR 113.6j).
+    pub discard_self: bool,
+    /// "Exile this card from your graveyard": for an ability activated from the graveyard.
+    pub exile_self: bool,
+}
+
+/// Where the card with an activated ability must be for the ability to be activated
+/// (CR 113.6: the battlefield unless the ability says or implies otherwise).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ActivationZone {
+    #[default]
+    Battlefield,
+    /// The owner's hand: cycling (CR 702.29a), "[cost], discard this card: …".
+    Hand,
+    /// The owner's graveyard: "[cost]: Return this card from your graveyard to your hand".
+    Graveyard,
+}
+
+/// Things chosen to pay a cost with: `count` of those matching any of `what`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CostChoice {
+    pub count: u32,
+    /// "an artifact or creature" is two selectors. `other` is relative to the ability's
+    /// source ("sacrifice another creature").
+    pub what: Vec<Selector>,
 }
 
 /// When an activated ability may be activated (CR 602.5d).
@@ -588,16 +1061,49 @@ pub enum ManaProduce {
     One(ManaType),
     /// "Add one mana of any color."
     AnyColor,
+    /// "Add {W} or {U}": one mana of one of these types.
+    OneOf(Vec<ManaType>),
+    /// `count` mana of ONE type chosen from `of`: "Add {C}{C}" (`of` = colorless only),
+    /// "Add three mana of any one color" (`of` = the five colors).
+    Times {
+        of: Vec<ManaType>,
+        count: u32,
+    },
+    /// "Add one mana of any color in your commander's color identity" (CR 903.4; with no
+    /// commander it adds nothing, CR 903.4f).
+    CommanderIdentity,
+}
+
+/// "Spend this mana only to cast [spells] or activate abilities of [permanents]" (CR 106.6).
+/// The mana can pay for a spell matching any of `spells`, or an ability whose source matches
+/// any of `abilities`; the selectors are relative to the player spending it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ManaRestriction {
+    #[serde(default)]
+    pub spells: Vec<Selector>,
+    #[serde(default)]
+    pub abilities: Vec<Selector>,
 }
 
 impl ManaProduce {
+    /// The types the player chooses between. For [`ManaProduce::CommanderIdentity`] these
+    /// are the five colors: the game narrows them to the identity.
     pub fn options(&self) -> Vec<ManaType> {
         match self {
             ManaProduce::One(t) => alloc::vec![*t],
-            ManaProduce::AnyColor => Color::ALL
+            ManaProduce::AnyColor | ManaProduce::CommanderIdentity => Color::ALL
                 .iter()
                 .map(|c| ManaType::from_color(*c))
                 .collect(),
+            ManaProduce::OneOf(of) | ManaProduce::Times { of, .. } => of.clone(),
+        }
+    }
+
+    /// How many mana (all of the chosen type) one activation adds.
+    pub fn count(&self) -> u32 {
+        match self {
+            ManaProduce::Times { count, .. } => *count,
+            _ => 1,
         }
     }
 }
@@ -611,6 +1117,8 @@ pub enum Effect {
     DealDamage {
         to: TargetRef,
         amount: Amount,
+        #[serde(default)]
+        by: DamageBy,
     },
     Draw {
         who: PlayerRef,
@@ -667,6 +1175,237 @@ pub enum Effect {
         to: TargetRef,
         amount: u32,
     },
+    /// "Destroy all [selector]" — everything matching as it resolves, at once.
+    DestroyAll(Selector),
+    /// "[Source] deals N damage to each [selector]" — at once (CR 120.3).
+    DamageEach {
+        each: Selector,
+        amount: Amount,
+    },
+    /// CR 701.13: exile.
+    Exile {
+        what: ObjRef,
+    },
+    /// "Exile [player]'s graveyard": every card in it, at once.
+    ExileGraveyard {
+        who: PlayerRef,
+    },
+    /// CR 701.17: mill — put the top N cards of the library into the graveyard.
+    Mill {
+        who: PlayerRef,
+        amount: Amount,
+    },
+    /// A continuous effect on every permanent matching the selector as this resolves; the
+    /// set is locked in then (CR 611.2c): "creatures you control gain … until end of turn".
+    ApplyAll {
+        affected: Selector,
+        effects: Vec<ContinuousEffect>,
+        #[serde(default)]
+        until_end_of_turn: bool,
+    },
+    /// "You may [effect]": the controller chooses as this resolves (CR 603.5 for triggers:
+    /// the choice is made on resolution, targets are still chosen when it is put on the
+    /// stack).
+    May(Box<Effect>),
+    /// "Return [it] to the battlefield" (a card from your graveyard, under your control).
+    ReturnToBattlefield {
+        what: ObjRef,
+    },
+    /// "…where X is [amount]": works X out once, now; later `Amount::X` in the same
+    /// resolution uses it (CR 608.2h: determined once, when the effect is applied).
+    SetX(Amount),
+    /// CR 701.26a: tap the permanent (nothing happens if it is already tapped).
+    Tap {
+        what: ObjRef,
+    },
+    /// CR 701.26b: untap the permanent.
+    Untap {
+        what: ObjRef,
+    },
+    /// "Tap all [selector]."
+    TapAll(Selector),
+    /// "Untap all [selector]."
+    UntapAll(Selector),
+    /// CR 701.9: the players each discard that many cards of their choice (all they have,
+    /// if fewer). They choose in APNAP order, then discard at once (CR 101.4).
+    Discard {
+        who: PlayerRef,
+        amount: Amount,
+    },
+    /// The players each discard their hand.
+    DiscardHand {
+        who: PlayerRef,
+    },
+    /// CR 701.21: the players each sacrifice that many permanents of their choice among
+    /// those they control that match (all of them, if fewer). APNAP order as for discards.
+    Sacrifice {
+        who: PlayerRef,
+        what: Selector,
+        amount: Amount,
+    },
+    /// "Sacrifice this": only if it is still on the battlefield under the control of the
+    /// ability's controller (CR 701.21a).
+    SacrificeThis,
+    /// "Attach this permanent to [it]" (CR 701.3; the body of equip, CR 702.6a).
+    AttachThis {
+        to: ObjRef,
+    },
+    /// The players each look through one of their own zones as this resolves and choose
+    /// cards there, which are then put somewhere — not targets. From a library this is a
+    /// search (CR 701.23): "search your library for up to two basic land cards, put them
+    /// onto the battlefield tapped, then shuffle". From a hand: "you may put a creature
+    /// card from your hand onto the battlefield". Several players choose in APNAP order,
+    /// then every card moves at once (CR 701.23i, 101.4).
+    ChooseCards {
+        who: PlayerRef,
+        from: CardZone,
+        /// A card qualifies if it matches any of these. `controller` is the card's owner
+        /// outside the battlefield.
+        cards: Vec<Selector>,
+        count: Amount,
+        /// The player must choose `count` cards (all that qualify, if fewer). Otherwise
+        /// any number up to `count`: CR 701.23b for a search with a stated quality, "you
+        /// may" for the other zones.
+        #[serde(default)]
+        must: bool,
+        to: CardDest,
+        /// The chosen cards are revealed (CR 701.20a; 701.23e: only if the effect says so).
+        #[serde(default)]
+        reveal: bool,
+        /// Then the player shuffles their library (CR 701.24). When the cards go on top
+        /// of that library, it is shuffled first (CR 701.24b).
+        #[serde(default)]
+        shuffle: bool,
+    },
+    /// CR 701.22: scry N.
+    Scry {
+        who: PlayerRef,
+        amount: Amount,
+    },
+    /// CR 701.25: surveil N.
+    Surveil {
+        who: PlayerRef,
+        amount: Amount,
+    },
+    /// "Look at the top N cards of your library. Put [some of them] [somewhere] and the
+    /// rest [somewhere else]."
+    Dig {
+        who: PlayerRef,
+        count: Amount,
+        /// The cards are revealed to everyone rather than looked at by the player.
+        #[serde(default)]
+        reveal: bool,
+        take: Take,
+        /// Which of the cards may be taken (empty = any of them).
+        #[serde(default)]
+        cards: Vec<Selector>,
+        /// Where the taken cards go.
+        to: CardDest,
+        /// The taken cards are revealed ("you may reveal a creature card from among them
+        /// and put it into your hand").
+        #[serde(default)]
+        reveal_taken: bool,
+        /// Where the rest go.
+        rest: CardDest,
+        /// The rest go there in a random order (otherwise the player orders cards that go
+        /// to a library, CR 401.4).
+        #[serde(default)]
+        rest_random: bool,
+    },
+    /// Put a card or permanent somewhere: "put target creature on top of its owner's
+    /// library", "shuffle it into its owner's library" (`shuffle`: the owner then shuffles,
+    /// CR 701.24c — even if the object didn't get there).
+    PutInto {
+        what: ObjRef,
+        to: CardDest,
+        #[serde(default)]
+        shuffle: bool,
+    },
+    /// Everything in a zone that matches, at once: "return all creatures to their owners'
+    /// hands", "exile all artifacts", "return all creature cards from your graveyard to
+    /// the battlefield", "shuffle your graveyard into your library". `whose`: on the
+    /// battlefield, permanents those players control; in graveyards, theirs.
+    MoveAll {
+        from: CardZone,
+        whose: PlayerRef,
+        cards: Vec<Selector>,
+        to: CardDest,
+        /// Then those players shuffle their libraries (CR 701.24d: even if nothing moved).
+        #[serde(default)]
+        shuffle: bool,
+    },
+    /// A spell or a non-mana ability adds mana (CR 106.4, 605.5): "add {R} for each tapped
+    /// land your opponents control", "add {G}{G}". `amount` mana of the one type.
+    AddMana {
+        who: PlayerRef,
+        mana: ManaType,
+        amount: Amount,
+    },
+    /// Several instructions that happen at the same time: "destroy two target creatures"
+    /// is one event, not one after the other. Only for instructions that are a single
+    /// event or change each (no choices, nothing done in steps).
+    Together(Vec<Effect>),
+    /// "Put N [kind] counters on each [permanent]" — all at once.
+    PutCountersAll {
+        what: Selector,
+        kind: CounterKind,
+        count: Amount,
+    },
+    /// "Exile [this spell]", "shuffle [this spell] into its owner's library", "return it
+    /// to its owner's hand": where the resolving instant or sorcery goes as it finishes
+    /// resolving, instead of its owner's graveyard (CR 608.2n).
+    ThisSpellTo {
+        to: CardDest,
+        /// Then its owner shuffles their library.
+        #[serde(default)]
+        shuffle: bool,
+    },
+    /// A cost paid while the spell or ability resolves (CR 118.12): "[`unpaid`] unless
+    /// [who] pays [cost]", or "[who] may pay [cost]. If they do, [`paid`]". The player is
+    /// asked only if they can pay; one of the two instructions is usually empty.
+    Pay {
+        who: PlayerRef,
+        cost: Cost,
+        paid: Box<Effect>,
+        unpaid: Box<Effect>,
+    },
+}
+
+/// A zone an effect takes cards out of as it resolves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CardZone {
+    Library,
+    Hand,
+    Graveyard,
+    Battlefield,
+}
+
+/// Where an effect puts cards. A card always goes to its owner's hand, library or
+/// graveyard (CR 400.3); onto the battlefield it comes under its owner's control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CardDest {
+    Hand,
+    Battlefield {
+        #[serde(default)]
+        tapped: bool,
+    },
+    Graveyard,
+    Exile,
+    LibraryTop,
+    LibraryBottom,
+}
+
+/// How many of the cards a [`Effect::Dig`] looks at are taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Take {
+    /// That many (as many as qualify, if fewer).
+    Exactly(u32),
+    /// "You may": up to that many.
+    UpTo(u32),
+    /// Every card that qualifies; no choice.
+    All,
+    /// Any number of those that qualify.
+    Any,
 }
 
 /// An object an effect refers to: a target slot, or the source itself.
@@ -675,6 +1414,27 @@ pub enum ObjRef {
     Target(u8),
     /// The ability's source ("this creature").
     This,
+    /// The object whose event triggered the ability ("it", "that creature"): the creature
+    /// that entered, died or attacked.
+    Triggering,
+    /// "This card", where the ability was activated or triggered from outside the
+    /// battlefield (a graveyard, a hand): the source for as long as it is still that
+    /// object (CR 400.7).
+    ThisCard,
+    /// "Return it to its owner's hand", of a permanent whose leaving the battlefield
+    /// triggered the ability: the card it became in the zone it went to, for as long as it
+    /// is still there (CR 400.7).
+    TriggeringCard,
+}
+
+/// Which object deals the damage of a `DealDamage`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DamageBy {
+    /// The spell, or the ability's source.
+    #[default]
+    This,
+    /// The object whose event triggered the ability ("it deals damage …").
+    Triggering,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -687,10 +1447,15 @@ pub enum EachPlayerAction {
     Draw(u32),
 }
 
-/// Refers to target slot `n` of the current mode.
+/// What an effect is done to when that can be an object or a player (damage).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TargetRef {
+    /// Target slot `n` of the current mode.
     Target(u8),
+    /// Players that aren't targets: "to you", "to each opponent".
+    Players(PlayerRef),
+    /// A permanent that isn't a target: "to itself", "to that creature".
+    Object(ObjRef),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -699,16 +1464,212 @@ pub enum PlayerRef {
     You,
     /// The player chosen for target slot `n` (the slot must allow players).
     Target(u8),
+    /// "each opponent" (of the controller), all at once.
+    EachOpponent,
+    /// "each player", all at once.
+    Each,
+    /// "its controller": who controls the object whose event triggered the ability — or
+    /// controlled it last, if it has left the battlefield (CR 608.2h).
+    TriggeringController,
+    /// "That player": the player the triggering event happened to (the player dealt
+    /// damage).
+    TriggeringPlayer,
+    /// "Its controller": the controller of the spell or permanent chosen for target slot
+    /// `n` ("counter target spell unless its controller pays {3}").
+    ControllerOf(u8),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Amount {
     Fixed(u32),
+    /// "the number of [selector]" on the battlefield as this resolves (relative to the
+    /// controller and source).
+    Count(Selector),
+    /// "the total power of [selector]" (negative powers count as 0).
+    TotalPower(Selector),
+    /// The power / toughness of the object whose event triggered the ability ("its power",
+    /// "that creature's toughness"): current, or last known if it has left (CR 608.2h).
+    TriggeringPower,
+    TriggeringToughness,
     /// The announced value of X (CR 107.3a).
     X,
     /// The source's power: current if it's still on the battlefield, otherwise as it last
     /// existed there (CR 608.2h, 113.7a).
     SourcePower,
+    /// "the sacrificed creature's power": the total power, as they last existed on the
+    /// battlefield, of the permanents sacrificed to pay this ability's cost (CR 608.2h).
+    SacrificedPower,
+    /// The source's toughness (as [`Amount::SourcePower`]).
+    SourceToughness,
+    /// "the number of [cards] in [your graveyard / all graveyards / your hand …]". A card
+    /// outside the battlefield has its owner where a selector says "you control" (empty
+    /// `cards` = every card).
+    CardsIn {
+        zone: CardZone,
+        cards: Vec<Selector>,
+    },
+    /// An amount, then arithmetic: "twice the number of …", "… plus 1".
+    Calc(Box<Amount>, Calc),
+    /// "`then` if [test] is `at_least` or more, otherwise `otherwise`".
+    IfAtLeast {
+        test: Box<Amount>,
+        at_least: u32,
+        then: u32,
+        otherwise: u32,
+    },
+    /// Domain: the number of basic land types among lands you control.
+    Domain,
+    /// Your devotion to these colors (CR 700.5): the mana symbols of those colors in the
+    /// mana costs of permanents you control.
+    Devotion(Vec<Color>),
+    /// The greatest power / toughness / mana value among the matching permanents (0 if
+    /// there are none).
+    Greatest {
+        of: Selector,
+        what: Measure,
+    },
+    /// The number of cards in your hand.
+    HandSize,
+    /// Your life total (0 if it is negative).
+    LifeTotal,
+    /// "That much", "that many": the amount of the triggering event (the damage dealt).
+    TriggeringAmount,
+}
+
+impl Amount {
+    /// Can it be worked out from the game alone, without a spell or ability resolving
+    /// (no X, no source or triggering object, nothing sacrificed)? Then a replacement
+    /// effect can use it.
+    pub fn stands_alone(&self) -> bool {
+        match self {
+            Amount::Fixed(_)
+            | Amount::Count(_)
+            | Amount::TotalPower(_)
+            | Amount::CardsIn { .. }
+            | Amount::Domain
+            | Amount::Devotion(_)
+            | Amount::Greatest { .. }
+            | Amount::HandSize
+            | Amount::LifeTotal => true,
+            Amount::Calc(base, _) => base.stands_alone(),
+            Amount::IfAtLeast { test, .. } => test.stands_alone(),
+            Amount::X
+            | Amount::SourcePower
+            | Amount::SourceToughness
+            | Amount::TriggeringPower
+            | Amount::TriggeringToughness
+            | Amount::TriggeringAmount
+            | Amount::SacrificedPower => false,
+        }
+    }
+
+    /// Can a static ability's "+N/+N for each …" use it? It is re-counted inside the layer
+    /// walk (CR 613.4c), so it must not depend on what the walk is still working out:
+    /// permanents counted without looking at power or toughness, cards in other zones,
+    /// hand sizes and life totals, and arithmetic on those.
+    pub fn countable_in_layers(&self) -> bool {
+        match self {
+            Amount::Fixed(_)
+            | Amount::HandSize
+            | Amount::LifeTotal
+            | Amount::Domain
+            | Amount::Devotion(_) => true,
+            Amount::Count(s) => !s.looks_at_pt(),
+            Amount::CardsIn { zone, cards } => {
+                *zone != CardZone::Battlefield && cards.iter().all(|s| !s.looks_at_pt())
+            }
+            Amount::Calc(base, _) => base.countable_in_layers(),
+            Amount::IfAtLeast { test, .. } => test.countable_in_layers(),
+            _ => false,
+        }
+    }
+}
+
+/// Arithmetic on an [`Amount`]. Results never go below 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Calc {
+    Plus(u32),
+    Minus(u32),
+    /// `n` minus the amount.
+    From(u32),
+    Times(u32),
+    HalfUp,
+    HalfDown,
+    /// No more than.
+    AtMost(u32),
+    /// No less than.
+    AtLeast(u32),
+}
+
+impl Calc {
+    pub fn apply(self, v: u32) -> u32 {
+        match self {
+            Calc::Plus(n) => v.saturating_add(n),
+            Calc::Minus(n) => v.saturating_sub(n),
+            Calc::From(n) => n.saturating_sub(v),
+            Calc::Times(n) => v.saturating_mul(n),
+            Calc::HalfUp => v.div_ceil(2),
+            Calc::HalfDown => v / 2,
+            Calc::AtMost(n) => v.min(n),
+            Calc::AtLeast(n) => v.max(n),
+        }
+    }
+}
+
+/// What of a permanent is measured ([`Amount::Greatest`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Measure {
+    Power,
+    Toughness,
+    ManaValue,
+}
+
+/// CR 903.4: a card's color identity — the colors of mana symbols in its mana cost or rules
+/// text, plus its color indicator. (Basic land types are handled by CR 903.5d.)
+pub fn color_identity(def: &CardDef) -> Vec<Color> {
+    let mut out: Vec<Color> = def.colors.clone().unwrap_or_default();
+    let add_cost = |m: &ManaCost, out: &mut Vec<Color>| {
+        for s in &m.symbols {
+            if let ManaSymbol::Colored(c) = s {
+                out.push(*c);
+            }
+        }
+    };
+    if let Some(m) = &def.mana_cost {
+        add_cost(m, &mut out);
+    }
+    for a in &def.abilities {
+        match a {
+            AbilityDef::Activated { cost, .. } | AbilityDef::Mana { cost, .. } => {
+                if let Some(m) = &cost.mana {
+                    add_cost(m, &mut out);
+                }
+                // CR 903.4: the mana symbols in the rules text. "{T}: Add {W} or {U}" has
+                // two; "one mana of any color" and "of any one color" have none.
+                if let AbilityDef::Mana { produce, .. } = a {
+                    let named: Vec<ManaType> = match produce {
+                        ManaProduce::One(t) => alloc::vec![*t],
+                        ManaProduce::AnyColor | ManaProduce::CommanderIdentity => Vec::new(),
+                        ManaProduce::OneOf(of) => of.clone(),
+                        ManaProduce::Times { of, .. } if of.len() < 5 => of.clone(),
+                        ManaProduce::Times { .. } => Vec::new(),
+                    };
+                    for t in named {
+                        if let Some(c) = Color::ALL
+                            .into_iter()
+                            .find(|c| ManaType::from_color(*c) == t)
+                        {
+                            out.push(c);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// A card file: the definition plus authoring metadata (spec §7.1). Parsed by `card-db`.
@@ -735,16 +1696,21 @@ impl CardCatalog {
         &self.defs[id.0 as usize]
     }
 
+    pub fn ability(&self, id: AbilityId) -> &AbilityDef {
+        self.get(id.card).ability(id)
+    }
+
     pub fn add(&mut self, def: CardDef) -> CardDefId {
         let id = CardDefId(u32::try_from(self.defs.len()).expect("catalog overflow"));
         self.defs.push(def);
         id
     }
 
+    /// The definition called `name`: by its key if it has one, otherwise by its name.
     pub fn find(&self, name: &str) -> Option<CardDefId> {
         self.defs
             .iter()
-            .position(|d| d.name == name)
+            .position(|d| d.key.as_deref().unwrap_or(&d.name) == name)
             .map(|i| CardDefId(i as u32))
     }
 }
@@ -784,8 +1750,12 @@ mod tests {
         let e = Effect::DealDamage {
             to: TargetRef::Target(0),
             amount: Amount::X,
+            by: DamageBy::This,
         };
         let s = serde_json::to_string(&e).unwrap();
-        assert_eq!(s, r#"{"DealDamage":{"to":{"Target":0},"amount":"X"}}"#);
+        assert_eq!(
+            s,
+            r#"{"DealDamage":{"to":{"Target":0},"amount":"X","by":"This"}}"#
+        );
     }
 }

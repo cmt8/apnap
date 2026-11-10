@@ -2,3 +2,6 @@
 # Official Comprehensive Rules text: never commit (Fan Content Policy; see docs/spec.md §12).
 /docs/rules/
 *.swp
+
+# Worktrees of parallel agents
+/.claude/worktrees/

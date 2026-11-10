@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "58916455-844c-4d97-908f-8205bdc117c0",
+    name: "Exorcise",
+    verified: true,
+    tests: ["exorcise_exiles_an_artifact_enchantment_or_big_creature"],
+    abilities: [
+        Spell(Effect((targets: [Permanent([
+                (types: [Artifact, Enchantment]),
+                (types: [Creature], power_min: Some(4)),
+            ])], effect: Exile(what: Target(0))))),
+    ],
+)

@@ -1,0 +1,13 @@
+RealCard(
+    oracle_id: "695eea46-1535-48c5-bbb6-0b8379e77bfc",
+    name: "Arasta of the Endless Web",
+    verified: true,
+    tests: ["arasta_makes_spiders_when_opponents_cast_instants_and_sorceries"],
+    keywords: [Reach],
+    abilities: [
+        Triggered(
+            when: Cast(by: Opponent, types: [Instant, Sorcery]),
+            body: Effect((effect: CreateToken(token: "g_1_2_spider_reach", count: Fixed(1), who: You))),
+        ),
+    ],
+)

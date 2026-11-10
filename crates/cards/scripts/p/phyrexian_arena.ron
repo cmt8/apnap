@@ -1,0 +1,15 @@
+RealCard(
+    oracle_id: "ee579a32-a048-4335-b966-231ba731cdea",
+    name: "Phyrexian Arena",
+    verified: true,
+    tests: ["phyrexian_arena_draws_and_drains_each_upkeep"],
+    abilities: [
+        Triggered(
+            when: BeginningOf(step: Upkeep, whose: You),
+            body: Effect((effect: Seq([
+                Draw(who: You, amount: Fixed(1)),
+                LoseLife(who: You, amount: Fixed(1)),
+            ]))),
+        ),
+    ],
+)

@@ -1,0 +1,16 @@
+RealCard(
+    oracle_id: "bd104c7e-311e-4b03-98d3-5f20f3a99d26",
+    name: "Liliana's Mastery",
+    verified: true,
+    tests: ["lilianas_mastery_pumps_zombies_and_makes_two"],
+    abilities: [
+        Static(
+            affected: All((subtypes: ["Zombie"], controller: You)),
+            effects: [ModifyPT(1, 1)],
+        ),
+        Triggered(
+            when: Enters(This),
+            body: Effect((effect: CreateToken(token: "b_2_2_zombie", count: Fixed(2), who: You))),
+        ),
+    ],
+)

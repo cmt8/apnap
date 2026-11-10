@@ -2,14 +2,19 @@
 //! [`CardCatalog`] for the engine (spec §7). A malformed or semantically wrong script fails
 //! **at load time** with its file path, never at game time.
 //!
-//! Scryfall bulk-data import (printed characteristics for real cards, fetched at runtime
-//! into the XDG cache, spec §12) arrives in M4. Until then every script carries its own
-//! printed characteristics, and only invented "Test …" cards and basic lands exist.
+//! Two kinds of card file: self-contained scripts ([`CardScript`]: invented "Test …" cards,
+//! token definitions, basic lands) and real-card scripts ([`real::RealCardScript`]: behaviour
+//! only; printed data comes from the Scryfall cache, [`scryfall`]).
+
+pub mod forge;
+pub mod images;
+pub mod real;
+pub mod scryfall;
 
 use card_model::{
-    AbilityDef, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript, CardType, Color, Effect,
-    ManaCost, ManaProduce, ManaSymbol, ManaType, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces,
-    Supertype, TargetFilter, TargetRef,
+    AbilityDef, ActivationZone, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript,
+    CardType, Cost, Effect, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces, Supertype,
+    TargetFilter, TargetRef, Trigger,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -56,55 +61,100 @@ pub fn parse_script(src: Source<'_>) -> Result<CardScript, LoadError> {
     ron::from_str(src.text).map_err(|e| err(src.path, e.to_string()))
 }
 
-/// Load, validate and compile card scripts into a catalog (in source order).
+/// Load, validate and compile self-contained card scripts into a catalog (in source order).
 pub fn load_catalog(
     sources: &[Source<'_>],
     strictness: Strictness,
 ) -> Result<CardCatalog, Vec<LoadError>> {
+    load_full_catalog(sources, &[], &scryfall::ScryfallData::default(), strictness)
+}
+
+/// Like [`load_catalog`], then appends the real cards in `scripts` (in source order),
+/// compiled against the printed data in `data`. Self-contained cards keep their ids.
+pub fn load_full_catalog(
+    sources: &[Source<'_>],
+    scripts: &[Source<'_>],
+    data: &scryfall::ScryfallData,
+    strictness: Strictness,
+) -> Result<CardCatalog, Vec<LoadError>> {
     let mut errors = Vec::new();
-    let mut catalog = CardCatalog::default();
-    let mut names = BTreeSet::new();
+    let mut entries: Vec<(&str, CardScript)> = Vec::new();
     for src in sources {
-        let script = match parse_script(*src) {
-            Ok(s) => s,
-            Err(e) => {
-                errors.push(e);
-                continue;
-            }
-        };
+        match parse_script(*src) {
+            Ok(s) => entries.push((src.path, s)),
+            Err(e) => errors.push(e),
+        }
+    }
+    for src in scripts {
+        match compile_real(*src, data) {
+            Ok(s) => entries.push((src.path, s)),
+            Err(mut e) => errors.append(&mut e),
+        }
+    }
+    let mut catalog = CardCatalog::default();
+    let mut paths: Vec<&str> = Vec::new();
+    let mut names = BTreeSet::new();
+    for (path, script) in entries {
         let problems = validate(&script, strictness);
-        if !names.insert(script.card.name.clone()) {
-            errors.push(err(
-                src.path,
-                format!("duplicate card name {:?}", script.card.name),
-            ));
+        // Definitions are found by key if they have one (tokens that share a name).
+        let called = script.card.key.clone().unwrap_or(script.card.name.clone());
+        if !names.insert(called.clone()) {
+            errors.push(err(path, format!("duplicate card name {called:?}")));
+        }
+        if script.card.key.is_some() && !script.card.token {
+            errors.push(err(path, "only token definitions have a key"));
         }
         if problems.is_empty() {
             catalog.add(script.card);
+            paths.push(path);
         } else {
-            errors.extend(problems.into_iter().map(|m| err(src.path, m)));
+            errors.extend(problems.into_iter().map(|m| err(path, m)));
         }
     }
     // Second pass: CreateToken must name a token definition in the catalog.
-    for (i, def) in catalog.defs.iter().enumerate() {
+    for (def, path) in catalog.defs.iter().zip(&paths) {
         for name in token_names(def) {
             match catalog.find(&name) {
                 Some(id) if catalog.get(id).token => {}
-                Some(_) => errors.push(err(
-                    sources[i].path,
-                    format!("{name:?} is not a token definition"),
-                )),
-                None => errors.push(err(sources[i].path, format!("unknown token {name:?}"))),
+                Some(_) => errors.push(err(path, format!("{name:?} is not a token definition"))),
+                None => errors.push(err(path, format!("unknown token {name:?}"))),
             }
         }
         if def.token && def.mana_cost.is_some() {
-            errors.push(err(sources[i].path, "tokens have no mana cost (CR 111.3)"));
+            errors.push(err(path, "tokens have no mana cost (CR 111.3)"));
         }
     }
     if errors.is_empty() {
         Ok(catalog)
     } else {
         Err(errors)
+    }
+}
+
+/// Parse a real-card script without compiling it.
+pub fn parse_real(src: Source<'_>) -> Result<real::RealCardScript, LoadError> {
+    ron::from_str(src.text).map_err(|e| err(src.path, e.to_string()))
+}
+
+/// Parse a real-card script and compile it against its printed data.
+pub fn compile_real(
+    src: Source<'_>,
+    data: &scryfall::ScryfallData,
+) -> Result<CardScript, Vec<LoadError>> {
+    let script = parse_real(src).map_err(|e| vec![e])?;
+    let Some(card) = data.get(&script.name) else {
+        return Err(vec![err(
+            src.path,
+            format!("{:?}: {}", script.name, scryfall::FETCH_HINT),
+        )]);
+    };
+    match real::compile(&script, card) {
+        Ok(card) => Ok(CardScript {
+            verified: script.verified,
+            tests: script.tests,
+            card,
+        }),
+        Err(problems) => Err(problems.into_iter().map(|m| err(src.path, m)).collect()),
     }
 }
 
@@ -183,28 +233,340 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
         p.push("duplicate keyword".into());
     }
     let card_has_x = c.mana_cost.as_ref().is_some_and(|m| m.has_x());
-    for (i, a) in c.abilities.iter().enumerate() {
-        let at = |m: String| format!("ability {i}: {m}");
+    // "Has [quoted ability]" names an ability of the card's `granted` list.
+    let text = format!("{:?}", (&c.abilities, &c.granted));
+    for list in text.split("GrantAbilities([").skip(1) {
+        let list = list.split(']').next().unwrap_or_default();
+        if list.is_empty() {
+            p.push("an effect that gives no ability".into());
+        }
+        for index in list.split(", ").filter(|i| !i.is_empty()) {
+            if index
+                .parse::<usize>()
+                .map_or(true, |i| i >= c.granted.len())
+            {
+                p.push(format!("no granted ability {index}"));
+            }
+        }
+    }
+    let printed = c.abilities.iter().enumerate().map(|(i, a)| (i, a, false));
+    let given = c.granted.iter().enumerate().map(|(i, a)| (i, a, true));
+    for (i, a, granted) in printed.chain(given) {
+        let at = |m: String| {
+            if granted {
+                format!("granted ability {i}: {m}")
+            } else {
+                format!("ability {i}: {m}")
+            }
+        };
+        // An ability another object is given works on the battlefield, for whatever has
+        // it: nothing about casting, about the card it is written on, or about a layer
+        // that is over by the time abilities are given (CR 613.1f).
+        if granted {
+            let fits = match a {
+                AbilityDef::Spell(_)
+                | AbilityDef::AdditionalCost(_)
+                | AbilityDef::Enchant(_)
+                | AbilityDef::SelfCostReduction(_) => false,
+                AbilityDef::Activated { from, cycling, .. } => {
+                    *from == ActivationZone::Battlefield && !*cycling
+                }
+                AbilityDef::Static {
+                    affected, effects, ..
+                } => {
+                    *affected != card_model::Affected::Enchanted
+                        && effects.iter().all(|e| {
+                            use card_model::ContinuousEffect as E;
+                            !matches!(
+                                e,
+                                E::GainControl
+                                    | E::AddTypes { .. }
+                                    | E::SetColors(_)
+                                    | E::SetPTBy { .. }
+                            )
+                        })
+                }
+                AbilityDef::CombatRule { affected, .. } => {
+                    *affected != card_model::Affected::Enchanted
+                }
+                AbilityDef::Replacement { replaces, .. } => *replaces != Replaces::ThisEnters,
+                AbilityDef::Mana { .. }
+                | AbilityDef::Triggered { .. }
+                | AbilityDef::CostReduction { .. } => true,
+            };
+            if !fits {
+                p.push(at("not an ability another object can be given".into()));
+                continue;
+            }
+        }
+        // "The sacrificed creature's power" needs a sacrifice chosen as its cost is paid.
+        if format!("{a:?}").contains("SacrificedPower") {
+            let paid = match a {
+                AbilityDef::Activated { cost, .. } => cost.sacrifice.is_some(),
+                AbilityDef::Spell(_) => c
+                    .abilities
+                    .iter()
+                    .any(|x| matches!(x, AbilityDef::AdditionalCost(c) if c.sacrifice.is_some())),
+                _ => false,
+            };
+            if !paid {
+                p.push(at(
+                    "the sacrificed creature's power, but nothing is sacrificed as a cost".into(),
+                ));
+            }
+        }
+        // Only an instant or sorcery spell's own effect says where the spell goes; "that
+        // card" needs a permanent that left the battlefield.
+        if !matches!(a, AbilityDef::Spell(_)) && format!("{a:?}").contains("ThisSpellTo") {
+            p.push(at("ThisSpellTo outside a spell ability".into()));
+        }
+        if format!("{a:?}").contains("TriggeringCard") {
+            let left = match a {
+                AbilityDef::Triggered { when, .. } => when
+                    .events()
+                    .iter()
+                    .all(|t| matches!(t, Trigger::Dies(_) | Trigger::Leaves(_))),
+                _ => false,
+            };
+            if !left {
+                p.push(at(
+                    "\"that card\" needs a trigger on a permanent leaving the battlefield".into(),
+                ));
+            }
+        }
+        // "That player" and "that much" need an event that has them.
+        let text = format!("{a:?}");
+        for (word, needs_player) in [("TriggeringPlayer", true), ("TriggeringAmount", false)] {
+            if !text.contains(word) {
+                continue;
+            }
+            let given = match a {
+                AbilityDef::Triggered { when, .. } => when.events().iter().all(|t| match t {
+                    Trigger::Damage { to, .. } => {
+                        !needs_player || matches!(to, card_model::DamageTo::Player(_))
+                    }
+                    Trigger::GainsLife(_) | Trigger::LosesLife(_) => true,
+                    Trigger::Draws { .. } | Trigger::Discards(_) => needs_player,
+                    _ => false,
+                }),
+                _ => false,
+            };
+            if !given {
+                p.push(at(format!(
+                    "{word}: the ability's trigger event doesn't have one"
+                )));
+            }
+        }
+        // "If [something counted] is N or more" is asked with no spell or ability
+        // resolving, and for a static ability inside the layer walk.
+        let (cond, in_static) = match a {
+            AbilityDef::Activated { only_if, .. } | AbilityDef::Mana { only_if, .. } => {
+                (only_if.as_ref(), false)
+            }
+            AbilityDef::Triggered { intervening_if, .. } => (intervening_if.as_ref(), false),
+            AbilityDef::Static { only_if, .. } => (only_if.as_ref(), true),
+            _ => (None, false),
+        };
+        if let Some(card_model::Condition::Compare { amount, .. }) = cond {
+            if !amount.stands_alone() {
+                p.push(at(
+                    "a condition can't count something that needs the ability to resolve".into(),
+                ));
+            }
+            if in_static && !amount.countable_in_layers() {
+                p.push(at(
+                    "a static ability's condition can't count that (CR 613.4c)".into(),
+                ));
+            }
+        }
+        // "This card" (off the battlefield) means something only where the ability works
+        // from a hand or graveyard, or triggers on the card being cycled.
+        if format!("{a:?}").contains("ThisCard") {
+            let off_battlefield = match a {
+                AbilityDef::Activated { from, .. } => *from != ActivationZone::Battlefield,
+                AbilityDef::Triggered { when, .. } => when
+                    .events()
+                    .iter()
+                    .all(|t| matches!(t, Trigger::Cycles { this: true, .. })),
+                _ => false,
+            };
+            if !off_battlefield {
+                p.push(at(
+                    "\"this card\" in an ability that works on the battlefield".into(),
+                ));
+            }
+        }
         match a {
             AbilityDef::Spell(body) => check_body(body, card_has_x, &mut |m| p.push(at(m))),
-            AbilityDef::Activated { cost, body, .. } => {
+            AbilityDef::Activated {
+                cost,
+                body,
+                from,
+                cycling,
+                ..
+            } => {
+                // CR 113.6: the cost can name the card only where the ability works from.
+                let on_battlefield = cost.tap || cost.sacrifice_self;
+                let fits = match from {
+                    ActivationZone::Battlefield => !cost.discard_self && !cost.exile_self,
+                    ActivationZone::Hand => !on_battlefield && !cost.exile_self,
+                    ActivationZone::Graveyard => !on_battlefield && !cost.discard_self,
+                };
+                if !fits {
+                    p.push(at(
+                        "the cost uses the card in a zone the ability doesn't work from".into(),
+                    ));
+                }
+                if *cycling && !(*from == ActivationZone::Hand && cost.discard_self) {
+                    p.push(at(
+                        "cycling is \"[cost], discard this card\" from the hand (CR 702.29a)"
+                            .into(),
+                    ));
+                }
                 let has_x = cost.mana.as_ref().is_some_and(|m| m.has_x());
-                if cost.mana.is_none() && !cost.tap {
+                if *cost == Cost::default() {
                     p.push(at("activated ability with no cost".into()));
                 }
+                check_cost(cost, &mut |m| p.push(at(m)));
                 check_body(body, has_x, &mut |m| p.push(at(m)));
             }
-            AbilityDef::Mana { cost, .. } => {
-                if !(cost.tap && cost.mana.is_none()) {
-                    p.push(at("M1 mana abilities must cost exactly {T} (D-021)".into()));
+            AbilityDef::Mana {
+                cost,
+                produce,
+                spend,
+                ..
+            } => {
+                // `{T}`, optionally with "sacrifice this" (D-052). A mana ability that
+                // costs mana, or anything chosen, is not modelled.
+                let allowed = Cost {
+                    tap: true,
+                    sacrifice_self: cost.sacrifice_self,
+                    ..Cost::default()
+                };
+                if *cost != allowed {
+                    p.push(at(
+                        "a mana ability must cost {T}, or {T} and sacrificing itself (D-052)"
+                            .into(),
+                    ));
                 }
+                if produce.count() == 0 || produce.options().is_empty() {
+                    p.push(at("a mana ability that adds nothing".into()));
+                }
+                if spend
+                    .as_ref()
+                    .is_some_and(|r| r.spells.is_empty() && r.abilities.is_empty())
+                {
+                    p.push(at("mana that can be spent on nothing".into()));
+                }
+            }
+            AbilityDef::CombatRule { affected, .. } => {
+                // "Enchanted creature can't attack", "equipped creature can't be blocked":
+                // only on something that is attached to a creature.
+                if matches!(affected, card_model::Affected::Enchanted)
+                    && !c
+                        .creature_types
+                        .iter()
+                        .any(|t| t == "Aura" || t == "Equipment")
+                {
+                    p.push(at(
+                        "only an Aura or Equipment has an enchanted or equipped creature".into(),
+                    ));
+                }
+            }
+            AbilityDef::AdditionalCost(cost) => {
+                if cost.mana.is_some()
+                    || cost.tap
+                    || cost.sacrifice_self
+                    || cost.discard_self
+                    || cost.exile_self
+                {
+                    p.push(at(
+                        "an additional cost is a sacrifice, a discard or life, nothing else".into(),
+                    ));
+                }
+                if cost.sacrifice.is_none() && cost.discard.is_none() && cost.life == 0 {
+                    p.push(at("an additional cost of nothing".into()));
+                }
+                if c.has_type(CardType::Land) {
+                    p.push(at("lands aren't cast: no additional cost".into()));
+                }
+                check_cost(cost, &mut |m| p.push(at(m)));
             }
             AbilityDef::Triggered { body, .. } => {
                 check_body(body, false, &mut |m| p.push(at(m)));
             }
-            AbilityDef::Static { effects, .. } => {
+            AbilityDef::Static {
+                affected,
+                effects,
+                only_if,
+            } => {
                 if effects.is_empty() {
                     p.push(at("a static ability needs at least one effect".into()));
+                }
+                // "+1/+1 for each [selector]" is re-counted inside the layer walk: only a
+                // count of permanents that doesn't look at power or toughness can be
+                // (CR 613.4c; anything else would depend on the order of other effects).
+                for e in effects {
+                    // CR 604.3: a characteristic-defining ability defines its own card.
+                    if let card_model::ContinuousEffect::SetPTBy { power, toughness } = e {
+                        if *affected != card_model::Affected::This || only_if.is_some() {
+                            p.push(at(
+                                "a characteristic-defining ability is about its own card, \
+                                 unconditionally"
+                                    .into(),
+                            ));
+                        }
+                        if power.is_none() && toughness.is_none() {
+                            p.push(at(
+                                "a characteristic-defining ability that defines nothing".into()
+                            ));
+                        }
+                        if [power, toughness]
+                            .into_iter()
+                            .flatten()
+                            .any(|a| !a.countable_in_layers())
+                        {
+                            p.push(at(
+                                "a characteristic-defining ability can't count that (CR 613.4a)"
+                                    .into(),
+                            ));
+                        }
+                        if c.power.is_none() || c.toughness.is_none() {
+                            p.push(at(
+                                "defines the power or toughness of a card without them".into()
+                            ));
+                        }
+                    }
+                    if let card_model::ContinuousEffect::ModifyPTBy { power, toughness } = e {
+                        for a in [&power.amount, &toughness.amount] {
+                            if !a.countable_in_layers() {
+                                p.push(at("a static ModifyPTBy can only count permanents \
+                                           (not by power or toughness)"
+                                    .into()));
+                            }
+                        }
+                    }
+                }
+                // The affected set is worked out inside the layer walk, before power and
+                // toughness are final (CR 613.4): it can't depend on them.
+                if let card_model::Affected::All(s) = affected
+                    && s.looks_at_pt()
+                {
+                    p.push(at(
+                        "a static ability can't select by power or toughness (CR 613)".into(),
+                    ));
+                }
+            }
+            AbilityDef::CostReduction { amount, .. } => {
+                if *amount == 0 {
+                    p.push(at("a cost reduction of nothing".into()));
+                }
+            }
+            AbilityDef::SelfCostReduction(a) => {
+                if matches!(a, Amount::X | Amount::SourcePower) {
+                    p.push(at(
+                        "a spell's own cost reduction can't depend on X or its power".into(),
+                    ));
                 }
             }
             AbilityDef::Enchant(f) => {
@@ -213,8 +575,8 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 {
                     p.push(at("only Auras have enchant (CR 702.5a)".into()));
                 }
-                if *f != TargetFilter::Creature {
-                    p.push(at("M3 supports only \"Enchant creature\" (D-029)".into()));
+                if !matches!(f, TargetFilter::Creature | TargetFilter::Permanent(_)) {
+                    p.push(at("an Aura enchants a permanent (players: not yet)".into()));
                 }
             }
             AbilityDef::Replacement { replaces, with } => {
@@ -229,9 +591,28 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                         )
                         | (
                             Replaces::ThisEnters,
-                            ReplaceWith::EntersTapped | ReplaceWith::EntersWithCounters { .. }
+                            ReplaceWith::EntersTapped
+                                | ReplaceWith::EntersWithCounters { .. }
+                                | ReplaceWith::EntersWithCounted { .. }
+                        )
+                        | (
+                            Replaces::OtherEnters(_),
+                            ReplaceWith::EntersTapped
+                                | ReplaceWith::EntersWithCounters { .. }
+                                | ReplaceWith::EntersWithCounted { .. }
                         )
                 );
+                // Counted without a resolving spell or ability to supply X or a trigger.
+                // (Its own X — "enters with X counters" — is the X it was cast with.)
+                let own_x = *replaces == Replaces::ThisEnters && card_has_x;
+                if let ReplaceWith::EntersWithCounted { amount, .. } = with
+                    && !amount.stands_alone()
+                    && !(own_x && *amount == Amount::X)
+                {
+                    p.push(at(
+                        "counters counted from something a replacement can't know".into(),
+                    ));
+                }
                 if !ok {
                     p.push(at(format!(
                         "unsupported replacement {replaces:?} -> {with:?}"
@@ -259,19 +640,101 @@ fn check_body(body: &Body, has_x: bool, p: &mut dyn FnMut(String)) {
         check_effect(&mode.effect, mode, has_x, &mut |m| {
             p(format!("mode {mi}: {m}"))
         });
+        // CR 115.3: the slots of a target group.
+        let n = mode.targets.len();
+        for g in &mode.groups {
+            let (first, end) = (g.first as usize, g.first as usize + g.count as usize);
+            if g.count == 0 || g.min > g.count || end > n || (g.count == 1 && g.min == 1) {
+                p(format!("mode {mi}: bad target group {g:?}"));
+                continue;
+            }
+            if mode.targets[first..end]
+                .iter()
+                .any(|f| *f != mode.targets[first])
+            {
+                p(format!(
+                    "mode {mi}: a target group's slots must have one filter"
+                ));
+            }
+            if g.min < g.count && end != n {
+                p(format!(
+                    "mode {mi}: an \"up to\" target group must be the last targets"
+                ));
+            }
+            if mode
+                .groups
+                .iter()
+                .filter(|o| (o.first..o.first + o.count).contains(&g.first))
+                .count()
+                != 1
+            {
+                p(format!("mode {mi}: overlapping target groups"));
+            }
+        }
     }
 }
 
-fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String)) {
-    let slot = |t: &TargetRef| {
-        let TargetRef::Target(i) = t;
-        mode.targets.get(*i as usize).copied()
-    };
-    let amount = |a: &Amount, p: &mut dyn FnMut(String)| {
-        if matches!(a, Amount::X) && !has_x {
-            p("Amount::X used but the cost has no {X}".into());
+/// The chosen parts of a cost.
+fn check_cost(cost: &Cost, p: &mut dyn FnMut(String)) {
+    for (what, choice) in [("sacrifice", &cost.sacrifice), ("discard", &cost.discard)] {
+        if let Some(ch) = choice {
+            if ch.count == 0 {
+                p(format!("a cost to {what} nothing"));
+            }
+            if ch.what.is_empty() {
+                p(format!("a cost to {what} needs at least one selector"));
+            }
         }
+    }
+    // Cards in a hand are matched by card type and subtype only.
+    if let Some(d) = &cost.discard {
+        for s in &d.what {
+            let asked = card_model::Selector {
+                types: s.types.clone(),
+                not_types: s.not_types.clone(),
+                subtypes: s.subtypes.clone(),
+                not_subtypes: s.not_subtypes.clone(),
+                ..Default::default()
+            };
+            if asked != *s {
+                p("a discard cost can only ask for card types and subtypes".into());
+            }
+        }
+    }
+}
+
+/// A selector used where "another" has no meaning must not say it.
+fn selector(_s: &card_model::Selector, _p: &mut dyn FnMut(String)) {}
+
+fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String)) {
+    let slot = |t: &TargetRef| match t {
+        TargetRef::Target(i) => mode.targets.get(*i as usize),
+        TargetRef::Players(_) | TargetRef::Object(_) => None,
     };
+    #[allow(clippy::type_complexity)]
+    fn check_amount(
+        a: &Amount,
+        has_x: bool,
+        selector: &dyn Fn(&card_model::Selector, &mut dyn FnMut(String)),
+        p: &mut dyn FnMut(String),
+    ) {
+        match a {
+            Amount::X if !has_x => {
+                p("Amount::X used but nothing defines X (no {X} in the cost, no SetX)".into());
+            }
+            Amount::Count(s) | Amount::TotalPower(s) | Amount::Greatest { of: s, .. } => {
+                selector(s, p)
+            }
+            Amount::CardsIn { cards, .. } => cards.iter().for_each(|s| selector(s, p)),
+            Amount::Calc(base, _) => check_amount(base, has_x, selector, p),
+            Amount::IfAtLeast { test, .. } => check_amount(test, has_x, selector, p),
+            Amount::Devotion(colors) if colors.is_empty() => {
+                p("devotion to no color".into());
+            }
+            _ => {}
+        }
+    }
+    let amount = |a: &Amount, p: &mut dyn FnMut(String)| check_amount(a, has_x, &selector, p);
     let player = |r: &PlayerRef, p: &mut dyn FnMut(String)| {
         if let PlayerRef::Target(i) = r {
             match mode.targets.get(*i as usize) {
@@ -284,7 +747,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
     let obj = |r: &ObjRef, p: &mut dyn FnMut(String)| {
         if let ObjRef::Target(i) = r {
             match mode.targets.get(*i as usize) {
-                Some(TargetFilter::Creature | TargetFilter::AnyTarget) => {}
+                Some(f) if f.allows_permanents() => {}
                 Some(f) => p(format!("ObjRef::Target({i}) refers to a {f:?} target")),
                 None => p(format!("ObjRef::Target({i}) has no target slot")),
             }
@@ -292,32 +755,171 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
     };
     match e {
         Effect::Seq(v) => {
+            // "…where X is …": a SetX defines X for the instructions after it.
+            let mut has_x = has_x;
             for x in v {
+                check_effect(x, mode, has_x, p);
+                has_x |= matches!(x, Effect::SetX(_));
+            }
+        }
+        Effect::SetX(a) => amount(a, p),
+        Effect::May(inner) => check_effect(inner, mode, has_x, p),
+        Effect::Pay {
+            who,
+            cost,
+            paid,
+            unpaid,
+        } => {
+            match who {
+                PlayerRef::Each | PlayerRef::EachOpponent => {
+                    p("a cost paid on resolution is paid by one player".into())
+                }
+                PlayerRef::ControllerOf(i) => {
+                    if mode.targets.get(*i as usize).is_none() {
+                        p(format!("PlayerRef::ControllerOf({i}) has no target slot"));
+                    }
+                }
+                other => player(other, p),
+            }
+            if *cost == Cost::default() {
+                p("a cost of nothing".into());
+            }
+            if cost.discard_self || cost.exile_self {
+                p("a cost paid on resolution can't use the card in hand or graveyard".into());
+            }
+            // `{T}` and "sacrifice this" are the ability's source: its controller's.
+            if (cost.tap || cost.sacrifice_self) && *who != PlayerRef::You {
+                p("only the ability's controller can tap or sacrifice its source".into());
+            }
+            check_cost(cost, p);
+            check_effect(paid, mode, has_x, p);
+            check_effect(unpaid, mode, has_x, p);
+        }
+        Effect::Together(v) => {
+            for x in v {
+                if matches!(
+                    x,
+                    Effect::Seq(_) | Effect::May(_) | Effect::Together(_) | Effect::SetX(_)
+                ) {
+                    p("Together holds single instructions only".into());
+                }
                 check_effect(x, mode, has_x, p);
             }
         }
-        Effect::DealDamage { to, amount: a } => {
-            match slot(to) {
-                None => p(format!("{to:?} has no target slot")),
-                Some(TargetFilter::Spell) => p("can't deal damage to a spell".into()),
-                Some(_) => {}
+        Effect::ReturnToBattlefield { what } => match what {
+            ObjRef::Target(i)
+                if matches!(
+                    mode.targets.get(*i as usize),
+                    Some(TargetFilter::CardInGraveyard { .. })
+                ) => {}
+            other => p(format!(
+                "ReturnToBattlefield needs a card-in-graveyard target, got {other:?}"
+            )),
+        },
+        Effect::DestroyAll(s) => selector(s, p),
+        Effect::DamageEach { each, amount: a } => {
+            selector(each, p);
+            amount(a, p);
+        }
+        Effect::Exile { what } => obj(what, p),
+        Effect::ExileGraveyard { who } => player(who, p),
+        Effect::Mill { who, amount: a } => {
+            player(who, p);
+            amount(a, p);
+        }
+        Effect::ApplyAll {
+            affected, effects, ..
+        } => {
+            selector(affected, p);
+            if effects.is_empty() {
+                p("ApplyAll needs at least one effect".into());
+            }
+        }
+        Effect::DealDamage { to, amount: a, .. } => {
+            match to {
+                TargetRef::Players(r) => player(r, p),
+                TargetRef::Object(r) => obj(r, p),
+                TargetRef::Target(_) => match slot(to) {
+                    None => p(format!("{to:?} has no target slot")),
+                    Some(TargetFilter::Spell | TargetFilter::SpellMatching(_)) => {
+                        p("can't deal damage to a spell".into())
+                    }
+                    Some(_) => {}
+                },
             }
             amount(a, p);
         }
+        Effect::Tap { what } | Effect::Untap { what } => obj(what, p),
+        Effect::TapAll(s) | Effect::UntapAll(s) => selector(s, p),
+        Effect::Discard { who, amount: a } => {
+            player(who, p);
+            amount(a, p);
+        }
+        Effect::DiscardHand { who } => player(who, p),
+        Effect::Sacrifice {
+            who,
+            what,
+            amount: a,
+        } => {
+            player(who, p);
+            selector(what, p);
+            amount(a, p);
+        }
+        Effect::SacrificeThis => {}
+        Effect::AttachThis { to } => obj(to, p),
+        Effect::ChooseCards {
+            who, cards, count, ..
+        } => {
+            player(who, p);
+            amount(count, p);
+            cards.iter().for_each(|s| selector(s, p));
+        }
+        Effect::Scry { who, amount: a } | Effect::Surveil { who, amount: a } => {
+            player(who, p);
+            amount(a, p);
+        }
+        Effect::Dig {
+            who, count, cards, ..
+        } => {
+            player(who, p);
+            amount(count, p);
+            cards.iter().for_each(|s| selector(s, p));
+        }
+        Effect::PutInto { what, .. } => obj(what, p),
+        Effect::MoveAll { whose, cards, .. } => {
+            player(whose, p);
+            cards.iter().for_each(|s| selector(s, p));
+        }
         Effect::Draw { who, amount: a }
         | Effect::GainLife { who, amount: a }
+        | Effect::AddMana { who, amount: a, .. }
         | Effect::LoseLife { who, amount: a } => {
             player(who, p);
             amount(a, p);
         }
         Effect::Counter { what } => match slot(what) {
-            Some(TargetFilter::Spell) => {}
+            Some(TargetFilter::Spell | TargetFilter::SpellMatching(_)) => {}
             other => p(format!("Counter needs a Spell target slot, got {other:?}")),
         },
         Effect::EachPlayer(_) => {}
         Effect::DamageEachPlayer { amount: a } => amount(a, p),
         Effect::Destroy { what } | Effect::ReturnToHand { what } | Effect::Apply { what, .. } => {
             obj(what, p)
+        }
+        Effect::PutCountersAll { what, count, .. } => {
+            selector(what, p);
+            amount(count, p);
+        }
+        Effect::ThisSpellTo { to, .. } => {
+            if matches!(
+                to,
+                card_model::CardDest::Battlefield { .. } | card_model::CardDest::Graveyard
+            ) {
+                p(
+                    "a resolving spell goes to exile, a hand or a library, if not the graveyard"
+                        .into(),
+                );
+            }
         }
         Effect::PutCounters { what, count, .. } => {
             obj(what, p);
@@ -343,6 +945,11 @@ pub struct DeckFile {
     #[serde(default)]
     pub commander: Option<String>,
     pub cards: Vec<(u32, String)>,
+}
+
+/// Parse a deck list without resolving its card names.
+pub fn parse_deck_file(src: Source<'_>) -> Result<DeckFile, LoadError> {
+    ron::from_str(src.text).map_err(|e| err(src.path, e.to_string()))
 }
 
 /// A deck resolved against a catalog.
@@ -374,44 +981,7 @@ pub fn load_deck_file(src: Source<'_>, catalog: &CardCatalog) -> Result<Deck, Lo
     })
 }
 
-/// CR 903.4: a card's color identity — the colors of mana symbols in its mana cost or rules
-/// text, plus its color indicator. (Basic land types are handled by CR 903.5d.)
-pub fn color_identity(def: &CardDef) -> Vec<Color> {
-    let mut out: Vec<Color> = def.colors.clone().unwrap_or_default();
-    let add_cost = |m: &ManaCost, out: &mut Vec<Color>| {
-        for s in &m.symbols {
-            if let ManaSymbol::Colored(c) = s {
-                out.push(*c);
-            }
-        }
-    };
-    if let Some(m) = &def.mana_cost {
-        add_cost(m, &mut out);
-    }
-    for a in &def.abilities {
-        match a {
-            AbilityDef::Activated { cost, .. } | AbilityDef::Mana { cost, .. } => {
-                if let Some(m) = &cost.mana {
-                    add_cost(m, &mut out);
-                }
-                if let AbilityDef::Mana {
-                    produce: ManaProduce::One(t),
-                    ..
-                } = a
-                    && let Some(c) = Color::ALL
-                        .into_iter()
-                        .find(|c| ManaType::from_color(*c) == *t)
-                {
-                    out.push(c);
-                }
-            }
-            _ => {}
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
+pub use card_model::color_identity;
 
 /// CR 903.5: Commander deck construction rules (and 903.3 for the commander).
 pub fn validate_commander_deck(catalog: &CardCatalog, deck: &Deck) -> Vec<String> {

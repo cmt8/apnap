@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "d9a7e5a6-3e41-4fc6-987a-18fe1b9d67dd",
+    name: "Elemental Bond",
+    verified: true,
+    tests: ["elemental_bond_draws_for_power_three_or_more"],
+    abilities: [
+        Triggered(
+            when: Enters(Matching((types: [Creature], controller: You, power_min: Some(3)))),
+            body: Effect((effect: Draw(who: You, amount: Fixed(1)))),
+        ),
+    ],
+)

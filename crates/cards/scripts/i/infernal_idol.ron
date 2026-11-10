@@ -1,0 +1,16 @@
+RealCard(
+    oracle_id: "a0802918-e18a-4716-befb-96ae6667f2f3",
+    name: "Infernal Idol",
+    verified: true,
+    tests: ["infernal_idol_taps_for_black_or_is_sacrificed_for_cards"],
+    abilities: [
+        Mana(cost: (tap: true), produce: One(Black)),
+        Activated(
+            cost: (mana: Some("{1}{B}{B}"), tap: true, sacrifice_self: true),
+            body: Effect((effect: Seq([
+                Draw(who: You, amount: Fixed(2)),
+                LoseLife(who: You, amount: Fixed(2)),
+            ]))),
+        ),
+    ],
+)

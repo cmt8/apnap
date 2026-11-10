@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "6ee71432-a44d-495e-86ea-d495d891c331",
+    name: "Verdant Sun's Avatar",
+    verified: true,
+    tests: ["verdant_suns_avatar_gains_life_equal_to_toughness"],
+    abilities: [
+        Triggered(
+            when: Enters(ThisOr((types: [Creature], controller: You))),
+            body: Effect((effect: GainLife(who: You, amount: TriggeringToughness))),
+        ),
+    ],
+)

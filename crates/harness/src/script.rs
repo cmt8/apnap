@@ -104,7 +104,7 @@ impl Script {
             OptionDesc::ActivateAbility { source, .. } => {
                 format!("activate {}", self.name(*source))
             }
-            OptionDesc::TapForMana { source, mana } => {
+            OptionDesc::TapForMana { source, mana, .. } => {
                 format!("tap {} for {mana:?}", self.name(*source))
             }
             OptionDesc::Target {
@@ -155,7 +155,7 @@ impl Script {
 
     pub fn tap(&mut self, name: &str, mana: engine_core::mana::ManaType) -> &mut Self {
         self.pick(&format!("tap {name} for {mana:?}"), |s, o| {
-            matches!(o, OptionDesc::TapForMana { source, mana: m } if s.name(*source) == name && *m == mana)
+            matches!(o, OptionDesc::TapForMana { source, mana: m, .. } if s.name(*source) == name && *m == mana)
         })
     }
 

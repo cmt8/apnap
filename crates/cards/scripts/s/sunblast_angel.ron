@@ -1,0 +1,13 @@
+RealCard(
+    oracle_id: "8b34d1df-4024-497d-bd28-a7caa8c3fa24",
+    name: "Sunblast Angel",
+    verified: true,
+    tests: ["sunblast_angel_destroys_tapped_creatures"],
+    keywords: [Flying],
+    abilities: [
+        Triggered(
+            when: Enters(This),
+            body: Effect((effect: DestroyAll((types: [Creature], tapped: Some(true))))),
+        ),
+    ],
+)

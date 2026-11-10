@@ -1,0 +1,20 @@
+RealCard(
+    oracle_id: "95be5f72-1f81-4ec6-9bd9-f0b07bfc874b",
+    name: "Surrak and Goreclaw",
+    verified: true,
+    tests: ["surrak_and_goreclaw_welcome_new_creatures"],
+    keywords: [Trample],
+    abilities: [
+        Static(
+            affected: All((types: [Creature], controller: You, other: true)),
+            effects: [AddKeywords([Trample])],
+        ),
+        Triggered(
+            when: Enters(Matching((types: [Creature], controller: You, other: true, token: Some(false)))),
+            body: Effect((effect: Seq([
+                PutCounters(what: Triggering, kind: PlusOne, count: Fixed(1)),
+                Apply(what: Triggering, effects: [AddKeywords([Haste])], until_end_of_turn: true),
+            ]))),
+        ),
+    ],
+)

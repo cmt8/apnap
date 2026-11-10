@@ -1,0 +1,16 @@
+RealCard(
+    oracle_id: "d2a65ff4-ab82-42f7-9d90-feb29132121e",
+    name: "Graveborn Muse",
+    verified: true,
+    tests: ["graveborn_muse_draws_and_drains_per_zombie"],
+    abilities: [
+        Triggered(
+            when: BeginningOf(step: Upkeep, whose: You),
+            body: Effect((effect: Seq([
+                SetX(Count((subtypes: ["Zombie"], controller: You))),
+                Draw(who: You, amount: X),
+                LoseLife(who: You, amount: X),
+            ]))),
+        ),
+    ],
+)

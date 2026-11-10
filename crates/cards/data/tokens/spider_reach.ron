@@ -1,0 +1,16 @@
+// Token definition (CR 111.4: named for its subtype plus "Token"; `key` is what scripts call it): a 1/2 green Spider creature token with reach.
+CardScript(
+    verified: true,
+    tests: ["arasta_makes_spiders_when_opponents_cast_instants_and_sorceries"],
+    card: (
+        name: "Spider Token",
+        key: Some("g_1_2_spider_reach"),
+        token: true,
+        colors: Some([Green]),
+        card_types: [Creature],
+        creature_types: ["Spider"],
+        power: Some(1),
+        toughness: Some(2),
+        keywords: [Reach],
+    ),
+)

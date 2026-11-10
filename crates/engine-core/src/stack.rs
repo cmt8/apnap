@@ -5,7 +5,7 @@
 use crate::ids::{ObjectId, PlayerId};
 use crate::layers::Characteristics;
 use alloc::vec::Vec;
-use card_model::CardDefId;
+use card_model::{AbilityId, CardDefId};
 use serde::{Deserialize, Serialize};
 
 /// A chosen target (CR 115).
@@ -20,11 +20,12 @@ pub enum Target {
 pub enum StackKind {
     /// The spell is the card object with the same id.
     Spell,
-    /// An activated ability of `source` (printed ability `index` of `source_card`).
+    /// An activated or triggered ability of `source`, whose card is `source_card`.
+    /// `ability` is its text: of that card, or of the card that gave `source` the ability.
     Ability {
         source: ObjectId,
         source_card: CardDefId,
-        index: u16,
+        ability: AbilityId,
         /// A triggered ability (CR 603) rather than an activated one (CR 602).
         triggered: bool,
     },
@@ -38,12 +39,25 @@ pub struct StackObject {
     /// For abilities: the source as it last existed on the battlefield, once it has left
     /// (CR 113.7a, 608.2h). `None` while the source is still there.
     pub source_lki: Option<Characteristics>,
+    /// For triggered abilities: the object whose event triggered it ("it", "that
+    /// creature"), and that object as it last existed once it has left the battlefield.
+    #[serde(default)]
+    pub subject: Option<ObjectId>,
+    #[serde(default)]
+    pub subject_lki: Option<Characteristics>,
     /// Chosen mode indices, ascending (non-modal bodies: `[0]`). Empty for permanent spells.
     pub modes: Vec<u8>,
     /// Announced X (CR 107.3a); 0 if none.
     pub x: u32,
     /// `targets[k][slot]` for the k-th chosen mode.
     pub targets: Vec<Vec<Target>>,
+    /// The total power, as they last existed, of the permanents sacrificed to pay for this
+    /// ("the sacrificed creature's power", CR 608.2h).
+    #[serde(default)]
+    pub sacrificed_power: u32,
+    /// For triggered abilities: what else the triggering event carries.
+    #[serde(default)]
+    pub facts: crate::triggers::EventFacts,
 }
 
 impl StackObject {

@@ -1,0 +1,16 @@
+RealCard(
+    oracle_id: "ed4cd3a1-688b-4c05-948d-39d3336e00c0",
+    name: "Oversold Cemetery",
+    verified: true,
+    tests: ["oversold_cemetery_needs_four_creature_cards"],
+    abilities: [
+        Triggered(
+            when: BeginningOf(step: Upkeep, whose: You),
+            intervening_if: Some(CardsInGraveyard(cards: (types: [Creature]), at_least: 4)),
+            body: Effect((
+                targets: [CardInGraveyard(cards: (types: [Creature]), whose: You)],
+                effect: May(ReturnToHand(what: Target(0))),
+            )),
+        ),
+    ],
+)

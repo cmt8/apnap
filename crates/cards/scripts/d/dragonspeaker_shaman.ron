@@ -1,0 +1,9 @@
+RealCard(
+    oracle_id: "6a29f36b-7911-4d84-a3ae-546b131d5159",
+    name: "Dragonspeaker Shaman",
+    verified: true,
+    tests: ["dragonspeaker_shaman_takes_two_off_dragon_spells"],
+    abilities: [
+        CostReduction(spells: (subtypes: ["Dragon"]), amount: 2),
+    ],
+)

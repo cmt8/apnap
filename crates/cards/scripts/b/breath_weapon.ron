@@ -1,0 +1,9 @@
+RealCard(
+    oracle_id: "f3dd1f6d-f7d7-4358-8139-7495404f29c7",
+    name: "Breath Weapon",
+    verified: true,
+    tests: ["breath_weapon_spares_dragons"],
+    abilities: [
+        Spell(Effect((effect: DamageEach(each: (types: [Creature], not_subtypes: ["Dragon"]), amount: Fixed(2))))),
+    ],
+)

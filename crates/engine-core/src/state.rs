@@ -37,6 +37,21 @@ pub struct PlayerState {
     pub commander_damage: BTreeMap<CardInstanceId, u32>,
     /// CR 903.8: how many times this player has cast each commander from the command zone.
     pub commander_casts: BTreeMap<CardInstanceId, u32>,
+    /// CR 106.6: unspent mana that can only be spent in certain ways, in the order it was
+    /// added. Not part of `mana_pool`.
+    #[serde(default)]
+    pub restricted_mana: Vec<RestrictedMana>,
+    /// Cards drawn this turn ("whenever you draw your second card each turn").
+    #[serde(default)]
+    pub drawn_this_turn: u32,
+}
+
+/// CR 106.6: mana with a spending restriction — the `spend` of mana ability `ability`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestrictedMana {
+    pub mana: crate::mana::ManaType,
+    pub amount: u32,
+    pub ability: card_model::AbilityId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +103,8 @@ pub struct GameState {
     pub next_effect_id: u32,
     /// CR 903.3: the commander cards (owner, card), in seat order.
     pub commanders: Vec<(PlayerId, CardInstanceId)>,
+    /// The card definition of each commander (it stays known after the card leaves the game).
+    pub commander_cards: BTreeMap<CardInstanceId, card_model::CardDefId>,
     /// CR 903.9a: commanders put into a graveyard or exile since SBAs were last checked.
     pub commander_moved: Vec<ObjectId>,
     /// Triggered abilities waiting to be put on the stack (CR 603.3).

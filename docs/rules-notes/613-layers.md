@@ -136,3 +136,40 @@
 
 ## Tests
 `crates/harness/tests/rules_m2.rs`: `cr_613_*`.
+
+## Characteristic-defining abilities for power and toughness (D-055)
+> 604.3. Some static abilities are characteristic-defining abilities. A characteristic-defining ability conveys information about an object’s characteristics that would normally be found elsewhere on that object (such as in its mana cost, type line, or power/toughness box). Characteristic-defining abilities can add to or override information found elsewhere on that object. Characteristic-defining abilities function in all zones. They also function outside the game and before the game begins.
+
+> 604.3a A static ability is a characteristic-defining ability if it meets the following criteria: (1) It defines an object’s colors, subtypes, power, or toughness; (2) it is printed on the card it affects, it was granted to the token it affects by the effect that created the token, or it was acquired by the object it affects as the result of a copy effect or text-changing effect; (3) it does not directly affect the characteristics of any other objects; (4) it is not an ability that an object grants to itself; and (5) it does not set the values of such characteristics only if certain conditions are met.
+
+> 613.4a Layer 7a: Effects from characteristic-defining abilities that define power and/or toughness are applied. See rule 604.3.
+
+> 208.2a The card may have a characteristic-defining ability that sets its power and/or toughness according to some stated condition. (See rule 604.3.) Such an ability is worded “[This creature’s] [power or toughness] is equal to . . .” or “[This creature’s] power and toughness are each equal to . . .” This ability functions everywhere, even outside the game. If the ability needs to use a number that can’t be determined, including inside a calculation, use 0 instead of that number.
+
+Engine: `ContinuousEffect::SetPTBy` (layer 7a) in a static ability whose `affected` is its
+own card. On the battlefield it is applied by the layer walk, counted against the view in
+progress (types are settled by then; card-db only lets it count what doesn't depend on
+power or toughness — `Amount::countable_in_layers`). In any other zone `layers::chars`
+applies it to the printed characteristics (604.3: it functions everywhere), with the
+card's owner (or, on the stack, its controller) as "you". If the permanent loses the
+ability (layer 6), the "*" is not defined and stays 0 (208.2a). Tests:
+`power_and_toughness_defined_by_a_count`, `a_creature_defined_as_zero_toughness_dies`,
+`a_condition_on_graveyard_cards_meets_a_card_with_a_defined_power`.
+
+## Becoming a creature; types, colors and base power/toughness from effects (D-062)
+
+The layer rules these effects apply in are quoted above (613.1d–f, 613.4b). What is new is
+only where they come from:
+
+- Forge's `Animate`/`AnimateAll` compile to `Effect::Apply`/`ApplyAll` with `AddTypes`
+  (layer 4), `SetColors` (5), `AddKeywords`/`LoseAllAbilities` (6) and `SetPT` (7b), until
+  end of turn or — `Duration$ Permanent` — indefinitely. Types "instead of" the others,
+  colors "in addition", single-sided base power or toughness, and durations tied to
+  something else are not compiled.
+- `S:Mode$ Continuous` gains `AddType$`, `SetColor$`, `RemoveKeyword$`,
+  `RemoveAllAbilities$` and `SetPower$`/`SetToughness$` (both).
+
+| Rule | Test (`crates/harness/tests/forge_features.rs`) |
+|---|---|
+| 613.1d–f, 613.4b, 611.2a–b | `becoming_a_creature_for_a_turn_or_for_good` |
+| 613.1d–f, 613.4b | `statics_that_change_types_colors_and_base_power` |

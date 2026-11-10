@@ -1,0 +1,9 @@
+RealCard(
+    oracle_id: "68954295-54e3-4303-a6bc-fc4547a4e3a3",
+    name: "Llanowar Elves",
+    verified: true,
+    tests: ["llanowar_elves_taps_for_green"],
+    abilities: [
+        Mana(cost: (tap: true), produce: One(Green)),
+    ],
+)

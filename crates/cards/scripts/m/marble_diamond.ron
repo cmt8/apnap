@@ -1,0 +1,10 @@
+RealCard(
+    oracle_id: "910488bf-66ab-415e-973b-1262b2ab7454",
+    name: "Marble Diamond",
+    verified: true,
+    tests: ["diamonds_enter_tapped_and_tap_for_their_color"],
+    abilities: [
+        Replacement(replaces: ThisEnters, with: EntersTapped),
+        Mana(cost: (tap: true), produce: One(White)),
+    ],
+)

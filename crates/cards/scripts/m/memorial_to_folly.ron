@@ -1,0 +1,17 @@
+RealCard(
+    oracle_id: "2bc38f14-0314-4351-8138-e2b8bf041404",
+    name: "Memorial to Folly",
+    verified: true,
+    tests: ["memorial_to_folly_is_sacrificed_to_recover_a_creature"],
+    abilities: [
+        Replacement(replaces: ThisEnters, with: EntersTapped),
+        Mana(cost: (tap: true), produce: One(Black)),
+        Activated(
+            cost: (mana: Some("{2}{B}"), tap: true, sacrifice_self: true),
+            body: Effect((
+                targets: [CardInGraveyard(cards: (types: [Creature]), whose: You)],
+                effect: ReturnToHand(what: Target(0)),
+            )),
+        ),
+    ],
+)

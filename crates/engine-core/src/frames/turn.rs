@@ -36,8 +36,11 @@ pub(crate) fn begin_turn(st: &mut GameState, active: PlayerId) {
     st.turn.turn_number += 1;
     st.turn.active = active;
     st.turn.step = Step::Untap;
+    // "During your turn, …": static abilities can look at whose turn it is.
+    st.generation += 1;
     for p in &mut st.players {
         p.lands_played_this_turn = 0;
+        p.drawn_this_turn = 0;
     }
     // CR 302.6: permanents the active player has controlled continuously since their most
     // recent turn began are no longer summoning sick.
@@ -182,6 +185,7 @@ impl StepStage {
                 if step == Step::EndOfCombat {
                     // CR 511.3: all creatures are removed from combat.
                     st.combat = None;
+                    st.generation += 1;
                 }
                 if repeat_cleanup {
                     return Flow::then(Frame::Step(StepStage::Begin));

@@ -1,0 +1,9 @@
+RealCard(
+    oracle_id: "3f3b2c10-21f8-4e13-be83-4ef3fa36e123",
+    name: "Elvish Mystic",
+    verified: true,
+    tests: ["elvish_mystic_taps_for_green"],
+    abilities: [
+        Mana(cost: (tap: true), produce: One(Green)),
+    ],
+)

@@ -1,0 +1,21 @@
+RealCard(
+    oracle_id: "15fef45d-f1a9-49b2-abaa-fe77bb9d1afd",
+    name: "Lathliss, Dragon Queen",
+    verified: true,
+    tests: ["lathliss_makes_dragons_and_pumps_them"],
+    keywords: [Flying],
+    abilities: [
+        Triggered(
+            when: Enters(Matching((subtypes: ["Dragon"], controller: You, other: true, token: Some(false)))),
+            body: Effect((effect: CreateToken(token: "r_5_5_dragon_flying", count: Fixed(1), who: You))),
+        ),
+        Activated(
+            cost: (mana: Some("{1}{R}")),
+            body: Effect((effect: ApplyAll(
+                affected: (subtypes: ["Dragon"], controller: You),
+                effects: [ModifyPT(1, 0)],
+                until_end_of_turn: true,
+            ))),
+        ),
+    ],
+)

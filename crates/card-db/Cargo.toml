@@ -1,6 +1,6 @@
 [package]
 name = "card-db"
-description = "Loads and validates RON card scripts and deck lists into a CardCatalog. Scryfall import arrives in M4."
+description = "Loads and validates RON card scripts and deck lists into a CardCatalog; fetches printed card data from Scryfall into the user's cache at runtime."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,7 +10,11 @@ publish.workspace = true
 [dependencies]
 card-model.workspace = true
 serde = { workspace = true, features = ["std"] }
+serde_json.workspace = true
 ron = "0.12.3"
+ureq = { version = "3.5.1", features = ["json"] }
+dirs = "7.0.0"
+flate2 = "1"
 
 [lints]
 workspace = true

@@ -1,0 +1,26 @@
+RealCard(
+    oracle_id: "b9bacb46-fd1d-459b-81c2-d7d08fe73848",
+    name: "Dragon Tempest",
+    verified: true,
+    tests: ["dragon_tempest_hastes_fliers_and_burns_for_dragons"],
+    abilities: [
+        Triggered(
+            when: Enters(Matching((types: [Creature], controller: You, keywords: [Flying]))),
+            body: Effect((effect: Apply(
+                what: Triggering,
+                effects: [AddKeywords([Haste])],
+                until_end_of_turn: true,
+            ))),
+        ),
+        Triggered(
+            when: Enters(Matching((subtypes: ["Dragon"], controller: You))),
+            body: Effect((
+                targets: [AnyTarget],
+                effect: Seq([
+                    SetX(Count((subtypes: ["Dragon"], controller: You))),
+                    DealDamage(to: Target(0), amount: X, by: Triggering),
+                ]),
+            )),
+        ),
+    ],
+)

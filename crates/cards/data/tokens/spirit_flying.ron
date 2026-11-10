@@ -1,0 +1,16 @@
+// Token definition (CR 111.4: named for its subtype plus "Token"; `key` is what scripts call it): a 1/1 white Spirit creature token with flying.
+CardScript(
+    verified: true,
+    tests: ["bishop_of_wings_gains_life_and_leaves_spirits"],
+    card: (
+        name: "Spirit Token",
+        key: Some("w_1_1_spirit_flying"),
+        token: true,
+        colors: Some([White]),
+        card_types: [Creature],
+        creature_types: ["Spirit"],
+        power: Some(1),
+        toughness: Some(1),
+        keywords: [Flying],
+    ),
+)

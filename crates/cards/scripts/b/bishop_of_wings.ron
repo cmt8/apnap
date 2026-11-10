@@ -1,0 +1,16 @@
+RealCard(
+    oracle_id: "af4684cf-f109-44be-adfb-7c551a36635e",
+    name: "Bishop of Wings",
+    verified: true,
+    tests: ["bishop_of_wings_gains_life_and_leaves_spirits"],
+    abilities: [
+        Triggered(
+            when: Enters(Matching((subtypes: ["Angel"], controller: You))),
+            body: Effect((effect: GainLife(who: You, amount: Fixed(4)))),
+        ),
+        Triggered(
+            when: Dies(Matching((subtypes: ["Angel"], controller: You))),
+            body: Effect((effect: CreateToken(token: "w_1_1_spirit_flying", count: Fixed(1), who: You))),
+        ),
+    ],
+)

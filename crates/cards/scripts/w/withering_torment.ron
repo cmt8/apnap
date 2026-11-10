@@ -1,0 +1,9 @@
+RealCard(
+    oracle_id: "ffce81c5-1b58-4882-a4e7-6f8d7cb170de",
+    name: "Withering Torment",
+    verified: true,
+    tests: ["withering_torment_destroys_a_creature_or_enchantment"],
+    abilities: [
+        Spell(Effect((targets: [Permanent([(types: [Creature, Enchantment])])], effect: Seq([Destroy(what: Target(0)), LoseLife(who: You, amount: Fixed(2))])))),
+    ],
+)

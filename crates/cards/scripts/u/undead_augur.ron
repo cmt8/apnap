@@ -1,0 +1,15 @@
+RealCard(
+    oracle_id: "c26887e1-27f4-4550-921b-53460e43c079",
+    name: "Undead Augur",
+    verified: true,
+    tests: ["undead_augur_draws_when_it_or_your_zombie_dies"],
+    abilities: [
+        Triggered(
+            when: Dies(ThisOr((subtypes: ["Zombie"], controller: You))),
+            body: Effect((effect: Seq([
+                Draw(who: You, amount: Fixed(1)),
+                LoseLife(who: You, amount: Fixed(1)),
+            ]))),
+        ),
+    ],
+)

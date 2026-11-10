@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "fc5d3341-cbce-49e5-93cc-8add92479dca",
+    name: "Bad Moon",
+    verified: true,
+    tests: ["bad_moon_pumps_every_black_creature"],
+    abilities: [
+        Static(
+            affected: All((types: [Creature], colors: [Black])),
+            effects: [ModifyPT(1, 1)],
+        ),
+    ],
+)

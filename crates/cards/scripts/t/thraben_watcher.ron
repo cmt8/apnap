@@ -1,0 +1,13 @@
+RealCard(
+    oracle_id: "53cd9d9f-c1a7-404e-9934-4542415e3431",
+    name: "Thraben Watcher",
+    verified: true,
+    tests: ["thraben_watcher_pumps_other_nontoken_creatures"],
+    keywords: [Flying, Vigilance],
+    abilities: [
+        Static(
+            affected: All((types: [Creature], controller: You, other: true, token: Some(false))),
+            effects: [ModifyPT(1, 1), AddKeywords([Vigilance])],
+        ),
+    ],
+)

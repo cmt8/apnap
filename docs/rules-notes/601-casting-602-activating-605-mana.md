@@ -118,3 +118,149 @@
 
 ## Tests
 `crates/harness/tests/rules_m1.rs`: `cr_601_*`, `cr_602_*`, `cr_605_*`, `cr_107_3a_*`, `cr_700_2a_*`, `cr_115_5_*`.
+
+## Costs that aren't mana: sacrifice, discard, life; additional costs (D-048)
+> 118.3. A player can’t pay a cost without having the necessary resources to pay it fully.
+> For example, a player with only 1 life can’t pay a cost of 2 life, and a permanent that’s
+> already tapped can’t be tapped to pay a cost.
+
+> 118.8. Some spells and abilities have additional costs. An additional cost is a cost
+> listed in a spell’s rules text, or applied to a spell or ability from another effect, that
+> its controller must pay at the same time they pay the spell’s mana cost or the ability’s
+> activation cost.
+
+> 119.4. If a cost or effect allows a player to pay an amount of life greater than 0, the
+> player may do so only if their life total is greater than or equal to the amount of the
+> payment. If a player pays life, the payment is subtracted from their life total; in other
+> words, the player loses that much life.
+
+> 701.21a To sacrifice a permanent, its controller moves it from the battlefield directly to
+> its owner’s graveyard. A player can’t sacrifice something that isn’t a permanent, or
+> something that’s a permanent they don’t control.
+
+Engine (`frames/cast.rs`):
+- `can_begin` offers a spell or ability only if every part of its cost can be paid
+  (`extra_payable`): enough permanents to sacrifice, enough cards to discard — the card
+  being cast doesn't count, it is on the stack by then (601.2a) — and life total ≥ the life
+  to pay.
+- Which permanents and cards pay is asked after the mana abilities (601.2g, `CastStage::Pay`)
+  and before the payment itself (`CastStage::ChooseSacrifice`, `ChooseDiscard`; D-052 — until
+  then it was asked before the mana). They leave with the rest of the payment in `finish`
+  (601.2h, one Apply batch: sacrifices, discards, the life loss), so a land can be tapped
+  for mana and then sacrificed, while a Treasure sacrificed for mana is no longer there to
+  be chosen. They are events like any other: replaceable, and they trigger ("dies",
+  "whenever you lose life").
+- A spell's additional cost is `AbilityDef::AdditionalCost` on its card. Forge restates the
+  whole cost on the `SP$` line (`Cost$ 1 B Sac<1/Creature>`); the compiler requires the mana
+  in it to be the card's mana cost and takes the rest as the additional cost.
+- Costs are paid whether or not the spell or ability later resolves (601.2h happens before
+  it can be responded to).
+
+## Mana abilities that make a choice of mana, or several mana (D-049)
+> 106.4. When an effect instructs a player to add mana, that mana goes into a player’s mana pool. From there, it can be used to pay costs immediately, or it can stay in the player’s mana pool as unspent mana. Each player’s mana pool empties at the end of each step and phase, and the player is said to lose this mana. Cards with abilities that produce mana or refer to unspent mana have received errata in the Oracle™ card reference to no longer explicitly refer to the mana pool.
+
+> 605.1a An activated ability is a mana ability if it meets all of the following criteria: it doesn’t require a target (see rule 115.6), it could add mana to a player’s mana pool when it resolves, it’s not a loyalty ability (see rule 606, “Loyalty Abilities”), and its cost and effect don’t move any card to or from a library. Do not take into account replacement effects that may apply, other than self-replacement effects, when evaluating these criteria.
+
+> 605.3b An activated mana ability doesn’t go on the stack, so it can’t be targeted, countered, or otherwise responded to. Rather, it resolves immediately after it is activated. (See rule 405.6c.)
+
+Engine: a permanent that can be tapped for mana is a `cast::ManaSource { id, mask, count }`:
+one activation adds `count` mana, all of one type the player picks from `mask`
+(`OptionDesc::TapForMana { source, mana }` names the type; `tap_for_mana` adds all of it).
+`cast::payable` decides whether a cost can be paid from the pool and the sources, trying
+each type for a source that makes several mana of a chosen type, so that no payment step is
+offered that can't be completed (D-019). Mana that isn't spent stays in the pool until the
+step or phase ends (106.4; `frames/turn.rs`).
+
+## Treasure, commander identity, restricted mana, mana from spells (D-052)
+> 111.10a A Treasure token is a colorless Treasure artifact token with “{T}, Sacrifice this token: Add one mana of any color.”
+
+> 106.6. Some spells or abilities that produce mana restrict how that mana can be spent, have an additional effect that affects the spell or ability that mana is spent on, or create a delayed triggered ability (see rule 603.7a) that triggers when that mana is spent. This doesn’t affect the mana’s type.
+
+> 106.12. To “tap [a permanent] for mana” is to activate a mana ability of that permanent that includes the {T} symbol in its activation cost. See rule 605, “Mana Abilities.”
+
+> 605.5a An ability with a target is not a mana ability, even if it could put mana into a player’s mana pool when it resolves. The same is true for a triggered ability that could produce mana but triggers from an event other than activating a mana ability, or a triggered ability that triggers from activating a mana ability but couldn’t produce mana. These follow the normal rules for activated or triggered abilities, as appropriate.
+
+> 605.5b A spell can never be a mana ability, even if it could put mana into a player’s mana pool when it resolves. It’s cast and resolves just like any other spell. Some older cards were printed with the card type “mana source”; these cards have received errata in the Oracle card reference and are now instants.
+
+> 602.5b If an activated ability has a restriction on its use (for example, “Activate only once each turn”), the restriction continues to apply to that object even if its controller changes.
+
+> 903.4. The Commander variant uses color identity to determine what cards can be in a deck with a certain commander. The color identity of a card is the color or colors of any mana symbols in that card’s mana cost or rules text, plus any colors defined by its characteristic-defining abilities (see rule 604.3) or color indicator (see rule 204).
+
+> 903.4f If an ability refers to the colors or number of colors in a commander’s color identity, that quality is undefined if that player doesn’t have a commander. That part of the ability won’t do anything. Costs that refer to that quality are unpayable.
+
+> 608.2h If an effect requires information from the game (such as the number of creatures on the battlefield), the answer is determined only once, when the effect is applied. If the effect requires information from a specific object, including the source of the ability itself, the effect uses the current information of that object if it’s in the public zone it was expected to be in; if it’s no longer in that zone, or if the effect has moved it from a public zone to a hidden zone, the effect uses the object’s last known information. See rule 113.7a. If an ability states that an object does something, it’s the object as it exists—or as it most recently existed—that does it, not the ability.
+
+Engine (`frames/cast.rs`):
+- `ManaSource { id, mask, count, sacrifice, ability }` is one *way* to tap a permanent for
+  mana. A permanent's plain abilities ("{T}: Add one mana", and what its land types give
+  it) are merged into one entry; any other mana ability (several mana, "sacrifice this",
+  a spending restriction) is its own entry, and entries of one permanent exclude each
+  other in `payable`. The player still picks by permanent and mana type
+  (`OptionDesc::TapForMana`), so card-db rejects a card with two mana abilities that
+  differ in more than the type and make the same type.
+- **Treasure (111.10a, 605.3b):** `tap_for_mana` taps, adds the mana and returns the
+  sacrifice, which the caller applies at once as a `Frame::Apply` (a replaceable event);
+  the cast frame then carries on. The mana ability's cost is paid when it is activated,
+  i.e. before the spell's own costs (601.2g before 601.2h).
+- **One permanent can't pay twice:** a source that sacrifices itself and could also be
+  chosen for the cost's own "sacrifice N" is limited (`SacLimit`): only so many of them may
+  be used for mana that N candidates remain. `can_begin`, the X bound and every tap option
+  use the same check (`payable_within`), so no offered step can dead-end (D-019).
+- **"Activate only if" (602.5b)** on a mana ability: `AbilityDef::Mana::only_if`, checked
+  each time the sources are listed.
+- **Commander identity (903.4, 903.4f):** `ManaProduce::CommanderIdentity` makes one mana of
+  a colour in the identity of the controller's commander(s), taken from the commander
+  card's definition (903.4a); with no commander the ability adds nothing and isn't offered.
+  `color_identity` moved from card-db to card-model so the engine can use it.
+- **Restricted mana (106.6):** `AbilityDef::Mana::spend` (`ManaRestriction { spells,
+  abilities }`). Such mana is kept apart in `PlayerState::restricted_mana` (which ability
+  made it); what a player can spend on a given spell or ability is `usable_pool`. When
+  the cost is paid, matching restricted mana is spent first. While paying for something
+  the mana can't be spent on, its source isn't offered. It empties with the pool (106.4).
+  A player's view shows it as part of the pool, with the restricted part counted.
+- **Mana from a spell or a non-mana ability (605.5):** `Effect::AddMana` — on the stack like
+  any other, the mana arrives on resolution.
+- **"The sacrificed creature's power" (608.2h):** the total power of the permanents chosen
+  for a cost's sacrifice, read in `finish` just before they leave, kept on the stack object
+  (`StackObject::sacrificed_power`) and used as `Amount::SacrificedPower`.
+
+## Several targets for one "target" (D-055)
+> 115.3. The same target can’t be chosen multiple times for any one instance of the word “target” on a spell or ability. If the spell or ability uses the word “target” in multiple places, the same object or player can be chosen once for each instance of the word “target” (as long as it fits the targeting criteria). This rule applies both when choosing targets for a spell or ability and when changing targets or choosing new targets for a spell or ability (see rule 115.7).
+
+> 601.2c The player announces their choice of an appropriate object or player for each target the spell requires. A spell may require some targets only if an alternative or additional cost (such as a kicker cost) or a particular mode was chosen for it; otherwise, the spell is cast as though it did not require those targets. Similarly, a spell may require alternative targets only if an alternative or additional cost was chosen for it. If the spell has a variable number of targets, the player announces how many targets they will choose before they announce those targets. In some cases, the number of targets will be defined by the spell’s text. Once the number of targets the spell has is determined, that number doesn’t change, even if the information used to determine the number of targets does. The same target can’t be chosen multiple times for any one instance of the word “target” on the spell. However, if the spell uses the word “target” in multiple places, the same object or player can be chosen once for each instance of the word “target” (as long as it fits the targeting criteria). If any effects say that an object or player must be chosen as a target, the player chooses targets so that they obey the maximum possible number of such effects without violating any rules or effects that say that an object or player can’t be chosen as a target. The chosen objects and/or players each become a target of that spell. (Any abilities that trigger when those objects and/or players become the target of a spell trigger at this point; they’ll wait to be put on the stack until the spell has finished being cast.)
+
+> 608.2b If the spell or ability specifies targets, it checks whether the targets are still legal. A target that’s no longer in the zone it was in when it was targeted is illegal. Other changes to the game state may cause a target to no longer be legal; for example, its characteristics may have changed or an effect may have changed the text of the spell. If the source of an ability has left the zone it was in, its last known information is used during this process. If all its targets, for every instance of the word “target,” are now illegal, the spell or ability doesn’t resolve. It’s removed from the stack and, if it’s a spell, put into its owner’s graveyard. Otherwise, the spell or ability will resolve normally. Illegal targets, if any, won’t be affected by parts of a resolving spell’s effect for which they’re illegal. Other parts of the effect for which those targets are not illegal may still affect them. If the spell or ability creates any continuous effects that affect game rules (see rule 613.11), those effects don’t apply to illegal targets. If part of the effect requires information about an illegal target, it fails to determine any such information. Any part of the effect that requires that information won’t happen.
+
+Engine: `Mode::groups` marks the slots that are one instance of the word "target". The
+cast frame offers, for each slot of a group, only what the group hasn't taken yet, and
+lets the player stop once the group's minimum is reached (`PickN { min: 0, max: 1 }`).
+`legal_modes` requires as many candidates as the minimum. Tests:
+`two_target_creatures`, `up_to_two_target_creatures`.
+
+## Costs paid while a spell or ability resolves (D-063)
+
+> 118.3. A player can’t pay a cost without having the necessary resources to pay it fully. For example, a player with only 1 life can’t pay a cost of 2 life, and a permanent that’s already tapped can’t be tapped to pay a cost. See rule 202, “Mana Cost and Color,” and rule 602, “Activating Activated Abilities.”
+>
+> 118.12. Some spells, activated abilities, and triggered abilities read, “[Do something]. If [a player] [does, doesn’t, or can’t], [effect].” Or “[A player] may [do something]. If [that player] [does, doesn’t, or can’t], [effect].” The action [do something] is a cost, paid when the spell or ability resolves. The “If [a player] [does, doesn’t, or can’t]” clause checks whether the player chose to pay an optional cost or started to pay a mandatory cost, regardless of what events actually occurred.
+>
+> 118.12a Some spells, activated abilities, and triggered abilities read, “[Do something] unless [a player does something else].” This means the same thing as “[A player may do something else]. If [that player doesn’t], [do something].”
+>
+> 608.2h If an effect requires information from the game (such as the number of creatures on the battlefield), the answer is determined only once, when the effect is applied. If the effect requires information from a specific object, including the source of the ability itself, the effect uses the current information of that object if it’s in the public zone it was expected to be in; if it’s no longer in that zone, or if the effect has moved it from a public zone to a hidden zone, the effect uses the object’s last known information. See rule 113.7a. If an ability states that an object does something, it’s the object as it exists—or as it most recently existed—that does it, not the ability.
+
+- `Effect::Pay { who, cost, paid, unpaid }` is both forms of 118.12: "[who] may pay
+  [cost]. If they do, [paid]" and (118.12a) "[unpaid] unless [who] pays [cost]".
+- The player is asked (`ChoiceKind::PayUnlessCost`) only if they can pay in full (118.3):
+  the same test as for casting — mana in the pool and from mana abilities, permanents to
+  sacrifice, cards to discard, life. A player who can't pay isn't paying.
+- Paying runs the cast frame's payment stages (`CastSource::Payment`): mana abilities,
+  which floating mana pays generic costs, what is sacrificed or discarded. Nothing goes
+  on the stack; the resolution carries on afterwards. Restricted mana ("spend this mana
+  only to cast …") can't pay such a cost.
+- "Its controller" of a target (`PlayerRef::ControllerOf`) is who controlled it as
+  resolution began (608.2h): "destroy target land. Its controller loses 2 life".
+
+| Rule | Test (`crates/harness/tests/forge_features.rs`) |
+|---|---|
+| 118.12a, 118.3, 701.6a | `counter_target_spell_unless_its_controller_pays` |
+| 118.12, 118.12a | `paying_as_an_ability_resolves` |
+| 608.2h | `the_targets_controller` |

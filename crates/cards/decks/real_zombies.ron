@@ -1,0 +1,13 @@
+// A 60-card deck built only from verified real cards (decisions.md D-038): black Zombies
+// that replace themselves. Needs the Scryfall cache (`harness fetch-cards`).
+DeckFile(
+    name: "Zombies (real cards)",
+    cards: [
+        (22, "Swamp"), (2, "Bojuka Bog"),
+        (4, "Champion of the Perished"), (3, "Vengeful Dead"), (4, "Undead Augur"),
+        (4, "Headless Rider"), (2, "Fleshbag Marauder"), (1, "Noxious Ghoul"),
+        (2, "Graveborn Muse"), (2, "Grave Titan"), (3, "Mire Triton"),
+        (2, "Liliana's Mastery"), (2, "Bad Moon"), (3, "Go for the Throat"),
+        (2, "Night's Whisper"), (1, "Phyrexian Arena"), (1, "Withering Torment"),
+    ],
+)

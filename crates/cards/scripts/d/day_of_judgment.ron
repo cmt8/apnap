@@ -1,0 +1,9 @@
+RealCard(
+    oracle_id: "d057289d-5e28-43d5-8ff3-4a1bc723477d",
+    name: "Day of Judgment",
+    verified: true,
+    tests: ["day_of_judgment_destroys_all_creatures"],
+    abilities: [
+        Spell(Effect((effect: DestroyAll((types: [Creature]))))),
+    ],
+)

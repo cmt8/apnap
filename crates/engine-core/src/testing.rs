@@ -75,9 +75,13 @@ impl Scenario {
                 controller: owner,
                 kind: StackKind::Spell,
                 source_lki: None,
+                subject: None,
+                subject_lki: None,
                 modes: Vec::new(),
                 x: 0,
                 targets: Vec::new(),
+                sacrificed_power: 0,
+                facts: Default::default(),
             });
         } else {
             self.st.zones.list_mut(zone, owner).push(id);
@@ -101,6 +105,7 @@ impl Scenario {
         let id = self.card(owner, zone, name);
         let ci = self.st.object(id).card_instance;
         self.st.commanders.push((owner, ci));
+        self.st.commander_cards.insert(ci, self.st.object(id).card);
         id
     }
 

@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "83a76601-ef59-4888-af70-5088dd1f504c",
+    name: "Regal Imperiosaur",
+    verified: true,
+    tests: ["regal_imperiosaur_pumps_other_dinosaurs"],
+    abilities: [
+        Static(
+            affected: All((subtypes: ["Dinosaur"], controller: You, other: true)),
+            effects: [ModifyPT(1, 1)],
+        ),
+    ],
+)

@@ -1,0 +1,9 @@
+RealCard(
+    oracle_id: "87bd0fdb-c5b9-46ea-9858-1a870960351f",
+    name: "Invoke the Divine",
+    verified: true,
+    tests: ["invoke_the_divine_destroys_an_artifact_or_enchantment"],
+    abilities: [
+        Spell(Effect((targets: [Permanent([(types: [Artifact, Enchantment])])], effect: Seq([Destroy(what: Target(0)), GainLife(who: You, amount: Fixed(4))])))),
+    ],
+)

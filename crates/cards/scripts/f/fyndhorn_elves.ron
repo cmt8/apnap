@@ -1,0 +1,9 @@
+RealCard(
+    oracle_id: "df317532-7d36-40fd-938f-e972749c8792",
+    name: "Fyndhorn Elves",
+    verified: true,
+    tests: ["fyndhorn_elves_taps_for_green"],
+    abilities: [
+        Mana(cost: (tap: true), produce: One(Green)),
+    ],
+)

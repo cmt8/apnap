@@ -67,7 +67,7 @@ impl PutTriggersFrame {
                     .iter()
                     .map(|t| OptionDesc::Trigger {
                         source: t.source,
-                        index: t.index,
+                        ability: t.ability,
                     })
                     .collect();
                 self.asking = mine;

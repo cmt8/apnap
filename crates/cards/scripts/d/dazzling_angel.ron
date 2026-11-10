@@ -1,0 +1,13 @@
+RealCard(
+    oracle_id: "7de464e3-fae3-44cc-8233-776fc727c00a",
+    name: "Dazzling Angel",
+    verified: true,
+    tests: ["dazzling_angel_gains_life_for_other_creatures"],
+    keywords: [Flying],
+    abilities: [
+        Triggered(
+            when: Enters(Matching((types: [Creature], controller: You, other: true))),
+            body: Effect((effect: GainLife(who: You, amount: Fixed(1)))),
+        ),
+    ],
+)

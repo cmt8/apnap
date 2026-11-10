@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "d4fdacd7-3101-44e2-a880-dde7326137a4",
+    name: "Headless Rider",
+    verified: true,
+    tests: ["headless_rider_replaces_nontoken_zombies"],
+    abilities: [
+        Triggered(
+            when: Dies(ThisOr((subtypes: ["Zombie"], controller: You, token: Some(false)))),
+            body: Effect((effect: CreateToken(token: "b_2_2_zombie", count: Fixed(1), who: You))),
+        ),
+    ],
+)

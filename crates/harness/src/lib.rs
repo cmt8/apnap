@@ -29,7 +29,32 @@ pub enum Setup {
     /// M3: a Commander game (CR 903) with `players` players, using the four commander decks
     /// in seat order (`decks/commander_*.ron`).
     Commander { players: u8 },
+    /// M4: 60-card decks built only from verified real cards (`decks/real_*.ron`, D-038),
+    /// alternating by seat. Needs the Scryfall cache.
+    Real { players: u8 },
+    /// A soak over every card that compiles from Forge's scripts (D-046): each seat gets a
+    /// 60-card two-colour deck drawn at random (by the game's seed) from all of them.
+    Forge { players: u8 },
+    /// M4: a Commander game with the four precons in seat order (D-034), as far as their
+    /// cards compile from Forge's scripts: a card that doesn't yet is left out, and basic
+    /// lands are trimmed to keep the deck's proportion of lands (D-053). Needs the caches.
+    ///
+    /// `decks[seat]` is the index into [`PRECON_DECKS`] of that seat's deck (the same deck
+    /// may sit in several seats).
+    Precon {
+        players: u8,
+        #[serde(default = "precon_seats")]
+        decks: [u8; 4],
+    },
 }
+
+/// Each seat its own precon, in the order of [`PRECON_DECKS`].
+pub const fn precon_seats() -> [u8; 4] {
+    [0, 1, 2, 3]
+}
+
+/// The real-card decks, in seat order.
+pub const REAL_DECKS: &[&str] = &["real_stompy.ron", "real_angels.ron", "real_zombies.ron"];
 
 /// The Commander decks, in seat order.
 pub const COMMANDER_DECKS: &[&str] = &[
@@ -43,7 +68,12 @@ impl Setup {
     pub fn players(self) -> u8 {
         match self {
             Setup::M0Vanilla => 2,
-            Setup::M1 { players } | Setup::M2 { players } | Setup::Commander { players } => players,
+            Setup::M1 { players }
+            | Setup::M2 { players }
+            | Setup::Commander { players }
+            | Setup::Real { players }
+            | Setup::Precon { players, .. }
+            | Setup::Forge { players } => players,
         }
     }
 
@@ -54,6 +84,19 @@ impl Setup {
             Setup::M1 { players } => format!("m1-{players}p"),
             Setup::M2 { players } => format!("m2-{players}p"),
             Setup::Commander { players } => format!("cmd-{players}p"),
+            Setup::Real { players } => format!("real-{players}p"),
+            Setup::Forge { players } => format!("forge-{players}p"),
+            Setup::Precon { players, decks } if decks == precon_seats() => {
+                format!("precon-{players}p")
+            }
+            // `precon-4p:2301`: the deck of each seat.
+            Setup::Precon { players, decks } => {
+                let seats: String = decks[..(players as usize).min(4)]
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect();
+                format!("precon-{players}p:{seats}")
+            }
         }
     }
 
@@ -64,6 +107,35 @@ impl Setup {
         if let Some(rest) = label.strip_prefix("cmd-") {
             let n = rest.strip_suffix('p')?.parse().ok()?;
             return Some(Setup::Commander { players: n });
+        }
+        if let Some(rest) = label.strip_prefix("forge-") {
+            let n = rest.strip_suffix('p')?.parse().ok()?;
+            return Some(Setup::Forge { players: n });
+        }
+        if let Some(rest) = label.strip_prefix("precon-") {
+            let (count, seats) = match rest.split_once(':') {
+                Some((c, s)) => (c, Some(s)),
+                None => (rest, None),
+            };
+            let n: u8 = count.strip_suffix('p')?.parse().ok()?;
+            let mut decks = precon_seats();
+            if let Some(seats) = seats {
+                if seats.len() != (n as usize).min(4) {
+                    return None;
+                }
+                for (i, c) in seats.chars().enumerate() {
+                    let d = c.to_digit(10)? as usize;
+                    if d >= PRECON_DECKS.len() {
+                        return None;
+                    }
+                    decks[i] = d as u8;
+                }
+            }
+            return Some(Setup::Precon { players: n, decks });
+        }
+        if let Some(rest) = label.strip_prefix("real-") {
+            let n = rest.strip_suffix('p')?.parse().ok()?;
+            return Some(Setup::Real { players: n });
         }
         if let Some(rest) = label.strip_prefix("m2-") {
             let n = rest.strip_suffix('p')?.parse().ok()?;
@@ -89,13 +161,105 @@ impl Setup {
             )
             .expect("valid commander setup");
         }
+        if let Setup::Real { players } = self {
+            let config = if players == 2 {
+                GameConfig::constructed_1v1()
+            } else {
+                GameConfig::free_for_all(players)
+            };
+            // The cards are compiled from Forge's scripts (D-046); the game's catalog
+            // holds only the cards of the decks in play and their tokens.
+            let files: Vec<&str> = (0..players as usize)
+                .map(|i| REAL_DECKS[i % REAL_DECKS.len()])
+                .collect();
+            let lists: Vec<card_db::DeckFile> = files.iter().map(|f| precon_list(f)).collect();
+            let names = lists
+                .iter()
+                .flat_map(|d| d.cards.iter().map(|(_, n)| n.as_str()));
+            let catalog = Arc::new(
+                forge_library()
+                    .catalog_for(&catalog(), names)
+                    .unwrap_or_else(|missing| panic!("cards that don't compile: {missing:?}")),
+            );
+            let decks: Vec<Vec<CardDefId>> = files
+                .iter()
+                .map(|file| {
+                    let text = cards::deck(file).unwrap_or_else(|| panic!("no deck {file}"));
+                    let path = format!("crates/cards/decks/{file}");
+                    card_db::load_deck(card_db::Source { path: &path, text }, &catalog)
+                        .unwrap_or_else(|e| panic!("{e}"))
+                })
+                .collect();
+            return engine_core::new_game(config, catalog, &decks, seed).expect("valid setup");
+        }
+        if let Setup::Precon { players, decks } = self {
+            let lib = forge_library();
+            let base = catalog();
+            let lists: Vec<PreconDeck> = (0..players as usize)
+                .map(|i| {
+                    let deck = decks[i % decks.len()] as usize;
+                    precon_deck(&lib, PRECON_DECKS[deck % PRECON_DECKS.len()])
+                })
+                .collect();
+            let names = lists
+                .iter()
+                .flat_map(|d| d.cards.iter().chain(std::iter::once(&d.commander)))
+                .map(String::as_str);
+            let catalog = Arc::new(
+                lib.catalog_for(&base, names)
+                    .unwrap_or_else(|missing| panic!("cards that don't compile: {missing:?}")),
+            );
+            let id = |n: &String| catalog.find(n).expect("in the catalog");
+            let decks: Vec<Vec<CardDefId>> = lists
+                .iter()
+                .map(|d| d.cards.iter().map(id).collect())
+                .collect();
+            let commanders: Vec<Option<CardDefId>> =
+                lists.iter().map(|d| Some(id(&d.commander))).collect();
+            return engine_core::new_game_with_commanders(
+                GameConfig::commander(players),
+                catalog,
+                &decks,
+                &commanders,
+                seed,
+            )
+            .expect("valid commander setup");
+        }
+        if let Setup::Forge { players } = self {
+            let config = if players == 2 {
+                GameConfig::constructed_1v1()
+            } else {
+                GameConfig::free_for_all(players)
+            };
+            let lists = forge_random_decks(&forge_library(), players, seed);
+            let names = lists.iter().flatten().map(String::as_str);
+            let catalog = Arc::new(
+                forge_library()
+                    .catalog_for(&catalog(), names)
+                    .unwrap_or_else(|missing| panic!("cards that don't compile: {missing:?}")),
+            );
+            let decks: Vec<Vec<CardDefId>> = lists
+                .iter()
+                .map(|list| {
+                    list.iter()
+                        .map(|n| catalog.find(n).expect("in the catalog"))
+                        .collect()
+                })
+                .collect();
+            return engine_core::new_game(config, catalog, &decks, seed).expect("valid setup");
+        }
         let (config, deck_file) = match self {
             Setup::M0Vanilla => (GameConfig::constructed_1v1(), "m0_vanilla.ron"),
             Setup::M1 { players: 2 } => (GameConfig::constructed_1v1(), "m1_red_green.ron"),
             Setup::M1 { players } => (GameConfig::free_for_all(players), "m1_red_green.ron"),
             Setup::M2 { players: 2 } => (GameConfig::constructed_1v1(), "m2_mixed.ron"),
             Setup::M2 { players } => (GameConfig::free_for_all(players), "m2_mixed.ron"),
-            Setup::Commander { .. } => unreachable!("handled above"),
+            Setup::Commander { .. }
+            | Setup::Real { .. }
+            | Setup::Forge { .. }
+            | Setup::Precon { .. } => {
+                unreachable!("handled above")
+            }
         };
         let d = deck(deck_file);
         let decks = vec![d; config.num_players as usize];
@@ -123,12 +287,370 @@ pub fn catalog() -> Arc<CardCatalog> {
         .clone()
 }
 
+/// The four M4 precons (decisions.md D-034), in seat order.
+pub const PRECON_DECKS: &[&str] = &[
+    "precon_calling_all_angels.ron",
+    "precon_wretched_ranks.ron",
+    "precon_reign_of_dragons.ron",
+    "precon_tramplesaurus_rex.ron",
+];
+
+/// A precon as it can be played today (D-053).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreconDeck {
+    pub name: String,
+    pub commander: String,
+    /// The library: one name per card.
+    pub cards: Vec<String>,
+    /// The cards of the list that don't compile yet, and so are left out.
+    pub missing: Vec<String>,
+    /// Basic lands taken out to keep the proportion of lands.
+    pub basics_trimmed: u32,
+}
+
+/// The playable part of a precon: every card of its list that compiles. Basic lands are
+/// trimmed in proportion to the other cards left out, so that the deck keeps its share of
+/// lands. Panics if the commander itself doesn't compile.
+pub fn precon_deck(lib: &card_db::forge::Library, file: &str) -> PreconDeck {
+    let list = precon_list(file);
+    let base = catalog();
+    let is_basic = |n: &str| {
+        base.find(n).is_some_and(|id| {
+            base.get(id)
+                .supertypes
+                .contains(&card_model::Supertype::Basic)
+        })
+    };
+    let compiles = |n: &str| base.find(n).is_some() || lib.cards.contains_key(n);
+    let commander = list.commander.clone().expect("a precon has a commander");
+    assert!(
+        compiles(&commander),
+        "{}: the commander {commander} doesn't compile yet: {:?}",
+        list.name,
+        lib.blocked.get(&commander)
+    );
+    let (mut others, mut kept, mut basics, mut missing) = (0u32, 0u32, 0u32, Vec::new());
+    for (n, name) in &list.cards {
+        if is_basic(name) {
+            basics += n;
+        } else {
+            others += n;
+            if compiles(name) {
+                kept += n;
+            } else {
+                missing.push(name.clone());
+            }
+        }
+    }
+    // Round to nearest; never fewer than one basic if the list has any.
+    let keep_basics = if others == 0 {
+        basics
+    } else {
+        ((basics * kept * 2 + others) / (others * 2)).max(basics.min(1))
+    };
+    let mut trim = basics - keep_basics;
+    let basics_trimmed = trim;
+    let mut cards = Vec::new();
+    for (n, name) in &list.cards {
+        let mut n = *n;
+        if is_basic(name) {
+            let cut = trim.min(n);
+            n -= cut;
+            trim -= cut;
+        } else if !compiles(name) {
+            continue;
+        }
+        cards.extend(std::iter::repeat_n(name.clone(), n as usize));
+    }
+    PreconDeck {
+        name: list.name,
+        commander,
+        cards,
+        missing,
+        basics_trimmed,
+    }
+}
+
+/// The names of the precons, in the order of [`PRECON_DECKS`].
+pub fn precon_names() -> &'static [String] {
+    static NAMES: OnceLock<Vec<String>> = OnceLock::new();
+    NAMES.get_or_init(|| PRECON_DECKS.iter().map(|f| precon_list(f).name).collect())
+}
+
+/// A precon's unresolved list: (deck name, commander, [(count, card name)]).
+pub fn precon_list(file: &str) -> card_db::DeckFile {
+    let text = cards::deck(file).unwrap_or_else(|| panic!("no deck {file}"));
+    let path = format!("crates/cards/decks/{file}");
+    card_db::parse_deck_file(card_db::Source { path: &path, text })
+        .unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// Every card name the precons need from Scryfall (everything except the self-contained
+/// basic lands), sorted and de-duplicated.
+pub fn precon_card_names() -> Vec<String> {
+    let have = catalog();
+    let mut names: Vec<String> = PRECON_DECKS
+        .iter()
+        .flat_map(|f| {
+            let d = precon_list(f);
+            d.cards.into_iter().map(|(_, n)| n).chain(d.commander)
+        })
+        .filter(|n| have.find(n).is_none())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Every card name whose printed data the app and tools want cached: the precon pool plus
+/// the basic lands (self-contained cards, but they have real printings to show).
+pub fn scryfall_card_names() -> Vec<String> {
+    let have = catalog();
+    let mut names = precon_card_names();
+    names.extend(
+        have.defs
+            .iter()
+            .filter(|d| d.supertypes.contains(&card_model::Supertype::Basic))
+            .map(|d| d.name.clone()),
+    );
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Where a precon card stands (spec §10.6 coverage report).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Coverage {
+    /// A self-contained card (basic land).
+    BuiltIn,
+    /// Scripted, verified, and compiles against its printed data.
+    Verified,
+    /// Scripted but not yet verified.
+    Unverified,
+    /// A script exists but doesn't load: the problems.
+    Broken(Vec<String>),
+    /// No script yet. `printed_ok` = its printed data is representable today.
+    Missing { printed_problems: Vec<String> },
+}
+
+/// Coverage of one card name against the scripts in `crates/cards/scripts`.
+pub fn coverage_of(name: &str, data: &card_db::scryfall::ScryfallData) -> Coverage {
+    if catalog().find(name).is_some() {
+        return Coverage::BuiltIn;
+    }
+    let script = cards::SCRIPTS.iter().find_map(|&(path, text)| {
+        let src = card_db::Source { path, text };
+        card_db::parse_real(src)
+            .ok()
+            .filter(|s| s.name == name)
+            .map(|s| (src, s))
+    });
+    match script {
+        Some((src, s)) => match card_db::compile_real(src, data) {
+            Ok(cs) => {
+                let problems = card_db::validate(&cs, card_db::Strictness::AllowUnverified);
+                if !problems.is_empty() {
+                    Coverage::Broken(problems)
+                } else if s.verified {
+                    Coverage::Verified
+                } else {
+                    Coverage::Unverified
+                }
+            }
+            Err(errs) => Coverage::Broken(errs.into_iter().map(|e| e.msg).collect()),
+        },
+        None => {
+            // Dry run: can the printed data be represented at all?
+            let printed_problems = match data.get(name) {
+                None => vec![card_db::scryfall::FETCH_HINT.to_string()],
+                Some(card) => {
+                    let empty = card_db::real::RealCardScript {
+                        oracle_id: card.oracle_id.clone().unwrap_or_default(),
+                        name: card.name.clone(),
+                        verified: false,
+                        tests: vec![],
+                        keywords: vec![],
+                        abilities: vec![],
+                        granted: vec![],
+                    };
+                    card_db::real::compile(&empty, card)
+                        .err()
+                        .unwrap_or_default()
+                }
+            };
+            Coverage::Missing { printed_problems }
+        }
+    }
+}
+
 /// A deck file (with its commander, if any) from `crates/cards/decks/<file>`.
 pub fn deck_file(file: &str) -> card_db::Deck {
     let text = cards::deck(file).unwrap_or_else(|| panic!("no deck {file}"));
     let path = format!("crates/cards/decks/{file}");
     card_db::load_deck_file(card_db::Source { path: &path, text }, &catalog())
         .unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// Random decks for [`Setup::Forge`]: per seat two colours, 36 cards that cost only those
+/// colours (any number of copies), and 12 of each of the two basic lands. Determined by
+/// `seed` alone.
+pub fn forge_random_decks(
+    lib: &card_db::forge::Library,
+    players: u8,
+    seed: u64,
+) -> Vec<Vec<String>> {
+    use card_model::{Color, ManaSymbol};
+    // SplitMix64: all that's needed is a reproducible stream.
+    let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
+    let mut next = move |n: usize| -> usize {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((z ^ (z >> 31)) % n as u64) as usize
+    };
+    const BASICS: [(Color, &str); 5] = [
+        (Color::White, "Plains"),
+        (Color::Blue, "Island"),
+        (Color::Black, "Swamp"),
+        (Color::Red, "Mountain"),
+        (Color::Green, "Forest"),
+    ];
+    (0..players)
+        .map(|_| {
+            let a = next(5);
+            let b = (a + 1 + next(4)) % 5;
+            let colors = [BASICS[a].0, BASICS[b].0];
+            let pool: Vec<&String> = lib
+                .cards
+                .iter()
+                .filter(|(_, c)| {
+                    c.def.mana_cost.as_ref().is_none_or(|m| {
+                        m.symbols.iter().all(|s| match s {
+                            ManaSymbol::Colored(c) => colors.contains(c),
+                            _ => true,
+                        })
+                    })
+                })
+                .map(|(name, _)| name)
+                .collect();
+            let mut deck: Vec<String> = (0..36).map(|_| pool[next(pool.len())].clone()).collect();
+            for land in [BASICS[a].1, BASICS[b].1] {
+                deck.extend(std::iter::repeat_n(land.to_string(), 12));
+            }
+            deck
+        })
+        .collect()
+}
+
+/// Every card that compiles from Forge's scripts, cross-checked against Scryfall's bulk
+/// data (decisions.md D-046). Panics with the fetch hints if either is missing: run
+/// `harness fetch-forge` and `harness fetch-bulk` once.
+pub fn forge_library() -> Arc<card_db::forge::Library> {
+    static LIBRARY: OnceLock<Arc<card_db::forge::Library>> = OnceLock::new();
+    LIBRARY
+        .get_or_init(|| Arc::new(try_forge_library().unwrap_or_else(|e| panic!("{e}"))))
+        .clone()
+}
+
+pub fn try_forge_library() -> Result<card_db::forge::Library, String> {
+    let bulk = card_db::scryfall::load_bulk().map_err(|e| e.to_string())?;
+    card_db::forge::Library::load(
+        &card_db::forge::cards_dir(),
+        &card_db::forge::tokens_dir(),
+        Some(&bulk),
+    )
+}
+
+/// A catalog for a feature test of the Forge compiler (CLAUDE.md invariant 15): the
+/// self-contained cards plus invented cards written in Forge's script format, compiled the
+/// way real ones are. `tokens` are `(script name, script)`. Panics, naming the blockers,
+/// if any of them doesn't compile. Only the subtypes on these scripts' type lines are
+/// known to the compiler.
+pub fn forge_test_catalog(cards: &[&str], tokens: &[(&str, &str)]) -> Arc<CardCatalog> {
+    let cards: Vec<(String, String)> = cards
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (format!("test_{i}"), t.to_string()))
+        .collect();
+    let tokens: Vec<(String, String)> = tokens
+        .iter()
+        .map(|(n, t)| (n.to_string(), t.to_string()))
+        .collect();
+    let lib = card_db::forge::Library::build(&cards, &tokens, None);
+    assert_eq!(lib.unreadable, 0, "a test script could not be read");
+    assert!(lib.blocked.is_empty(), "blocked: {:?}", lib.blocked);
+    assert!(
+        lib.blocked_tokens.is_empty(),
+        "blocked tokens: {:?}",
+        lib.blocked_tokens
+    );
+    let names: Vec<&str> = lib.cards.keys().map(String::as_str).collect();
+    for name in &names {
+        assert!(
+            catalog().find(name).is_none(),
+            "{name} is already a self-contained card: pick another name"
+        );
+    }
+    Arc::new(
+        lib.catalog_for(&catalog(), names)
+            .unwrap_or_else(|e| panic!("{e:?}")),
+    )
+}
+
+/// The blockers the Forge compiler reports for one invented card (empty = it compiles).
+pub fn forge_test_blockers(card: &str) -> Vec<String> {
+    let lib = card_db::forge::Library::build(&[("test".to_string(), card.to_string())], &[], None);
+    assert_eq!(lib.unreadable, 0, "the test script could not be read");
+    lib.blocked.into_values().flatten().collect()
+}
+
+/// Is the printed data the real cards need in the local cache? `Err` carries the hint
+/// (which command downloads it).
+pub fn real_cards_ready() -> Result<(), String> {
+    card_db::scryfall::cached(&precon_card_names()).map_err(|e| e.to_string())?;
+    if !card_db::forge::cards_dir().exists() {
+        return Err(card_db::forge::FETCH_HINT.to_string());
+    }
+    card_db::scryfall::load_bulk()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// The self-contained cards plus every verified real-card script, compiled against the
+/// printed data in the local Scryfall cache. Panics with the fetch hint if the cache is
+/// missing (decisions.md D-035): run `cargo run -p harness -- fetch-cards` once.
+pub fn full_catalog() -> Arc<CardCatalog> {
+    static CATALOG: OnceLock<Arc<CardCatalog>> = OnceLock::new();
+    CATALOG
+        .get_or_init(|| {
+            let data =
+                card_db::scryfall::cached(&precon_card_names()).unwrap_or_else(|e| panic!("{e}"));
+            let src =
+                |list: &'static [(&'static str, &'static str)]| -> Vec<card_db::Source<'static>> {
+                    list.iter()
+                        .map(|&(path, text)| card_db::Source { path, text })
+                        .collect()
+                };
+            // Unverified scripts are skipped in strict play: only verified ones are loaded.
+            let verified: Vec<card_db::Source<'static>> = src(cards::SCRIPTS)
+                .into_iter()
+                .filter(|s| card_db::parse_real(*s).is_ok_and(|r| r.verified))
+                .collect();
+            match card_db::load_full_catalog(
+                &src(cards::CARDS),
+                &verified,
+                &data,
+                card_db::Strictness::Strict,
+            ) {
+                Ok(c) => Arc::new(c),
+                Err(errs) => {
+                    let msg: Vec<String> = errs.iter().map(ToString::to_string).collect();
+                    panic!("real-card scripts failed to load:\n{}", msg.join("\n"))
+                }
+            }
+        })
+        .clone()
 }
 
 /// A deck from `crates/cards/decks/<file>`, resolved against [`catalog`].
@@ -198,7 +720,23 @@ pub enum HarnessError {
         seed: u64,
         msg: String,
     },
+    /// A random-deck game (`Setup::Forge`) abandoned because the board grew without bound:
+    /// some cards double the tokens on the battlefield every turn, and thousands of
+    /// creatures each asked whether they attack make a game that is legal but endless in
+    /// practice. Not a failure of the engine.
+    Runaway {
+        seed: u64,
+        decisions: usize,
+        permanents: usize,
+        /// The most numerous permanent, and the nontoken cards on the battlefield (one of
+        /// them is making it).
+        mostly: String,
+        cards: Vec<String>,
+    },
 }
+
+/// The board size at which a `Setup::Forge` game is abandoned as a [`HarnessError::Runaway`].
+pub const RUNAWAY_PERMANENTS: usize = 1_000;
 
 impl fmt::Display for HarnessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -250,8 +788,9 @@ impl Agents {
         }
     }
 
-    /// The agent for `seat` (each seeded independently of the game RNG).
-    pub fn make(self, seed: u64, seat: u8) -> Box<dyn Agent> {
+    /// The agent for `seat` (each seeded independently of the game RNG). `catalog` is the
+    /// game's card catalog (public card text, which the heuristic agent reads).
+    pub fn make(self, seed: u64, seat: u8, catalog: &Arc<CardCatalog>) -> Box<dyn Agent> {
         let s = agent_seed(seed, seat);
         let heuristic = match self {
             Agents::Random => false,
@@ -259,7 +798,7 @@ impl Agents {
             Agents::HeuristicVsRandom => seat == 0,
         };
         if heuristic {
-            Box::new(ai::HeuristicAgent::new(s, catalog()))
+            Box::new(ai::HeuristicAgent::new(s, catalog.clone()))
         } else {
             Box::new(RandomAgent::new(s))
         }
@@ -270,7 +809,7 @@ impl Agents {
 pub fn play_random(seed: u64, opts: PlayOptions) -> Result<GameRecord, HarnessError> {
     let mut st = opts.setup.game(seed);
     let mut agents: Vec<Box<dyn Agent>> = (0..st.num_players() as u8)
-        .map(|s| opts.agents.make(seed, s))
+        .map(|s| opts.agents.make(seed, s, &st.catalog))
         .collect();
     let max = opts.max_decisions.unwrap_or(MAX_DECISIONS);
     let mut rec = GameRecord {
@@ -301,6 +840,58 @@ pub fn play_random(seed: u64, opts: PlayOptions) -> Result<GameRecord, HarnessEr
                 seed,
                 decisions: max,
             });
+        }
+        if matches!(opts.setup, Setup::Forge { .. })
+            && st.zones.battlefield.len() > RUNAWAY_PERMANENTS
+        {
+            let mut count: std::collections::BTreeMap<&str, usize> = Default::default();
+            let mut cards = std::collections::BTreeSet::new();
+            for &id in &st.zones.battlefield {
+                let def = st.card_def(id);
+                *count.entry(def.name.as_str()).or_default() += 1;
+                if !def.token && !def.has_type(card_model::CardType::Land) {
+                    cards.insert(def.name.clone());
+                }
+            }
+            let mostly = count
+                .iter()
+                .max_by_key(|(_, n)| **n)
+                .map(|(name, n)| format!("{n} x {name}"))
+                .unwrap_or_default();
+            return Err(HarnessError::Runaway {
+                seed,
+                decisions: rec.responses.len(),
+                permanents: st.zones.battlefield.len(),
+                mostly,
+                cards: cards.into_iter().collect(),
+            });
+        }
+        // `APNAP_TRACE=1`: where a long game is, every 2,000 decisions (for finding out why
+        // a soak game doesn't end).
+        if rec.responses.len().is_multiple_of(2000) && std::env::var_os("APNAP_TRACE").is_some() {
+            let top = st.stack.last().map(|top| match &top.kind {
+                engine_core::stack::StackKind::Ability {
+                    source_card,
+                    ability,
+                    ..
+                } => format!(
+                    "{} ability {}",
+                    st.catalog.get(*source_card).name,
+                    ability.index
+                ),
+                engine_core::stack::StackKind::Spell => st.card_def(top.id).name.clone(),
+            });
+            eprintln!(
+                "TRACE n={} turn={} {:?} {:?} options={} stack={} (top: {top:?}) effects={} battlefield={}",
+                rec.responses.len(),
+                st.turn.turn_number,
+                st.turn.step,
+                d.kind,
+                d.options.len(),
+                st.stack.len(),
+                st.continuous.len(),
+                st.zones.battlefield.len(),
+            );
         }
         let view = player_view(&st, d.player);
         let r = agents[d.player.index()].decide(&view, &d);

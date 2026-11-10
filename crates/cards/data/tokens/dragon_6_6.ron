@@ -1,0 +1,16 @@
+// Token definition (CR 111.4: named for its subtype plus "Token"; `key` is what scripts call it): a 6/6 red Dragon creature token with flying.
+CardScript(
+    verified: true,
+    tests: ["utvara_hellkite_makes_a_dragon_for_each_attacking_dragon"],
+    card: (
+        name: "Dragon Token",
+        key: Some("r_6_6_dragon_flying"),
+        token: true,
+        colors: Some([Red]),
+        card_types: [Creature],
+        creature_types: ["Dragon"],
+        power: Some(6),
+        toughness: Some(6),
+        keywords: [Flying],
+    ),
+)

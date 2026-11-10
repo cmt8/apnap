@@ -1,0 +1,17 @@
+RealCard(
+    oracle_id: "0b504dc6-61cc-4a72-907c-145fa4c72466",
+    name: "Seraph Sanctuary",
+    verified: true,
+    tests: ["seraph_sanctuary_gains_life_for_itself_and_for_angels"],
+    abilities: [
+        Triggered(
+            when: Enters(This),
+            body: Effect((effect: GainLife(who: You, amount: Fixed(1)))),
+        ),
+        Triggered(
+            when: Enters(Matching((subtypes: ["Angel"], controller: You))),
+            body: Effect((effect: GainLife(who: You, amount: Fixed(1)))),
+        ),
+        Mana(cost: (tap: true), produce: One(Colorless)),
+    ],
+)

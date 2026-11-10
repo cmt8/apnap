@@ -24,7 +24,14 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
     ),
     (
         "app",
-        &["engine-core", "card-model", "cards", "ai", "card-db"],
+        &[
+            "engine-core",
+            "card-model",
+            "cards",
+            "ai",
+            "card-db",
+            "harness",
+        ],
     ),
     ("xtask", &[]),
 ];

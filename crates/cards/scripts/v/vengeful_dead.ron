@@ -1,0 +1,12 @@
+RealCard(
+    oracle_id: "277c8ee9-0157-4e45-96ad-1b67716955ee",
+    name: "Vengeful Dead",
+    verified: true,
+    tests: ["vengeful_dead_drains_when_it_or_another_zombie_dies"],
+    abilities: [
+        Triggered(
+            when: Dies(ThisOr((subtypes: ["Zombie"]))),
+            body: Effect((effect: LoseLife(who: EachOpponent, amount: Fixed(1)))),
+        ),
+    ],
+)

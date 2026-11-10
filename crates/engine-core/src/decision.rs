@@ -9,6 +9,7 @@ use crate::ids::{ObjectId, PlayerId};
 use crate::mana::ManaType;
 use crate::stack::Target;
 use alloc::vec::Vec;
+use card_model::AbilityId;
 use core::fmt;
 use serde::{Deserialize, Serialize};
 
@@ -92,9 +93,25 @@ pub enum ChoiceKind {
     Sacrifice,
     MayAbility,
     PayUnlessCost,
+    /// Order cards going on top of a library (CR 401.4; Order: the FIRST listed ends up on
+    /// top).
     ScryOrder,
     ChooseColor,
     ChoosePlayer,
+    /// Choose cards for an effect that puts them somewhere: from your hand or graveyard,
+    /// among permanents, or among cards you are looking at (PickN over `OptionDesc::Card`).
+    ChooseCards,
+    /// CR 701.22a: choose which of the cards you are looking at go to the bottom of your
+    /// library (PickN; the rest stay on top).
+    ScryBottom,
+    /// CR 701.25a: choose which of the cards you are looking at go to your graveyard
+    /// (PickN; the rest stay on top).
+    SurveilGraveyard,
+    /// Order cards going to the bottom of a library (CR 401.4; Order: the LAST listed ends
+    /// up bottom-most, as for `MulliganBottom`).
+    OrderBottom,
+    /// CR 303.4f: choose what an Aura that is being put onto the battlefield enchants.
+    AuraHost,
 }
 
 /// A structured description of one option. Frames read the chosen option back from the
@@ -108,16 +125,20 @@ pub enum OptionDesc {
     CastSpell {
         card: ObjectId,
     },
-    /// Activate non-mana activated ability `index` of `source` (CR 602).
+    /// Activate non-mana activated ability `ability` of `source` (CR 602).
     ActivateAbility {
         source: ObjectId,
-        index: u16,
+        ability: AbilityId,
     },
     /// Activate a `{T}` mana ability of `source` for one `mana` (CR 605; includes the
     /// intrinsic abilities of basic land types, CR 305.6).
     TapForMana {
         source: ObjectId,
         mana: ManaType,
+        /// Which of the source's mana abilities, when it isn't one of the plain ones
+        /// ("{T}: Add one mana", which are all one way to tap it): an ability that makes
+        /// more, sacrifices the source, or makes mana with a restriction.
+        ability: Option<AbilityId>,
     },
     /// A mode of a modal spell or ability (CR 700.2), by printed index.
     Mode {
@@ -131,10 +152,12 @@ pub enum OptionDesc {
     Mana {
         mana: ManaType,
     },
-    /// A replacement effect: ability `index` of `source` (CR 616.1).
+    /// A replacement effect: ability `ability` of `source` (CR 616.1); `nth` tells apart
+    /// the times `source` has that ability.
     Replacement {
         source: ObjectId,
-        index: u16,
+        ability: AbilityId,
+        nth: u8,
     },
     /// A prevention shield (CR 615.7, 616.1).
     Shield {
@@ -148,7 +171,7 @@ pub enum OptionDesc {
     /// A triggered ability waiting to go on the stack (CR 603.3b).
     Trigger {
         source: ObjectId,
-        index: u16,
+        ability: AbilityId,
     },
     Player {
         player: PlayerId,

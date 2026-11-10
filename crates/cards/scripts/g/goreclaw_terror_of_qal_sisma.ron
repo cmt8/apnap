@@ -1,0 +1,17 @@
+RealCard(
+    oracle_id: "befb211f-37ca-4083-98d4-9ff1f28be3f2",
+    name: "Goreclaw, Terror of Qal Sisma",
+    verified: true,
+    tests: ["goreclaw_discounts_big_creatures_and_leads_the_charge"],
+    abilities: [
+        CostReduction(spells: (types: [Creature], power_min: Some(4)), amount: 2),
+        Triggered(
+            when: Attacks(This),
+            body: Effect((effect: ApplyAll(
+                affected: (types: [Creature], controller: You, power_min: Some(4)),
+                effects: [ModifyPT(1, 1), AddKeywords([Trample])],
+                until_end_of_turn: true,
+            ))),
+        ),
+    ],
+)

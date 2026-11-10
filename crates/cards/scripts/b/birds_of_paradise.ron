@@ -1,0 +1,10 @@
+RealCard(
+    oracle_id: "d3a0b660-358c-41bd-9cd2-41fbf3491b1a",
+    name: "Birds of Paradise",
+    verified: true,
+    tests: ["birds_of_paradise_fly_and_tap_for_any_color"],
+    keywords: [Flying],
+    abilities: [
+        Mana(cost: (tap: true), produce: AnyColor),
+    ],
+)
