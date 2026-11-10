@@ -291,9 +291,7 @@ pub fn count_amount(
             // A card outside the battlefield is looked at as printed unless its power or
             // toughness is asked about (then a characteristic-defining ability counts,
             // CR 604.3). The layer walk only ever gets here the first way.
-            let by_pt = cards.iter().any(|s| {
-                s.power_min.is_some() || s.toughness_min.is_some() || s.power_max.is_some()
-            });
+            let by_pt = cards.iter().any(|s| s.looks_at_pt());
             let fits = |id: &ObjectId| {
                 cards.is_empty() || {
                     let o = st.object(*id);
@@ -468,6 +466,11 @@ pub fn matches_parts(
             sel.mana_value_min.is_none_or(|n| mv >= n) && sel.mana_value_max.is_none_or(|n| mv <= n)
         }
         && (sel.names.is_empty() || sel.names.contains(&c.name))
+        && !sel.not_colors.iter().any(|x| c.colors.contains(x))
+        && !sel.not_supertypes.iter().any(|x| c.supertypes.contains(x))
+        && sel
+            .toughness_max
+            .is_none_or(|n| c.toughness.is_some_and(|t| t <= n))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -784,9 +787,7 @@ impl Walk<'_> {
                 | ContinuousEffect::SetPTBy { .. }
                 | ContinuousEffect::ModifyPT(..)
                 | ContinuousEffect::ModifyPTBy { .. }
-                | ContinuousEffect::SwitchPT => {
-                    s.power_min.is_some() || s.toughness_min.is_some() || s.power_max.is_some()
-                }
+                | ContinuousEffect::SwitchPT => s.looks_at_pt(),
                 ContinuousEffect::LoseAllAbilities | ContinuousEffect::GainControl => true,
             }) || matches!(
                 p,

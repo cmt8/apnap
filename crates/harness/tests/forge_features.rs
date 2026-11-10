@@ -3205,3 +3205,124 @@ fn returning_a_creature_you_control_and_returning_this() {
     assert!(!on_battlefield(&s, sprite));
     assert!(s.find(P0, Zone::Hand, "Test Homing Sprite").is_some());
 }
+
+// ---------------------------------------------------------------------------------------
+// Filters: mana value, "non-" colors and supertypes, toughness at most (D-055).
+
+fn target_names(s: &Script) -> Vec<String> {
+    s.options()
+        .iter()
+        .filter_map(|o| match o {
+            OptionDesc::Target {
+                target: engine_core::stack::Target::Object(id),
+            } => Some(s.name(*id)),
+            _ => None,
+        })
+        .collect()
+}
+
+// CR 202.3, 105.2 (2026-11-06). Forge filter properties `cmcLE2`, `nonBlack`, `nonBasic`,
+// `toughnessLE2`.
+#[test]
+fn filters_by_mana_value_color_and_supertype() {
+    let kill = |name: &str, filter: &str| {
+        spell(
+            name,
+            "B",
+            "Instant",
+            &format!("A:SP$ Destroy | ValidTgts$ {filter} | SpellDescription$ Text."),
+        )
+    };
+    let cards = [
+        kill("Test Cheap Shot", "Creature.cmcLE2"),
+        kill("Test Costly Shot", "Creature.cmcGE3"),
+        kill("Test Exact Shot", "Creature.cmcEQ1"),
+        kill("Test Pale Shot", "Creature.nonBlack"),
+        kill("Test Frail Shot", "Creature.toughnessLE2"),
+        kill("Test Wasteland Shot", "Land.nonBasic"),
+        creature("Test Imp", "B", "Imp", "1/1", ""),
+        creature("Test Knight", "1 W", "Knight", "2/2", ""),
+        creature("Test Ogre", "2 R", "Ogre", "3/3", ""),
+        "Name:Test Tower\nManaCost:no cost\nTypes:Land\nA:AB$ Mana | Cost$ T | Produced$ C | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let targets = |spell: &str| -> Vec<String> {
+        let mut sc = scenario(&cards);
+        sc.cards(P0, Zone::Battlefield, &["Swamp"]);
+        sc.cards(
+            P1,
+            Zone::Battlefield,
+            &[
+                "Test Imp",
+                "Test Knight",
+                "Test Ogre",
+                "Forest",
+                "Test Tower",
+            ],
+        );
+        sc.card(P0, Zone::Hand, spell);
+        let mut s = Script::new(sc.build());
+        s.cast(spell);
+        target_names(&s)
+    };
+    assert_eq!(targets("Test Cheap Shot"), ["Test Imp", "Test Knight"]);
+    assert_eq!(targets("Test Costly Shot"), ["Test Ogre"]);
+    assert_eq!(targets("Test Exact Shot"), ["Test Imp"]);
+    assert_eq!(targets("Test Pale Shot"), ["Test Knight", "Test Ogre"]);
+    assert_eq!(targets("Test Frail Shot"), ["Test Imp", "Test Knight"]);
+    assert_eq!(targets("Test Wasteland Shot"), ["Test Tower"]);
+}
+
+// A card in a graveyard is matched on everything the filter says, not only its types:
+// "return target green card from your graveyard to your hand" used to accept any card.
+#[test]
+fn graveyard_targets_are_matched_on_color_and_mana_value() {
+    let fetch = |name: &str, filter: &str| {
+        spell(
+            name,
+            "G",
+            "Sorcery",
+            &format!(
+                "A:SP$ ChangeZone | Origin$ Graveyard | Destination$ Hand | ValidTgts$ {filter} | SpellDescription$ Text."
+            ),
+        )
+    };
+    let cards = [
+        fetch("Test Regrowth", "Card.Green+YouCtrl"),
+        fetch("Test Salvage", "Creature.cmcLE1+YouCtrl"),
+        creature("Test Seedling", "G", "Plant", "0/1", ""),
+        creature("Test Imp", "B", "Imp", "1/1", ""),
+        creature("Test Ogre", "2 R", "Ogre", "3/3", ""),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let targets = |spell: &str| -> Vec<String> {
+        let mut sc = scenario(&cards);
+        sc.cards(P0, Zone::Battlefield, &["Forest"]);
+        sc.cards(
+            P0,
+            Zone::Graveyard,
+            &["Test Seedling", "Test Imp", "Test Ogre", "Swamp"],
+        );
+        sc.card(P0, Zone::Hand, spell);
+        let mut s = Script::new(sc.build());
+        s.cast(spell);
+        target_names(&s)
+    };
+    assert_eq!(targets("Test Regrowth"), ["Test Seedling"]);
+    assert_eq!(targets("Test Salvage"), ["Test Seedling", "Test Imp"]);
+}
+
+// CR 107.3 (2026-11-06): {X} in a cost is announced. A script that defines X as something
+// else ("X is the target's mana value") describes a cost that follows from a choice — not
+// an X the caster may set to 0. Found compiled that way; now a blocker.
+#[test]
+fn an_x_cost_the_script_defines_is_not_an_announced_x() {
+    let card = spell(
+        "Test Exhumation",
+        "X B",
+        "Sorcery",
+        "A:SP$ ChangeZone | Origin$ Graveyard | Destination$ Battlefield | ValidTgts$ Creature.YouCtrl | SpellDescription$ Text.\nSVar:X:Targeted$CardManaCost",
+    );
+    assert_eq!(forge_test_blockers(&card), ["cost:X defined by the script"]);
+}

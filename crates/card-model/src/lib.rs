@@ -491,6 +491,23 @@ pub struct Selector {
     pub mana_value_max: Option<u32>,
     /// Must have one of these names ("a card named …"; empty = any).
     pub names: Vec<String>,
+    /// Must be none of these colors ("nonblack").
+    pub not_colors: Vec<Color>,
+    /// Must have none of these supertypes ("nonbasic", "nonlegendary").
+    pub not_supertypes: Vec<Supertype>,
+    /// "with toughness N or less".
+    pub toughness_max: Option<i32>,
+}
+
+impl Selector {
+    /// Does it ask about power or toughness? Those are final only after the whole layer
+    /// walk, so such a selector can't be used inside it (CR 613.4).
+    pub fn looks_at_pt(&self) -> bool {
+        self.power_min.is_some()
+            || self.power_max.is_some()
+            || self.toughness_min.is_some()
+            || self.toughness_max.is_some()
+    }
 }
 
 /// What a trigger condition or replacement watches: the source itself, or matching objects.
@@ -1311,14 +1328,9 @@ impl Amount {
             | Amount::LifeTotal
             | Amount::Domain
             | Amount::Devotion(_) => true,
-            Amount::Count(s) => {
-                s.power_min.is_none() && s.toughness_min.is_none() && s.power_max.is_none()
-            }
+            Amount::Count(s) => !s.looks_at_pt(),
             Amount::CardsIn { zone, cards } => {
-                *zone != CardZone::Battlefield
-                    && cards.iter().all(|s| {
-                        s.power_min.is_none() && s.toughness_min.is_none() && s.power_max.is_none()
-                    })
+                *zone != CardZone::Battlefield && cards.iter().all(|s| !s.looks_at_pt())
             }
             Amount::Calc(base, _) => base.countable_in_layers(),
             Amount::IfAtLeast { test, .. } => test.countable_in_layers(),

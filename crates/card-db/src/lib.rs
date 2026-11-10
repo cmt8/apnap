@@ -399,7 +399,7 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 // The affected set is worked out inside the layer walk, before power and
                 // toughness are final (CR 613.4): it can't depend on them.
                 if let card_model::Affected::All(s) = affected
-                    && (s.power_min.is_some() || s.toughness_min.is_some() || s.power_max.is_some())
+                    && s.looks_at_pt()
                 {
                     p.push(at(
                         "a static ability can't select by power or toughness (CR 613)".into(),

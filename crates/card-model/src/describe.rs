@@ -161,7 +161,7 @@ fn target_filter(f: &TargetFilter) -> String {
         }
         TargetFilter::CardInGraveyard { cards, whose } => format!(
             "target {} from {}",
-            card_noun(cards),
+            card_list(core::slice::from_ref(cards), false),
             match whose {
                 Who::Any => "a graveyard",
                 Who::You => "your graveyard",
@@ -258,6 +258,12 @@ fn selector(s: &Selector, plural: bool) -> String {
     for c in &s.colors {
         out.push_str(&format!("{c:?} ").to_lowercase());
     }
+    for c in &s.not_colors {
+        out.push_str(&format!("non{c:?} ").to_lowercase());
+    }
+    for st in &s.not_supertypes {
+        out.push_str(&format!("non{st:?} ").to_lowercase());
+    }
     for st in &s.not_subtypes {
         out.push_str(&format!("non-{st} "));
     }
@@ -295,6 +301,9 @@ fn selector(s: &Selector, plural: bool) -> String {
     }
     if let Some(p) = s.power_max {
         out.push_str(&format!(" with power {p} or less"));
+    }
+    if let Some(t) = s.toughness_max {
+        out.push_str(&format!(" with toughness {t} or less"));
     }
     out.push_str(&mana_value(s));
     if !s.names.is_empty() {

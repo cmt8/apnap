@@ -940,6 +940,19 @@ The user's direction from here: the biggest blockers across all cards, not the p
   own, so the filter must say "your" (`YouOwn`/`YouCtrl`), else a blocker. And a
   `ChangeZone` from the battlefield with neither target nor `Defined$` moves its own card
   (Forge's default): "return this to its owner's hand". +93 cards.
+- **Filter properties:** mana value (`cmcLE/GE/EQ/LT/GT`), "non-" colors and supertypes
+  (`nonBlack`, `nonBasic`, `nonLegendary`), toughness at most, power less/greater than.
+  `Selector` gained `not_colors`, `not_supertypes`, `toughness_max` (state hashes changed,
+  event-log hashes did not; golden file re-blessed). +121 cards.
+  - *Two silent mis-compilations found while doing it, both fixed:*
+    (1) a card in a graveyard, hand or library was matched on its types and subtypes
+    only (`targeting::card_matches`), so "return target green card from your graveyard"
+    (Revive) accepted any card and "target legendary card" any card. It now compares
+    everything the selector says (color, supertypes, mana value, name, power…).
+    (2) a spell with {X} in its cost whose script defines X as something else (Stir the
+    Grave: "X is the target's mana value") compiled with a free X — castable for X = 0 on
+    any target. The numeric variable was simply never read. `cost:X defined by the
+    script` is now a blocker.
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may

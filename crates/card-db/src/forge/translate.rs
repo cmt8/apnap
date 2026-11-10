@@ -348,6 +348,50 @@ impl<'a> Tx<'a> {
                         s.toughness_min = Some(n);
                     } else if let Some(n) = p.strip_prefix("powerLE").and_then(|n| n.parse().ok()) {
                         s.power_max = Some(n);
+                    } else if let Some(n) = p
+                        .strip_prefix("powerLT")
+                        .and_then(|n| n.parse::<i32>().ok())
+                    {
+                        s.power_max = Some(n - 1);
+                    } else if let Some(n) = p
+                        .strip_prefix("powerGT")
+                        .and_then(|n| n.parse::<i32>().ok())
+                    {
+                        s.power_min = Some(n + 1);
+                    } else if let Some(n) =
+                        p.strip_prefix("toughnessLE").and_then(|n| n.parse().ok())
+                    {
+                        s.toughness_max = Some(n);
+                    } else if let Some(n) = p
+                        .strip_prefix("toughnessLT")
+                        .and_then(|n| n.parse::<i32>().ok())
+                    {
+                        s.toughness_max = Some(n - 1);
+                    } else if let Some(n) = p
+                        .strip_prefix("toughnessGT")
+                        .and_then(|n| n.parse::<i32>().ok())
+                    {
+                        s.toughness_min = Some(n + 1);
+                    // Mana value ("converted mana cost" in Forge's words).
+                    } else if let Some(n) = p.strip_prefix("cmcLE").and_then(|n| n.parse().ok()) {
+                        s.mana_value_max = Some(n);
+                    } else if let Some(n) = p.strip_prefix("cmcGE").and_then(|n| n.parse().ok()) {
+                        s.mana_value_min = Some(n);
+                    } else if let Some(n) =
+                        p.strip_prefix("cmcEQ").and_then(|n| n.parse::<u32>().ok())
+                    {
+                        s.mana_value_min = Some(n);
+                        s.mana_value_max = Some(n);
+                    } else if let Some(n) = p
+                        .strip_prefix("cmcLT")
+                        .and_then(|n| n.parse::<u32>().ok())
+                        .filter(|n| *n > 0)
+                    {
+                        s.mana_value_max = Some(n - 1);
+                    } else if let Some(n) =
+                        p.strip_prefix("cmcGT").and_then(|n| n.parse::<u32>().ok())
+                    {
+                        s.mana_value_min = Some(n + 1);
                     } else if let Some(k) = p.strip_prefix("without").and_then(keyword) {
                         s.not_keywords.push(k);
                     } else if let Some(k) = p.strip_prefix("with").and_then(keyword) {
@@ -355,6 +399,12 @@ impl<'a> Tx<'a> {
                     } else if let Some(x) = p.strip_prefix("non") {
                         match card_type(x) {
                             Some(t) => s.not_types.push(t),
+                            None if color(x).is_some() => {
+                                s.not_colors.extend(color(x));
+                            }
+                            None if x == "Basic" => s.not_supertypes.push(Supertype::Basic),
+                            None if x == "Legendary" => s.not_supertypes.push(Supertype::Legendary),
+                            None if x == "Snow" => s.not_supertypes.push(Supertype::Snow),
                             None if self.known.subtypes.contains(x) => {
                                 s.not_subtypes.push(x.to_string())
                             }
@@ -2779,6 +2829,12 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
     match mana_cost(face.mana_cost.as_deref().unwrap_or("no cost")) {
         Ok(c) => {
             tx.has_x_cost = c.as_ref().is_some_and(ManaCost::has_x);
+            // {X} in the cost is announced by the caster — unless the script defines X
+            // as something else ("X is the target's mana value": the cost then follows
+            // from the target). That isn't an announced X: not compiled.
+            if tx.has_x_cost && face.svars.get("X").is_some_and(|v| v != "Count$xPaid") {
+                tx.block("cost:X defined by the script");
+            }
             def.mana_cost = c;
         }
         Err(b) => tx.block(b),

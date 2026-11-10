@@ -105,14 +105,32 @@ pub fn describes(
     }
 }
 
-/// Is the card `id` (in a graveyard, hand, library…) one of the cards `sel` names? Only
-/// card types and subtypes are compared — what a card has wherever it is (CR 109.2).
+/// Is the card `id` (in a graveyard, hand, library…) one of the cards `sel` names? What
+/// a card has wherever it is (CR 109.2) is compared: its types, colors, mana value, name,
+/// power and toughness… Whose card it is isn't asked here (`controller` and `other` are
+/// the caller's business).
 pub fn card_matches(st: &GameState, id: ObjectId, sel: &card_model::Selector) -> bool {
     let c = chars(st, id);
-    (sel.types.is_empty() || sel.types.iter().any(|t| c.is(*t)))
-        && !sel.not_types.iter().any(|t| c.is(*t))
-        && (sel.subtypes.is_empty() || sel.subtypes.iter().any(|s| c.has_subtype(s)))
-        && !sel.not_subtypes.iter().any(|s| c.has_subtype(s))
+    let o = st.object(id);
+    let what = card_model::Selector {
+        controller: card_model::Who::Any,
+        other: false,
+        ..sel.clone()
+    };
+    crate::layers::matches_parts(
+        &what,
+        &c,
+        crate::layers::Facts {
+            id,
+            controller: o.owner,
+            is_token: o.is_token,
+            tapped: false,
+            attacking: false,
+            blocking: false,
+        },
+        id,
+        o.owner,
+    )
 }
 
 /// Every legal choice for `filter`, in stable order: objects by stack/battlefield order
