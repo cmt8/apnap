@@ -155,7 +155,7 @@ that cost mana (signets) or make different mana at once, counters other than +1/
 the battlefield, "becomes tapped" and "becomes the target" triggers, protection, Forge's
 "Effect" objects, Sagas (the end of D-064 ranks them). `forge-coverage --families` ranks what is left by kind of feature.
 
-## Current milestone: M4 — IN PROGRESS (started 2026-11-09), branch `m4-wip`
+## Current milestone: M4 — IN PROGRESS (started 2026-11-09), on `main` (`m4-wip` merged 2026-11-10)
 Decisions: D-034 (precons: Calling All Angels, Wretched Ranks, Reign of Dragons,
 Tramplesaurus Rex), D-035 (real-card pipeline; Scryfall data only in the user's cache),
 D-037 (card images, mana symbols, proxies, AI pacing), D-038 (subtype selectors; `real-Np`
