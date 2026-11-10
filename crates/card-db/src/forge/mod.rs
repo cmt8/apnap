@@ -3,8 +3,11 @@
 //! `CardDef`, refusing any card that has a line or parameter it doesn't understand. The
 //! scripts themselves are fetched into the user's cache, never committed.
 
+pub mod library;
 pub mod parse;
 pub mod translate;
+
+pub use library::{Library, printed_mismatch};
 
 pub use parse::{Face, Record, Script, parse};
 pub use translate::{Blockers, Compiled, Known, compile};

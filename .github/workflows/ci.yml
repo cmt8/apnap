@@ -36,6 +36,7 @@ jobs:
       - name: fetch Forge's card scripts (pinned commit) + compile coverage over all cards
         run: |
           cargo run --release -p harness --locked -- fetch-forge
+          cargo run --release -p harness --locked -- fetch-bulk
           cargo run --release -p harness --locked -- forge-coverage --top 25
       - name: rustfmt
         run: cargo fmt --all --check
@@ -86,6 +87,7 @@ jobs:
         run: |
           cargo run -p harness --locked -- fetch-cards
           cargo run -p harness --locked -- fetch-forge
+          cargo run -p harness --locked -- fetch-bulk
       # The golden test pins event/state hashes generated on Linux: passing here proves
       # bit-for-bit determinism across platforms.
       - run: cargo test --workspace --locked

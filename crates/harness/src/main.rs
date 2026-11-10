@@ -9,6 +9,7 @@
 //!   fetch-cards                        download the precons' printed card data into the cache
 //!   coverage [--verbose]               per-precon script/verification status
 //!   fetch-forge                        clone Forge's card scripts (pinned commit) into the cache
+//!   fetch-bulk                         Scryfall's Oracle card file (every card) into the cache
 //!   forge-coverage [--top N]           how many Forge scripts compile; what blocks the rest
 //!   bless                              rewrite crates/harness/tests/golden/games.txt
 
@@ -190,75 +191,121 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        "fetch-bulk" => match card_db::scryfall::fetch_bulk() {
+            Ok(bytes) => {
+                println!(
+                    "Scryfall Oracle card file: {:.1} MB in {}",
+                    bytes as f64 / 1e6,
+                    card_db::scryfall::cache_dir().display()
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("fetch failed: {e}");
+                ExitCode::FAILURE
+            }
+        },
         "forge-coverage" => {
             // How many of Forge's card scripts compile, and which missing feature blocks
             // the most cards (decisions.md D-046).
-            let scripts = match card_db::forge::read_scripts(&card_db::forge::cards_dir()) {
-                Ok(s) if !s.is_empty() => s,
-                _ => {
-                    eprintln!("{}", card_db::forge::FETCH_HINT);
+            let bulk = card_db::scryfall::load_bulk();
+            if let Err(e) = &bulk {
+                eprintln!("(no cross-check against Scryfall: {e})");
+            }
+            let lib = match card_db::forge::Library::load(
+                &card_db::forge::cards_dir(),
+                &card_db::forge::tokens_dir(),
+                bulk.as_ref().ok(),
+            ) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("{e}");
                     return ExitCode::FAILURE;
                 }
             };
-            let tokens =
-                card_db::forge::read_scripts(&card_db::forge::tokens_dir()).unwrap_or_default();
-            let known = card_db::forge::Known::from_scripts(
-                scripts.iter().chain(&tokens).map(|(_, t)| t.as_str()),
-            );
             let top = num(&args, "--top", 40) as usize;
             // `--sample N`: print every N-th compiled card as the engine understands it,
             // next to its Oracle text, for reading over.
             let sample = num(&args, "--sample", 0) as usize;
-            let mut ok = 0usize;
-            let mut unreadable = 0usize;
-            // How many cards each blocker stops, and for how many it is the only one.
-            let mut blocks: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
-            let mut one_away = 0usize;
-            for (_, text) in &scripts {
-                let Ok(script) = card_db::forge::parse(text) else {
-                    unreadable += 1;
-                    continue;
-                };
-                match card_db::forge::compile(&script, &known) {
-                    Ok(c) => {
-                        ok += 1;
-                        if sample > 0 && ok.is_multiple_of(sample) {
-                            let oracle = script.faces[0].oracle.clone().unwrap_or_default();
-                            println!(
-                                "== {} | {} | {}\n   oracle: {}\n   engine: {}",
-                                c.def.name,
-                                c.def
-                                    .mana_cost
-                                    .as_ref()
-                                    .map_or(String::new(), |m| m.to_text()),
-                                card_model::describe::type_line(&c.def),
-                                oracle.replace("\\n", " / "),
-                                card_model::describe::rules_text(&c.def).join(" / ")
-                            );
-                        }
+            if sample > 0 {
+                for (i, (name, c)) in lib.cards.iter().enumerate() {
+                    if i % sample != sample / 2 {
+                        continue;
                     }
-                    Err(blockers) => {
-                        if blockers.len() == 1 {
-                            one_away += 1;
-                        }
-                        for b in &blockers {
-                            let e = blocks.entry(b.clone()).or_default();
-                            e.0 += 1;
-                            if blockers.len() == 1 {
-                                e.1 += 1;
-                            }
-                        }
+                    let oracle = bulk
+                        .as_ref()
+                        .ok()
+                        .and_then(|d| d.get(name))
+                        .and_then(|c| c.oracle_text.clone())
+                        .unwrap_or_default();
+                    println!(
+                        "== {} | {} | {}\n   oracle: {}\n   engine: {}",
+                        name,
+                        c.def
+                            .mana_cost
+                            .as_ref()
+                            .map_or(String::new(), |m| m.to_text()),
+                        card_model::describe::type_line(&c.def),
+                        oracle.replace('\n', " / "),
+                        card_model::describe::rules_text(&c.def).join(" / ")
+                    );
+                }
+            }
+            let total = lib.cards.len() + lib.blocked.len();
+            println!(
+                "{} of {total} Forge card scripts compile ({:.1}%); {} unreadable; tokens: {} of {} compile",
+                lib.cards.len(),
+                100.0 * lib.cards.len() as f64 / total.max(1) as f64,
+                lib.unreadable,
+                lib.tokens.len(),
+                lib.tokens.len() + lib.blocked_tokens.len(),
+            );
+            if let Ok(bulk) = &bulk {
+                // The cards that matter: real ones, per Scryfall.
+                let real: Vec<&String> = bulk
+                    .cards
+                    .iter()
+                    .filter(|(_, c)| c.is_real())
+                    .map(|(n, _)| n)
+                    .collect();
+                let front = |n: &str| n.split(" // ").next().unwrap_or(n).to_string();
+                let ok = real
+                    .iter()
+                    .filter(|n| lib.cards.contains_key(&front(n)))
+                    .count();
+                let none = real
+                    .iter()
+                    .filter(|n| {
+                        !lib.cards.contains_key(&front(n)) && !lib.blocked.contains_key(&front(n))
+                    })
+                    .count();
+                println!(
+                    "{ok} of {} real cards (per Scryfall) compile ({:.1}%); Forge has no script for {none}",
+                    real.len(),
+                    100.0 * ok as f64 / real.len().max(1) as f64
+                );
+            }
+            // How many cards each blocker stops, and for how many it is the only one.
+            let mut blocks: std::collections::BTreeMap<&str, (usize, usize)> = Default::default();
+            let mut one_away = 0usize;
+            for blockers in lib.blocked.values() {
+                if blockers.len() == 1 {
+                    one_away += 1;
+                }
+                for b in blockers {
+                    let e = blocks.entry(b.as_str()).or_default();
+                    e.0 += 1;
+                    if blockers.len() == 1 {
+                        e.1 += 1;
                     }
                 }
             }
-            let total = scripts.len();
-            println!(
-                "{ok} of {total} Forge card scripts compile ({:.1}%); {one_away} more are one feature away; {unreadable} unreadable",
-                100.0 * ok as f64 / total as f64
-            );
-            let mut rows: Vec<(String, (usize, usize))> = blocks.into_iter().collect();
+            println!("{one_away} cards are one feature away");
+            let mut rows: Vec<(&str, (usize, usize))> = blocks.into_iter().collect();
             rows.sort_by_key(|a| std::cmp::Reverse((a.1.1, a.1.0)));
-            println!("\nblocker — cards it alone blocks / cards it blocks at all");
+            if top > 0 {
+                println!("\nblocker — cards it alone blocks / cards it blocks at all");
+            }
             for (name, (all, alone)) in rows.iter().take(top) {
                 println!("  {alone:6} / {all:6}  {name}");
             }
@@ -266,13 +313,15 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         "coverage" => {
-            let data = match card_db::scryfall::cached(&harness::precon_card_names()) {
-                Ok(d) => d,
+            // The four precons: how many of each deck's cards compile from Forge's scripts.
+            let lib = match harness::try_forge_library() {
+                Ok(l) => l,
                 Err(e) => {
                     eprintln!("{e}");
                     return ExitCode::FAILURE;
                 }
             };
+            let base = harness::catalog();
             let verbose = args.iter().any(|a| a == "--verbose");
             let (mut total, mut done) = (0usize, 0usize);
             for file in harness::PRECON_DECKS {
@@ -283,52 +332,32 @@ fn main() -> ExitCode {
                     .cloned()
                     .chain(d.cards.iter().map(|(_, n)| n.clone()))
                     .collect();
-                let mut counts = [0usize; 5];
+                let mut ok = 0;
                 let mut lines = Vec::new();
                 for n in &names {
-                    let (i, note) = match harness::coverage_of(n, &data) {
-                        harness::Coverage::BuiltIn => (0, String::new()),
-                        harness::Coverage::Verified => (1, String::new()),
-                        harness::Coverage::Unverified => (2, "scripted, not verified".into()),
-                        harness::Coverage::Broken(p) => (3, format!("BROKEN: {}", p.join("; "))),
-                        harness::Coverage::Missing { printed_problems }
-                            if printed_problems.is_empty() =>
-                        {
-                            (4, "no script".into())
-                        }
-                        harness::Coverage::Missing { printed_problems } => (
-                            4,
-                            format!(
-                                "no script; printed data needs: {}",
-                                printed_problems.join("; ")
-                            ),
-                        ),
-                    };
-                    counts[i] += 1;
-                    if i >= 2 && (verbose || i == 3) {
-                        lines.push(format!("    {n}: {note}"));
+                    if base.find(n).is_some() || lib.cards.contains_key(n) {
+                        ok += 1;
+                    } else {
+                        let why = lib
+                            .blocked
+                            .get(n)
+                            .map_or("Forge has no script".to_string(), |b| {
+                                b.iter().cloned().collect::<Vec<_>>().join(", ")
+                            });
+                        lines.push(format!("    {n}: {why}"));
                     }
                 }
-                let ok = counts[0] + counts[1];
                 total += names.len();
                 done += ok;
-                println!(
-                    "{}: {}/{} verified ({} built-in, {} verified, {} unverified, {} broken, {} missing)",
-                    d.name,
-                    ok,
-                    names.len(),
-                    counts[0],
-                    counts[1],
-                    counts[2],
-                    counts[3],
-                    counts[4]
-                );
-                for l in lines {
-                    println!("{l}");
+                println!("{}: {ok}/{} cards compile", d.name, names.len());
+                if verbose {
+                    for l in lines {
+                        println!("{l}");
+                    }
                 }
             }
             println!(
-                "total: {done}/{total} deck slots verified ({}%)",
+                "total: {done}/{total} deck slots ({}%)",
                 done * 100 / total.max(1)
             );
             ExitCode::SUCCESS

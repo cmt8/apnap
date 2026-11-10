@@ -48,6 +48,11 @@ pub struct ScryfallCard {
     pub set: Option<String>,
     #[serde(default)]
     pub collector_number: Option<String>,
+    /// "expansion", "core", "funny", "token", … (bulk data).
+    #[serde(default)]
+    pub set_type: Option<String>,
+    #[serde(default)]
+    pub border_color: Option<String>,
 }
 
 /// Where Scryfall serves this printing's images (we use two of the sizes).
@@ -186,6 +191,110 @@ struct Collection {
     data: Vec<ScryfallCard>,
     #[serde(default)]
     not_found: Vec<serde_json::Value>,
+}
+
+fn bulk_file() -> PathBuf {
+    cache_dir().join("bulk").join("oracle-cards.jsonl.gz")
+}
+
+/// How to get the bulk file, shown whenever it is missing.
+pub const BULK_HINT: &str = "Scryfall's Oracle card file is not in the local cache; run `cargo run -p harness -- fetch-bulk` (needs network)";
+
+/// Download Scryfall's "Oracle Cards" bulk file (one record per card ever printed, ~25 MB)
+/// into the cache. Scryfall asks that bulk data be used for anything card-pool-wide instead
+/// of the API. Returns the file's size in bytes.
+pub fn fetch_bulk() -> Result<u64, ScryfallError> {
+    let http = |e: ureq::Error| ScryfallError::Http(e.to_string());
+    let mut listing = ureq::get("https://api.scryfall.com/bulk-data")
+        .header("User-Agent", USER_AGENT)
+        .header("Accept", "application/json")
+        .call()
+        .map_err(http)?;
+    let listing: serde_json::Value = listing.body_mut().read_json().map_err(http)?;
+    let uri = listing["data"]
+        .as_array()
+        .and_then(|a| a.iter().find(|x| x["type"] == "oracle_cards"))
+        .and_then(|x| x["jsonl_download_uri"].as_str())
+        .ok_or_else(|| ScryfallError::Http("no oracle_cards bulk file listed".into()))?
+        .to_string();
+    if !uri.starts_with("https://data.scryfall.io/") {
+        return Err(ScryfallError::Http(format!(
+            "unexpected bulk address {uri}"
+        )));
+    }
+    let mut resp = ureq::get(&uri)
+        .header("User-Agent", USER_AGENT)
+        .call()
+        .map_err(http)?;
+    let bytes = resp
+        .body_mut()
+        .with_config()
+        .limit(512 * 1024 * 1024)
+        .read_to_vec()
+        .map_err(http)?;
+    let path = bulk_file();
+    let io = |e: std::io::Error| ScryfallError::Io(format!("{}: {e}", path.display()));
+    std::fs::create_dir_all(path.parent().expect("has parent")).map_err(io)?;
+    let tmp = path.with_extension("part");
+    std::fs::write(&tmp, &bytes).map_err(io)?;
+    std::fs::rename(&tmp, &path).map_err(io)?;
+    Ok(bytes.len() as u64)
+}
+
+impl ScryfallCard {
+    /// A card that exists in the real game: not a token or other extra, not from a joke
+    /// ("funny") or memorabilia set, not silver- or gold-bordered.
+    pub fn is_real(&self) -> bool {
+        !matches!(
+            self.layout.as_str(),
+            "token"
+                | "double_faced_token"
+                | "emblem"
+                | "art_series"
+                | "scheme"
+                | "planar"
+                | "vanguard"
+                | "augment"
+                | "host"
+                | "reversible_card"
+        ) && !matches!(
+            self.set_type.as_deref(),
+            Some("funny" | "memorabilia" | "token" | "minigame")
+        ) && !matches!(self.border_color.as_deref(), Some("silver" | "gold"))
+    }
+}
+
+/// Every card in the bulk file, by name (the front face's name for multi-faced cards is
+/// also a key).
+pub fn load_bulk() -> Result<ScryfallData, ScryfallError> {
+    use std::io::{BufRead, BufReader};
+    let path = bulk_file();
+    let file = std::fs::File::open(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ScryfallError::Io(BULK_HINT.to_string())
+        } else {
+            ScryfallError::Io(format!("{}: {e}", path.display()))
+        }
+    })?;
+    let mut data = ScryfallData::default();
+    for line in BufReader::new(flate2::read::GzDecoder::new(file)).lines() {
+        let line = line.map_err(|e| ScryfallError::Io(format!("{}: {e}", path.display())))?;
+        let line = line.trim().trim_end_matches(',');
+        if !line.starts_with('{') {
+            continue;
+        }
+        let card: ScryfallCard = serde_json::from_str(line)
+            .map_err(|e| ScryfallError::Io(format!("{}: {e}", path.display())))?;
+        // Art cards and other extras share names with real cards: the real one wins.
+        let keep_old = data
+            .cards
+            .get(&card.name)
+            .is_some_and(|old| old.is_real() && !card.is_real());
+        if !keep_old {
+            data.cards.insert(card.name.clone(), card);
+        }
+    }
+    Ok(data)
 }
 
 /// Make sure `names` are in the cache, fetching the missing ones from Scryfall. Returns the

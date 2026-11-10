@@ -648,6 +648,7 @@ version = "0.0.1"
 dependencies = [
  "card-model",
  "dirs",
+ "flate2",
  "ron",
  "serde",
  "serde_json",

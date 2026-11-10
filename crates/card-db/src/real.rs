@@ -224,6 +224,8 @@ mod tests {
             artist: None,
             set: None,
             collector_number: None,
+            set_type: None,
+            border_color: None,
         }
     }
 

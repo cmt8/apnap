@@ -1430,16 +1430,20 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
             "Legendary" => def.supertypes.push(Supertype::Legendary),
             "Snow" => def.supertypes.push(Supertype::Snow),
             "World" => def.supertypes.push(Supertype::World),
-            "Plains" => def.land_types.push(BasicLandType::Plains),
-            "Island" => def.land_types.push(BasicLandType::Island),
-            "Swamp" => def.land_types.push(BasicLandType::Swamp),
-            "Mountain" => def.land_types.push(BasicLandType::Mountain),
-            "Forest" => def.land_types.push(BasicLandType::Forest),
-            _ if def.card_types.contains(&CardType::Land)
-                && !def.card_types.contains(&CardType::Creature) =>
+            // Basic land types on a land carry its mana ability (CR 305.6); every other
+            // subtype, a land's included ("Desert", "Gate"), is kept by name.
+            "Plains" | "Island" | "Swamp" | "Mountain" | "Forest"
+                if def.card_types.contains(&CardType::Land) =>
             {
-                tx.block("type:land-subtype")
+                def.land_types.push(match word.as_str() {
+                    "Plains" => BasicLandType::Plains,
+                    "Island" => BasicLandType::Island,
+                    "Swamp" => BasicLandType::Swamp,
+                    "Mountain" => BasicLandType::Mountain,
+                    _ => BasicLandType::Forest,
+                })
             }
+            "Ongoing" => def.supertypes.push(Supertype::Ongoing),
             other => def.creature_types.push(other.to_string()),
         }
     }

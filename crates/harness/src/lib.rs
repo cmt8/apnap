@@ -104,15 +104,28 @@ impl Setup {
             .expect("valid commander setup");
         }
         if let Setup::Real { players } = self {
-            let catalog = full_catalog();
             let config = if players == 2 {
                 GameConfig::constructed_1v1()
             } else {
                 GameConfig::free_for_all(players)
             };
-            let decks: Vec<Vec<CardDefId>> = (0..players as usize)
-                .map(|i| {
-                    let file = REAL_DECKS[i % REAL_DECKS.len()];
+            // The cards are compiled from Forge's scripts (D-046); the game's catalog
+            // holds only the cards of the decks in play and their tokens.
+            let files: Vec<&str> = (0..players as usize)
+                .map(|i| REAL_DECKS[i % REAL_DECKS.len()])
+                .collect();
+            let lists: Vec<card_db::DeckFile> = files.iter().map(|f| precon_list(f)).collect();
+            let names = lists
+                .iter()
+                .flat_map(|d| d.cards.iter().map(|(_, n)| n.as_str()));
+            let catalog = Arc::new(
+                forge_library()
+                    .catalog_for(&catalog(), names)
+                    .unwrap_or_else(|missing| panic!("cards that don't compile: {missing:?}")),
+            );
+            let decks: Vec<Vec<CardDefId>> = files
+                .iter()
+                .map(|file| {
                     let text = cards::deck(file).unwrap_or_else(|| panic!("no deck {file}"));
                     let path = format!("crates/cards/decks/{file}");
                     card_db::load_deck(card_db::Source { path: &path, text }, &catalog)
@@ -276,10 +289,33 @@ pub fn deck_file(file: &str) -> card_db::Deck {
         .unwrap_or_else(|e| panic!("{e}"))
 }
 
+/// Every card that compiles from Forge's scripts, cross-checked against Scryfall's bulk
+/// data (decisions.md D-046). Panics with the fetch hints if either is missing: run
+/// `harness fetch-forge` and `harness fetch-bulk` once.
+pub fn forge_library() -> Arc<card_db::forge::Library> {
+    static LIBRARY: OnceLock<Arc<card_db::forge::Library>> = OnceLock::new();
+    LIBRARY
+        .get_or_init(|| Arc::new(try_forge_library().unwrap_or_else(|e| panic!("{e}"))))
+        .clone()
+}
+
+pub fn try_forge_library() -> Result<card_db::forge::Library, String> {
+    let bulk = card_db::scryfall::load_bulk().map_err(|e| e.to_string())?;
+    card_db::forge::Library::load(
+        &card_db::forge::cards_dir(),
+        &card_db::forge::tokens_dir(),
+        Some(&bulk),
+    )
+}
+
 /// Is the printed data the real cards need in the local cache? `Err` carries the hint
 /// (which command downloads it).
 pub fn real_cards_ready() -> Result<(), String> {
-    card_db::scryfall::cached(&precon_card_names())
+    card_db::scryfall::cached(&precon_card_names()).map_err(|e| e.to_string())?;
+    if !card_db::forge::cards_dir().exists() {
+        return Err(card_db::forge::FETCH_HINT.to_string());
+    }
+    card_db::scryfall::load_bulk()
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
