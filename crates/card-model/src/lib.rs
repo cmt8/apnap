@@ -525,9 +525,13 @@ pub enum ObjFilter {
     /// "this creature or another [selector]": the source itself whatever it is, or any
     /// *other* object matching the selector.
     ThisOr(Selector),
+    /// "Enchanted creature", "equipped creature": the permanent the source is attached to.
+    Host,
 }
 
 /// Trigger conditions (CR 603.1). M2 vocabulary.
+// Built once when the catalog loads, then only read.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Trigger {
     /// CR 603.6a: "When/Whenever [filter] enters".
@@ -558,6 +562,49 @@ pub enum Trigger {
     /// CR 603.6c: "When/Whenever [filter] leaves the battlefield" — for any zone; looks
     /// back in time (CR 603.10a).
     Leaves(ObjFilter),
+    /// Damage being dealt (CR 120): "whenever this creature deals combat damage to a
+    /// player", "whenever a creature you control deals damage to an opponent", "whenever
+    /// this creature is dealt damage". In the ability, "that player" is the player dealt
+    /// damage and "that much" the amount; "it"/"that creature" (`ObjRef::Triggering`) is
+    /// the permanent dealt damage, or — when a player was dealt it — the source of the
+    /// damage.
+    Damage {
+        /// What dealt it (`None`: any source).
+        by: Option<ObjFilter>,
+        to: DamageTo,
+        /// Only combat damage (`Some(true)`), only noncombat damage (`Some(false)`), or
+        /// either.
+        combat: Option<bool>,
+        per: DamagePer,
+    },
+}
+
+/// What a damage trigger's damage was dealt to.
+// Built once when the catalog loads, then only read.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DamageTo {
+    /// A player or a permanent.
+    Anything,
+    Player(Who),
+    Permanent(ObjFilter),
+}
+
+/// How damage dealt at the same time counts for a damage trigger (CR 510.2: combat damage
+/// is dealt simultaneously; CR 120.9: "that much" is only the damage of the sources asked
+/// for).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DamagePer {
+    /// Once for each source and each recipient: "whenever this creature deals damage to a
+    /// player".
+    Each,
+    /// Once for each recipient, whatever number of sources: "whenever this creature is
+    /// dealt damage", "whenever one or more creatures you control deal combat damage to a
+    /// player".
+    Recipient,
+    /// Once for each source, whatever number of recipients: "whenever this creature deals
+    /// damage".
+    Source,
 }
 
 impl Trigger {
@@ -1315,6 +1362,9 @@ pub enum PlayerRef {
     /// "its controller": who controls the object whose event triggered the ability — or
     /// controlled it last, if it has left the battlefield (CR 608.2h).
     TriggeringController,
+    /// "That player": the player the triggering event happened to (the player dealt
+    /// damage).
+    TriggeringPlayer,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1370,6 +1420,8 @@ pub enum Amount {
     HandSize,
     /// Your life total (0 if it is negative).
     LifeTotal,
+    /// "That much", "that many": the amount of the triggering event (the damage dealt).
+    TriggeringAmount,
 }
 
 impl Amount {
@@ -1394,6 +1446,7 @@ impl Amount {
             | Amount::SourceToughness
             | Amount::TriggeringPower
             | Amount::TriggeringToughness
+            | Amount::TriggeringAmount
             | Amount::SacrificedPower => false,
         }
     }

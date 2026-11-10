@@ -251,6 +251,27 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 ));
             }
         }
+        // "That player" and "that much" need an event that has them.
+        let text = format!("{a:?}");
+        for (word, needs_player) in [("TriggeringPlayer", true), ("TriggeringAmount", false)] {
+            if !text.contains(word) {
+                continue;
+            }
+            let given = match a {
+                AbilityDef::Triggered { when, .. } => when.events().iter().all(|t| match t {
+                    Trigger::Damage { to, .. } => {
+                        !needs_player || matches!(to, card_model::DamageTo::Player(_))
+                    }
+                    _ => false,
+                }),
+                _ => false,
+            };
+            if !given {
+                p.push(at(format!(
+                    "{word}: the ability's trigger event doesn't have one"
+                )));
+            }
+        }
         // "If [something counted] is N or more" is asked with no spell or ability
         // resolving, and for a static ability inside the layer walk.
         let (cond, in_static) = match a {

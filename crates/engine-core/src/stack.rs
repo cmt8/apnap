@@ -54,6 +54,9 @@ pub struct StackObject {
     /// ("the sacrificed creature's power", CR 608.2h).
     #[serde(default)]
     pub sacrificed_power: u32,
+    /// For triggered abilities: what else the triggering event carries.
+    #[serde(default)]
+    pub facts: crate::triggers::EventFacts,
 }
 
 impl StackObject {

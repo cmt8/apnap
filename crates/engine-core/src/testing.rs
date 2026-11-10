@@ -81,6 +81,7 @@ impl Scenario {
                 x: 0,
                 targets: Vec::new(),
                 sacrificed_power: 0,
+                facts: Default::default(),
             });
         } else {
             self.st.zones.list_mut(zone, owner).push(id);

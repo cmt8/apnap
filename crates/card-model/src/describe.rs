@@ -6,9 +6,9 @@
 use crate::{
     AbilityDef, ActivationZone, Affected, Amount, Body, Calc, CardDef, CardDest, CardType,
     CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost, CounterKind, DamageBy,
-    EachPlayerAction, Effect, Keyword, ManaProduce, Measure, Mode, ObjFilter, ObjRef, PlayerRef,
-    ReplaceWith, Replaces, Selector, Take, TargetFilter, TargetRef, Timing, Trigger, TriggerStep,
-    Who,
+    DamagePer, DamageTo, EachPlayerAction, Effect, Keyword, ManaProduce, Measure, Mode, ObjFilter,
+    ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, Take, TargetFilter, TargetRef, Timing,
+    Trigger, TriggerStep, Who,
 };
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -86,6 +86,7 @@ fn amount(a: &Amount) -> String {
         Amount::TotalPower(s) => format!("the total power of {}", selector(s, true)),
         Amount::TriggeringPower => "its power".into(),
         Amount::TriggeringToughness => "its toughness".into(),
+        Amount::TriggeringAmount => "that much".into(),
         Amount::SacrificedPower => "the sacrificed creature's power".into(),
         Amount::SourceToughness => "its toughness".into(),
         Amount::CardsIn { zone, cards } => {
@@ -230,6 +231,7 @@ fn player(mode: &Mode, r: PlayerRef) -> String {
         PlayerRef::EachOpponent => "each opponent".into(),
         PlayerRef::Each => "each player".into(),
         PlayerRef::TriggeringController => "its controller".into(),
+        PlayerRef::TriggeringPlayer => "that player".into(),
     }
 }
 
@@ -1056,6 +1058,7 @@ fn obj_filter(f: &ObjFilter) -> String {
             if s.other { text } else { format!("a {text}") }
         }
         ObjFilter::ThisOr(s) => format!("this permanent or another {}", selector(s, false)),
+        ObjFilter::Host => "enchanted or equipped permanent".into(),
     }
 }
 
@@ -1084,6 +1087,42 @@ fn trigger(t: &Trigger) -> String {
         Trigger::Enters(f) => format!("Whenever {} enters", obj_filter(f)),
         Trigger::Dies(f) => format!("Whenever {} dies", obj_filter(f)),
         Trigger::Leaves(f) => format!("Whenever {} leaves the battlefield", obj_filter(f)),
+        Trigger::Damage {
+            by,
+            to,
+            combat,
+            per,
+        } => {
+            let kind = match combat {
+                Some(true) => "combat damage",
+                Some(false) => "noncombat damage",
+                None => "damage",
+            };
+            let whom = match to {
+                DamageTo::Anything => String::new(),
+                DamageTo::Player(Who::Any) => " to a player".to_string(),
+                DamageTo::Player(Who::You) => " to you".to_string(),
+                DamageTo::Player(Who::Opponent) => " to an opponent".to_string(),
+                DamageTo::Permanent(f) => format!(" to {}", obj_filter(f)),
+            };
+            match (by, per) {
+                // "Whenever this creature is dealt damage".
+                (None, _) => match to {
+                    DamageTo::Permanent(f) => format!("Whenever {} is dealt {kind}", obj_filter(f)),
+                    DamageTo::Player(Who::You) => format!("Whenever you are dealt {kind}"),
+                    DamageTo::Player(Who::Opponent) => {
+                        format!("Whenever an opponent is dealt {kind}")
+                    }
+                    DamageTo::Player(Who::Any) => format!("Whenever a player is dealt {kind}"),
+                    DamageTo::Anything => format!("Whenever {kind} is dealt"),
+                },
+                (Some(ObjFilter::Matching(s)), DamagePer::Recipient) => format!(
+                    "Whenever one or more {} deal {kind}{whom}",
+                    selector(s, true)
+                ),
+                (Some(f), _) => format!("Whenever {} deals {kind}{whom}", obj_filter(f)),
+            }
+        }
         // CR 511.2: "at end of combat" (as the end of combat step begins).
         Trigger::BeginningOf {
             step: TriggerStep::EndCombat,

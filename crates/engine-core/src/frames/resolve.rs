@@ -150,6 +150,9 @@ pub struct ResolveFrame {
     /// The total power of what was sacrificed to pay for this (CR 608.2h).
     #[serde(default)]
     pub sacrificed_power: u32,
+    /// What else the triggering event carries ("that player", "that much").
+    #[serde(default)]
+    pub facts: crate::triggers::EventFacts,
 }
 
 impl ResolveFrame {
@@ -166,6 +169,7 @@ impl ResolveFrame {
             filters: Vec::new(),
             work: Vec::new(),
             sacrificed_power: 0,
+            facts: Default::default(),
         }
     }
 
@@ -226,6 +230,12 @@ impl ResolveFrame {
             PlayerRef::TriggeringController => self
                 .subject_chars(st)
                 .map(|c| c.controller)
+                .filter(|p| st.in_game(*p))
+                .into_iter()
+                .collect(),
+            PlayerRef::TriggeringPlayer => self
+                .facts
+                .player
                 .filter(|p| st.in_game(*p))
                 .into_iter()
                 .collect(),
@@ -309,6 +319,7 @@ impl ResolveFrame {
             Amount::Fixed(n) => *n,
             Amount::X => self.x,
             Amount::SacrificedPower => self.sacrificed_power,
+            Amount::TriggeringAmount => self.facts.amount,
             // Arithmetic and tests on amounts that may themselves need this resolution.
             Amount::Calc(base, op) => op.apply(self.amount(st, base)),
             Amount::IfAtLeast {
@@ -991,6 +1002,7 @@ impl ResolveFrame {
         self.controller = top.controller;
         self.x = top.x;
         self.sacrificed_power = top.sacrificed_power;
+        self.facts = top.facts;
         self.targets = top.targets.clone();
         self.source_lki = top.source_lki.clone();
         self.subject = top.subject;

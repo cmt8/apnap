@@ -4020,3 +4020,261 @@ fn conditions_that_compare_a_count() {
     s.pick("a land", |_, o| matches!(o, OptionDesc::PlayLand { .. }));
     assert_eq!(pt(&s, scholar), (3, 3));
 }
+
+// ---------------------------------------------------------------------------------------
+// Damage triggers; "that player", "that much"; the enchanted creature (D-058).
+// Text: docs/rules-notes/603-triggered-abilities.md (last section).
+
+fn gain_x(name: &str, pt: &str, kw: &str, trigger: &str) -> String {
+    creature(
+        name,
+        "2",
+        "Beast",
+        pt,
+        &format!(
+            "{kw}T:Mode$ {trigger} | Execute$ TrigGain | TriggerDescription$ Text.\n\
+             SVar:TrigGain:DB$ GainLife | LifeAmount$ X\n\
+             SVar:X:TriggerCount$DamageAmount"
+        ),
+    )
+}
+
+/// Play combat out to the postcombat main phase, assigning combat damage where asked: the
+/// least each blocker must get and whatever is left to the last one; a trampler's excess
+/// to the player.
+fn fight(s: &mut Script) {
+    loop {
+        drive_until(s, |s| {
+            s.kind() == ChoiceKind::AssignCombatDamage || s.st.turn.step == Step::PostcombatMain
+        });
+        if s.next.is_none() || s.kind() != ChoiceKind::AssignCombatDamage {
+            return;
+        }
+        match s.decision().prim.clone() {
+            Primitive::Allocate { total, per_min, .. } => {
+                let mut given = per_min.clone();
+                *given.last_mut().unwrap() += total - per_min.iter().sum::<u32>();
+                s.respond(Response::Allocate(given));
+            }
+            // Trample: how much goes on to the player — all that may.
+            Primitive::PickNumber { max, .. } => {
+                s.respond(Response::Number(max));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+fn library_size(s: &Script, p: PlayerId) -> usize {
+    s.st.zones.list(Zone::Library, p).len()
+}
+
+// CR 120.2, 510.3a (2026-11-06). Forge: `Mode$ DamageDone` with `ValidSource$ Card.Self`,
+// `ValidTarget$ Player | Opponent`, `CombatDamage$ True`; in the ability `Defined$
+// TriggeredTarget` ("that player") and `TriggerCount$DamageAmount` ("that many").
+#[test]
+fn deals_damage_triggers_by_recipient_and_kind_of_damage() {
+    let cards = [
+        creature(
+            "Test Cutpurse",
+            "U",
+            "Rogue",
+            "3/1",
+            "T:Mode$ DamageDone | ValidSource$ Card.Self | ValidTarget$ Player | CombatDamage$ True | Execute$ TrigMill | TriggerDescription$ Text.\n\
+             SVar:TrigMill:DB$ Mill | Defined$ TriggeredTarget | NumCards$ X\n\
+             SVar:X:TriggerCount$DamageAmount",
+        ),
+        creature(
+            "Test Sparkmage",
+            "R",
+            "Shaman",
+            "1/1",
+            "A:AB$ DealDamage | Cost$ T | ValidTgts$ Any | NumDmg$ 1 | SpellDescription$ Text.\n\
+             T:Mode$ DamageDone | ValidSource$ Card.Self | ValidTarget$ Opponent | Execute$ TrigGain | TriggerDescription$ Text.\n\
+             SVar:TrigGain:DB$ GainLife | LifeAmount$ 1",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    let thief = sc.card(P0, Zone::Battlefield, "Test Cutpurse");
+    let mages = sc.cards(P0, Zone::Battlefield, &["Test Sparkmage", "Test Sparkmage"]);
+    let golem = sc.card(P1, Zone::Battlefield, "Test Golem");
+    let mut s = Script::new(sc.build());
+    let (mine, theirs) = (library_size(&s, P0), library_size(&s, P1));
+    // Noncombat damage to a creature: nothing. To the opponent: the Sparkmage's trigger.
+    let ping = |s: &mut Script, mage: ObjectId| {
+        s.pick(
+            "ping",
+            |_, o| matches!(o, OptionDesc::ActivateAbility { source, .. } if *source == mage),
+        );
+    };
+    ping(&mut s, mages[0]);
+    s.target_object(golem).pass_all();
+    assert_eq!(life(&s, P0), 40);
+    ping(&mut s, mages[1]);
+    s.target_player(P1);
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+    });
+    assert_eq!((life(&s, P0), life(&s, P1)), (41, 39));
+    // Combat damage to the player: that player mills that many cards.
+    attack_with(&mut s, &[thief]);
+    drive_until(&mut s, |s| at(s, P0, Step::PostcombatMain));
+    assert_eq!(life(&s, P1), 36);
+    assert_eq!(
+        (library_size(&s, P0), library_size(&s, P1)),
+        (mine, theirs - 3)
+    );
+}
+
+// CR 510.2, 120.9 (2026-11-06). Forge: `DamageDoneOnce` (once for each recipient: "is
+// dealt damage", "one or more creatures you control deal combat damage to a player") and
+// `DamageDealtOnce` (once for each source: "deals damage").
+#[test]
+fn simultaneous_damage_triggers_once_where_the_card_says_so() {
+    let cards = [
+        gain_x(
+            "Test Enraged Beast",
+            "1/9",
+            "",
+            "DamageDoneOnce | ValidTarget$ Card.Self",
+        ),
+        gain_x(
+            "Test Soulful Giant",
+            "5/5",
+            "K:Trample\n",
+            "DamageDealtOnce | ValidSource$ Card.Self",
+        ),
+        bell(
+            "Test War Banner",
+            "DamageDoneOnce | CombatDamage$ True | ValidSource$ Creature.YouCtrl | ValidTarget$ Player",
+            100,
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let triggers = |s: &Script, id: ObjectId| {
+        s.count(|e| matches!(e, Event::Triggered { source, .. } if *source == id))
+    };
+    // Blocked by two creatures at once: 4 damage, one trigger, "that much" is all of it.
+    let mut sc = scenario(&cards);
+    let beast = sc.card(P0, Zone::Battlefield, "Test Enraged Beast");
+    let blockers = sc.cards(P1, Zone::Battlefield, &["Test Golem", "Test Golem"]);
+    let mut s = Script::new(sc.build());
+    attack_with(&mut s, &[beast]);
+    block_with(&mut s, &[(blockers[0], beast), (blockers[1], beast)]);
+    fight(&mut s);
+    assert_eq!((triggers(&s, beast), life(&s, P0)), (1, 44));
+
+    // A trampler deals 3 to its blocker and 2 to the player: one "deals damage" trigger
+    // for 5. Two creatures connect: the Banner triggers once.
+    let mut sc = scenario(&cards);
+    let giant = sc.card(P0, Zone::Battlefield, "Test Soulful Giant");
+    let elf = sc.card(P0, Zone::Battlefield, "Test Elf");
+    let banner = sc.card(P0, Zone::Battlefield, "Test War Banner");
+    let golem = sc.card(P1, Zone::Battlefield, "Test Golem");
+    let mut s = Script::new(sc.build());
+    attack_with(&mut s, &[giant, elf]);
+    block_with(&mut s, &[(golem, giant)]);
+    fight(&mut s);
+    assert_eq!(life(&s, P1), 40 - 2 - 1);
+    assert_eq!((triggers(&s, giant), triggers(&s, banner)), (1, 1));
+    assert_eq!(life(&s, P0), 40 + 5 + 100);
+}
+
+// Forge: `ValidSource$ Card.AttachedBy`, `ValidCard$ Card.EnchantedBy` — "enchanted
+// creature" as what a trigger is about (CR 303.4, 603.10a for its dying).
+#[test]
+fn triggers_about_the_enchanted_creature() {
+    let cards = [
+        "Name:Test Mantle\nManaCost:U\nTypes:Enchantment Aura\nK:Enchant:Creature\n\
+         T:Mode$ DamageDone | ValidSource$ Card.AttachedBy | ValidTarget$ Player | CombatDamage$ True | TriggerZones$ Battlefield | Execute$ TrigDraw | TriggerDescription$ Text.\n\
+         SVar:TrigDraw:DB$ Draw | NumCards$ 1\n\
+         T:Mode$ ChangesZone | Origin$ Battlefield | Destination$ Graveyard | ValidCard$ Card.EnchantedBy | TriggerZones$ Battlefield | Execute$ TrigGain | TriggerDescription$ Text.\n\
+         SVar:TrigGain:DB$ GainLife | LifeAmount$ 7\nOracle:Text."
+            .to_string(),
+        SMITE.to_string(),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    let worn = sc.card(P0, Zone::Battlefield, "Test Elf");
+    let bare = sc.card(P0, Zone::Battlefield, "Test Elf");
+    let mantle = sc.card(P0, Zone::Battlefield, "Test Mantle");
+    sc.attach(mantle, worn);
+    sc.card(P0, Zone::Battlefield, "Swamp");
+    sc.card(P0, Zone::Hand, "Test Smiting");
+    let mut s = Script::new(sc.build());
+    let draws = |s: &Script| s.count(|e| matches!(e, Event::Drew { player, .. } if *player == P0));
+    // Both connect; only the enchanted one's damage draws a card.
+    attack_with(&mut s, &[worn, bare]);
+    drive_until(&mut s, |s| at(s, P0, Step::PostcombatMain));
+    assert_eq!((life(&s, P1), draws(&s)), (38, 1));
+    // The other creature dies: nothing. The enchanted one dies: the Aura sees it go.
+    s.cast("Test Smiting").target_object(worn).pay();
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+    });
+    assert_eq!(life(&s, P0), 47);
+    assert!(s.find(P0, Zone::Graveyard, "Test Mantle").is_some());
+}
+
+// What a Forge script leaves out that the card says is found by reading the compiled card
+// back against its Oracle text.
+#[test]
+fn words_of_the_oracle_text_the_script_leaves_out() {
+    let card = |oracle: &str, rest: &str| {
+        format!(
+            "Name:Test Oddity\nManaCost:G\nTypes:Creature Ooze\nPT:1/1\n{rest}\nOracle:{oracle}"
+        )
+    };
+    let upkeep_counter = "T:Mode$ Phase | Phase$ Upkeep | ValidPlayer$ You | TriggerZones$ Battlefield | Execute$ TrigCounter | TriggerDescription$ Text.\n\
+        SVar:TrigCounter:DB$ PutCounter | Defined$ Self | CounterType$ P1P1 | CounterNum$ 1";
+    // The script puts the counter; the card lets its controller choose.
+    assert_eq!(
+        forge_test_blockers(&card(
+            "At the beginning of your upkeep, you may put a +1/+1 counter on Test Oddity.",
+            upkeep_counter
+        )),
+        ["oracle:says may"]
+    );
+    assert!(
+        forge_test_blockers(&card(
+            "At the beginning of your upkeep, put a +1/+1 counter on Test Oddity. (You may not skip this.)",
+            upkeep_counter
+        ))
+        .is_empty()
+    );
+    // "Another target creature" on an ability whose script targets any creature.
+    let pump = "A:AB$ Pump | Cost$ Sac<1/CARDNAME> | ValidTgts$ Creature | NumAtt$ +1 | SpellDescription$ Text.";
+    assert_eq!(
+        forge_test_blockers(&card(
+            "Sacrifice Test Oddity: Another target creature gets +1/+0 until end of turn.",
+            pump
+        )),
+        ["oracle:another target"]
+    );
+    assert!(
+        forge_test_blockers(&card(
+            "Sacrifice Test Oddity: Another target creature gets +1/+0 until end of turn.",
+            &pump.replace("ValidTgts$ Creature", "ValidTgts$ Creature.Other")
+        ))
+        .is_empty()
+    );
+
+    // "You may search": a plain search in the script is the optional one when the card has
+    // one search and says "may" once — the player can leave the library unshuffled.
+    let seeker = card(
+        "When Test Oddity enters, you may search your library for a basic land card, reveal it, put it into your hand, then shuffle.",
+        "T:Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield | ValidCard$ Card.Self | Execute$ TrigSearch | TriggerDescription$ Text.\n\
+         SVar:TrigSearch:DB$ ChangeZone | Origin$ Library | Destination$ Hand | ChangeType$ Land.Basic | ChangeNum$ 1",
+    );
+    let mut sc = scenario(&[&seeker]);
+    sc.card(P0, Zone::Battlefield, "Forest");
+    sc.card(P0, Zone::Hand, "Test Oddity");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Oddity").pay().pass_all().pass_all();
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::MayAbility));
+    let shuffles = s.count(|e| matches!(e, Event::Shuffled { .. }));
+    s.pick("no", |_, o| matches!(o, OptionDesc::Decline));
+    assert_eq!(s.count(|e| matches!(e, Event::Shuffled { .. })), shuffles);
+    assert_eq!(s.kind(), ChoiceKind::Priority);
+}

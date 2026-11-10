@@ -155,3 +155,42 @@
 | 603.6c, 603.10a | `leaves_the_battlefield_triggers_for_any_zone` |
 | 601.2i | `cast_triggers_ask_what_the_spell_is` |
 | 603.4 | `conditions_that_compare_a_count` |
+
+## Damage triggers; what an event carries (D-058)
+
+> 120.1. Objects can deal damage to battles, creatures, planeswalkers, and players. This is generally detrimental to the object or player that receives that damage. An object that deals damage is the source of that damage.
+>
+> 120.2a Damage may be dealt as a result of combat. Each attacking and blocking creature deals combat damage equal to its power during the combat damage step.
+>
+> 120.2b Damage may be dealt as an effect of a spell or ability. The spell or ability will specify which object deals that damage.
+>
+> 120.9. If an ability triggers on damage being dealt by a specific source or sources, and the effect refers to the “damage dealt,” it refers only to the damage dealt by the specified sources and not to any damage dealt at the same time by other sources.
+>
+> 510.2. Second, all combat damage that’s been assigned is dealt simultaneously. This turn-based action doesn’t use the stack. No player has the chance to cast spells or activate abilities between the time combat damage is assigned and the time it’s dealt.
+>
+> 510.3a Any abilities that triggered on damage being dealt or while state-based actions are performed afterward are put onto the stack before the active player gets priority; the order in which they triggered doesn’t matter. (See rule 603, “Handling Triggered Abilities.”)
+>
+> 603.2c An ability triggers only once each time its trigger event occurs. However, it can trigger repeatedly if one event contains multiple occurrences.
+>
+> 603.2g An ability triggers only if its trigger event actually occurs. An event that’s prevented or replaced won’t trigger anything.
+
+- `Trigger::Damage { by, to, combat, per }` is found from the `DamageDealt` events of one
+  batch — damage dealt at the same time (510.2). `per` says how that counts: once for each
+  source and recipient ("whenever this creature deals damage to a player"), once for each
+  recipient ("whenever this creature is dealt damage", "whenever one or more creatures you
+  control deal combat damage to a player"), or once for each source ("whenever this
+  creature deals damage"). The amount an ability refers to is the damage of the sources
+  it asks for (120.9). Prevented damage is no event (603.2g).
+- The ability carries `EventFacts { player, amount }`: "that player" is the player dealt
+  damage (`PlayerRef::TriggeringPlayer`), "that much" the amount
+  (`Amount::TriggeringAmount`). "It" (`ObjRef::Triggering`) is the permanent dealt damage;
+  for damage to a player, the source of the damage.
+- `ObjFilter::Host`: "enchanted creature"/"equipped creature" as what a trigger is about.
+  When the creature dies the Aura is still attached to the object that left (state-based
+  actions come later), which is how "when enchanted creature dies" finds it (603.10a).
+
+| Rule | Test (`crates/harness/tests/forge_features.rs`) |
+|---|---|
+| 120.2, 510.3a | `deals_damage_triggers_by_recipient_and_kind_of_damage` |
+| 510.2, 120.9, 603.2c | `simultaneous_damage_triggers_once_where_the_card_says_so` |
+| 303.4, 603.10a | `triggers_about_the_enchanted_creature` |

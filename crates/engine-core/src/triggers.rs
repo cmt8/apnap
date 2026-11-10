@@ -10,7 +10,7 @@
 //! - "Dies" triggers look back in time (CR 603.10a): the dying object and any other objects
 //!   that left in the same batch are seen as they last existed (`Lki`).
 
-use crate::events::Event;
+use crate::events::{DamageTarget, Event};
 use crate::ids::{ObjectId, PlayerId};
 use crate::layers::{Characteristics, Facts, abilities, chars, matches_parts, matching};
 use crate::state::GameState;
@@ -18,7 +18,8 @@ use crate::turn::Step;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use card_model::{
-    AbilityDef, CardDefId, Condition, ObjFilter, Selector, Trigger, TriggerStep, Who,
+    AbilityDef, CardDefId, Condition, DamagePer, DamageTo, ObjFilter, Selector, Trigger,
+    TriggerStep, Who,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +41,18 @@ pub struct PendingTrigger {
     pub subject: Option<ObjectId>,
     #[serde(default)]
     pub subject_lki: Option<Characteristics>,
+    /// What else the triggering event carries ("that player", "that much").
+    #[serde(default)]
+    pub facts: EventFacts,
+}
+
+/// What a triggering event carries besides its object, for the ability to refer to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventFacts {
+    /// "That player": the player it happened to (the player dealt damage).
+    pub player: Option<PlayerId>,
+    /// "That much": its amount (the damage dealt).
+    pub amount: u32,
 }
 
 /// Last known information about an object that left the battlefield (CR 113.7a, 608.2h),
@@ -75,6 +88,7 @@ pub(crate) fn snapshot(st: &GameState, id: ObjectId) -> Lki {
 
 /// Does the object `id` (seen as `c` / `facts`) satisfy a trigger's object filter, for an
 /// ability whose source is `source`, controlled by `controller`?
+/// `host`: the permanent the source is attached to ("enchanted creature").
 fn filter_hit(
     filter: &ObjFilter,
     id: ObjectId,
@@ -82,6 +96,7 @@ fn filter_hit(
     facts: Facts,
     source: ObjectId,
     controller: PlayerId,
+    host: Option<ObjectId>,
 ) -> bool {
     let matches = |sel: &Selector| matches_parts(sel, c, facts, source, controller);
     match filter {
@@ -89,6 +104,7 @@ fn filter_hit(
         ObjFilter::Matching(sel) => matches(sel),
         // "This or another X": the source whatever it is, or a different object that is X.
         ObjFilter::ThisOr(sel) => id == source || matches(sel),
+        ObjFilter::Host => host == Some(id),
     }
 }
 
@@ -153,6 +169,8 @@ struct Source<'a> {
     controller: PlayerId,
     abilities: Vec<(u16, &'a AbilityDef)>,
     lki: Option<Characteristics>,
+    /// What it is attached to (not known for a source that has left).
+    host: Option<ObjectId>,
 }
 
 fn battlefield_sources(st: &GameState) -> Vec<Source<'_>> {
@@ -165,6 +183,7 @@ fn battlefield_sources(st: &GameState) -> Vec<Source<'_>> {
             controller: crate::layers::controller_of(st, id),
             abilities: abilities(st, id),
             lki: None,
+            host: st.object(id).attached_to,
         })
         .collect()
 }
@@ -185,6 +204,26 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
     let mut died: Vec<ObjectId> = Vec::new();
     // Everything that left the battlefield, for any zone (CR 603.6c).
     let mut left: Vec<ObjectId> = Vec::new();
+    let dealt: Vec<Dealt> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::DamageDealt {
+                source,
+                target,
+                amount,
+                combat,
+            } => Some(Dealt {
+                source: *source,
+                target: *target,
+                amount: *amount,
+                combat: *combat,
+            }),
+            _ => None,
+        })
+        .collect();
+    if !dealt.is_empty() {
+        detect_damage(st, &dealt, lki);
+    }
     for e in events {
         if let Event::ZoneChange {
             old,
@@ -249,7 +288,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                             attacking,
                             blocking,
                         };
-                        if filter_hit(filter, e, &c, facts, src.id, src.controller) {
+                        if filter_hit(filter, e, &c, facts, src.id, src.controller, src.host) {
                             found.push(PendingTrigger {
                                 controller: src.controller,
                                 source: src.id,
@@ -258,6 +297,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                                 source_lki: None,
                                 subject: Some(e),
                                 subject_lki: None,
+                                facts: EventFacts::default(),
                             });
                             conds.push(intervening_if.clone());
                         }
@@ -282,6 +322,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                     .map(|&i| (i, &st.catalog.get(l.card).abilities[i as usize]))
                     .collect(),
                 lki: Some(l.chars.clone()),
+                host: None,
             });
         }
         for src in &sources {
@@ -309,7 +350,15 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                             attacking: l.attacking,
                             blocking: l.blocking,
                         };
-                        if filter_hit(filter, *d, &l.chars, facts, src.id, src.controller) {
+                        if filter_hit(
+                            filter,
+                            *d,
+                            &l.chars,
+                            facts,
+                            src.id,
+                            src.controller,
+                            src.host,
+                        ) {
                             found.push(PendingTrigger {
                                 controller: src.controller,
                                 source: src.id,
@@ -318,6 +367,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                                 source_lki: src.lki.clone(),
                                 subject: Some(*d),
                                 subject_lki: Some(l.chars.clone()),
+                                facts: EventFacts::default(),
                             });
                             conds.push(intervening_if.clone());
                         }
@@ -367,6 +417,7 @@ pub(crate) fn detect_step(st: &mut GameState, step: Step) {
                         source_lki: None,
                         subject: None,
                         subject_lki: None,
+                        facts: EventFacts::default(),
                     });
                     conds.push(intervening_if.clone());
                 }
@@ -408,7 +459,15 @@ pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
                         attacking: true,
                         blocking: false,
                     };
-                    if filter_hit(filter, attacker, &c, facts, src.id, src.controller) {
+                    if filter_hit(
+                        filter,
+                        attacker,
+                        &c,
+                        facts,
+                        src.id,
+                        src.controller,
+                        src.host,
+                    ) {
                         found.push(PendingTrigger {
                             controller: src.controller,
                             source: src.id,
@@ -417,9 +476,177 @@ pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
                             source_lki: None,
                             subject: Some(attacker),
                             subject_lki: None,
+                            facts: EventFacts::default(),
                         });
                         conds.push(intervening_if.clone());
                     }
+                }
+            }
+        }
+    }
+    queue_matching(st, found, conds);
+}
+
+/// Damage that was dealt (one source, one recipient).
+struct Dealt {
+    source: ObjectId,
+    target: DamageTarget,
+    amount: u32,
+    combat: bool,
+}
+
+/// Does the object `id` — a permanent, a spell, or something that left the battlefield in
+/// this batch — satisfy `filter` for an ability of `src`?
+fn object_hit(
+    st: &GameState,
+    lki: &BTreeMap<ObjectId, Lki>,
+    filter: &ObjFilter,
+    id: ObjectId,
+    src: &Source<'_>,
+) -> bool {
+    let (c, facts) = if let Some(l) = lki.get(&id) {
+        (
+            l.chars.clone(),
+            Facts {
+                id,
+                controller: l.controller,
+                is_token: l.is_token,
+                tapped: l.tapped,
+                attacking: l.attacking,
+                blocking: l.blocking,
+            },
+        )
+    } else if let Some(o) = st.objects.get(&id) {
+        let c = chars(st, id);
+        let (attacking, blocking) = crate::layers::combat_role(st, id);
+        let facts = Facts {
+            id,
+            controller: c.controller,
+            is_token: o.is_token,
+            tapped: o.tapped,
+            attacking,
+            blocking,
+        };
+        (c, facts)
+    } else {
+        // Nothing is known about it any more: only "this" and "the enchanted permanent"
+        // can still be told.
+        return match filter {
+            ObjFilter::This | ObjFilter::ThisOr(_) => id == src.id,
+            ObjFilter::Host => src.host == Some(id),
+            ObjFilter::Matching(_) => false,
+        };
+    };
+    // Only a permanent is "a creature you control" (a creature spell deals no damage, but
+    // an instant must not match "a permanent").
+    let on_battlefield = lki.contains_key(&id)
+        || st
+            .objects
+            .get(&id)
+            .is_some_and(|o| o.zone == crate::zones::Zone::Battlefield);
+    match filter {
+        ObjFilter::Matching(_) if !on_battlefield => false,
+        _ => filter_hit(filter, id, &c, facts, src.id, src.controller, src.host),
+    }
+}
+
+/// Damage triggers (CR 120, 510.3a), from all the damage one batch dealt — simultaneously
+/// (CR 510.2).
+fn detect_damage(st: &mut GameState, dealt: &[Dealt], lki: &BTreeMap<ObjectId, Lki>) {
+    let mut found = Vec::new();
+    let mut conds = Vec::new();
+    for src in battlefield_sources(st) {
+        for &(index, a) in &src.abilities {
+            let AbilityDef::Triggered {
+                when,
+                intervening_if,
+                ..
+            } = a
+            else {
+                continue;
+            };
+            for t in when.events() {
+                let Trigger::Damage {
+                    by,
+                    to,
+                    combat,
+                    per,
+                } = t
+                else {
+                    continue;
+                };
+                let hits = dealt.iter().filter(|d| {
+                    combat.is_none_or(|c| c == d.combat)
+                        && by
+                            .as_ref()
+                            .is_none_or(|f| object_hit(st, lki, f, d.source, &src))
+                        && match (to, d.target) {
+                            (DamageTo::Anything, _) => true,
+                            (DamageTo::Player(w), DamageTarget::Player(p)) => {
+                                who_matches(*w, p, src.controller)
+                            }
+                            (DamageTo::Permanent(f), DamageTarget::Object(o)) => {
+                                object_hit(st, lki, f, o, &src)
+                            }
+                            _ => false,
+                        }
+                });
+                // One trigger for each source and recipient, for each recipient, or for
+                // each source; "that much" is the damage of the sources asked for
+                // (CR 120.9). `None`: several different ones.
+                struct Group {
+                    source: ObjectId,
+                    one_source: bool,
+                    target: Option<DamageTarget>,
+                    amount: u32,
+                }
+                let mut groups: Vec<Group> = Vec::new();
+                for d in hits {
+                    let same = |g: &Group| match per {
+                        DamagePer::Each => g.source == d.source && g.target == Some(d.target),
+                        DamagePer::Recipient => g.target == Some(d.target),
+                        DamagePer::Source => g.source == d.source,
+                    };
+                    match groups.iter_mut().find(|g| same(g)) {
+                        Some(g) => {
+                            g.amount += d.amount;
+                            g.one_source &= g.source == d.source;
+                            if g.target != Some(d.target) {
+                                g.target = None;
+                            }
+                        }
+                        None => groups.push(Group {
+                            source: d.source,
+                            one_source: true,
+                            target: Some(d.target),
+                            amount: d.amount,
+                        }),
+                    }
+                }
+                for g in groups {
+                    // "It": the permanent dealt damage; for damage to a player, the
+                    // source (if there was just one).
+                    let (subject, player) = match g.target {
+                        Some(DamageTarget::Object(o)) => (Some(o), None),
+                        Some(DamageTarget::Player(p)) => {
+                            (g.one_source.then_some(g.source), Some(p))
+                        }
+                        None => (Some(g.source), None),
+                    };
+                    found.push(PendingTrigger {
+                        controller: src.controller,
+                        source: src.id,
+                        source_card: src.card,
+                        index,
+                        source_lki: None,
+                        subject,
+                        subject_lki: None,
+                        facts: EventFacts {
+                            player,
+                            amount: g.amount,
+                        },
+                    });
+                    conds.push(intervening_if.clone());
                 }
             }
         }
@@ -439,6 +666,7 @@ fn detect_cycled(st: &mut GameState, player: PlayerId, card: ObjectId) {
             controller: player,
             abilities: abilities(st, card),
             lki: None,
+            host: None,
         });
     }
     let mut found = Vec::new();
@@ -470,6 +698,7 @@ fn detect_cycled(st: &mut GameState, player: PlayerId, card: ObjectId) {
                         source_lki: None,
                         subject: Some(card),
                         subject_lki: None,
+                        facts: EventFacts::default(),
                     });
                     conds.push(intervening_if.clone());
                 }
@@ -511,6 +740,7 @@ pub(crate) fn detect_cast(st: &mut GameState, caster: PlayerId, spell: ObjectId)
                         source_lki: None,
                         subject: None,
                         subject_lki: None,
+                        facts: EventFacts::default(),
                     });
                     conds.push(intervening_if.clone());
                 }
@@ -564,6 +794,7 @@ mod tests {
                 facts(id),
                 source,
                 you,
+                None,
             )
         };
         assert!(hit(1, &["Elf"]), "the source, though it isn't a Zombie");
@@ -580,7 +811,8 @@ mod tests {
             &chars_of(&["Elf"]),
             facts(1),
             source,
-            you
+            you,
+            None
         ));
         assert!(filter_hit(
             &ObjFilter::This,
@@ -588,7 +820,8 @@ mod tests {
             &chars_of(&["Elf"]),
             facts(1),
             source,
-            you
+            you,
+            None
         ));
         assert!(!filter_hit(
             &ObjFilter::This,
@@ -596,7 +829,8 @@ mod tests {
             &chars_of(&["Zombie"]),
             facts(2),
             source,
-            you
+            you,
+            None
         ));
     }
 }

@@ -1013,6 +1013,29 @@ Rules text: docs/rules-notes/603-triggered-abilities.md (last section).
   unchanged.
 - 7,467 → 7,716 of 34,463 scripts (22.4%).
 
+## D-058 Compiler batch 7 (breadth): damage triggers, what an event carries, an Oracle guard (2026-11-10)
+Rules text: docs/rules-notes/603-triggered-abilities.md (last section).
+- **`Trigger::Damage { by, to, combat, per }`** for Forge's `DamageDone` (once for each
+  source and recipient), `DamageDoneOnce` (once for each recipient) and `DamageDealtOnce`
+  (once for each source), found from the `DamageDealt` events of one Apply batch.
+- **`EventFacts { player, amount }`** travel with a triggered ability from the event to
+  its resolution (pending trigger → stack object → resolve frame): "that player"
+  (`PlayerRef::TriggeringPlayer`) and "that much" (`Amount::TriggeringAmount`). There is
+  still one triggering object: the permanent dealt damage, or for damage to a player the
+  source. The compiler tracks which of Forge's `Triggered…` names the event of the trigger
+  being compiled provides (`TrigCtx`); a name it doesn't provide is a blocker as before.
+- **`ObjFilter::Host`**: "enchanted creature", "equipped creature" in any trigger.
+- **Reading the compiled card back against its Oracle text** (`oracle:*` blockers). A scan
+  of all 7,929 compiled cards for words of the Oracle text missing from the engine's text
+  found Forge scripts that leave things out where its AI would never choose otherwise:
+  "you may put a counter" compiled as mandatory (3 cards), "another target creature" on an
+  ability that sacrifices its source (1), and "you may search … then shuffle" compiled as
+  a search that always shuffles (3). The compiler now blocks a card that says "may" where
+  the compiled card has no choice, or "another target" where it has no "another"; a plain
+  library search is made optional when the card has one search and says "may search" once.
+  This is the first piece of the generated-text-versus-Oracle round trip.
+- 7,716 → 7,924 of 34,463 scripts (23.0%). Golden hashes unchanged.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

@@ -130,12 +130,14 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-057): 7,716 of 34,463 scripts compile (22.4%); about 10,500 more are one feature
+Status (D-058): 7,924 of 34,463 scripts compile (23.0%); about 10,500 more are one feature
 away. Precons: `harness coverage --verbose` lists what blocks the rest. Feature tests live in `crates/harness/tests/forge_features.rs`: invented cards written
 in Forge's format, compiled by `harness::forge_test_catalog` and played (`forge_test_blockers`
-for "this must not compile"). Three guards catch compiler holes — keep them: a line that
+for "this must not compile"). Four guards catch compiler holes — keep them: a line that
 yields nothing without a named blocker is `unexplained:*`; every compiled card goes through
-`card_db::validate` (`invalid:*`); and the `forge-Np` soak plays random decks of all of them.
+`card_db::validate` (`invalid:*`); the compiled card is read back against its Oracle text
+for words Forge scripts leave out (`oracle:*`: "may", "another target"); and the `forge-Np`
+soak plays random decks of all of them.
 References written from Forge's sources: `docs/forge/script-format.md` (file format, costs,
 filters, `Defined$`, expressions), `effects.md` (every effect API), and
 `triggers-statics-replacements-keywords.md`. Read the relevant section before compiling a

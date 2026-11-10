@@ -894,6 +894,7 @@ impl CastFrame {
                                     source_lki: None,
                                     subject: None,
                                     subject_lki: None,
+                                    facts: Default::default(),
                                 },
                             )
                         }
@@ -909,6 +910,7 @@ impl CastFrame {
                                 source_lki: t.source_lki.clone(),
                                 subject: t.subject,
                                 subject_lki: t.subject_lki.clone(),
+                                facts: t.facts,
                             },
                         ),
                     });

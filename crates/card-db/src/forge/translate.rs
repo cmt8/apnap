@@ -13,10 +13,10 @@ use super::parse::{Face, Record, Script};
 use card_model::{
     AbilityDef, ActivationZone, Affected, Amount, BasicLandType, Body, Calc, CardDef, CardDest,
     CardType, CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost, CostChoice,
-    CounterKind, DamageBy, EachPlayerAction, Effect, Keyword, ManaCost, ManaProduce,
-    ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces,
-    Selector, Signed, Supertype, Take, TargetFilter, TargetGroup, TargetRef, Timing, Trigger,
-    TriggerStep, Who,
+    CounterKind, DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword, ManaCost,
+    ManaProduce, ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef, PlayerRef,
+    ReplaceWith, Replaces, Selector, Signed, Supertype, Take, TargetFilter, TargetGroup, TargetRef,
+    Timing, Trigger, TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -136,6 +136,10 @@ struct Tx<'a> {
     /// The zone the activated ability being compiled works from ("this card" is then the
     /// card in that hand or graveyard).
     from_zone: ActivationZone,
+    /// What the event of the trigger being compiled lets its ability refer to.
+    trig: TrigCtx,
+    /// The trigger being compiled is "you may" as a whole (`OptionalDecider$`).
+    optional_trigger: bool,
     /// Additional costs of the spell, found on its `SP$` line.
     additional: Vec<AbilityDef>,
     /// The filter of the card's `K:Enchant:<filter>` line, if it is an Aura.
@@ -145,6 +149,67 @@ struct Tx<'a> {
     /// The script variables that hold abilities, parsed.
     records: &'a [(String, Record)],
     known: &'a Known,
+}
+
+/// What a trigger's event gives its ability to refer to (Forge's `Triggered…` names).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TrigCtx {
+    /// `TriggeredCard`: the event's object ("it").
+    card: bool,
+    /// `TriggeredTarget` is the player dealt damage ("that player").
+    target_player: bool,
+    /// `TriggeredTarget` is the permanent dealt damage ("it").
+    target_object: bool,
+    /// `TriggeredSource` is the ability's own source.
+    source_this: bool,
+    /// `TriggeredSource` is the event's object: the one source of damage dealt to a player.
+    source: bool,
+    /// `TriggerCount$DamageAmount` ("that much").
+    amount: bool,
+}
+
+impl Default for TrigCtx {
+    fn default() -> Self {
+        TrigCtx {
+            card: true,
+            target_player: false,
+            target_object: false,
+            source_this: false,
+            source: false,
+            amount: false,
+        }
+    }
+}
+
+impl TrigCtx {
+    fn of(when: &Trigger) -> TrigCtx {
+        match when {
+            Trigger::Damage { by, to, per, .. } => {
+                let player = matches!(to, DamageTo::Player(_));
+                TrigCtx {
+                    card: false,
+                    target_player: player,
+                    target_object: matches!(to, DamageTo::Permanent(_)),
+                    source_this: *by == Some(ObjFilter::This),
+                    source: player && *per != DamagePer::Recipient,
+                    amount: true,
+                }
+            }
+            // Several events for one ability: only what all of them give.
+            Trigger::Any(v) => {
+                let all: Vec<TrigCtx> = v.iter().map(TrigCtx::of).collect();
+                TrigCtx {
+                    card: all.iter().all(|c| c.card),
+                    target_player: all.iter().all(|c| c.target_player),
+                    target_object: all.iter().all(|c| c.target_object),
+                    source_this: all.iter().all(|c| c.source_this),
+                    source: all.iter().all(|c| c.source),
+                    amount: all.iter().all(|c| c.amount),
+                }
+            }
+            _ => TrigCtx::default(),
+        }
+    }
 }
 
 /// A cost names the card only where the ability works from: `{T}` and "sacrifice this" on
@@ -506,7 +571,28 @@ impl<'a> Tx<'a> {
     }
 
     /// The filter of a trigger's `ValidCard$`.
+    /// Is the card a permanent card (not an instant or sorcery)?
+    fn permanent(&self) -> bool {
+        !self
+            .face
+            .types
+            .iter()
+            .any(|t| t == "Instant" || t == "Sorcery")
+    }
+
     fn obj_filter(&mut self, text: &str) -> Option<ObjFilter> {
+        // "Enchanted creature", "equipped creature": what this is attached to. The type
+        // word says nothing more where it is what the card attaches to anyway.
+        if let Some((kind, "EquippedBy" | "EnchantedBy" | "AttachedBy")) = text.split_once('.') {
+            let implied = match kind {
+                "Card" | "Permanent" => true,
+                "Creature" => self.equipment || self.enchant == Some("Creature"),
+                _ => false,
+            };
+            if implied {
+                return Some(ObjFilter::Host);
+            }
+        }
         let alts = self.alts(text)?;
         match alts.as_slice() {
             [Alt::This] => Some(ObjFilter::This),
@@ -538,6 +624,7 @@ impl<'a> Tx<'a> {
             Amount::X
             | Amount::TriggeringPower
             | Amount::TriggeringToughness
+            | Amount::TriggeringAmount
             | Amount::SacrificedPower => Some(a),
             // Read off the battlefield: worked out once for the whole resolution (CR
             // 608.2h), as "X".
@@ -633,8 +720,14 @@ impl<'a> Tx<'a> {
             return self.expr_text(inner, depth + 1);
         }
         match v {
-            "TriggeredCard$CardPower" => return Some(Amount::TriggeringPower),
-            "TriggeredCard$CardToughness" => return Some(Amount::TriggeringToughness),
+            "TriggeredCard$CardPower" if self.trig.card => return Some(Amount::TriggeringPower),
+            "TriggeredCard$CardToughness" if self.trig.card => {
+                return Some(Amount::TriggeringToughness);
+            }
+            // "That much damage", "that many".
+            "TriggerCount$DamageAmount" if self.trig.amount => {
+                return Some(Amount::TriggeringAmount);
+            }
             // "the sacrificed creature's power": what was sacrificed to pay the cost.
             "Sacrificed$CardPower" => return Some(Amount::SacrificedPower),
             // The card the ability is on.
@@ -726,7 +819,21 @@ impl<'a> Tx<'a> {
             Some("Player.Opponent" | "Opponent") => Some(PlayerRef::EachOpponent),
             Some("Player") => Some(PlayerRef::Each),
             // The rules' "its controller" is whoever controlled it last (CR 608.2h).
-            Some("TriggeredCardController") if triggered => Some(PlayerRef::TriggeringController),
+            Some("TriggeredCardController") if triggered && self.trig.card => {
+                Some(PlayerRef::TriggeringController)
+            }
+            // "That player": the player dealt damage.
+            Some("TriggeredTarget") if triggered && self.trig.target_player => {
+                Some(PlayerRef::TriggeringPlayer)
+            }
+            // The controller of the source of the damage: of this permanent — the
+            // ability's controller — or of the creature that dealt it.
+            Some("TriggeredSourceController") if triggered && self.trig.source_this => {
+                Some(PlayerRef::You)
+            }
+            Some("TriggeredSourceController") if triggered && self.trig.source => {
+                Some(PlayerRef::TriggeringController)
+            }
             Some("Targeted") => match chain.targets.len() {
                 0 => {
                     self.block("defined:Targeted-without-target");
@@ -748,7 +855,15 @@ impl<'a> Tx<'a> {
     /// is the card itself.
     fn recipient(&mut self, rd: &Rd<'a>, chain: &Chain, triggered: bool) -> Option<TargetRef> {
         match rd.rec.get("Defined") {
-            Some("You" | "Opponent" | "Player.Opponent" | "Player" | "TriggeredCardController") => {
+            Some(
+                "You"
+                | "Opponent"
+                | "Player.Opponent"
+                | "Player"
+                | "TriggeredCardController"
+                | "TriggeredSourceController",
+            ) => self.player(rd, chain, triggered).map(TargetRef::Players),
+            Some("TriggeredTarget") if self.trig.target_player => {
                 self.player(rd, chain, triggered).map(TargetRef::Players)
             }
             Some("Targeted") => match chain.targets.len() {
@@ -774,7 +889,23 @@ impl<'a> Tx<'a> {
             // form is the snapshot from the event; for the effects that use this reference
             // (counters and pumps on a permanent) both act only if it is still the
             // permanent that triggered the ability, which is what `Triggering` means.
-            Some("TriggeredCard" | "TriggeredCardLKICopy") if triggered => Some(ObjRef::Triggering),
+            Some("TriggeredCard" | "TriggeredCardLKICopy") if triggered && self.trig.card => {
+                Some(ObjRef::Triggering)
+            }
+            // The permanent dealt damage; the source of damage dealt to a player.
+            Some("TriggeredTarget" | "TriggeredTargetLKICopy")
+                if triggered && self.trig.target_object =>
+            {
+                Some(ObjRef::Triggering)
+            }
+            Some("TriggeredSource" | "TriggeredSourceLKICopy")
+                if triggered && self.trig.source_this =>
+            {
+                Some(ObjRef::This)
+            }
+            Some("TriggeredSource" | "TriggeredSourceLKICopy") if triggered && self.trig.source => {
+                Some(ObjRef::Triggering)
+            }
             Some("Targeted") if !chain.targets.is_empty() => {
                 chain.refers_to_targets.set(true);
                 Some(ObjRef::Target(chain.targets.len() as u8 - 1))
@@ -1681,10 +1812,33 @@ impl<'a> Tx<'a> {
             shuffle,
         };
         // "You may search…": one yes/no before anything is looked at.
-        Some(match rd.get("Optional") {
-            None => effect,
-            Some(_) => Effect::May(Box::new(effect)),
-        })
+        if rd.get("Optional").is_some() {
+            return Some(Effect::May(Box::new(effect)));
+        }
+        // The card says "you may search" where the script has a plain search: Forge lets
+        // the search find nothing and always shuffles, the card lets the player leave the
+        // library alone. Where the card has one search and says "may" once, that search
+        // is the optional one; anything less clear is not compiled.
+        let oracle = self.face.oracle.as_deref().unwrap_or("").to_lowercase();
+        let says_may = oracle.matches("may search").count();
+        if from != CardZone::Library || self.optional_trigger || says_may == 0 {
+            return Some(effect);
+        }
+        let searches = self
+            .face
+            .abilities
+            .iter()
+            .chain(self.records.iter().map(|(_, r)| r))
+            .filter(|r| {
+                r.head().is_some_and(|h| h.1 == "ChangeZone") && r.get("Origin") == Some("Library")
+            })
+            .count();
+        if says_may == 1 && searches == 1 {
+            Some(Effect::May(Box::new(effect)))
+        } else {
+            self.block("ChangeZone:optional search differs from the card");
+            None
+        }
     }
 
     /// `NumAtt$` / `NumDef$` / `KW$` of Pump and PumpAll (which last until end of turn).
@@ -2485,6 +2639,43 @@ impl<'a> Tx<'a> {
                 .get("ValidCard")
                 .and_then(|f| self.obj_filter(f))
                 .map(Trigger::Attacks),
+            // Damage being dealt (CR 120). `DamageDone`: once for each source and
+            // recipient; `DamageDoneOnce`: once for each recipient ("is dealt damage",
+            // "one or more creatures deal damage"); `DamageDealtOnce`: once for each
+            // source ("deals damage").
+            mode @ ("DamageDone" | "DamageDoneOnce" | "DamageDealtOnce") => {
+                let by = match rd.get("ValidSource") {
+                    None => Some(None),
+                    Some(f) => self.obj_filter(f).map(Some),
+                };
+                let to = match rd.get("ValidTarget") {
+                    None => Some(DamageTo::Anything),
+                    Some("Player") => Some(DamageTo::Player(Who::Any)),
+                    Some("You") => Some(DamageTo::Player(Who::You)),
+                    Some("Opponent" | "Player.Opponent") => Some(DamageTo::Player(Who::Opponent)),
+                    Some(f) => self.obj_filter(f).map(DamageTo::Permanent),
+                };
+                let combat = match rd.get("CombatDamage") {
+                    None => Some(None),
+                    Some("True") => Some(Some(true)),
+                    Some("False") => Some(Some(false)),
+                    Some(_) => {
+                        self.block("param:trig DamageDone.CombatDamage value");
+                        None
+                    }
+                };
+                let per = match mode {
+                    "DamageDone" => DamagePer::Each,
+                    "DamageDoneOnce" => DamagePer::Recipient,
+                    _ => DamagePer::Source,
+                };
+                Some(Trigger::Damage {
+                    by: by?,
+                    to: to?,
+                    combat: combat?,
+                    per,
+                })
+            }
             // CR 702.29c: "when you cycle this card"; "whenever [a player] cycles a card",
             // which a permanent watches for (the cycled card is never that permanent, so
             // "another card" says nothing more).
@@ -2544,6 +2735,20 @@ impl<'a> Tx<'a> {
                 (Some("Attacks"), _) => rec.get("ValidCard") == Some("Card.Self"),
                 // "When you cycle this card": from wherever the card went.
                 (Some("Cycled"), _) => rec.get("ValidCard") == Some("Card.Self"),
+                // A permanent that deals or is dealt damage is on the battlefield; so is
+                // an Aura or Equipment whose host does. (An instant's own "whenever this
+                // deals damage" would be something else.)
+                (Some("DamageDone" | "DamageDoneOnce" | "DamageDealtOnce"), _) => {
+                    let about = |key: &str| {
+                        rec.get(key).is_some_and(|v| {
+                            v == "Card.Self"
+                                || v.ends_with(".EquippedBy")
+                                || v.ends_with(".EnchantedBy")
+                                || v.ends_with(".AttachedBy")
+                        })
+                    };
+                    (about("ValidSource") || about("ValidTarget")) && self.permanent()
+                }
                 _ => false,
             };
             match rd.get("TriggerZones") {
@@ -2591,11 +2796,15 @@ impl<'a> Tx<'a> {
                 self.block("trig:Secondary-alone");
             }
             self.in_trigger = true;
+            self.optional_trigger = optional;
+            self.trig = event.as_ref().map(TrigCtx::of).unwrap_or_default();
             let body = match self.sub(exec) {
                 Some(r) => self.body(r, true, "DB"),
                 None => None,
             };
             self.in_trigger = false;
+            self.optional_trigger = false;
+            self.trig = TrigCtx::default();
             let (Some(when), Some(intervening_if), Some(mut body)) = (event, cond, body) else {
                 self.explained(before, "trigger");
                 continue;
@@ -3021,6 +3230,8 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
         defines_pt: (false, false),
         in_trigger: false,
         from_zone: ActivationZone::Battlefield,
+        trig: TrigCtx::default(),
+        optional_trigger: false,
         additional: Vec::new(),
         enchant: None,
         equipment: face.types.iter().any(|t| t == "Equipment"),
@@ -3338,6 +3549,17 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
             }
         }
     }
+    // Forge scripts leave out some things the card says where its AI would never choose
+    // otherwise ("you may put a counter", "another target creature" on an ability that
+    // sacrifices its source). The card as compiled is read back against its Oracle text
+    // for those words.
+    if tx.blockers.is_empty()
+        && let Some(oracle) = &face.oracle
+    {
+        for word in oracle_words_missing(oracle, &def) {
+            tx.block(format!("oracle:{word}"));
+        }
+    }
     if tx.blockers.is_empty() {
         Ok(Compiled {
             def,
@@ -3346,6 +3568,45 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
     } else {
         Err(tx.blockers)
     }
+}
+
+/// Words of the card's Oracle text (without reminder text and without the quoted
+/// abilities of tokens it makes) that the compiled card has no counterpart for.
+fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
+    // Drop "(reminder text)" and "quoted abilities".
+    let mut plain = String::new();
+    let (mut parens, mut quoted) = (0u32, false);
+    for c in oracle.chars() {
+        match c {
+            '(' => parens += 1,
+            ')' => parens = parens.saturating_sub(1),
+            '"' => quoted = !quoted,
+            c if parens == 0 && !quoted => plain.extend(c.to_lowercase()),
+            _ => {}
+        }
+    }
+    let has_word = |text: &str, word: &str| {
+        text.split(|c: char| !c.is_ascii_alphabetic())
+            .any(|w| w == word)
+    };
+    let compiled = card_model::describe::rules_text(def)
+        .join(" / ")
+        .to_lowercase();
+    let mut missing = Vec::new();
+    // "You may": an optional instruction, or "up to" some number of things.
+    if has_word(&plain, "may") && !has_word(&compiled, "may") && !compiled.contains("up to") {
+        missing.push("says may");
+    }
+    // "Another target creature": the ability's source can't be chosen.
+    if (plain.contains("another target") || plain.contains("other target"))
+        && !has_word(&compiled, "another")
+        && !has_word(&compiled, "other")
+        // (Several targets of one instruction are different objects anyway: CR 115.3.)
+        && !has_word(&compiled, "targets")
+    {
+        missing.push("another target");
+    }
+    missing
 }
 
 /// Where each `A:`/`T:`/`S:`/`R:` line sits among the others, so abilities keep the

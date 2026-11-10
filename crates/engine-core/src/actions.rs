@@ -167,6 +167,7 @@ pub enum GameAction {
         /// The object whose event triggered the ability, and its last known information.
         subject: Option<ObjectId>,
         subject_lki: Option<Characteristics>,
+        facts: crate::triggers::EventFacts,
     },
     /// CR 608.2h: an ability on the stack remembers the triggering object as it last
     /// existed, once that object leaves the battlefield.
@@ -574,6 +575,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             source_lki,
             subject,
             subject_lki,
+            facts,
         } => {
             let id = st.alloc_object_id();
             st.stack.push(StackObject {
@@ -592,6 +594,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 x: 0,
                 targets: Vec::new(),
                 sacrificed_power: 0,
+                facts,
             });
             st.emit(Event::AbilityActivated {
                 player: controller,
@@ -765,6 +768,7 @@ fn perform_move(
             x: 0,
             targets: Vec::new(),
             sacrificed_power: 0,
+            facts: Default::default(),
         });
     } else {
         let list = st.zones.list_mut(to, old.owner);
