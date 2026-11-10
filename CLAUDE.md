@@ -124,7 +124,13 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status: 3,673 of 34,465 scripts compile (10.7%); 8,551 more are one feature away.
+Status: 3,602 of 34,465 scripts compile (10.5%); about 8,500 more are one feature away.
+References written from Forge's sources: `docs/forge/script-format.md` (file format, costs,
+filters, `Defined$`, expressions), `effects.md` (every effect API), and
+`triggers-statics-replacements-keywords.md`. Read the relevant section before compiling a
+feature: Forge's defaults are often not what the key names suggest (flags are tested for
+presence, `Defined$ Targeted` means every target of the chain, a trigger that runs an
+`AB$` with a cost is "you may pay", triggers without `TriggerZones$` work from any zone).
 Not built yet: loading compiled cards into games (a game's catalog must hold only the
 cards in its decks, not all 30k), the Scryfall cross-check of printed characteristics, the
 generated-text-vs-Oracle round trip, multi-face cards.

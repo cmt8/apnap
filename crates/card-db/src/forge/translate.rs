@@ -68,8 +68,13 @@ impl<'a> Rd<'a> {
     /// Report every parameter that wasn't read.
     fn finish(&self, blockers: &mut Blockers) {
         let seen = self.seen.borrow();
-        for (k, _) in &self.rec.params {
+        for (i, (k, _)) in self.rec.params.iter().enumerate() {
             let k = k.as_str();
+            // Forge takes the last of two parameters with the same key; rather than rely
+            // on that, a record that repeats a key isn't compiled.
+            if self.rec.params[..i].iter().any(|(other, _)| other == k) {
+                blockers.insert(format!("param:{}.{k} (twice)", self.what));
+            }
             if seen.contains(k)
                 || TEXT_ONLY.contains(&k)
                 || matches!(k, "SP" | "AB" | "DB" | "ST" | "Mode" | "Event")
@@ -96,6 +101,8 @@ struct Chain {
     effects: Vec<Effect>,
     /// "…where X is [amount]": the script variable that `Amount::X` stands for.
     x: Option<(String, Amount)>,
+    /// Some link said `Defined$ Targeted` — in Forge, every target of the whole chain.
+    refers_to_targets: std::cell::Cell<bool>,
 }
 
 struct Tx<'a> {
@@ -415,7 +422,10 @@ impl<'a> Tx<'a> {
                     self.block("defined:Targeted-without-target");
                     None
                 }
-                n => Some(PlayerRef::Target(n as u8 - 1)),
+                n => {
+                    chain.refers_to_targets.set(true);
+                    Some(PlayerRef::Target(n as u8 - 1))
+                }
             },
             Some(other) => {
                 self.block(format!("defined:player {other}"));
@@ -427,8 +437,13 @@ impl<'a> Tx<'a> {
     fn object(&mut self, rd: &Rd<'a>, chain: &Chain, triggered: bool) -> Option<ObjRef> {
         match rd.get("Defined") {
             None | Some("Self") => Some(ObjRef::This),
+            // Forge's plain form follows the card to wherever it is now and the "LKICopy"
+            // form is the snapshot from the event; for the effects that use this reference
+            // (counters and pumps on a permanent) both act only if it is still the
+            // permanent that triggered the ability, which is what `Triggering` means.
             Some("TriggeredCard" | "TriggeredCardLKICopy") if triggered => Some(ObjRef::Triggering),
             Some("Targeted") if !chain.targets.is_empty() => {
+                chain.refers_to_targets.set(true);
                 Some(ObjRef::Target(chain.targets.len() as u8 - 1))
             }
             Some(other) => {
@@ -441,6 +456,11 @@ impl<'a> Tx<'a> {
     /// `ValidTgts$` of an effect: adds a target slot and returns its index.
     fn target(&mut self, rd: &Rd<'a>, chain: &mut Chain, graveyard: bool) -> Option<u8> {
         let text = rd.get("ValidTgts")?;
+        // Which of the two wins differs from one Forge effect to the next.
+        if rd.rec.get("Defined").is_some() {
+            self.block("param:target+Defined");
+            return None;
+        }
         for k in ["TargetMin", "TargetMax", "TargetUnique", "TargetType"] {
             if rd.rec.get(k).is_some() {
                 self.block(format!("param:target.{k}"));
@@ -481,11 +501,23 @@ impl<'a> Tx<'a> {
     // ------------------------------------------------------------------ effects
 
     /// One effect record (not following its sub-ability). `None` = blocked.
-    fn effect(&mut self, rec: &'a Record, chain: &mut Chain, triggered: bool) -> Option<Effect> {
-        let Some((_, api)) = rec.head() else {
+    fn effect(
+        &mut self,
+        rec: &'a Record,
+        chain: &mut Chain,
+        triggered: bool,
+        kind: &str,
+    ) -> Option<Effect> {
+        let Some((found, api)) = rec.head() else {
             self.block("record:no-api");
             return None;
         };
+        // A trigger or sub-ability written as `AB$` with a cost is "you may pay …; if you
+        // do, …" in Forge: not the same as a plain effect.
+        if found != kind {
+            self.block(format!("record:{found}$ where {kind}$ expected"));
+            return None;
+        }
         let rd = Rd::new(rec, api);
         rd.get("SubAbility");
         rd.get("Cost");
@@ -740,8 +772,9 @@ impl<'a> Tx<'a> {
     }
 
     /// A whole chain (an ability and its `SubAbility$` descendants) as one mode.
-    fn mode(&mut self, first: &'a Record, triggered: bool) -> Option<Mode> {
+    fn mode(&mut self, first: &'a Record, triggered: bool, root: &str) -> Option<Mode> {
         let mut chain = Chain::default();
+        let mut kind = root;
         let mut next = Some(first);
         let mut ok = true;
         let mut steps = 0;
@@ -751,10 +784,11 @@ impl<'a> Tx<'a> {
                 self.block("chain:too-long");
                 return None;
             }
-            match self.effect(rec, &mut chain, triggered) {
+            match self.effect(rec, &mut chain, triggered, kind) {
                 Some(e) => chain.effects.push(e),
                 None => ok = false,
             }
+            kind = "DB";
             next = match rec.get("SubAbility") {
                 None => None,
                 Some(name) => match self.sub(name) {
@@ -765,6 +799,12 @@ impl<'a> Tx<'a> {
                     }
                 },
             };
+        }
+        // `Defined$ Targeted` means every target of the chain; with exactly one target slot
+        // that is unambiguous.
+        if chain.refers_to_targets.get() && chain.targets.len() != 1 {
+            self.block("defined:Targeted-with-several-targets");
+            ok = false;
         }
         if !ok {
             return None;
@@ -799,9 +839,13 @@ impl<'a> Tx<'a> {
     }
 
     /// The body of a spell, activated ability or trigger: a single mode, or a Charm.
-    fn body(&mut self, rec: &'a Record, triggered: bool) -> Option<Body> {
+    fn body(&mut self, rec: &'a Record, triggered: bool, root: &str) -> Option<Body> {
         if rec.head().map(|h| h.1) != Some("Charm") {
-            return self.mode(rec, triggered).map(Body::Effect);
+            return self.mode(rec, triggered, root).map(Body::Effect);
+        }
+        if rec.head().map(|h| h.0) != Some(root) {
+            self.block(format!("record:Charm not {root}$"));
+            return None;
         }
         let rd = Rd::new(rec, "Charm");
         rd.get("Cost");
@@ -825,7 +869,7 @@ impl<'a> Tx<'a> {
         let mut modes = Vec::new();
         for n in names {
             let rec = self.sub(n)?;
-            modes.push(self.mode(rec, triggered)?);
+            modes.push(self.mode(rec, triggered, "DB")?);
         }
         Some(Body::Modal { min, max, modes })
     }
@@ -904,7 +948,7 @@ impl<'a> Tx<'a> {
                     self.block("spell:Cost");
                     return None;
                 }
-                self.body(rec, false).map(AbilityDef::Spell)
+                self.body(rec, false, "SP").map(AbilityDef::Spell)
             }
             "AB" if api == "Mana" => {
                 let rd = Rd::new(rec, "Mana");
@@ -947,7 +991,7 @@ impl<'a> Tx<'a> {
                         return None;
                     }
                 };
-                let body = self.body(rec, false);
+                let body = self.body(rec, false, "AB");
                 Some(AbilityDef::Activated {
                     cost: cost?,
                     timing,
@@ -1074,7 +1118,15 @@ impl<'a> Tx<'a> {
                     false
                 }
             };
-            let secondary = rd.get("Secondary") == Some("True");
+            let secondary = match rd.get("Secondary") {
+                None => false,
+                Some("True") => true,
+                // Forge only tests that the key is present.
+                Some(_) => {
+                    self.block("trig:Secondary value");
+                    true
+                }
+            };
             let cond = self.condition(&rd);
             let exec = rd.get("Execute").unwrap_or("");
             rd.finish(&mut self.blockers);
@@ -1097,7 +1149,7 @@ impl<'a> Tx<'a> {
                 self.block("trig:Secondary-alone");
             }
             let body = match self.sub(exec) {
-                Some(r) => self.body(r, true),
+                Some(r) => self.body(r, true, "DB"),
                 None => None,
             };
             let (Some(when), Some(intervening_if), Some(mut body)) = (event, cond, body) else {
