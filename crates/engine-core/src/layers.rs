@@ -312,6 +312,12 @@ pub fn matches_parts(
         }
         && !(sel.other && id == source)
         && sel.token.is_none_or(|t| is_token == t)
+        && {
+            // CR 202.3: no mana cost is mana value 0.
+            let mv = c.mana_cost.as_ref().map_or(0, |m| m.mana_value());
+            sel.mana_value_min.is_none_or(|n| mv >= n) && sel.mana_value_max.is_none_or(|n| mv <= n)
+        }
+        && (sel.names.is_empty() || sel.names.contains(&c.name))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

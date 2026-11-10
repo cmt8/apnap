@@ -4,10 +4,10 @@
 //! vocabulary without describing it is a compile error.
 
 use crate::{
-    AbilityDef, Affected, Amount, Body, CardDef, CardType, Color, CombatRule, Condition,
-    ContinuousEffect, Cost, CounterKind, DamageBy, EachPlayerAction, Effect, Keyword, ManaProduce,
-    Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, TargetFilter, TargetRef,
-    Timing, Trigger, TriggerStep, Who,
+    AbilityDef, Affected, Amount, Body, CardDef, CardDest, CardType, CardZone, Color, CombatRule,
+    Condition, ContinuousEffect, Cost, CounterKind, DamageBy, EachPlayerAction, Effect, Keyword,
+    ManaProduce, Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, Take,
+    TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
 };
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -236,6 +236,10 @@ fn selector(s: &Selector, plural: bool) -> String {
     }
     if let Some(p) = s.power_max {
         out.push_str(&format!(" with power {p} or less"));
+    }
+    out.push_str(&mana_value(s));
+    if !s.names.is_empty() {
+        out.push_str(&format!(" named {}", s.names.join(" or ")));
     }
     match s.controller {
         Who::Any => {}
@@ -496,6 +500,307 @@ fn effect(mode: &Mode, e: &Effect) -> String {
         Effect::ReturnToBattlefield { what } => {
             format!("return {} to the battlefield", obj(mode, *what))
         }
+        Effect::ChooseCards {
+            who,
+            from,
+            cards,
+            count,
+            must,
+            to,
+            reveal,
+            shuffle,
+        } => {
+            let who = player(mode, *who);
+            let you = who == "you";
+            let their = if you { "your" } else { "their" };
+            let n = amount(count);
+            let one = n == "1";
+            let noun = if *from == CardZone::Battlefield {
+                let parts: Vec<String> = cards.iter().map(|s| selector(s, !one)).collect();
+                if parts.is_empty() {
+                    if one { "permanent" } else { "permanents" }.to_string()
+                } else {
+                    join(parts, "or")
+                }
+            } else {
+                card_list(cards, !one)
+            };
+            let what = match (one, *must) {
+                (true, _) => with_article(&noun),
+                (false, true) => format!("{n} {noun}"),
+                (false, false) => format!("up to {n} {noun}"),
+            };
+            let it = if one { "it" } else { "them" };
+            let s = |base: &str| {
+                if you {
+                    base.to_string()
+                } else {
+                    format!("{base}s")
+                }
+            };
+            let mut out = match from {
+                CardZone::Library => {
+                    let mut t = format!("{who} {} {their} library for {what}", s("search"));
+                    if *reveal {
+                        t.push_str(&format!(", {} {it}", s("reveal")));
+                    }
+                    t.push_str(&format!(", {} {it} {}", s("put"), dest(*to, their)));
+                    t
+                }
+                CardZone::Hand | CardZone::Graveyard => {
+                    let zone = if *from == CardZone::Hand {
+                        "hand"
+                    } else {
+                        "graveyard"
+                    };
+                    let may = if *must { "" } else { "may " };
+                    let verb = if *must { s("put") } else { "put".to_string() };
+                    let mut t = format!(
+                        "{who} {may}{verb} {what} from {their} {zone} {}",
+                        dest(*to, their)
+                    );
+                    if *reveal {
+                        t.push_str(" (revealed)");
+                    }
+                    t
+                }
+                CardZone::Battlefield => {
+                    let may = if *must { "" } else { "may " };
+                    let verb = if *must { s("put") } else { "put".to_string() };
+                    format!("{who} {may}{verb} {what} {}", dest(*to, "its owner's"))
+                }
+            };
+            if *shuffle {
+                out.push_str(&format!(", then {}", s("shuffle")));
+            }
+            out
+        }
+        Effect::Scry { who, amount: a } => {
+            format!(
+                "{} {}",
+                verb(&player(mode, *who), "scry", "scries"),
+                amount(a)
+            )
+        }
+        Effect::Surveil { who, amount: a } => {
+            format!(
+                "{} {}",
+                verb(&player(mode, *who), "surveil", "surveils"),
+                amount(a)
+            )
+        }
+        Effect::Dig {
+            who,
+            count,
+            reveal,
+            take,
+            cards,
+            to,
+            reveal_taken,
+            rest,
+            rest_random,
+        } => {
+            let who = player(mode, *who);
+            let you = who == "you";
+            let their = if you { "your" } else { "their" };
+            let n = amount(count);
+            let look = match (*reveal, you) {
+                (true, true) => "reveal",
+                (true, false) => "reveals",
+                (false, true) => "look at",
+                (false, false) => "looks at",
+            };
+            let top = if n == "1" {
+                format!("the top card of {their} library")
+            } else {
+                format!("the top {n} cards of {their} library")
+            };
+            let noun = |plural: bool| card_list(cards, plural);
+            let shown = if *reveal_taken && !*reveal {
+                "reveal "
+            } else {
+                ""
+            };
+            let taken = match take {
+                Take::Exactly(1) => {
+                    format!("{shown}{} from among them", with_article(&noun(false)))
+                }
+                Take::Exactly(k) => format!("{shown}{k} {} from among them", noun(true)),
+                Take::UpTo(1) => {
+                    format!(
+                        "you may {shown}{} from among them",
+                        with_article(&noun(false))
+                    )
+                }
+                Take::UpTo(k) => format!("you may {shown}up to {k} {} from among them", noun(true)),
+                Take::All => format!("{shown}all {} from among them", noun(true)),
+                Take::Any => format!(
+                    "you may {shown}any number of {} from among them",
+                    noun(true)
+                ),
+            };
+            let taken = if taken.starts_with("you may") {
+                format!("{taken} and put them")
+            } else if shown.is_empty() {
+                format!("put {taken}")
+            } else {
+                format!("{taken} and put them")
+            };
+            format!(
+                "{who} {look} {top}. Then {taken} {} and the rest {}{}",
+                dest(*to, their),
+                dest(*rest, their),
+                if *rest_random {
+                    " in a random order"
+                } else {
+                    ""
+                }
+            )
+        }
+        Effect::PutInto { what, to, shuffle } => {
+            if *shuffle {
+                format!("shuffle {} into its owner's library", obj(mode, *what))
+            } else {
+                format!("put {} {}", obj(mode, *what), dest(*to, "its owner's"))
+            }
+        }
+        Effect::MoveAll {
+            from,
+            whose,
+            cards,
+            to,
+            shuffle,
+        } => {
+            let whose_text = match whose {
+                PlayerRef::Each => String::new(),
+                PlayerRef::You => "your".to_string(),
+                other => format!("{}'s", player(mode, *other)),
+            };
+            let what = match from {
+                CardZone::Battlefield => {
+                    let parts: Vec<String> = cards.iter().map(|s| selector(s, true)).collect();
+                    let list = if parts.is_empty() {
+                        "permanents".to_string()
+                    } else {
+                        join(parts, "and")
+                    };
+                    match whose {
+                        PlayerRef::Each => format!("all {list}"),
+                        PlayerRef::You => format!("all {list} you control"),
+                        other => format!("all {list} {} controls", player(mode, *other)),
+                    }
+                }
+                zone => {
+                    let zone = match zone {
+                        CardZone::Library => "library",
+                        CardZone::Hand => "hand",
+                        _ => "graveyard",
+                    };
+                    let list = card_list(cards, true);
+                    if whose_text.is_empty() {
+                        format!("all {list} from all {zone}s")
+                    } else {
+                        format!("all {list} from {whose_text} {zone}")
+                    }
+                }
+            };
+            let mut out = match to {
+                CardDest::Hand => format!("return {what} to their owners' hands"),
+                CardDest::Exile => format!("exile {what}"),
+                CardDest::Battlefield { tapped: false } => {
+                    format!("put {what} onto the battlefield")
+                }
+                CardDest::Battlefield { tapped: true } => {
+                    format!("put {what} onto the battlefield tapped")
+                }
+                CardDest::Graveyard => format!("put {what} into their owners' graveyards"),
+                CardDest::LibraryTop if *shuffle => {
+                    format!("shuffle {what} into their owners' libraries")
+                }
+                CardDest::LibraryTop => format!("put {what} on top of their owners' libraries"),
+                CardDest::LibraryBottom => {
+                    format!("put {what} on the bottom of their owners' libraries")
+                }
+            };
+            if *shuffle && *to != CardDest::LibraryTop {
+                out.push_str(", then those players shuffle");
+            }
+            out
+        }
+    }
+}
+
+/// "into your hand", "onto the battlefield tapped", "on top of their library".
+fn dest(to: CardDest, whose: &str) -> String {
+    match to {
+        CardDest::Hand => format!("into {whose} hand"),
+        CardDest::Battlefield { tapped: false } => "onto the battlefield".to_string(),
+        CardDest::Battlefield { tapped: true } => "onto the battlefield tapped".to_string(),
+        CardDest::Graveyard => format!("into {whose} graveyard"),
+        CardDest::Exile => "into exile".to_string(),
+        CardDest::LibraryTop => format!("on top of {whose} library"),
+        CardDest::LibraryBottom => format!("on the bottom of {whose} library"),
+    }
+}
+
+/// Cards in a hand, library or graveyard: "basic land card", "creature cards with mana
+/// value 3 or less", "card named Test Elf", "artifact or enchantment cards".
+fn card_list(cards: &[Selector], plural: bool) -> String {
+    let noun = if plural { "cards" } else { "card" };
+    if cards.is_empty() {
+        return noun.to_string();
+    }
+    let parts: Vec<String> = cards
+        .iter()
+        .map(|s| {
+            let mut words: Vec<String> = Vec::new();
+            if s.other {
+                words.push(if plural { "other" } else { "another" }.to_string());
+            }
+            words.extend(s.colors.iter().map(|c| color(*c).to_string()));
+            words.extend(s.supertypes.iter().map(|t| format!("{t:?}").to_lowercase()));
+            words.extend(s.not_subtypes.iter().map(|t| format!("non-{t}")));
+            words.extend(s.not_types.iter().map(|t| format!("non{}", card_type(*t))));
+            if !s.subtypes.is_empty() {
+                words.push(s.subtypes.join(" or "));
+            }
+            if !s.types.is_empty() {
+                words.push(types(&s.types, "or"));
+            }
+            words.push(noun.to_string());
+            let mut out = words.join(" ");
+            for k in &s.keywords {
+                out.push_str(&format!(" with {}", keyword(*k).to_lowercase()));
+            }
+            if let Some(p) = s.power_min {
+                out.push_str(&format!(" with power {p} or greater"));
+            }
+            if let Some(t) = s.toughness_min {
+                out.push_str(&format!(" with toughness {t} or greater"));
+            }
+            out.push_str(&mana_value(s));
+            if !s.names.is_empty() {
+                out.push_str(&format!(" named {}", s.names.join(" or ")));
+            }
+            match s.controller {
+                Who::Any => {}
+                Who::You => out.push_str(" you own"),
+                Who::Opponent => out.push_str(" an opponent owns"),
+            }
+            out
+        })
+        .collect();
+    join(parts, "or")
+}
+
+/// " with mana value 3 or less" (empty if the selector doesn't ask).
+fn mana_value(s: &Selector) -> String {
+    match (s.mana_value_min, s.mana_value_max) {
+        (None, None) => String::new(),
+        (Some(a), Some(b)) if a == b => format!(" with mana value {a}"),
+        (Some(a), Some(b)) => format!(" with mana value {a} to {b}"),
+        (Some(a), None) => format!(" with mana value {a} or greater"),
+        (None, Some(b)) => format!(" with mana value {b} or less"),
     }
 }
 

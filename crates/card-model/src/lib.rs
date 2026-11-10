@@ -476,6 +476,11 @@ pub struct Selector {
     pub power_max: Option<i32>,
     /// "without flying": has none of these keywords.
     pub not_keywords: Vec<Keyword>,
+    /// "with mana value N or greater" / "N or less" (CR 202.3; both = "exactly N").
+    pub mana_value_min: Option<u32>,
+    pub mana_value_max: Option<u32>,
+    /// Must have one of these names ("a card named …"; empty = any).
+    pub names: Vec<String>,
 }
 
 /// What a trigger condition or replacement watches: the source itself, or matching objects.
@@ -954,6 +959,127 @@ pub enum Effect {
     AttachThis {
         to: ObjRef,
     },
+    /// The players each look through one of their own zones as this resolves and choose
+    /// cards there, which are then put somewhere — not targets. From a library this is a
+    /// search (CR 701.23): "search your library for up to two basic land cards, put them
+    /// onto the battlefield tapped, then shuffle". From a hand: "you may put a creature
+    /// card from your hand onto the battlefield". Several players choose in APNAP order,
+    /// then every card moves at once (CR 701.23i, 101.4).
+    ChooseCards {
+        who: PlayerRef,
+        from: CardZone,
+        /// A card qualifies if it matches any of these. `controller` is the card's owner
+        /// outside the battlefield.
+        cards: Vec<Selector>,
+        count: Amount,
+        /// The player must choose `count` cards (all that qualify, if fewer). Otherwise
+        /// any number up to `count`: CR 701.23b for a search with a stated quality, "you
+        /// may" for the other zones.
+        #[serde(default)]
+        must: bool,
+        to: CardDest,
+        /// The chosen cards are revealed (CR 701.20a; 701.23e: only if the effect says so).
+        #[serde(default)]
+        reveal: bool,
+        /// Then the player shuffles their library (CR 701.24). When the cards go on top
+        /// of that library, it is shuffled first (CR 701.24b).
+        #[serde(default)]
+        shuffle: bool,
+    },
+    /// CR 701.22: scry N.
+    Scry {
+        who: PlayerRef,
+        amount: Amount,
+    },
+    /// CR 701.25: surveil N.
+    Surveil {
+        who: PlayerRef,
+        amount: Amount,
+    },
+    /// "Look at the top N cards of your library. Put [some of them] [somewhere] and the
+    /// rest [somewhere else]."
+    Dig {
+        who: PlayerRef,
+        count: Amount,
+        /// The cards are revealed to everyone rather than looked at by the player.
+        #[serde(default)]
+        reveal: bool,
+        take: Take,
+        /// Which of the cards may be taken (empty = any of them).
+        #[serde(default)]
+        cards: Vec<Selector>,
+        /// Where the taken cards go.
+        to: CardDest,
+        /// The taken cards are revealed ("you may reveal a creature card from among them
+        /// and put it into your hand").
+        #[serde(default)]
+        reveal_taken: bool,
+        /// Where the rest go.
+        rest: CardDest,
+        /// The rest go there in a random order (otherwise the player orders cards that go
+        /// to a library, CR 401.4).
+        #[serde(default)]
+        rest_random: bool,
+    },
+    /// Put a card or permanent somewhere: "put target creature on top of its owner's
+    /// library", "shuffle it into its owner's library" (`shuffle`: the owner then shuffles,
+    /// CR 701.24c — even if the object didn't get there).
+    PutInto {
+        what: ObjRef,
+        to: CardDest,
+        #[serde(default)]
+        shuffle: bool,
+    },
+    /// Everything in a zone that matches, at once: "return all creatures to their owners'
+    /// hands", "exile all artifacts", "return all creature cards from your graveyard to
+    /// the battlefield", "shuffle your graveyard into your library". `whose`: on the
+    /// battlefield, permanents those players control; in graveyards, theirs.
+    MoveAll {
+        from: CardZone,
+        whose: PlayerRef,
+        cards: Vec<Selector>,
+        to: CardDest,
+        /// Then those players shuffle their libraries (CR 701.24d: even if nothing moved).
+        #[serde(default)]
+        shuffle: bool,
+    },
+}
+
+/// A zone an effect takes cards out of as it resolves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CardZone {
+    Library,
+    Hand,
+    Graveyard,
+    Battlefield,
+}
+
+/// Where an effect puts cards. A card always goes to its owner's hand, library or
+/// graveyard (CR 400.3); onto the battlefield it comes under its owner's control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CardDest {
+    Hand,
+    Battlefield {
+        #[serde(default)]
+        tapped: bool,
+    },
+    Graveyard,
+    Exile,
+    LibraryTop,
+    LibraryBottom,
+}
+
+/// How many of the cards a [`Effect::Dig`] looks at are taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Take {
+    /// That many (as many as qualify, if fewer).
+    Exactly(u32),
+    /// "You may": up to that many.
+    UpTo(u32),
+    /// Every card that qualifies; no choice.
+    All,
+    /// Any number of those that qualify.
+    Any,
 }
 
 /// An object an effect refers to: a target slot, or the source itself.

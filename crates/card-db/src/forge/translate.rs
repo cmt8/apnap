@@ -11,11 +11,11 @@
 
 use super::parse::{Face, Record, Script};
 use card_model::{
-    AbilityDef, Affected, Amount, BasicLandType, Body, CardDef, CardType, Color, CombatRule,
-    Condition, ContinuousEffect, Cost, CostChoice, CounterKind, DamageBy, EachPlayerAction, Effect,
-    Keyword, ManaCost, ManaProduce, ManaType, Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith,
-    Replaces, Selector, Signed, Supertype, TargetFilter, TargetRef, Timing, Trigger, TriggerStep,
-    Who,
+    AbilityDef, Affected, Amount, BasicLandType, Body, CardDef, CardDest, CardType, CardZone,
+    Color, CombatRule, Condition, ContinuousEffect, Cost, CostChoice, CounterKind, DamageBy,
+    EachPlayerAction, Effect, Keyword, ManaCost, ManaProduce, ManaType, Mode, ObjFilter, ObjRef,
+    PlayerRef, ReplaceWith, Replaces, Selector, Signed, Supertype, TargetFilter, TargetRef, Timing,
+    Trigger, TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -32,7 +32,12 @@ pub struct Compiled {
 
 /// Parameters that never affect the rules: descriptions shown to players, prompts, and
 /// hints for Forge's AI. (docs/forge/script-format.md, "keys a translator can ignore".)
-const TEXT_ONLY: [&str; 9] = [
+const TEXT_ONLY: [&str; 14] = [
+    "ChangeTypeDesc",
+    "ChangeNumDesc",
+    "DefinedDesc",
+    "SelectPrompt",
+    "OptionalPrompt",
     "SpellDescription",
     "TriggerDescription",
     "StackDescription",
@@ -314,6 +319,9 @@ impl<'a> Tx<'a> {
                 "OppCtrl" | "OppOwn" => s.controller = Who::Opponent,
                 "!token" | "nonToken" => s.token = Some(false),
                 "token" => s.token = Some(true),
+                "Basic" => s.supertypes.push(Supertype::Basic),
+                "Legendary" => s.supertypes.push(Supertype::Legendary),
+                "Snow" => s.supertypes.push(Supertype::Snow),
                 "tapped" => s.tapped = Some(true),
                 "untapped" => s.tapped = Some(false),
                 "attacking" => s.attacking = Some(true),
@@ -809,6 +817,13 @@ impl<'a> Tx<'a> {
                     }
                 }
             }
+            "ChangeZone"
+                if matches!(rec.get("Origin"), Some("Library" | "Hand"))
+                    && rec.get("ValidTgts").is_none()
+                    && rec.get("Defined").is_none() =>
+            {
+                self.choose_cards(&rd, chain, triggered)?
+            }
             "ChangeZone" => {
                 let origin = rd.get("Origin").unwrap_or("Battlefield");
                 let dest = rd.get("Destination");
@@ -827,6 +842,20 @@ impl<'a> Tx<'a> {
                     ("Battlefield" | "Graveyard", Some("Exile")) => Effect::Exile { what },
                     ("Battlefield" | "Graveyard", Some("Hand")) => Effect::ReturnToHand { what },
                     ("Graveyard", Some("Battlefield")) => Effect::ReturnToBattlefield { what },
+                    // "Put target creature on top of its owner's library", "shuffle it
+                    // into its owner's library".
+                    ("Battlefield", Some("Library")) => {
+                        let to = self.library_position(&rd)?;
+                        let shuffle = match rd.get("Shuffle") {
+                            None => false,
+                            Some("True") => true,
+                            Some(_) => {
+                                self.block("param:ChangeZone.Shuffle");
+                                return None;
+                            }
+                        };
+                        Effect::PutInto { what, to, shuffle }
+                    }
                     (o, d) => {
                         self.block(format!("ChangeZone:{o}->{}", d.unwrap_or("?")));
                         return None;
@@ -848,10 +877,58 @@ impl<'a> Tx<'a> {
                             who: PlayerRef::Target(i),
                         }
                     }
+                    // "Return all creatures to their owners' hands", "exile all
+                    // artifacts", "destroy"-less mass moves of permanents: everyone's.
+                    ((Some("Battlefield"), Some(dest), Some(filter)), None)
+                        if rd.rec.get("Defined").is_none() =>
+                    {
+                        let to = match dest {
+                            "Hand" => CardDest::Hand,
+                            "Exile" => CardDest::Exile,
+                            "Graveyard" => CardDest::Graveyard,
+                            _ => {
+                                self.block("ChangeZoneAll:shape");
+                                return None;
+                            }
+                        };
+                        let cards = self.card_alts(filter, false)?;
+                        Effect::MoveAll {
+                            from: CardZone::Battlefield,
+                            whose: PlayerRef::Each,
+                            cards,
+                            to,
+                            shuffle: false,
+                        }
+                    }
                     _ => {
                         self.block("ChangeZoneAll:shape");
                         return None;
                     }
+                }
+            }
+            // CR 701.22 / 701.25.
+            "Scry" | "Surveil" => {
+                let who = match self.target(&rd, chain, false) {
+                    Some(i) if chain.targets[i as usize].allows_players() => {
+                        Some(PlayerRef::Target(i))
+                    }
+                    Some(_) => {
+                        self.block(format!("{api}:target"));
+                        return None;
+                    }
+                    None => self.player(&rd, chain, triggered),
+                };
+                let key = if api == "Scry" { "ScryNum" } else { "Amount" };
+                let amount = self.amount(rd.get(key).unwrap_or("1"), chain);
+                match api {
+                    "Scry" => Effect::Scry {
+                        who: who?,
+                        amount: amount?,
+                    },
+                    _ => Effect::Surveil {
+                        who: who?,
+                        amount: amount?,
+                    },
                 }
             }
             "Token" => {
@@ -1007,6 +1084,125 @@ impl<'a> Tx<'a> {
         };
         rd.finish(&mut self.blockers);
         Some(out)
+    }
+
+    /// `LibraryPosition$` of a move to a library: `0` (the default) is the top, `-1` the
+    /// bottom.
+    fn library_position(&mut self, rd: &Rd<'a>) -> Option<CardDest> {
+        match rd.get("LibraryPosition") {
+            None | Some("0") => Some(CardDest::LibraryTop),
+            Some("-1") => Some(CardDest::LibraryBottom),
+            Some(_) => {
+                self.block("param:ChangeZone.LibraryPosition");
+                None
+            }
+        }
+    }
+
+    /// The alternatives of a filter as selectors (a card qualifies if it matches any).
+    /// `Card` alone is "anything": no selectors. Off the battlefield `Permanent` is a
+    /// permanent card (CR 110.4a).
+    fn card_alts(&mut self, text: &str, off_battlefield: bool) -> Option<Vec<Selector>> {
+        if text.trim() == "Card" {
+            return Some(Vec::new());
+        }
+        let mut out = Vec::new();
+        for alt in text.split(',') {
+            let alt = alt.trim();
+            match self.alt(alt)? {
+                Alt::Sel(mut s) => {
+                    if off_battlefield && alt.split('.').next() == Some("Permanent") {
+                        s.not_types.extend([CardType::Instant, CardType::Sorcery]);
+                    }
+                    out.push(s);
+                }
+                Alt::This => {
+                    self.block("filter:Self-among-cards");
+                    return None;
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// A ChangeZone that takes cards out of a hidden zone as it resolves (Forge's
+    /// "hidden-origin mode", docs/forge/effects.md §1): a library search (CR 701.23), or
+    /// cards chosen from a hand.
+    fn choose_cards(&mut self, rd: &Rd<'a>, chain: &mut Chain, triggered: bool) -> Option<Effect> {
+        let from = match rd.get("Origin") {
+            Some("Library") => CardZone::Library,
+            _ => CardZone::Hand,
+        };
+        // Whose zone: the activator's unless `DefinedPlayer$` says otherwise.
+        let who = match rd.get("DefinedPlayer") {
+            None | Some("You") => PlayerRef::You,
+            Some("Player") => PlayerRef::Each,
+            Some("Player.Opponent" | "Opponent") => PlayerRef::EachOpponent,
+            Some("TriggeredCardController") if triggered => PlayerRef::TriggeringController,
+            Some(other) => {
+                self.block(format!("defined:player {other}"));
+                return None;
+            }
+        };
+        let filter = rd.get("ChangeType");
+        let cards = match filter {
+            None => Some(Vec::new()),
+            Some(f) => self.card_alts(f, true),
+        };
+        let count = self.amount(rd.get("ChangeNum").unwrap_or("1"), chain);
+        // Without `Mandatory$` every pick may be declined (CR 701.23b).
+        let must = rd.get("Mandatory").is_some();
+        let to = match rd.get("Destination") {
+            Some("Battlefield") => Some(CardDest::Battlefield {
+                tapped: rd.get("Tapped").is_some(),
+            }),
+            Some("Hand") => Some(CardDest::Hand),
+            Some("Graveyard") => Some(CardDest::Graveyard),
+            Some("Exile") => Some(CardDest::Exile),
+            Some("Library") => self.library_position(rd),
+            other => {
+                self.block(format!("ChangeZone:->{}", other.unwrap_or("?")));
+                None
+            }
+        };
+        let to = to?;
+        if rd.rec.get("Tapped").is_some() && !matches!(to, CardDest::Battlefield { .. }) {
+            self.block("param:ChangeZone.Tapped");
+            return None;
+        }
+        // Forge reveals what was found when a quality was asked for and the cards don't
+        // go to the battlefield ("search for a creature card, reveal it, …").
+        let restricted = filter.is_some_and(|f| f.trim() != "Card");
+        let reveal = rd.get("NoReveal").is_none()
+            && (rd.get("Reveal").is_some()
+                || (restricted && !matches!(to, CardDest::Battlefield { .. })));
+        // A library that was searched is shuffled (CR 701.23, the effects all say so)
+        // unless the script says not to. `ShuffleNonMandatory$` only matters when a player
+        // can't search at all, which nothing in this engine causes.
+        rd.get("ShuffleNonMandatory");
+        let no_shuffle = rd.get("NoShuffle").is_some() || rd.get("Shuffle") == Some("False");
+        if let Some(v) = rd.rec.get("Shuffle")
+            && (from != CardZone::Library || !matches!(v, "True" | "False"))
+        {
+            self.block("param:ChangeZone.Shuffle");
+            return None;
+        }
+        let shuffle = from == CardZone::Library && !no_shuffle;
+        let effect = Effect::ChooseCards {
+            who,
+            from,
+            cards: cards?,
+            count: count?,
+            must,
+            to,
+            reveal,
+            shuffle,
+        };
+        // "You may search…": one yes/no before anything is looked at.
+        Some(match rd.get("Optional") {
+            None => effect,
+            Some(_) => Effect::May(Box::new(effect)),
+        })
     }
 
     /// `NumAtt$` / `NumDef$` / `KW$` of Pump and PumpAll (which last until end of turn).

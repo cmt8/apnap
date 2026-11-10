@@ -92,9 +92,25 @@ pub enum ChoiceKind {
     Sacrifice,
     MayAbility,
     PayUnlessCost,
+    /// Order cards going on top of a library (CR 401.4; Order: the FIRST listed ends up on
+    /// top).
     ScryOrder,
     ChooseColor,
     ChoosePlayer,
+    /// Choose cards for an effect that puts them somewhere: from your hand or graveyard,
+    /// among permanents, or among cards you are looking at (PickN over `OptionDesc::Card`).
+    ChooseCards,
+    /// CR 701.22a: choose which of the cards you are looking at go to the bottom of your
+    /// library (PickN; the rest stay on top).
+    ScryBottom,
+    /// CR 701.25a: choose which of the cards you are looking at go to your graveyard
+    /// (PickN; the rest stay on top).
+    SurveilGraveyard,
+    /// Order cards going to the bottom of a library (CR 401.4; Order: the LAST listed ends
+    /// up bottom-most, as for `MulliganBottom`).
+    OrderBottom,
+    /// CR 303.4f: choose what an Aura that is being put onto the battlefield enchants.
+    AuraHost,
 }
 
 /// A structured description of one option. Frames read the chosen option back from the

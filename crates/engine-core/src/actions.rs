@@ -189,6 +189,18 @@ pub enum GameAction {
     LeaveGame {
         player: PlayerId,
     },
+    /// CR 401.4 / 701.22a: put cards that are in `player`'s library on its top and/or its
+    /// bottom. They stay in the library, so they stay the same objects (CR 400.7 is about
+    /// changing zones).
+    ArrangeLibrary {
+        player: PlayerId,
+        /// The first listed ends up on top.
+        top: Vec<ObjectId>,
+        /// The last listed ends up bottom-most.
+        bottom: Vec<ObjectId>,
+        /// The bottom cards go in a random order instead of the listed one.
+        random_bottom: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -541,6 +553,32 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
         }
         GameAction::LeaveGame { player } => {
             leave_game(st, player);
+            ActionResult::Done
+        }
+        GameAction::ArrangeLibrary {
+            player,
+            top,
+            mut bottom,
+            random_bottom,
+        } => {
+            let mut lib = core::mem::take(&mut st.zones.libraries[player.index()]);
+            let here = |id: &ObjectId| lib.contains(id);
+            let top: Vec<ObjectId> = top.into_iter().filter(here).collect();
+            bottom.retain(|id| lib.contains(id) && !top.contains(id));
+            if random_bottom {
+                st.rng.shuffle(&mut bottom);
+            }
+            lib.retain(|id| !top.contains(id) && !bottom.contains(id));
+            // Index 0 is the bottom of a library and the last entry its top.
+            let mut arranged: Vec<ObjectId> = bottom.iter().rev().copied().collect();
+            arranged.append(&mut lib);
+            arranged.extend(top.iter().rev().copied());
+            st.zones.libraries[player.index()] = arranged;
+            st.emit(Event::LibraryArranged {
+                player,
+                top: top.len() as u32,
+                bottom: bottom.len() as u32,
+            });
             ActionResult::Done
         }
     }

@@ -238,4 +238,37 @@ pub enum Event {
     Unattached {
         object: ObjectId,
     },
+    /// CR 701.23a: `player` searched their library (looked at every card in it).
+    SearchedLibrary {
+        player: PlayerId,
+    },
+    /// CR 701.20a: these cards were shown to all players.
+    Revealed {
+        player: PlayerId,
+        cards: Vec<ObjectId>,
+    },
+    /// CR 701.20e: `player` looked at the top `count` cards of their library.
+    LookedAtLibrary {
+        player: PlayerId,
+        count: u32,
+    },
+    /// CR 701.22: `player` scried `count`, putting `bottom` of the cards on the bottom.
+    Scried {
+        player: PlayerId,
+        count: u32,
+        bottom: u32,
+    },
+    /// CR 701.25: `player` surveilled `count`, putting `graveyard` of the cards into their
+    /// graveyard.
+    Surveilled {
+        player: PlayerId,
+        count: u32,
+        graveyard: u32,
+    },
+    /// Cards of `player`'s library were put on its top and/or bottom without leaving it.
+    LibraryArranged {
+        player: PlayerId,
+        top: u32,
+        bottom: u32,
+    },
 }

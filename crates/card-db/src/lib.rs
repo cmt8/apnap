@@ -538,6 +538,29 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         }
         Effect::SacrificeThis => {}
         Effect::AttachThis { to } => obj(to, p),
+        Effect::ChooseCards {
+            who, cards, count, ..
+        } => {
+            player(who, p);
+            amount(count, p);
+            cards.iter().for_each(|s| selector(s, p));
+        }
+        Effect::Scry { who, amount: a } | Effect::Surveil { who, amount: a } => {
+            player(who, p);
+            amount(a, p);
+        }
+        Effect::Dig {
+            who, count, cards, ..
+        } => {
+            player(who, p);
+            amount(count, p);
+            cards.iter().for_each(|s| selector(s, p));
+        }
+        Effect::PutInto { what, .. } => obj(what, p),
+        Effect::MoveAll { whose, cards, .. } => {
+            player(whose, p);
+            cards.iter().for_each(|s| selector(s, p));
+        }
         Effect::Draw { who, amount: a }
         | Effect::GainLife { who, amount: a }
         | Effect::LoseLife { who, amount: a } => {

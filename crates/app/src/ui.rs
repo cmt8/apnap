@@ -342,9 +342,14 @@ pub fn prompt(kind: ChoiceKind) -> &'static str {
         ChoiceKind::Sacrifice => "Sacrifice",
         ChoiceKind::MayAbility => "Use this ability?",
         ChoiceKind::PayUnlessCost => "Pay the cost?",
-        ChoiceKind::ScryOrder => "Order the cards",
+        ChoiceKind::ScryOrder => "Order the cards for the top (the first one is on top)",
         ChoiceKind::ChooseColor => "Choose a color",
         ChoiceKind::ChoosePlayer => "Choose a player",
+        ChoiceKind::ChooseCards => "Choose cards",
+        ChoiceKind::ScryBottom => "Scry: choose cards to put on the bottom of your library",
+        ChoiceKind::SurveilGraveyard => "Surveil: choose cards to put into your graveyard",
+        ChoiceKind::OrderBottom => "Order the cards for the bottom (the last one is bottom-most)",
+        ChoiceKind::AuraHost => "Choose what the Aura enchants",
     }
 }
 
@@ -385,6 +390,8 @@ fn find_object(v: &PlayerView, id: ObjectId) -> Option<&ObjectView> {
         .chain(&v.command)
         .chain(&v.exile)
         .chain(v.players.iter().flat_map(|p| &p.graveyard))
+        // Cards the decision lets the player look at: a library being searched, a scry.
+        .chain(&v.revealed)
         .find(|o| o.id == id)
 }
 

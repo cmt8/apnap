@@ -54,6 +54,13 @@ fn effect_polarity(e: &Effect) -> Polarity {
             _ => Polarity::Neutral,
         },
         Effect::Untap { .. } | Effect::AttachThis { .. } => Polarity::Help,
+        // Putting a permanent into its owner's library or hand: aimed at an opponent's.
+        Effect::PutInto { .. } => Polarity::Harm,
+        Effect::ChooseCards { .. }
+        | Effect::Scry { .. }
+        | Effect::Surveil { .. }
+        | Effect::Dig { .. }
+        | Effect::MoveAll { .. } => Polarity::Neutral,
         Effect::TapAll(_) | Effect::UntapAll(_) | Effect::SacrificeThis => Polarity::Neutral,
         Effect::PutCounters { kind, .. } => match kind {
             CounterKind::PlusOne => Polarity::Help,
@@ -211,6 +218,8 @@ impl HeuristicAgent {
             .chain(&v.command)
             .chain(&v.exile)
             .chain(v.players.iter().flat_map(|p| &p.graveyard))
+            // Cards the pending decision lets this player look at (a library search…).
+            .chain(&v.revealed)
             .find(|o| o.id == id)
     }
 
@@ -898,6 +907,31 @@ impl Agent for HeuristicAgent {
             (ChoiceKind::Sacrifice, Primitive::PickN { min, .. }) => {
                 self.pick_worst(v, d, *min, value)
             }
+            // A search, or cards to put somewhere from hand: as many as allowed, the most
+            // expensive first.
+            (ChoiceKind::SearchLibrary | ChoiceKind::ChooseCards, Primitive::PickN { max, .. }) => {
+                let mut ranked: Vec<(i64, usize)> = d
+                    .options
+                    .iter()
+                    .enumerate()
+                    .map(|(i, o)| match o {
+                        OptionDesc::Card { card } => (
+                            Self::find(v, *card).map_or(0, |c| i64::from(c.mana_value)),
+                            i,
+                        ),
+                        _ => (0, i),
+                    })
+                    .collect();
+                ranked.sort_by_key(|(v, i)| (std::cmp::Reverse(*v), *i));
+                let mut picks: Vec<usize> = ranked.iter().take(*max).map(|(_, i)| *i).collect();
+                picks.sort_unstable();
+                Response::Pick(picks)
+            }
+            // Scry and surveil: keep what is there (the least a player must do).
+            (
+                ChoiceKind::ScryBottom | ChoiceKind::SurveilGraveyard,
+                Primitive::PickN { min, .. },
+            ) => Response::Pick((0..*min).collect()),
             (ChoiceKind::LegendRule, _) => {
                 let best = d
                     .options

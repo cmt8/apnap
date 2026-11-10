@@ -726,6 +726,44 @@ Rules text: `docs/rules-notes/601-casting-602-activating-605-mana.md`.
   permanent chosen as a sacrifice *cost* must not also be sacrificed for mana, and
   `can_begin` must not count one Treasure for both.
 
+## D-050 Libraries: searching, scry, surveil, cards put somewhere without being cast (2026-11-09)
+5,648 → 6,212 of 34,463 scripts compile (18.0%). Rules text:
+`docs/rules-notes/701-search-scry-surveil-library.md`. The vocabulary and the resolve-frame
+code were written by a parallel agent in a worktree (which could not finish: its tool calls
+kept being declined); its uncommitted work was merged into the main tree, and the compiler,
+validation, AI answers, app prompts and all tests were written on top of it.
+
+- **Effects:** `ChooseCards { who, from, cards, count, must, to, reveal, shuffle }` (a
+  library search, or cards chosen from a hand), `Scry`, `Surveil`, `PutInto` ("put target
+  creature on top of its owner's library", "shuffle it into its owner's library"),
+  `MoveAll` ("return all creatures to their owners' hands"), `Dig` (engine only — the
+  compiler doesn't produce it yet). `CardZone`, `CardDest`, `Take`.
+- **Decisions** reuse `PickN`/`Order` over `OptionDesc::Card`: `SearchLibrary`,
+  `ChooseCards`, `ScryBottom`, `SurveilGraveyard`, `ScryOrder` (first listed on top),
+  `OrderBottom` (last listed bottom-most), `AuraHost`.
+- **Hidden information:** `PlayerView::revealed` holds the hidden cards the pending
+  decision shows its player — the cards offered, and the rest of what the effect lets them
+  see (the whole library during a search, CR 701.23a) — and is empty for everyone else. The
+  AI and the app find card names there. The app shows these choices as a list of named
+  buttons for now (no card images in a picker yet).
+- **Auras entering without being cast** (CR 303.4f–g): every such move goes through
+  `Work::Move`; the controller-to-be chooses what the Aura enchants, and with nothing to
+  enchant the card stays where it is. Before, `ReturnToBattlefield` put it onto the
+  battlefield unattached and the state check sent it to the graveyard.
+- **Selectors:** `mana_value_min/max`, `names` (not compiled from Forge yet), supertypes in
+  filters (`Land.Basic`, `.Legendary`, `.Snow`).
+- **Compiler** (Forge's hidden-origin `ChangeZone`, docs/forge/effects.md §1): untargeted
+  `Origin$ Library | Hand` with `ChangeType$`, `ChangeNum$`, `Mandatory$` (otherwise every
+  pick may be declined), `Tapped$`, `LibraryPosition$ 0 | -1`, `Optional$` (one yes/no
+  first = `May`), `DefinedPlayer$`. Found cards are revealed when a quality was asked for
+  and they don't go to the battlefield (Forge's rule; `Reveal$`/`NoReveal$` override). A
+  searched library is shuffled unless `NoShuffle$`/`Shuffle$ False`. `ShuffleNonMandatory$`
+  is accepted and means nothing here (it only matters when a player can't search at all).
+- **Blocked:** searching another player's library (a targeted player with the activator
+  choosing), `Chooser$`, `AtRandom$`, `DifferentNames$`, `EACH` filters, `GainControl$`,
+  counters on entering, `Hidden$` choices from public zones, `Dig`, `named` and `cmc`
+  filter properties, graveyard-origin untargeted moves.
+
 ## D-051 Compiler batch 3: conditional statics, combat restrictions, Equipment, Auras on anything (2026-11-09)
 5,001 → 5,468 of 34,463 scripts compile (15.9%); precons 103 → 109 of 275 deck slots.
 (D-049 and D-050 are reserved for the mana-ability and library-search work started in

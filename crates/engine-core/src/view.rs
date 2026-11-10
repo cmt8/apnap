@@ -2,7 +2,8 @@
 //! only ever see this, never `GameState` (CLAUDE.md invariant 6). Opponents' hands and all
 //! libraries are counts only.
 
-use crate::decision::PendingDecision;
+use crate::decision::{OptionDesc, PendingDecision};
+use crate::frames::Frame;
 use crate::ids::CardInstanceId;
 use crate::ids::{ObjectId, PlayerId};
 use crate::layers::chars;
@@ -10,6 +11,7 @@ use crate::mana::ManaPool;
 use crate::stack::{StackKind, Target};
 use crate::state::{CombatState, GameState};
 use crate::turn::Step;
+use crate::zones::Zone;
 use alloc::string::String;
 use alloc::vec::Vec;
 use card_model::{CardType, CounterKind, Keyword};
@@ -100,6 +102,12 @@ pub struct PlayerView {
     pub combat: Option<CombatState>,
     /// The pending decision, if it is the viewer's.
     pub decision: Option<PendingDecision>,
+    /// Cards in hidden zones that the viewer is looking at for the pending decision (CR
+    /// 701.20e): the cards it offers that aren't otherwise in this view, and the rest of
+    /// what the effect lets the player see — the library being searched (CR 701.23a), the
+    /// cards a scry looks at. Empty unless the decision is the viewer's.
+    #[serde(default)]
+    pub revealed: Vec<ObjectView>,
 }
 
 fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
@@ -203,5 +211,37 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
             .collect(),
         combat: st.combat.clone(),
         decision: st.pending.clone().filter(|d| d.player == viewer),
+        revealed: views(st, &shown_to(st, viewer)),
     }
+}
+
+/// The hidden cards the pending decision shows to `viewer` (none if it isn't theirs).
+fn shown_to(st: &GameState, viewer: PlayerId) -> Vec<ObjectId> {
+    let Some(d) = st.pending.as_ref().filter(|d| d.player == viewer) else {
+        return Vec::new();
+    };
+    let hidden = |id: &ObjectId| {
+        st.objects.get(id).is_some_and(|o| match o.zone {
+            Zone::Library => true,
+            Zone::Hand => o.owner != viewer,
+            _ => false,
+        })
+    };
+    let mut out: Vec<ObjectId> = d
+        .options
+        .iter()
+        .filter_map(|o| match o {
+            OptionDesc::Card { card } => Some(*card),
+            _ => None,
+        })
+        .filter(hidden)
+        .collect();
+    if let Some(Frame::Resolve(f)) = st.frames.last() {
+        let mut more = f.shown(st);
+        more.retain(|id| hidden(id) && !out.contains(id));
+        // By name: what the player learns is which cards these are, not their order.
+        more.sort_by(|a, b| (&st.card_def(*a).name, *a).cmp(&(&st.card_def(*b).name, *b)));
+        out.extend(more);
+    }
+    out
 }

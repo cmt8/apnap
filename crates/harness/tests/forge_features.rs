@@ -1727,3 +1727,351 @@ fn mana_forms_not_compiled() {
         "{b:?}"
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Libraries: searching, scry, surveil, putting cards back.
+
+use engine_core::Event;
+
+fn library(s: &Script, p: PlayerId) -> Vec<String> {
+    // Top card first.
+    s.st.zones
+        .list(Zone::Library, p)
+        .iter()
+        .rev()
+        .map(|&id| s.name(id))
+        .collect()
+}
+
+fn option_names(s: &Script) -> Vec<String> {
+    s.options().iter().map(|o| s.describe(o)).collect()
+}
+
+// CR 701.23a–b, 701.24 (2026-11-06). Forge: an untargeted `ChangeZone | Origin$ Library` —
+// "search your library for a basic land card, put it onto the battlefield tapped, then
+// shuffle". Only cards of the stated quality are offered; finding none is allowed.
+#[test]
+fn searching_a_library_for_a_card_with_a_quality() {
+    let growth = spell(
+        "Test Sprawl",
+        "1 G",
+        "Sorcery",
+        "A:SP$ ChangeZone | Origin$ Library | Destination$ Battlefield | ChangeType$ Land.Basic | ChangeTypeDesc$ basic land | Tapped$ True | ChangeNum$ 1 | SpellDescription$ Text.",
+    );
+    let mut sc = scenario(&[&growth]);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Forest", "Forest", "Forest", "Forest"],
+    );
+    // On top of the twenty Forests: a creature card and an Island.
+    sc.card(P0, Zone::Library, "Island");
+    sc.card(P0, Zone::Library, "Test Golem");
+    sc.cards(P0, Zone::Hand, &["Test Sprawl", "Test Sprawl"]);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Sprawl").pay().pass_all();
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::SearchLibrary));
+    assert_eq!(s.decision().prim, Primitive::PickN { min: 0, max: 1 });
+    let names = option_names(&s);
+    assert_eq!(names.len(), 21, "twenty Forests and the Island: {names:?}");
+    assert!(!names.contains(&"Test Golem".to_string()));
+    // While it is being searched, the searcher sees the library; nobody else does.
+    let mine = engine_core::player_view(&s.st, P0);
+    let theirs = engine_core::player_view(&s.st, P1);
+    assert_eq!(mine.revealed.len(), 22);
+    assert!(theirs.revealed.is_empty());
+    s.pick(
+        "the Island",
+        |s, o| matches!(o, OptionDesc::Card { card } if s.name(*card) == "Island"),
+    );
+    let island = s
+        .find(P0, Zone::Battlefield, "Island")
+        .expect("on the battlefield");
+    assert!(s.st.object(island).tapped, "it enters tapped");
+    assert_eq!(
+        s.count(|e| matches!(e, Event::Shuffled { player } if *player == P0)),
+        1
+    );
+    assert_eq!(s.st.zones.list(Zone::Library, P0).len(), 21);
+    // CR 701.23b: a player needn't find a card of a stated quality.
+    s.cast("Test Sprawl").pay().pass_all();
+    s.respond(Response::Pick(vec![]));
+    assert_eq!(s.st.zones.list(Zone::Library, P0).len(), 21);
+    assert_eq!(
+        s.count(|e| matches!(e, Event::Shuffled { .. })),
+        2,
+        "still shuffled"
+    );
+}
+
+// CR 701.23d, 701.24b (2026-11-06): a search for "a card" must find one; "then shuffle and
+// put that card on top" shuffles first. Forge: `Destination$ Library | LibraryPosition$ 0 |
+// Mandatory$ True`. And a card put into the hand for a stated quality is revealed.
+#[test]
+fn tutoring_to_the_top_of_the_library_and_to_hand() {
+    let cards = [
+        spell(
+            "Test Foresight",
+            "B",
+            "Instant",
+            "A:SP$ ChangeZone | Origin$ Library | Destination$ Library | LibraryPosition$ 0 | ChangeType$ Card | ChangeNum$ 1 | Mandatory$ True | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Summons",
+            "G",
+            "Sorcery",
+            "A:SP$ ChangeZone | Origin$ Library | Destination$ Hand | ChangeType$ Creature | ChangeNum$ 1 | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Swamp", "Forest"]);
+    let golem = sc.card(P0, Zone::Library, "Test Golem");
+    sc.library(P0, "Forest", 3); // the Golem is under three more Forests
+    sc.cards(P0, Zone::Hand, &["Test Foresight", "Test Summons"]);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Foresight").pay().pass_all();
+    assert_eq!(s.kind(), ChoiceKind::SearchLibrary);
+    assert_eq!(
+        s.decision().prim,
+        Primitive::PickN { min: 1, max: 1 },
+        "must find"
+    );
+    s.pick(
+        "the Golem",
+        |_, o| matches!(o, OptionDesc::Card { card } if *card == golem),
+    );
+    assert_eq!(
+        library(&s, P0)[0],
+        "Test Golem",
+        "on top, after the shuffle"
+    );
+    assert_eq!(s.st.zones.list(Zone::Library, P0).len(), 24);
+    // "Search for a creature card, reveal it, put it into your hand, then shuffle."
+    s.cast("Test Summons").pay().pass_all();
+    assert_eq!(option_names(&s), ["Test Golem"]);
+    s.respond(Response::Pick(vec![0]));
+    assert!(s.find(P0, Zone::Hand, "Test Golem").is_some());
+    assert_eq!(
+        s.count(|e| matches!(e, Event::Revealed { player, .. } if *player == P0)),
+        1
+    );
+    assert_eq!(s.count(|e| matches!(e, Event::Shuffled { .. })), 2);
+}
+
+// Forge: `ChangeZone | Origin$ Hand | Destination$ Battlefield | ChangeType$ Land` — "you
+// may put a land card from your hand onto the battlefield" (not a search: no shuffle).
+#[test]
+fn putting_a_card_from_hand_onto_the_battlefield() {
+    let explore = spell(
+        "Test Homestead",
+        "G",
+        "Sorcery",
+        "A:SP$ ChangeZone | Origin$ Hand | Destination$ Battlefield | ChangeType$ Land | ChangeNum$ 1 | SpellDescription$ Text.",
+    );
+    let mut sc = scenario(&[&explore]);
+    sc.cards(P0, Zone::Battlefield, &["Forest"]);
+    sc.cards(P0, Zone::Hand, &["Test Homestead", "Island", "Test Golem"]);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Homestead").pay().pass_all();
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::ChooseCards));
+    assert_eq!(option_names(&s), ["Island"]);
+    s.respond(Response::Pick(vec![0]));
+    let island = s.find(P0, Zone::Battlefield, "Island").unwrap();
+    assert!(!s.st.object(island).tapped);
+    assert_eq!(s.count(|e| matches!(e, Event::Shuffled { .. })), 0);
+}
+
+// CR 701.22a (scry), 701.25a (surveil) (2026-11-06). Forge: `Scry | ScryNum$ 2`,
+// `Surveil | Amount$ 2`.
+#[test]
+fn scry_and_surveil() {
+    let cards = [
+        spell(
+            "Test Omen",
+            "U",
+            "Instant",
+            "A:SP$ Scry | ScryNum$ 2 | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Sift",
+            "B",
+            "Instant",
+            "A:SP$ Surveil | Amount$ 2 | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Island", "Swamp"]);
+    sc.card(P0, Zone::Library, "Test Giant");
+    sc.card(P0, Zone::Library, "Test Golem");
+    sc.card(P0, Zone::Library, "Test Elf"); // top: Elf, Golem, Giant, Forests…
+    sc.cards(P0, Zone::Hand, &["Test Omen", "Test Sift"]);
+    let mut s = Script::new(sc.build());
+    // Scry 2: look at the Elf and the Golem; the Elf goes to the bottom.
+    s.cast("Test Omen").pay().pass_all();
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::ScryBottom));
+    assert_eq!(s.decision().prim, Primitive::PickN { min: 0, max: 2 });
+    assert_eq!(option_names(&s), ["Test Elf", "Test Golem"]);
+    assert!(engine_core::player_view(&s.st, P1).revealed.is_empty());
+    s.pick(
+        "the Elf",
+        |s, o| matches!(o, OptionDesc::Card { card } if s.name(*card) == "Test Elf"),
+    );
+    let lib = library(&s, P0);
+    assert_eq!(&lib[..2], ["Test Golem", "Test Giant"]);
+    assert_eq!(lib.last().unwrap(), "Test Elf");
+    assert_eq!(lib.len(), 23);
+    // Surveil 2: the Golem to the graveyard, the Giant stays on top.
+    s.cast("Test Sift").pay().pass_all();
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::SurveilGraveyard));
+    assert_eq!(option_names(&s), ["Test Golem", "Test Giant"]);
+    s.pick(
+        "the Golem",
+        |s, o| matches!(o, OptionDesc::Card { card } if s.name(*card) == "Test Golem"),
+    );
+    assert!(s.find(P0, Zone::Graveyard, "Test Golem").is_some());
+    assert_eq!(library(&s, P0)[0], "Test Giant");
+}
+
+// CR 401.4 (2026-11-06): several cards kept on top by a scry go back in an order the player
+// chooses.
+#[test]
+fn scry_orders_the_cards_kept_on_top() {
+    let omen = spell(
+        "Test Omen",
+        "U",
+        "Instant",
+        "A:SP$ Scry | ScryNum$ 2 | SpellDescription$ Text.",
+    );
+    let mut sc = scenario(&[&omen]);
+    sc.cards(P0, Zone::Battlefield, &["Island"]);
+    sc.card(P0, Zone::Library, "Test Golem");
+    sc.card(P0, Zone::Library, "Test Elf");
+    sc.card(P0, Zone::Hand, "Test Omen");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Omen").pay().pass_all();
+    s.respond(Response::Pick(vec![])); // keep both
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::ScryOrder));
+    assert_eq!(option_names(&s), ["Test Elf", "Test Golem"]);
+    // The first listed ends up on top: put the Golem first.
+    s.respond(Response::Order(vec![1, 0]));
+    assert_eq!(&library(&s, P0)[..2], ["Test Golem", "Test Elf"]);
+}
+
+// Forge: `ChangeZone | Origin$ Battlefield | Destination$ Library` with `LibraryPosition$`
+// and `Shuffle$ True` — "put target creature on top of its owner's library" / "shuffle it
+// into its owner's library" (CR 701.24c); `ChangeZoneAll` from the battlefield — "return
+// all creatures to their owners' hands".
+#[test]
+fn putting_permanents_into_libraries_and_mass_bounce() {
+    let cards = [
+        spell(
+            "Test Rewind",
+            "U",
+            "Instant",
+            "A:SP$ ChangeZone | ValidTgts$ Creature | Origin$ Battlefield | Destination$ Library | LibraryPosition$ 0 | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Oblivion",
+            "U",
+            "Instant",
+            "A:SP$ ChangeZone | ValidTgts$ Creature | Origin$ Battlefield | Destination$ Library | Shuffle$ True | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Tide",
+            "U",
+            "Sorcery",
+            "A:SP$ ChangeZoneAll | ChangeType$ Creature | Origin$ Battlefield | Destination$ Hand | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Island"; 3]);
+    let giant = sc.card(P1, Zone::Battlefield, "Test Giant");
+    let golem = sc.card(P1, Zone::Battlefield, "Test Golem");
+    sc.card(P1, Zone::Battlefield, "Test Elf");
+    sc.card(P0, Zone::Battlefield, "Test Elf");
+    sc.cards(
+        P0,
+        Zone::Hand,
+        &["Test Rewind", "Test Oblivion", "Test Tide"],
+    );
+    let mut s = Script::new(sc.build());
+    s.cast("Test Rewind").target_object(giant).pay().pass_all();
+    assert_eq!(
+        library(&s, P1)[0],
+        "Test Giant",
+        "on top of its owner's library"
+    );
+    s.cast("Test Oblivion")
+        .target_object(golem)
+        .pay()
+        .pass_all();
+    assert_eq!(s.st.zones.list(Zone::Library, P1).len(), 22);
+    assert_eq!(
+        s.count(|e| matches!(e, Event::Shuffled { player } if *player == P1)),
+        1
+    );
+    s.cast("Test Tide").pay().pass_all();
+    assert!(s.find(P1, Zone::Hand, "Test Elf").is_some());
+    assert!(s.find(P0, Zone::Hand, "Test Elf").is_some());
+    assert_eq!(s.count(|e| matches!(e, Event::Shuffled { .. })), 1);
+}
+
+// CR 303.4f–g (2026-11-06): an Aura put onto the battlefield without being cast enters
+// attached to something its controller chooses that it could enchant; with nothing to
+// enchant it stays where it is.
+#[test]
+fn an_aura_returned_to_the_battlefield_chooses_what_it_enchants() {
+    let cards = [
+        aura(
+            "Test Blessing",
+            "W",
+            "Creature",
+            "S:Mode$ Continuous | AffectedDefined$ Enchanted | AddPower$ 1 | AddToughness$ 1 | Description$ Text.",
+        ),
+        spell(
+            "Test Restoration",
+            "W",
+            "Sorcery",
+            "A:SP$ ChangeZone | Origin$ Graveyard | Destination$ Battlefield | ValidTgts$ Enchantment.YouOwn | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    // With creatures around: the player picks one, whoever controls it.
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Plains"]);
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    sc.card(P1, Zone::Battlefield, "Test Elf");
+    sc.card(P0, Zone::Graveyard, "Test Blessing");
+    sc.card(P0, Zone::Hand, "Test Restoration");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Restoration")
+        .target("Test Blessing")
+        .pay()
+        .pass_all();
+    assert_eq!((s.who(), s.kind()), (P0, ChoiceKind::AuraHost));
+    assert_eq!(s.options().len(), 2);
+    let pick = s
+        .options()
+        .iter()
+        .position(|o| s.describe(o).contains("Test Golem"))
+        .expect("the Golem is offered");
+    s.respond(Response::Pick(vec![pick]));
+    let blessing = s.find(P0, Zone::Battlefield, "Test Blessing").unwrap();
+    assert_eq!(s.st.object(blessing).attached_to, Some(golem));
+    assert_eq!(pt(&s, golem), (3, 4));
+    // With nothing to enchant, it stays in the graveyard.
+    let mut sc = scenario(&cards);
+    sc.cards(P0, Zone::Battlefield, &["Plains"]);
+    sc.card(P0, Zone::Graveyard, "Test Blessing");
+    sc.card(P0, Zone::Hand, "Test Restoration");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Restoration")
+        .target("Test Blessing")
+        .pay()
+        .pass_all();
+    assert!(s.find(P0, Zone::Graveyard, "Test Blessing").is_some());
+    assert!(s.find(P0, Zone::Battlefield, "Test Blessing").is_none());
+}
