@@ -391,6 +391,9 @@ fn cost(c: &Cost) -> String {
     if c.tap {
         parts.push("{T}".to_string());
     }
+    if c.sacrifice_self {
+        parts.push("Sacrifice this permanent".to_string());
+    }
     parts.join(", ")
 }
 
@@ -487,15 +490,20 @@ fn ability(a: &AbilityDef) -> String {
         AbilityDef::Activated {
             cost: c,
             timing,
+            only_if,
             body: b,
         } => format!(
-            "{}: {}{}",
+            "{}: {}{}{}",
             cost(c),
             body(b),
             match timing {
                 Timing::Instant => "",
                 Timing::Sorcery => " Activate only as a sorcery.",
-            }
+            },
+            only_if.as_ref().map_or(String::new(), |c| format!(
+                " Activate only {}.",
+                condition(c)
+            ))
         ),
         AbilityDef::Mana { cost: c, produce } => format!(
             "{}: Add {}.",

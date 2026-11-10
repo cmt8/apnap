@@ -507,6 +507,17 @@ cards verified (61 of 254 unique; 65 of 275 deck slots), each with a test.
 - A third interim deck, `real_zombies.ron`; the other two were refreshed with new cards.
 - Golden re-bless: only `state_hash` changed (catalog: new tokens, new fields).
 
+## D-042 M4 card batch 3: sacrifice as a cost, "activate only if"
+7 more cards (68 of 254 unique; 75 of 275 deck slots), including the commander Lathliss.
+- `Cost::sacrifice_self` ("Sacrifice this permanent"): paid with the rest of the cost as
+  the ability is activated (CR 602.2b), as a proposed move to the graveyard through the
+  replacement pipeline (invariant 14) — so it can be replaced and it triggers "dies"
+  (CR 700.4). The ability keeps its source's last known information.
+- `AbilityDef::Activated::only_if` ("Activate only if you control a creature with power 4
+  or greater", CR 602.5b), using the same `Condition`s as intervening ifs.
+- Still not expressible, on purpose: mana abilities with a sacrifice cost (Treasure) and
+  costs that need a choice (sacrifice *another* creature, discard a card).
+
 ## D-039 Future scope: other 1v1 constructed formats (user note 2026-11-09)
 The user wants 1v1 **Modern, Legacy, Vintage, etc.** supported in future. Nothing is built
 for this yet; it is recorded so current work doesn't close the door:

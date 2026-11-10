@@ -1,0 +1,13 @@
+RealCard(
+    oracle_id: "c97361b5-af16-4a7b-af85-a429dbaf4ad2",
+    name: "Mind Stone",
+    verified: true,
+    tests: ["mind_stone_taps_for_mana_or_is_sacrificed_for_a_card"],
+    abilities: [
+        Mana(cost: (tap: true), produce: One(Colorless)),
+        Activated(
+            cost: (mana: Some("{1}"), tap: true, sacrifice_self: true),
+            body: Effect((effect: Draw(who: You, amount: Fixed(1)))),
+        ),
+    ],
+)

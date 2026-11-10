@@ -1,0 +1,13 @@
+RealCard(
+    oracle_id: "7b9fafe7-d26a-4ed5-b4c4-ce13763770b5",
+    name: "Geier Reach Sanitarium",
+    verified: true,
+    tests: ["geier_reach_sanitarium_makes_everyone_loot"],
+    abilities: [
+        Mana(cost: (tap: true), produce: One(Colorless)),
+        Activated(
+            cost: (mana: Some("{2}"), tap: true),
+            body: Effect((effect: Seq([EachPlayer(Draw(1)), EachPlayer(Discard(1))]))),
+        ),
+    ],
+)

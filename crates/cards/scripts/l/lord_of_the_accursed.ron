@@ -1,0 +1,20 @@
+RealCard(
+    oracle_id: "3f372107-6c52-4f1f-8bf0-7b3fa21b2cae",
+    name: "Lord of the Accursed",
+    verified: true,
+    tests: ["lord_of_the_accursed_pumps_zombies_and_gives_menace"],
+    abilities: [
+        Static(
+            affected: All((subtypes: ["Zombie"], controller: You, other: true)),
+            effects: [ModifyPT(1, 1)],
+        ),
+        Activated(
+            cost: (mana: Some("{1}{B}"), tap: true),
+            body: Effect((effect: ApplyAll(
+                affected: (subtypes: ["Zombie"]),
+                effects: [AddKeywords([Menace])],
+                until_end_of_turn: true,
+            ))),
+        ),
+    ],
+)

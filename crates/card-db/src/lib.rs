@@ -238,13 +238,13 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
             AbilityDef::Spell(body) => check_body(body, card_has_x, &mut |m| p.push(at(m))),
             AbilityDef::Activated { cost, body, .. } => {
                 let has_x = cost.mana.as_ref().is_some_and(|m| m.has_x());
-                if cost.mana.is_none() && !cost.tap {
+                if cost.mana.is_none() && !cost.tap && !cost.sacrifice_self {
                     p.push(at("activated ability with no cost".into()));
                 }
                 check_body(body, has_x, &mut |m| p.push(at(m)));
             }
             AbilityDef::Mana { cost, .. } => {
-                if !(cost.tap && cost.mana.is_none()) {
+                if !(cost.tap && cost.mana.is_none() && !cost.sacrifice_self) {
                     p.push(at("M1 mana abilities must cost exactly {T} (D-021)".into()));
                 }
             }

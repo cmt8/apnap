@@ -7,13 +7,14 @@
 //! possible (legal modes, payable X, targets that exist, mana abilities that keep the cost
 //! payable). So any shape-valid response leads to a completed cast.
 
-use super::{Flow, Frame, Input};
+use super::{ApplyFrame, Flow, Frame, Input};
 use crate::actions::{GameAction, execute, move_object};
 use crate::decision::{ChoiceKind, OptionDesc, Primitive, Response};
 use crate::events::Event;
 use crate::ids::{ObjectId, PlayerId};
 use crate::layers::{abilities, chars, controller_of};
 use crate::mana::{ManaMask, ManaRequirement, ManaType, mask_of, types_in};
+use crate::replacement::{MoveCause, Proposed};
 use crate::stack::Target;
 use crate::state::GameState;
 use crate::targeting::candidates;
@@ -83,6 +84,8 @@ struct Proposal {
     cost: Option<ManaCost>,
     /// `{T}` in the cost: this permanent.
     tap: Option<ObjectId>,
+    /// "Sacrifice this permanent" in the cost.
+    sacrifice: Option<ObjectId>,
 }
 
 fn proposal(st: &GameState, source: &CastSource) -> Proposal {
@@ -99,6 +102,7 @@ fn proposal(st: &GameState, source: &CastSource) -> Proposal {
             }),
             cost: chars(st, *card).mana_cost,
             tap: None,
+            sacrifice: None,
         },
         CastSource::Ability { source, index } => {
             match &st.card_def(*source).abilities[*index as usize] {
@@ -106,6 +110,7 @@ fn proposal(st: &GameState, source: &CastSource) -> Proposal {
                     body: Some(body.clone()),
                     cost: cost.mana.clone(),
                     tap: cost.tap.then_some(*source),
+                    sacrifice: cost.sacrifice_self.then_some(*source),
                 },
                 other => unreachable!("not an activated ability: {other:?}"),
             }
@@ -116,6 +121,7 @@ fn proposal(st: &GameState, source: &CastSource) -> Proposal {
                     body: Some(body.clone()),
                     cost: None,
                     tap: None,
+                    sacrifice: None,
                 },
                 other => unreachable!("not a triggered ability: {other:?}"),
             }
@@ -232,11 +238,22 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
                 return false;
             }
             // CLAUDE.md invariant 4: only abilities the permanent currently has.
-            let Some((_, AbilityDef::Activated { cost, timing, .. })) =
-                abilities(st, source).into_iter().find(|(i, _)| *i == index)
+            let Some((
+                _,
+                AbilityDef::Activated {
+                    cost,
+                    timing,
+                    only_if,
+                    ..
+                },
+            )) = abilities(st, source).into_iter().find(|(i, _)| *i == index)
             else {
                 return false;
             };
+            // "Activate only if …" (CR 602.5b).
+            if !triggers::condition_holds(st, only_if.as_ref(), p, source) {
+                return false;
+            }
             if *timing == Timing::Sorcery && !sorcery_timing(st, p) {
                 return false;
             }
@@ -502,7 +519,9 @@ impl CastFrame {
                     let pool = st.player(p).mana_pool;
                     if req.payable_from(&pool) {
                         match req.forced_generic(&pool) {
-                            Some(alloc) => return self.finish(st, req, alloc, prop.tap),
+                            Some(alloc) => {
+                                return self.finish(st, req, alloc, prop.tap, prop.sacrifice);
+                            }
                             None => {
                                 // CR 601.2h: the player picks which floating mana pays generic.
                                 self.stage = CastStage::PayGeneric;
@@ -559,7 +578,7 @@ impl CastFrame {
                         };
                         alloc[mana.index()] = n;
                     }
-                    return self.finish(st, req, alloc, prop.tap);
+                    return self.finish(st, req, alloc, prop.tap, prop.sacrifice);
                 }
             }
         }
@@ -572,6 +591,7 @@ impl CastFrame {
         req: ManaRequirement,
         generic: [u32; 6],
         tap: Option<ObjectId>,
+        sacrifice: Option<ObjectId>,
     ) -> Flow {
         let p = self.player;
         if req.total() > 0 {
@@ -595,6 +615,21 @@ impl CastFrame {
             st.emit(Event::SpellCast { player: p, spell });
             // CR 601.2i: "whenever ... casts" abilities trigger now.
             triggers::detect_cast(st, p, spell);
+        }
+        // "Sacrifice this permanent" as a cost (CR 701.21a): a move to the graveyard like
+        // any other, so it goes through the replacement pipeline (and can trigger "dies").
+        if let Some(source) = sacrifice
+            && st
+                .objects
+                .get(&source)
+                .is_some_and(|o| o.zone == Zone::Battlefield)
+        {
+            let events = vec![Proposed::moving(
+                source,
+                Zone::Graveyard,
+                MoveCause::Sacrifice,
+            )];
+            return Flow::then(Frame::Apply(ApplyFrame::new(st, events)));
         }
         Flow::done()
     }

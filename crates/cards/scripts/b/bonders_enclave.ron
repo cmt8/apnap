@@ -1,0 +1,14 @@
+RealCard(
+    oracle_id: "f33ce38a-34ec-4b65-a0fc-160484a02007",
+    name: "Bonders' Enclave",
+    verified: true,
+    tests: ["bonders_enclave_draws_only_with_a_big_creature"],
+    abilities: [
+        Mana(cost: (tap: true), produce: One(Colorless)),
+        Activated(
+            cost: (mana: Some("{3}"), tap: true),
+            only_if: Some(Control(what: (types: [Creature], controller: You, power_min: Some(4)), at_least: 1)),
+            body: Effect((effect: Draw(who: You, amount: Fixed(1)))),
+        ),
+    ],
+)

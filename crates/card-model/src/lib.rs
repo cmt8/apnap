@@ -347,6 +347,9 @@ pub enum AbilityDef {
         cost: Cost,
         #[serde(default)]
         timing: Timing,
+        /// "Activate only if [condition]" (for the ability's controller).
+        #[serde(default)]
+        only_if: Option<Condition>,
         body: Body,
     },
     /// An activated mana ability (CR 605.1a). M1: the cost must be exactly `{T}`.
@@ -632,6 +635,9 @@ pub struct Cost {
     pub mana: Option<ManaCost>,
     /// `{T}`
     pub tap: bool,
+    /// "Sacrifice this [permanent]" (CR 701.21: its controller moves it to its owner's
+    /// graveyard; it can't be regenerated or otherwise saved, but the move is replaceable).
+    pub sacrifice_self: bool,
 }
 
 /// When an activated ability may be activated (CR 602.5d).

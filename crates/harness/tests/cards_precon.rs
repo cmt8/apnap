@@ -105,7 +105,7 @@ fn every_verified_real_card_names_existing_tests() {
             script.name
         );
     }
-    assert!(verified >= 61);
+    assert!(verified >= 68);
 }
 
 #[test]
@@ -1282,4 +1282,162 @@ fn bojuka_bog_enters_tapped_and_exiles_a_graveyard() {
     assert!(s.st.object(bog).tapped);
     assert_eq!(in_zone(&s, P1, Zone::Exile), 2);
     assert_eq!(in_zone(&s, P1, Zone::Graveyard), 0);
+}
+
+// ------------------------------------------------------------------------------------------
+// Batch 3: sacrifice as a cost, "activate only if" (D-042)
+// ------------------------------------------------------------------------------------------
+
+fn can_activate(s: &Script, id: ObjectId) -> bool {
+    s.has(|_, o| matches!(o, OptionDesc::ActivateAbility { source, .. } if *source == id))
+}
+
+#[test]
+fn lathliss_makes_dragons_and_pumps_them() {
+    let mut sc = scenario();
+    let lathliss = sc.card(P0, Zone::Battlefield, "Lathliss, Dragon Queen");
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    sc.cards(P0, Zone::Battlefield, &["Mountain"; 4]);
+    sc.card(P0, Zone::Hand, "Test Wyrmling"); // a nontoken Dragon
+    let mut s = Script::new(sc.build());
+    assert_eq!(pt(&s, lathliss), (6, 6));
+    assert!(has(&s, lathliss, Keyword::Flying));
+    s.cast("Test Wyrmling").pay();
+    resolve_all(&mut s);
+    // One 5/5 Dragon for the Wyrmling; the token itself is a token, so no chain.
+    let tokens = named(&s, "Dragon Token");
+    assert_eq!((tokens.len(), triggers(&s)), (1, 1));
+    assert_eq!(pt(&s, tokens[0]), (5, 5));
+    // {1}{R}: Dragons you control get +1/+0 until end of turn.
+    s.activate("Lathliss, Dragon Queen").pay().pass_all();
+    assert_eq!(pt(&s, lathliss), (7, 6));
+    assert_eq!(pt(&s, tokens[0]), (6, 5));
+    assert_eq!(pt(&s, named(&s, "Test Wyrmling")[0]), (3, 2));
+    assert_eq!(pt(&s, golem), (2, 3));
+    drive_until(&mut s, |s| s.st.turn.active == P1);
+    assert_eq!(pt(&s, lathliss), (6, 6));
+}
+
+#[test]
+fn lord_of_the_accursed_pumps_zombies_and_gives_menace() {
+    let mut sc = scenario();
+    let lord = sc.card(P0, Zone::Battlefield, "Lord of the Accursed");
+    let mine = sc.card(P0, Zone::Battlefield, "Champion of the Perished");
+    let theirs = sc.card(P1, Zone::Battlefield, "Champion of the Perished");
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    sc.cards(P0, Zone::Battlefield, &["Swamp"; 2]);
+    let mut s = Script::new(sc.build());
+    assert_eq!(pt(&s, lord), (2, 3), "other Zombies");
+    assert_eq!(pt(&s, mine), (2, 2));
+    assert_eq!(pt(&s, theirs), (1, 1), "you control");
+    s.activate("Lord of the Accursed").pay().pass_all();
+    assert!(s.st.object(lord).tapped);
+    // "All Zombies": the opponent's too, and the Lord itself.
+    for z in [lord, mine, theirs] {
+        assert!(has(&s, z, Keyword::Menace));
+    }
+    assert!(!has(&s, golem, Keyword::Menace));
+}
+
+#[test]
+fn geier_reach_sanitarium_makes_everyone_loot() {
+    let mut sc = scenario();
+    let land = sc.card(P0, Zone::Battlefield, "Geier Reach Sanitarium");
+    sc.cards(P0, Zone::Battlefield, &["Forest"; 2]);
+    sc.card(P0, Zone::Hand, "Test Golem");
+    sc.card(P1, Zone::Hand, "Test Sprout");
+    let mut s = Script::new(sc.build());
+    let c = chars(&s.st, land);
+    assert!(c.is(card_model::CardType::Land));
+    assert!(c.supertypes.contains(&card_model::Supertype::Legendary));
+    let libraries = (
+        in_zone(&s, P0, Zone::Library),
+        in_zone(&s, P1, Zone::Library),
+    );
+    s.activate("Geier Reach Sanitarium").pay().pass_all();
+    // Each player draws, then each player discards (their choice, in turn order).
+    let mut discarders = Vec::new();
+    while s.next.is_some() && s.kind() == ChoiceKind::Discard {
+        discarders.push(s.who());
+        s.respond(Response::Pick(vec![0]));
+    }
+    assert_eq!(discarders, [P0, P1]);
+    for (p, before) in [(P0, libraries.0), (P1, libraries.1)] {
+        assert_eq!(in_zone(&s, p, Zone::Library), before - 1);
+        assert_eq!(hand(&s, p), 1);
+        assert_eq!(in_zone(&s, p, Zone::Graveyard), 1);
+    }
+}
+
+#[test]
+fn mind_stone_taps_for_mana_or_is_sacrificed_for_a_card() {
+    let mut sc = scenario();
+    sc.card(P0, Zone::Battlefield, "Mind Stone");
+    sc.card(P0, Zone::Battlefield, "Forest");
+    let mut s = Script::new(sc.build());
+    let offered = s.has(|s, o| {
+        matches!(o, OptionDesc::TapForMana { source, mana: ManaType::Colorless }
+            if s.name(*source) == "Mind Stone")
+    });
+    assert!(offered);
+    // {1}, {T}, sacrifice: draw a card. The {1} has to come from somewhere else.
+    s.activate("Mind Stone").pay().pass_all();
+    assert_eq!(hand(&s, P0), 1);
+    assert!(named(&s, "Mind Stone").is_empty());
+    assert!(s.find(P0, Zone::Graveyard, "Mind Stone").is_some());
+    assert_eq!(s.count(|e| matches!(e, Event::Sacrificed { .. })), 1);
+}
+
+#[test]
+fn thrashing_brontodon_is_sacrificed_to_destroy_an_artifact_or_enchantment() {
+    let mut sc = scenario();
+    let bronto = sc.card(P0, Zone::Battlefield, "Thrashing Brontodon");
+    sc.card(P0, Zone::Battlefield, "Forest");
+    // Sacrificing it is dying (CR 700.4): Open the Graves sees a nontoken creature die.
+    sc.card(P0, Zone::Battlefield, "Open the Graves");
+    let diamond = sc.card(P1, Zone::Battlefield, "Fire Diamond");
+    let golem = sc.card(P1, Zone::Battlefield, "Test Golem");
+    let mut s = Script::new(sc.build());
+    assert_eq!(pt(&s, bronto), (3, 4));
+    s.activate("Thrashing Brontodon");
+    assert!(can_target(&s, diamond) && !can_target(&s, golem));
+    s.target_object(diamond).pay();
+    // The cost is paid as the ability is activated: it is already in the graveyard.
+    assert!(named(&s, "Thrashing Brontodon").is_empty());
+    assert!(s.find(P0, Zone::Graveyard, "Thrashing Brontodon").is_some());
+    resolve_all(&mut s);
+    assert!(named(&s, "Fire Diamond").is_empty());
+    assert_eq!(named(&s, "Zombie Token").len(), 1);
+}
+
+#[test]
+fn infernal_idol_taps_for_black_or_is_sacrificed_for_cards() {
+    let mut sc = scenario();
+    sc.card(P0, Zone::Battlefield, "Infernal Idol");
+    sc.cards(P0, Zone::Battlefield, &["Swamp"; 3]);
+    let mut s = Script::new(sc.build());
+    let offered = s.has(|s, o| {
+        matches!(o, OptionDesc::TapForMana { source, mana: ManaType::Black }
+            if s.name(*source) == "Infernal Idol")
+    });
+    assert!(offered);
+    s.activate("Infernal Idol").pay().pass_all();
+    assert_eq!((hand(&s, P0), life(&s, P0)), (2, 38));
+    assert!(s.find(P0, Zone::Graveyard, "Infernal Idol").is_some());
+}
+
+#[test]
+fn bonders_enclave_draws_only_with_a_big_creature() {
+    for (creature, allowed) in [("Test Golem", false), ("Gigantosaurus", true)] {
+        let mut sc = scenario();
+        let enclave = sc.card(P0, Zone::Battlefield, "Bonders' Enclave");
+        sc.cards(P0, Zone::Battlefield, &["Forest"; 3]);
+        sc.card(P0, Zone::Battlefield, creature);
+        let mut s = Script::new(sc.build());
+        assert_eq!(can_activate(&s, enclave), allowed, "{creature}");
+        if allowed {
+            s.activate("Bonders' Enclave").pay().pass_all();
+            assert_eq!(hand(&s, P0), 1);
+        }
+    }
 }
