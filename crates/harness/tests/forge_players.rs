@@ -115,7 +115,7 @@ fn cleanup_discards(s: &mut Script, p: PlayerId) -> usize {
     if s.next.is_some() && s.kind() == ChoiceKind::Discard {
         assert_eq!(s.who(), p);
         if let Primitive::PickN { min, .. } = s.decision().prim {
-            n = min as usize;
+            n = min;
         }
         s.respond(Response::Pick((0..n).collect()));
     }

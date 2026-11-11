@@ -2864,6 +2864,31 @@ impl eframe::App for App {
     }
 }
 
+/// A rule about a player, as the player panel lists it.
+fn player_rule_text(r: &card_model::PlayerRule) -> String {
+    use card_model::PlayerRule as R;
+    match r {
+        R::NoMaximumHandSize => "No maximum hand size".into(),
+        R::MaximumHandSize(n) => format!("Maximum hand size {n}"),
+        R::MaximumHandSizeBy(n) => format!("Maximum hand size {n:+}"),
+        R::AdditionalLandPlays(n) => format!("{n} additional land play(s) each turn"),
+        R::AnyNumberOfLandPlays => "Any number of land plays".into(),
+        R::Hexproof => "Hexproof".into(),
+        R::Shroud => "Shroud".into(),
+        R::TopCardRevealed => "Plays with the top card of their library revealed".into(),
+        R::LookAtTopCard => "May look at the top card of their library".into(),
+        R::PlayFrom { zone, .. } => format!(
+            "May play cards from {}",
+            match zone {
+                card_model::PlayZone::Graveyard => "their graveyard",
+                card_model::PlayZone::LibraryTop => "the top of their library",
+                card_model::PlayZone::Exile => "exile",
+            }
+        ),
+        R::PlayThisFrom(_) => "May cast a card from another zone".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3012,30 +3037,5 @@ mod tests {
             option_label(&v, &cat, &d, option),
             "Test Golem — {T}: This deals 1 damage to any target."
         );
-    }
-}
-
-/// A rule about a player, as the player panel lists it.
-fn player_rule_text(r: &card_model::PlayerRule) -> String {
-    use card_model::PlayerRule as R;
-    match r {
-        R::NoMaximumHandSize => "No maximum hand size".into(),
-        R::MaximumHandSize(n) => format!("Maximum hand size {n}"),
-        R::MaximumHandSizeBy(n) => format!("Maximum hand size {n:+}"),
-        R::AdditionalLandPlays(n) => format!("{n} additional land play(s) each turn"),
-        R::AnyNumberOfLandPlays => "Any number of land plays".into(),
-        R::Hexproof => "Hexproof".into(),
-        R::Shroud => "Shroud".into(),
-        R::TopCardRevealed => "Plays with the top card of their library revealed".into(),
-        R::LookAtTopCard => "May look at the top card of their library".into(),
-        R::PlayFrom { zone, .. } => format!(
-            "May play cards from {}",
-            match zone {
-                card_model::PlayZone::Graveyard => "their graveyard",
-                card_model::PlayZone::LibraryTop => "the top of their library",
-                card_model::PlayZone::Exile => "exile",
-            }
-        ),
-        R::PlayThisFrom(_) => "May cast a card from another zone".into(),
     }
 }
