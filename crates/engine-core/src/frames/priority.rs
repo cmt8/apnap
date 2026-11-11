@@ -1,13 +1,12 @@
 //! Priority (CR 117 (2026-11-06)). Text: docs/rules-notes/117-priority-101.4-apnap.md.
 
-use super::cast::{CastFrame, CastSource, can_begin, mana_sources, sorcery_timing, tap_for_mana};
+use super::cast::{CastFrame, CastSource, can_begin, sorcery_timing};
 use super::resolve::ResolveFrame;
 use super::{ApplyFrame, Flow, Frame, Input, StateCheckFrame};
 use crate::decision::{ChoiceKind, OptionDesc};
 use crate::events::Event;
 use crate::ids::PlayerId;
 use crate::layers::{abilities, chars};
-use crate::mana::types_in;
 use crate::replacement::{MoveCause, Proposed};
 use crate::state::GameState;
 use crate::zones::Zone;
@@ -110,15 +109,7 @@ impl PriorityFrame {
                 source,
                 mana,
                 ability,
-            } => {
-                // The ability's own cost may include sacrificing its source (Treasure).
-                let cost = tap_for_mana(st, p, source, mana, ability, None);
-                if cost.is_empty() {
-                    Flow::then(again)
-                } else {
-                    Flow::Continue(vec![again, Frame::Apply(ApplyFrame::new(st, cost))])
-                }
-            }
+            } => super::mana::activate(st, p, again, source, mana, ability, None),
             o => unreachable!("not a priority option: {o:?}"),
         }
     }
@@ -177,18 +168,6 @@ fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
             }
         }
     }
-    for src in mana_sources(st, p, None, None) {
-        for mana in types_in(src.mask) {
-            let option = OptionDesc::TapForMana {
-                source: src.id,
-                mana,
-                ability: src.ability,
-            };
-            // An ability the permanent has twice is one option.
-            if !opts.contains(&option) {
-                opts.push(option);
-            }
-        }
-    }
+    opts.extend(super::mana::priority_options(st, p));
     opts
 }

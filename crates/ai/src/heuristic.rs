@@ -1014,15 +1014,28 @@ impl Agent for HeuristicAgent {
                 Response::Allocate(alloc)
             }
             (ChoiceKind::PayMana, Primitive::PickN { .. }) => {
-                // Tap what stays before sacrificing what doesn't (Treasure).
-                let keeps = |o: &OptionDesc| match o {
-                    OptionDesc::TapForMana { ability, .. } => ability.is_none_or(|a| {
-                        !matches!(self.catalog.ability(a),
-                            AbilityDef::Mana { cost, .. } if cost.sacrifice_self)
-                    }),
-                    _ => true,
+                // The cheapest mana first: tap what stays before sacrificing what doesn't
+                // (Treasure), before paying mana for mana, taking damage or paying life,
+                // and sacrifice another permanent last (D-066).
+                let price = |o: &OptionDesc| match o {
+                    OptionDesc::TapForMana {
+                        ability: Some(a), ..
+                    } => match self.catalog.ability(*a) {
+                        AbilityDef::Mana { cost, then, .. } => {
+                            u32::from(cost.sacrifice_self) * 2
+                                + u32::from(cost.mana.is_some())
+                                + u32::from(then.is_some()) * 3
+                                + cost.life * 4
+                                + u32::from(cost.sacrifice.is_some()) * 20
+                        }
+                        _ => 0,
+                    },
+                    _ => 0,
                 };
-                Response::Pick(vec![d.options.iter().position(keeps).unwrap_or(0)])
+                let best = (0..d.options.len())
+                    .min_by_key(|&i| (price(&d.options[i]), i))
+                    .unwrap_or(0);
+                Response::Pick(vec![best])
             }
             // Paying is nearly always right: it is offered only when it can be afforded,
             // and it buys the effect or stops the harm.

@@ -195,6 +195,32 @@ impl ResolveFrame {
         }
     }
 
+    /// The rest of what a mana ability does as it resolves (CR 605.3b): no stack object,
+    /// no targets (CR 605.5a). `object` is the source itself, which is not on the stack,
+    /// so resolving ends without anything leaving the stack.
+    pub(crate) fn mana_ability(
+        controller: PlayerId,
+        source: ObjectId,
+        card: card_model::CardDefId,
+        effect: Effect,
+        source_lki: Option<Characteristics>,
+    ) -> Self {
+        let mut f = ResolveFrame::new();
+        f.object = Some(source);
+        f.controller = controller;
+        f.source = source;
+        f.card = card;
+        f.source_lki = source_lki;
+        f.targets = vec![Vec::new()];
+        f.filters = vec![Vec::new()];
+        f.target_controllers = vec![Vec::new()];
+        f.work = vec![Work::Eval {
+            k: 0,
+            effect: Box::new(effect),
+        }];
+        f
+    }
+
     /// Everything `r` stands for right now: objects and players.
     fn recipients(&self, st: &GameState, k: usize, r: TargetRef) -> Vec<Target> {
         match r {

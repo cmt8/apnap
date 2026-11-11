@@ -299,7 +299,25 @@ impl Session {
                     return Some(Response::Pick(vec![0]));
                 }
                 if kind == ChoiceKind::PayMana && self.stops.auto_pay {
-                    return Some(Response::Pick(vec![0]));
+                    // Mana that costs nothing but a tap is paid with automatically; life,
+                    // damage, mana or a sacrifice for mana is the player's choice (D-066).
+                    let free = |o: &OptionDesc| match o {
+                        OptionDesc::TapForMana { ability: None, .. } => true,
+                        OptionDesc::TapForMana {
+                            ability: Some(a), ..
+                        } => matches!(
+                            self.st.catalog.ability(*a),
+                            card_model::AbilityDef::Mana { cost, then: None, .. }
+                                if cost.mana.is_none()
+                                    && cost.life == 0
+                                    && cost.sacrifice.is_none()
+                                    && !cost.sacrifice_self
+                        ),
+                        _ => false,
+                    };
+                    if let Some(i) = d.options.iter().position(free) {
+                        return Some(Response::Pick(vec![i]));
+                    }
                 }
             }
             (Primitive::Allocate { total, per_max, .. }, ChoiceKind::PayMana)
