@@ -626,8 +626,10 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                         | (Replaces::PutCountersOnYourPermanents, ReplaceWith::Twice)
                         | (Replaces::CardToGraveyard, ReplaceWith::Exile)
                         | (
-                            Replaces::ThisDies,
-                            ReplaceWith::Exile | ReplaceWith::ShuffleIntoLibrary
+                            Replaces::ThisDies | Replaces::Dies(_) | Replaces::ThisToGraveyard,
+                            ReplaceWith::Exile
+                                | ReplaceWith::ShuffleIntoLibrary
+                                | ReplaceWith::RevealShuffleIntoLibrary
                         )
                         | (
                             Replaces::ThisEnters,

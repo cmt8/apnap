@@ -580,6 +580,141 @@ fn discard_instead_with_another_chain_blocks() {
 }
 
 // ---------------------------------------------------------------------------------------
+// The same event to the graveyard: "… instead".
+
+const SLAY: &str = "Name:Test Slay\n\
+    ManaCost:B\n\
+    Types:Instant\n\
+    A:SP$ Destroy | ValidTgts$ Creature | SpellDescription$ Text.\n\
+    Oracle:Text.";
+
+// CR 700.4, 614.1a: "if a creature an opponent controls would die, exile it instead" —
+// judged as it is on the battlefield; the effect's controller's own creatures die.
+#[test]
+fn cr_700_4_a_creature_an_opponent_controls_would_die_exile_it_instead() {
+    let stone = "Name:Test Stone\n\
+        ManaCost:1\n\
+        Types:Artifact\n\
+        R:Event$ Moved | ActiveZones$ Battlefield | Origin$ Battlefield | Destination$ Graveyard | ValidLKI$ Creature.OppCtrl | ReplaceWith$ Exile | Description$ Text.\n\
+        SVar:Exile:DB$ ChangeZone | Hidden$ True | Origin$ All | Destination$ Exile | Defined$ ReplacedCard\n\
+        Oracle:Text.";
+    let mut sc = scenario(&[stone, SLAY]);
+    sc.card(P0, Zone::Battlefield, "Test Stone");
+    sc.cards(P0, Zone::Battlefield, &["Swamp", "Swamp"]);
+    sc.card(P0, Zone::Battlefield, "Test Golem");
+    sc.card(P1, Zone::Battlefield, "Test Giant");
+    sc.cards(P0, Zone::Hand, &["Test Slay", "Test Slay"]);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Slay").target("Test Giant").pay().pass_all();
+    assert!(s.find(P1, Zone::Exile, "Test Giant").is_some());
+    assert!(s.find(P1, Zone::Graveyard, "Test Giant").is_none());
+    s.cast("Test Slay").target("Test Golem").pay().pass_all();
+    assert!(
+        s.find(P0, Zone::Graveyard, "Test Golem").is_some(),
+        "its controller's own"
+    );
+}
+
+// CR 113.6b: "if this card would be put into a graveyard from anywhere" works in every
+// zone; CR 701.20a: it is revealed, then shuffled into its owner's library.
+#[test]
+fn cr_113_6b_put_into_a_graveyard_from_anywhere_shuffle_it_into_the_library_instead() {
+    let colossus = "Name:Test Colossus\n\
+        ManaCost:7\n\
+        Types:Artifact Creature Golem\n\
+        PT:7/7\n\
+        R:Event$ Moved | Destination$ Graveyard | ValidCard$ Card.Self | ReplaceWith$ DBShuffle | Description$ Text.\n\
+        SVar:DBShuffle:DB$ ChangeZone | Hidden$ True | Origin$ All | Destination$ Library | Defined$ ReplacedCard | Reveal$ True | Shuffle$ True\n\
+        Oracle:Text.";
+    let mill = "Name:Test Mill\n\
+        ManaCost:U\n\
+        Types:Sorcery\n\
+        A:SP$ Mill | NumCards$ 1 | Defined$ You | SpellDescription$ Text.\n\
+        Oracle:Text.";
+    // From the battlefield.
+    let mut sc = scenario(&[colossus, SLAY]);
+    sc.cards(P0, Zone::Battlefield, &["Swamp"]);
+    sc.card(P1, Zone::Battlefield, "Test Colossus");
+    sc.card(P0, Zone::Hand, "Test Slay");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Slay").target("Test Colossus").pay().pass_all();
+    let card = s
+        .find(P1, Zone::Library, "Test Colossus")
+        .expect("in its library");
+    assert!(s.find(P1, Zone::Graveyard, "Test Colossus").is_none());
+    let _ = card;
+    assert_eq!(
+        s.count(|e| matches!(e, Event::Revealed { player, .. } if *player == P1)),
+        1
+    );
+    assert_eq!(
+        s.count(|e| matches!(e, Event::Shuffled { player } if *player == P1)),
+        1
+    );
+    // From the library (milled).
+    let mut sc = scenario(&[colossus, mill]);
+    sc.cards(P0, Zone::Battlefield, &["Island"]);
+    sc.card(P0, Zone::Library, "Test Colossus");
+    sc.card(P0, Zone::Hand, "Test Mill");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Mill").pay().pass_all();
+    assert!(s.find(P0, Zone::Library, "Test Colossus").is_some());
+    assert!(
+        s.st.zones
+            .list(Zone::Graveyard, P0)
+            .iter()
+            .all(|&c| s.name(c) != "Test Colossus")
+    );
+}
+
+// The Oracle guard: a card that says "unless" compiles only if the engine's text does too
+// (a script that drops the condition would make an always-tapped land).
+#[test]
+fn oracle_unless_without_an_unless_blocks() {
+    let card = "Name:Test Dropland\n\
+        ManaCost:no cost\n\
+        Types:Land\n\
+        R:Event$ Moved | ValidCard$ Card.Self | Destination$ Battlefield | ReplaceWith$ T | ReplacementResult$ Updated | Description$ Text.\n\
+        SVar:T:DB$ Tap | ETB$ True | Defined$ Self\n\
+        Oracle:This land enters tapped unless you control a basic land.";
+    assert_eq!(forge_test_blockers(card), ["oracle:says unless"]);
+    let honest = card.replace(" unless you control a basic land", "");
+    assert_eq!(forge_test_blockers(&honest), [] as [&str; 0]);
+}
+
+#[test]
+fn graveyard_forms_not_compiled_yet_block() {
+    let base = "Name:Test Warden\n\
+        ManaCost:1\n\
+        Types:Artifact\n\
+        R:Event$ Moved | ActiveZones$ Battlefield | Origin$ Battlefield | Destination$ Graveyard | ValidLKI$ Creature.OppCtrl | ReplaceWith$ Exile | Description$ Text.\n\
+        SVar:Exile:DB$ ChangeZone | Hidden$ True | Origin$ All | Destination$ Exile | Defined$ ReplacedCard\n\
+        Oracle:Text.";
+    // "… exile it instead. When you do, …": more than the replacement.
+    let more = base.replace(
+        "Defined$ ReplacedCard",
+        "Defined$ ReplacedCard | SubAbility$ D\nSVar:D:DB$ Draw | NumCards$ 1",
+    );
+    assert!(
+        forge_test_blockers(&more)
+            .contains(&"repl:Moved to graveyard:ChangeZone+SubAbility".to_string())
+    );
+    // "If a card would be put into an opponent's graveyard from anywhere": no vocabulary
+    // for other cards from anywhere.
+    let anywhere = base.replace(" | Origin$ Battlefield", "");
+    assert_eq!(
+        forge_test_blockers(&anywhere),
+        ["repl:Moved to graveyard:shape"]
+    );
+    // Somewhere else than exile or the library.
+    let hand = base.replace("Destination$ Exile", "Destination$ Hand");
+    assert_eq!(
+        forge_test_blockers(&hand),
+        ["repl:Moved to graveyard:ChangeZone shape"]
+    );
+}
+
+// ---------------------------------------------------------------------------------------
 // What is not compiled (CLAUDE.md invariant 15).
 
 #[test]

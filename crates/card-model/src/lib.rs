@@ -872,6 +872,13 @@ pub enum Replaces {
         to: DamageTo,
         combat: Option<bool>,
     },
+    /// "If [a creature an opponent controls] would die" (CR 700.4): a permanent matching
+    /// the selector — relative to this ability's source and controller, as the permanent
+    /// last existed on the battlefield — would be put into a graveyard from the battlefield.
+    Dies(Selector),
+    /// "If this card would be put into a graveyard from anywhere" (CR 113.6b: it functions
+    /// in every zone).
+    ThisToGraveyard,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -908,6 +915,8 @@ pub enum ReplaceWith {
     /// 614.12a: chosen as the event is modified, by the player it would enter under the
     /// control of.)
     EntersOnlyIfYou(AsEnters),
+    /// "… reveal it and shuffle it into its owner's library instead" (CR 701.20a).
+    RevealShuffleIntoLibrary,
 }
 
 /// What a player may do as a permanent enters (CR 614.12a) so that it enters untapped.

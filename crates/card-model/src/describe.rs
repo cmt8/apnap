@@ -1713,6 +1713,13 @@ fn ability(a: &AbilityDef) -> String {
                 }
                 Replaces::ThisDies => "If this creature would die",
                 Replaces::ThisEnters => "This permanent",
+                Replaces::Dies(s) => {
+                    others = format!("If {} would die", with_article(&selector(s, false)));
+                    others.as_str()
+                }
+                Replaces::ThisToGraveyard => {
+                    "If this card would be put into a graveyard from anywhere"
+                }
                 // Written out by the arm above.
                 Replaces::Damage { .. } => "If damage would be dealt",
             };
@@ -1721,6 +1728,9 @@ fn ability(a: &AbilityDef) -> String {
                 ReplaceWith::Exile => format!("{what}, exile it instead."),
                 ReplaceWith::ShuffleIntoLibrary => {
                     format!("{what}, shuffle it into its owner's library instead.")
+                }
+                ReplaceWith::RevealShuffleIntoLibrary => {
+                    format!("{what}, reveal it and shuffle it into its owner's library instead.")
                 }
                 ReplaceWith::Prevent => format!("{what}, prevent it."),
                 ReplaceWith::EntersTapped => format!("{what} enters tapped."),

@@ -258,6 +258,32 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
             }
         }
     }
+    // CR 113.6b: "if this card would be put into a graveyard from anywhere" works wherever
+    // the card is (on the battlefield it is one of the abilities above).
+    if let Proposed::Move {
+        object,
+        to: Zone::Graveyard,
+        ..
+    } = &p.event
+        && st
+            .objects
+            .get(object)
+            .is_some_and(|o| o.zone != Zone::Battlefield)
+    {
+        for (i, a) in st.card_def(*object).abilities.iter().enumerate() {
+            if let AbilityDef::Replacement {
+                replaces: Replaces::ThisToGraveyard,
+                ..
+            } = a
+            {
+                out.push(RepKey::Static {
+                    source: *object,
+                    ability: AbilityId::printed(st.object(*object).card, i as u16),
+                    nth: 0,
+                });
+            }
+        }
+    }
     if let Proposed::Damage { target, amount, .. } = &p.event
         && *amount > 0
     {
@@ -554,6 +580,44 @@ fn applies(st: &GameState, who: Bearer<'_>, replaces: &Replaces, ev: &Proposed) 
                 ..
             },
         ) => *object == source && st.object(source).zone == Zone::Battlefield,
+        // CR 700.4: "dies" — from the battlefield, judged as it is there now (its last
+        // existence on the battlefield).
+        (
+            Replaces::Dies(sel),
+            Proposed::Move {
+                object,
+                to: Zone::Graveyard,
+                ..
+            },
+        ) => st.objects.get(object).is_some_and(|o| {
+            o.zone == Zone::Battlefield && {
+                let (attacking, blocking) = crate::layers::combat_role(st, *object);
+                crate::layers::matches_parts(
+                    sel,
+                    &crate::layers::chars(st, *object),
+                    crate::layers::Facts {
+                        id: *object,
+                        controller: crate::layers::controller_of(st, *object),
+                        owner: o.owner,
+                        is_token: o.is_token,
+                        tapped: o.tapped,
+                        attacking,
+                        blocking,
+                    },
+                    source,
+                    you,
+                )
+            }
+        }),
+        // From the battlefield; from anywhere else see `applicable`.
+        (
+            Replaces::ThisToGraveyard,
+            Proposed::Move {
+                object,
+                to: Zone::Graveyard,
+                ..
+            },
+        ) => *object == source,
         // CR 614.12: checked against the permanent as it would exist on the battlefield.
         (
             Replaces::OtherEnters(sel),
@@ -694,6 +758,16 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
 /// The event as `with` changes it; `None` if it no longer happens (CR 615.1a: prevented
 /// damage isn't dealt).
 fn replace(st: &mut GameState, ev: Proposed, with: ReplaceWith) -> Option<Proposed> {
+    // CR 701.20a: shown to all players first.
+    if with == ReplaceWith::RevealShuffleIntoLibrary
+        && let Proposed::Move { object, .. } = &ev
+    {
+        let player = st.object(*object).owner;
+        st.emit(crate::events::Event::Revealed {
+            player,
+            cards: alloc::vec![*object],
+        });
+    }
     if with == ReplaceWith::Prevent {
         if let Proposed::Damage { target, amount, .. } = &ev {
             st.emit(crate::events::Event::DamagePrevented {
@@ -725,9 +799,11 @@ fn modify(mut ev: Proposed, with: ReplaceWith) -> Proposed {
                 attach_to,
                 ..
             },
-            ReplaceWith::Exile | ReplaceWith::ShuffleIntoLibrary,
+            ReplaceWith::Exile
+            | ReplaceWith::ShuffleIntoLibrary
+            | ReplaceWith::RevealShuffleIntoLibrary,
         ) => {
-            let library = with == ReplaceWith::ShuffleIntoLibrary;
+            let library = with != ReplaceWith::Exile;
             *to = if library { Zone::Library } else { Zone::Exile };
             *position = LibraryPosition::Top;
             *tapped = false;

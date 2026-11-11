@@ -4305,6 +4305,9 @@ impl<'a> Tx<'a> {
         if event == "Moved" && rd.rec.get("Destination") == Some("Battlefield") {
             return self.moved_enters(&rd);
         }
+        if event == "Moved" && rd.rec.get("Destination") == Some("Graveyard") {
+            return self.moved_to_graveyard(&rd);
+        }
         // Not compiled yet: named by the event alone, so that it ranks as one feature.
         for key in [
             "ValidCard",
@@ -4374,6 +4377,98 @@ impl<'a> Tx<'a> {
             replaces,
             with: with?,
         })
+    }
+
+    /// `R:Event$ Moved | Destination$ Graveyard` whose ability moves the card elsewhere
+    /// instead (no `ReplacementResult$`): "if this creature would die, exile it instead",
+    /// "if a creature an opponent controls would die, exile it instead" (CR 700.4), "if
+    /// this card would be put into a graveyard from anywhere, [reveal it and] shuffle it
+    /// into its owner's library instead".
+    fn moved_to_graveyard(&mut self, rd: &Rd<'a>) -> Option<AbilityDef> {
+        rd.get("Destination");
+        let from_battlefield = match rd.get("Origin") {
+            None => false,
+            Some("Battlefield") => true,
+            Some(_) => {
+                self.block("repl:Moved to graveyard:origin");
+                return None;
+            }
+        };
+        // `ValidLKI$` judges the card as it last existed in its old zone; for one leaving
+        // the battlefield that is what `ValidCard$` sees as the event is modified, too.
+        let valid = match (rd.get("ValidCard"), rd.get("ValidLKI")) {
+            (Some(v), None) | (None, Some(v)) => v,
+            _ => {
+                self.block("repl:Moved to graveyard:which card");
+                return None;
+            }
+        };
+        let zones = rd.get("ActiveZones");
+        let replaced = rd.get("ReplacementResult").is_none();
+        let with = rd.get("ReplaceWith").and_then(|n| self.sub(n));
+        rd.finish(&mut self.blockers);
+        let replaces = match (valid, from_battlefield, zones) {
+            ("Card.Self", true, Some("Battlefield")) => Some(Replaces::ThisDies),
+            // Its own: no zone stated, it works from every zone (Forge: no `ActiveZones`).
+            ("Card.Self", false, None) => Some(Replaces::ThisToGraveyard),
+            (f, true, Some("Battlefield")) if f != "Card.Self" => {
+                self.selector(f).map(Replaces::Dies)
+            }
+            _ => {
+                self.block("repl:Moved to graveyard:shape");
+                None
+            }
+        };
+        let with = with.and_then(|w| self.graveyard_instead(w, from_battlefield));
+        if !replaced {
+            self.block("repl:Moved to graveyard:result");
+            return None;
+        }
+        Some(AbilityDef::Replacement {
+            replaces: replaces?,
+            with: with?,
+        })
+    }
+
+    /// `DB$ ChangeZone | Defined$ ReplacedCard | Destination$ Exile` or `… Library |
+    /// Shuffle$ True [| Reveal$ True]` (`Origin$ All`, or `Battlefield` for a card leaving
+    /// it; `Hidden$ True` changes nothing for a defined card).
+    fn graveyard_instead(
+        &mut self,
+        rec: &'a Record,
+        from_battlefield: bool,
+    ) -> Option<ReplaceWith> {
+        if rec.head() != Some(("DB", "ChangeZone")) {
+            self.block(format!(
+                "repl:Moved to graveyard:{}",
+                rec.head().map_or("?", |h| h.1)
+            ));
+            return None;
+        }
+        let rd = Rd::new(rec, "repl Moved ChangeZone");
+        let origin = matches!(
+            (rd.get("Origin"), from_battlefield),
+            (Some("All"), _) | (Some("Battlefield"), true)
+        );
+        let defined = rd.get("Defined") == Some("ReplacedCard");
+        let hidden = matches!(rd.get("Hidden"), None | Some("True"));
+        let with = match (rd.get("Destination"), rd.get("Shuffle"), rd.get("Reveal")) {
+            (Some("Exile"), None, None) => Some(ReplaceWith::Exile),
+            (Some("Library"), Some("True"), None) => Some(ReplaceWith::ShuffleIntoLibrary),
+            (Some("Library"), Some("True"), Some("True")) => {
+                Some(ReplaceWith::RevealShuffleIntoLibrary)
+            }
+            _ => None,
+        };
+        if rd.get("SubAbility").is_some() {
+            self.block("repl:Moved to graveyard:ChangeZone+SubAbility");
+        }
+        rd.finish(&mut self.blockers);
+        if !origin || !defined || !hidden || with.is_none() {
+            self.block("repl:Moved to graveyard:ChangeZone shape");
+            return None;
+        }
+        with
     }
 
     /// "If this would enter, you may discard a [land] card instead. If you do, put it onto
@@ -5232,6 +5327,11 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
         // "You may": an optional instruction, or "up to" some number of things.
         if has_word(plain, "may") && !has_word(compiled, "may") && !compiled.contains("up to") {
             missing.push("says may");
+        }
+        // "Unless": a condition or a payment that lets it not happen ("enters tapped
+        // unless you control an Island", "counter target spell unless its controller pays").
+        if has_word(plain, "unless") && !has_word(compiled, "unless") {
+            missing.push("says unless");
         }
         // "Another target creature": the ability's source can't be chosen.
         if (plain.contains("another target") || plain.contains("other target"))
