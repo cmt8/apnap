@@ -2546,6 +2546,14 @@ impl<'a> Tx<'a> {
                 "Swamp" => land_types.push(BasicLandType::Swamp),
                 "Mountain" => land_types.push(BasicLandType::Mountain),
                 "Forest" => land_types.push(BasicLandType::Forest),
+                // "Every basic land type" (CR 205.3i).
+                "AllBasicLandType" => land_types.extend([
+                    BasicLandType::Plains,
+                    BasicLandType::Island,
+                    BasicLandType::Swamp,
+                    BasicLandType::Mountain,
+                    BasicLandType::Forest,
+                ]),
                 w if self.known.subtypes.contains(w) => subtypes.push(w.to_string()),
                 w => {
                     self.block(format!("type added:{}", shape(w)));

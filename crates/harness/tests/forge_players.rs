@@ -846,3 +846,41 @@ fn the_graveyard_ability_ends_when_the_card_leaves_the_graveyard() {
     assert!(s.find(P0, Zone::Exile, "Test Fury").is_some());
     assert!(!chars(&s.st, mine).has(Keyword::Haste));
 }
+
+// CR 205.3i, 305.7 (2026-11-06): "every basic land type in addition to their other types"
+// (Forge: `AddType$ AllBasicLandType`); each basic land type gives its mana ability
+// (CR 305.6).
+#[test]
+fn lands_are_every_basic_land_type() {
+    use engine_core::mana::ManaType;
+    let omen = "Name:Test Omen\nManaCost:1 G\nTypes:Enchantment\n\
+        S:Mode$ Continuous | Affected$ Land.YouCtrl | AddType$ AllBasicLandType | Description$ Text.\n\
+        Oracle:Text.";
+    let mut sc = scenario(&[omen, PEAK]);
+    sc.card(P0, Zone::Battlefield, "Test Omen");
+    let peak = sc.card(P0, Zone::Battlefield, "Test Peak");
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Peak");
+    sc.turn(P0, Step::PrecombatMain);
+    let s = Script::new(sc.build());
+    let colors = |id: ObjectId| -> Vec<ManaType> {
+        s.options()
+            .iter()
+            .filter_map(|o| match o {
+                OptionDesc::TapForMana { source, mana, .. } if *source == id => Some(*mana),
+                _ => None,
+            })
+            .collect()
+    };
+    let mine = colors(peak);
+    for m in [
+        ManaType::White,
+        ManaType::Blue,
+        ManaType::Black,
+        ManaType::Red,
+        ManaType::Green,
+    ] {
+        assert!(mine.contains(&m), "{m:?}: {mine:?}");
+    }
+    let c = engine_core::layers::chars(&s.st, theirs);
+    assert!(c.has_subtype("Mountain") && !c.has_subtype("Island"));
+}
