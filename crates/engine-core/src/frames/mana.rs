@@ -1465,7 +1465,10 @@ impl ManaFrame {
                     self.stage = ManaStage::Types;
                     if !events.is_empty() {
                         let apply = Frame::Apply(ApplyFrame::new(st, events));
-                        return Flow::Continue(vec![Frame::Mana(alloc::boxed::Box::new(self)), apply]);
+                        return Flow::Continue(vec![
+                            Frame::Mana(alloc::boxed::Box::new(self)),
+                            apply,
+                        ]);
                     }
                 }
                 ManaStage::Types => {

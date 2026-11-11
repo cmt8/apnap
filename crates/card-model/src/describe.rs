@@ -596,6 +596,20 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 amount(a)
             ),
         },
+        Effect::AddManaOf { who, of, amount: a } => {
+            let kind = if of.len() == 5 {
+                "any one color".to_string()
+            } else {
+                join(of.iter().map(|t| t.symbol().to_string()).collect(), "or")
+            };
+            let add = verb(&player(mode, *who), "add", "adds");
+            match a {
+                Amount::Fixed(1) if of.len() == 5 => format!("{add} one mana of any color"),
+                Amount::Fixed(1) => format!("{add} {kind}"),
+                Amount::Fixed(n) => format!("{add} {n} mana of {kind}"),
+                a => format!("{add} X mana of {kind}, where X is {}", amount(a)),
+            }
+        }
         Effect::GainLife { who, amount: a } => {
             format!(
                 "{} {} life",

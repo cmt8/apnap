@@ -101,6 +101,12 @@ pub enum Work {
         paid: Box<Effect>,
         unpaid: Box<Effect>,
     },
+    /// CR 106.4: `player` adds `count` mana of one type they choose from `of`.
+    AddManaOf {
+        player: PlayerId,
+        of: Vec<crate::mana::ManaType>,
+        count: u32,
+    },
 }
 
 /// The fixed part of a [`Work::ChooseCards`] (amounts already worked out, CR 608.2h).
@@ -524,6 +530,32 @@ impl ResolveFrame {
                         self.work.push(Work::Eval { k, effect: unpaid });
                     }
                 },
+                Work::AddManaOf { player, of, count } => {
+                    let mana = match input.take() {
+                        Some(inp) => match inp.picked_one() {
+                            Some(OptionDesc::Mana { mana }) => Some(*mana),
+                            other => unreachable!("{other:?}"),
+                        },
+                        None if of.len() == 1 => Some(of[0]),
+                        None if st.in_game(player) => {
+                            let options =
+                                of.iter().map(|&mana| OptionDesc::Mana { mana }).collect();
+                            self.work.push(Work::AddManaOf { player, of, count });
+                            return Flow::ask_one(
+                                Frame::Resolve(Box::new(self)),
+                                player,
+                                ChoiceKind::ChooseColor,
+                                options,
+                            );
+                        }
+                        None => None,
+                    };
+                    if let Some(mana) = mana {
+                        for _ in 0..count {
+                            execute(st, GameAction::AddMana { player, mana });
+                        }
+                    }
+                }
                 Work::May { k, effect } => match input.take() {
                     None if st.in_game(self.controller) => {
                         let controller = self.controller;
@@ -1300,6 +1332,20 @@ impl ResolveFrame {
                 for player in self.players(st, k, who) {
                     for _ in 0..amount {
                         execute(st, GameAction::AddMana { player, mana });
+                    }
+                }
+                Vec::new()
+            }
+            Effect::AddManaOf { who, of, amount } => {
+                let count = self.amount(st, &amount);
+                if count > 0 {
+                    // Each player chooses as their mana is added (last pushed = first).
+                    for player in self.players_apnap(st, k, who).into_iter().rev() {
+                        self.work.push(Work::AddManaOf {
+                            player,
+                            of: of.clone(),
+                            count,
+                        });
                     }
                 }
                 Vec::new()

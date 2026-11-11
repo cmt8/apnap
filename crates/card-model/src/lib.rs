@@ -1456,6 +1456,14 @@ pub enum Effect {
         /// Ends when its source leaves the battlefield ("for as long as …").
         while_source: bool,
     },
+    /// A spell or a non-mana ability adds `amount` mana of ONE type its controller chooses
+    /// from `of` as it resolves (CR 106.4, 605.5a): "add one mana of any color" (Lotus
+    /// Cobra's landfall, which is not a mana ability), "add three mana of any one color".
+    AddManaOf {
+        who: PlayerRef,
+        of: Vec<ManaType>,
+        amount: Amount,
+    },
 }
 
 /// A zone an effect takes cards out of as it resolves.

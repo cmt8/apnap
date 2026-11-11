@@ -79,6 +79,7 @@ fn effect_polarity(e: &Effect) -> Polarity {
         Effect::Together(v) => v.first().map_or(Polarity::Neutral, effect_polarity),
         Effect::GainLife { .. }
         | Effect::AddMana { .. }
+        | Effect::AddManaOf { .. }
         | Effect::ReturnToBattlefield { .. }
         | Effect::Draw { .. }
         | Effect::CreateToken { .. }

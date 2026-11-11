@@ -613,17 +613,62 @@ fn mana_for_abilities_of_permanents_or_of_any_source() {
     let drake = "Name:Test Drake\nManaCost:4 R\nTypes:Creature Dragon\nPT:4/4\nK:Cycling:1\nOracle:Cycling {1}";
     let trinket = "Name:Test Trinket\nManaCost:1\nTypes:Artifact\nOracle:";
     let cards = [permanents.as_str(), &sources, &any, drake, trinket];
-    for (rock, cycles) in [("Test Lair", false), ("Test Hoard", true), ("Test Workshop", true)] {
+    for (rock, cycles) in [
+        ("Test Lair", false),
+        ("Test Hoard", true),
+        ("Test Workshop", true),
+    ] {
         let mut sc = scenario(&cards);
         sc.card(P0, Zone::Battlefield, rock);
         let card = sc.card(P0, Zone::Hand, "Test Drake");
         sc.card(P0, Zone::Hand, "Test Trinket");
         let s = Script::new(sc.build());
-        let can_cycle =
-            s.has(|_, o| matches!(o, OptionDesc::ActivateAbility { source, .. } if *source == card));
+        let can_cycle = s
+            .has(|_, o| matches!(o, OptionDesc::ActivateAbility { source, .. } if *source == card));
         assert_eq!(can_cycle, cycles, "{rock}");
         assert!(!s.can_cast("Test Trinket"), "{rock}: not for spells");
     }
+}
+
+// CR 605.5a, 605.1b: a triggered ability that adds mana but triggers on something other
+// than a mana ability (a land entering) is not a mana ability: it uses the stack, and the
+// color is chosen as it resolves. CR 605.5b: a spell that adds mana is a spell.
+// Forge: `DB$ Mana | Produced$ Any` in a trigger; `SP$ Mana | Produced$ R R G G`.
+#[test]
+fn effects_that_add_mana_of_a_chosen_color() {
+    let cobra = "Name:Test Cobra\nManaCost:1 G U\nTypes:Creature Snake\nPT:2/1\n\
+        T:Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield | ValidCard$ Land.YouCtrl | TriggerZones$ Battlefield | Execute$ TrigMana | TriggerDescription$ Text.\n\
+        SVar:TrigMana:DB$ Mana | Produced$ Any\n\
+        Oracle:Landfall — Whenever a land you control enters, add one mana of any color.";
+    let ritual = "Name:Test Rite\nManaCost:2 R\nTypes:Instant\n\
+        A:SP$ Mana | Produced$ R R G G | SpellDescription$ Add {R}{R}{G}{G}.\n\
+        Oracle:Add {R}{R}{G}{G}.";
+    let mut sc = scenario(&[cobra, ritual]);
+    sc.card(P0, Zone::Battlefield, "Test Cobra");
+    sc.card(P0, Zone::Hand, "Forest");
+    sc.card(P0, Zone::Hand, "Test Rite");
+    sc.cards(P0, Zone::Battlefield, &["Mountain", "Mountain", "Mountain"]);
+    let mut s = Script::new(sc.build());
+    s.pick(
+        "play Forest",
+        |s, o| matches!(o, OptionDesc::PlayLand { card } if s.name(*card) == "Forest"),
+    );
+    assert_eq!(s.st.stack.len(), 1, "the trigger uses the stack");
+    s.pass_all();
+    assert_eq!(s.kind(), ChoiceKind::ChooseColor);
+    assert_eq!(s.options().len(), 5);
+    pick_mana(&mut s, ManaType::Blue);
+    assert_eq!(pool(&s, ManaType::Blue), 1);
+    s.cast("Test Rite").pay().pass_all();
+    assert_eq!((pool(&s, ManaType::Red), pool(&s, ManaType::Green)), (2, 2));
+    let def = s.st.catalog.get(
+        s.st.object(s.find(P0, Zone::Battlefield, "Test Cobra").unwrap())
+            .card,
+    );
+    assert_eq!(
+        card_model::describe::ability_text(def, &def.abilities[0]),
+        "Whenever a land you control enters, you add one mana of any color."
+    );
 }
 
 // Found by the soak (precon-4p, heuristic agents): mana that may only be spent on Dragons,
@@ -644,7 +689,11 @@ fn restricted_mana_of_open_types_still_pays() {
     let wyrm = sc.card(P0, Zone::Battlefield, "Test Wyrm");
     let mut s = Script::new(sc.build());
     s.activate("Test Wyrm");
-    assert_eq!(offered(&s, rock), [] as [ManaType; 0], "its {{1}} isn't in the pool yet");
+    assert_eq!(
+        offered(&s, rock),
+        [] as [ManaType; 0],
+        "its {{1}} isn't in the pool yet"
+    );
     s.tap("Mountain", ManaType::Red);
     s.tap("Test Orb", ManaType::Red);
     assert_eq!(s.kind(), ChoiceKind::ChooseColor);

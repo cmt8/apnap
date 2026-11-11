@@ -527,10 +527,9 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                         "a mana ability may only also deal damage to, or change the life of, its controller (D-066): {e:?}"
                     )));
                 }
-                if spend
-                    .as_ref()
-                    .is_some_and(|r| r.spells.is_empty() && r.abilities.is_empty() && r.sources.is_empty())
-                {
+                if spend.as_ref().is_some_and(|r| {
+                    r.spells.is_empty() && r.abilities.is_empty() && r.sources.is_empty()
+                }) {
                     p.push(at("mana that can be spent on nothing".into()));
                 }
             }
@@ -994,6 +993,13 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         | Effect::LoseLife { who, amount: a } => {
             player(who, p);
             amount(a, p);
+        }
+        Effect::AddManaOf { who, of, amount: a } => {
+            player(who, p);
+            amount(a, p);
+            if of.len() < 2 {
+                p("AddManaOf with no choice is AddMana".into());
+            }
         }
         Effect::Counter { what } => match slot(what) {
             Some(TargetFilter::Spell | TargetFilter::SpellMatching(_)) => {}

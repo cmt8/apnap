@@ -1351,26 +1351,87 @@ impl<'a> Tx<'a> {
                     _ => Effect::LoseLife { who, amount },
                 }
             }
-            // A spell or a non-mana ability that adds mana: one type, any amount.
+            // A spell or a non-mana ability that adds mana (CR 605.5): exactly that mana
+            // ("R R R G G G": each type `Amount$` times), or `Amount$` mana of one type the
+            // player chooses ("Any": any color; "Combo R G" once: {R} or {G}).
             "Mana" => {
-                let mana = match rd.get("Produced") {
-                    Some("W") => Some(ManaType::White),
-                    Some("U") => Some(ManaType::Blue),
-                    Some("B") => Some(ManaType::Black),
-                    Some("R") => Some(ManaType::Red),
-                    Some("G") => Some(ManaType::Green),
-                    Some("C") => Some(ManaType::Colorless),
-                    _ => {
-                        self.block("Mana:produced");
-                        None
-                    }
+                let letter = |w: &str| match w {
+                    "W" => Some(ManaType::White),
+                    "U" => Some(ManaType::Blue),
+                    "B" => Some(ManaType::Black),
+                    "R" => Some(ManaType::Red),
+                    "G" => Some(ManaType::Green),
+                    "C" => Some(ManaType::Colorless),
+                    _ => None,
                 };
+                let words: Vec<&str> = rd
+                    .get("Produced")
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .collect();
+                let amount_text = rd.get("Amount").unwrap_or("1");
                 let who = self.player(&rd, chain, triggered);
-                let amount = self.amount(rd.get("Amount").unwrap_or("1"), chain);
-                Effect::AddMana {
-                    who: who?,
-                    mana: mana?,
-                    amount: amount?,
+                let amount = self.amount(amount_text, chain);
+                let (who, amount) = (who?, amount?);
+                let colors: Vec<ManaType> =
+                    Color::ALL.into_iter().map(ManaType::from_color).collect();
+                match words.as_slice() {
+                    ["Any"] => Effect::AddManaOf {
+                        who,
+                        of: colors,
+                        amount,
+                    },
+                    ["Combo", rest @ ..] if amount == Amount::Fixed(1) && !rest.is_empty() => {
+                        let of: Option<Vec<ManaType>> = match rest {
+                            ["Any"] => Some(colors),
+                            _ => rest.iter().map(|w| letter(w)).collect(),
+                        };
+                        match of {
+                            Some(mut of) if of.len() > 1 => {
+                                of.dedup();
+                                Effect::AddManaOf { who, of, amount }
+                            }
+                            _ => {
+                                self.block("Mana:produced");
+                                return None;
+                            }
+                        }
+                    }
+                    [_, ..] => match words.iter().map(|w| letter(w)).collect::<Option<Vec<_>>>() {
+                        Some(all) => {
+                            // Each type once, as many times as it is listed.
+                            let mut parts: Vec<Effect> = Vec::new();
+                            for t in ManaType::ALL {
+                                let n = all.iter().filter(|x| **x == t).count() as u32;
+                                if n == 0 {
+                                    continue;
+                                }
+                                let amount = match (&amount, n) {
+                                    (a, 1) => a.clone(),
+                                    (Amount::Fixed(k), n) => Amount::Fixed(k * n),
+                                    (a, n) => Amount::Calc(Box::new(a.clone()), Calc::Times(n)),
+                                };
+                                parts.push(Effect::AddMana {
+                                    who,
+                                    mana: t,
+                                    amount,
+                                });
+                            }
+                            if parts.len() == 1 {
+                                parts.remove(0)
+                            } else {
+                                Effect::Seq(parts)
+                            }
+                        }
+                        None => {
+                            self.block("Mana:produced");
+                            return None;
+                        }
+                    },
+                    [] => {
+                        self.block("Mana:produced");
+                        return None;
+                    }
                 }
             }
             "Destroy" => {
