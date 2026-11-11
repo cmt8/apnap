@@ -1122,14 +1122,20 @@ pub enum ManaProduce {
 }
 
 /// "Spend this mana only to cast [spells] or activate abilities of [permanents]" (CR 106.6).
-/// The mana can pay for a spell matching any of `spells`, or an ability whose source matches
-/// any of `abilities`; the selectors are relative to the player spending it.
+/// The mana can pay for a spell matching any of `spells`, or an ability of a permanent
+/// matching any of `abilities` or of a source matching any of `sources`; the selectors are
+/// relative to the player spending it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ManaRestriction {
     #[serde(default)]
     pub spells: Vec<Selector>,
     #[serde(default)]
     pub abilities: Vec<Selector>,
+    /// Abilities whose source matches any of these wherever it is ("activate abilities of
+    /// artifact sources", "activate an ability": the empty selector). `abilities` is about
+    /// permanents only (D-066).
+    #[serde(default)]
+    pub sources: Vec<Selector>,
 }
 
 impl ManaProduce {

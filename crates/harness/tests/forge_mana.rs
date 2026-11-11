@@ -594,6 +594,38 @@ fn mana_abilities_that_stay_blocked() {
     );
 }
 
+// CR 106.6, 109.2: "spend this mana only to activate abilities of Dragons" is about Dragon
+// permanents; "… of Dragon sources" and "… to activate an ability" also cover a card's
+// ability activated from a hand (cycling). Forge: `RestrictValid$ Activated.Dragon+
+// inZoneBattlefield` / `Activated.Dragon` / `Activated`.
+#[test]
+fn mana_for_abilities_of_permanents_or_of_any_source() {
+    let mage = |name: &str, restrict: &str| {
+        format!(
+            "Name:{name}\nManaCost:1\nTypes:Artifact\n\
+             A:AB$ Mana | Cost$ T | Produced$ C | RestrictValid$ {restrict} | SpellDescription$ Text.\n\
+             Oracle:Text."
+        )
+    };
+    let permanents = mage("Test Lair", "Activated.Dragon+inZoneBattlefield");
+    let sources = mage("Test Hoard", "Activated.Dragon");
+    let any = mage("Test Workshop", "Activated");
+    let drake = "Name:Test Drake\nManaCost:4 R\nTypes:Creature Dragon\nPT:4/4\nK:Cycling:1\nOracle:Cycling {1}";
+    let trinket = "Name:Test Trinket\nManaCost:1\nTypes:Artifact\nOracle:";
+    let cards = [permanents.as_str(), &sources, &any, drake, trinket];
+    for (rock, cycles) in [("Test Lair", false), ("Test Hoard", true), ("Test Workshop", true)] {
+        let mut sc = scenario(&cards);
+        sc.card(P0, Zone::Battlefield, rock);
+        let card = sc.card(P0, Zone::Hand, "Test Drake");
+        sc.card(P0, Zone::Hand, "Test Trinket");
+        let s = Script::new(sc.build());
+        let can_cycle =
+            s.has(|_, o| matches!(o, OptionDesc::ActivateAbility { source, .. } if *source == card));
+        assert_eq!(can_cycle, cycles, "{rock}");
+        assert!(!s.can_cast("Test Trinket"), "{rock}: not for spells");
+    }
+}
+
 // Found by the soak (precon-4p, heuristic agents): mana that may only be spent on Dragons,
 // made two at a time for {1}, pays a Dragon's ability. The second mana's type is chosen
 // after the first; while it is open it must still count toward the cost being paid

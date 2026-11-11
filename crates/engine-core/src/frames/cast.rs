@@ -374,9 +374,13 @@ pub(crate) fn may_spend(
         }
         Payee::Ability(source) => {
             let c = chars(st, source);
-            r.abilities
-                .iter()
-                .any(|s| crate::layers::matches(st, s, &c, st.object(source), source, p))
+            let fits = |s: &card_model::Selector| {
+                crate::layers::matches(st, s, &c, st.object(source), source, p)
+            };
+            // "Abilities of Dragons": of Dragon permanents (CR 109.2); "of Dragon
+            // sources": wherever the source is.
+            (st.object(source).zone == Zone::Battlefield && r.abilities.iter().any(fits))
+                || r.sources.iter().any(fits)
         }
         Payee::Cost => false,
     }

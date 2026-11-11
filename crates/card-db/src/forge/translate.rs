@@ -2966,6 +2966,9 @@ impl<'a> Tx<'a> {
             match (kind, on_battlefield) {
                 ("Spell", false) => out.spells.push(self.selector(&filter)?),
                 ("Activated", true) => out.abilities.push(self.selector(&filter)?),
+                // Without `inZoneBattlefield`: an ability of such a source anywhere (a
+                // card's cycling from the hand too).
+                ("Activated", false) => out.sources.push(self.selector(&filter)?),
                 _ => {
                     self.block(format!("Mana:RestrictValid {kind}"));
                     return None;

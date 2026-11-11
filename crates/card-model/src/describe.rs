@@ -1626,6 +1626,14 @@ fn ability(a: &AbilityDef) -> String {
                         )
                     ));
                 }
+                if r.sources.iter().any(|s| *s == Selector::default()) {
+                    uses.push("activate an ability".to_string());
+                } else if !r.sources.is_empty() {
+                    uses.push(format!(
+                        "activate abilities of {} sources",
+                        join(r.sources.iter().map(spell_kind).collect(), "or")
+                    ));
+                }
                 format!(" Spend this mana only to {}.", join(uses, "or"))
             }),
             only_if.as_ref().map_or(String::new(), |c| format!(

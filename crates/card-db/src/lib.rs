@@ -529,7 +529,7 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 }
                 if spend
                     .as_ref()
-                    .is_some_and(|r| r.spells.is_empty() && r.abilities.is_empty())
+                    .is_some_and(|r| r.spells.is_empty() && r.abilities.is_empty() && r.sources.is_empty())
                 {
                     p.push(at("mana that can be spent on nothing".into()));
                 }
