@@ -1244,6 +1244,106 @@ Rules text: docs/rules-notes/611.2-lasting-effects-615-prevention.md.
   beginning of the next end step" (46 alone, 169 in all); then must-attack and
   can-attack-as-though rules, and effects about players.
 
+## D-067 How a permanent enters: "enters tapped unless …", "as this enters, you may …" (2026-11-10)
+Rules text: docs/rules-notes/614.12-enters-tapped-unless.md.
+- **Why first:** by EDHREC rank `repl:Moved` alone blocked more of the most played
+  Commander cards than any other blocker (the dual lands). 75 of the 1,000 and 114 of the
+  5,000 most played cards compile now that didn't: the ten shock lands, check lands,
+  battle lands, bond lands, slow lands, fast lands, reveal lands and Snarls, the Castles
+  with an "unless", Rivendell, Mox Diamond, Authority of the Consuls.
+- **Vocabulary** (all appended at the end of their enums):
+  `ReplaceWith::EntersTappedUnless(Condition)`, `ReplaceWith::EntersTappedUnlessYou(AsEnters)`
+  ("as this enters, you may [pay N life / reveal a … card from your hand]. If you don't,
+  it enters tapped"), `ReplaceWith::EntersOnlyIfYou(AsEnters)` ("if this would enter, you
+  may discard a land card instead. If you do, put it onto the battlefield. If you don't,
+  put it into its owner's graveyard"), `AsEnters { PayLife, Reveal, Discard }`,
+  `ReplaceWith::RevealShuffleIntoLibrary`, `Replaces::Dies(Selector)` ("if a creature an
+  opponent controls would die"), `Replaces::ThisToGraveyard` ("… from anywhere"),
+  `Amount::Players(Who)` ("the number of opponents you have") and
+  `Amount::LifeAmong { players, highest }`.
+- **The choice is made inside the replacement pipeline** (CR 614.12a, 603.6d: no stack,
+  no priority). `ApplyFrame` gets a `choosing` key (serialized only when set, so golden
+  hashes are unchanged) and suspends with the new `ChoiceKind::AsEnters { object,
+  ability, tapped }`: `Accept` (pay) or the cards that may be revealed / discarded, then
+  `Decline`. `tapped` says it enters tapped anyway, for the agents and the app. When
+  nothing can be done (less life than the payment, CR 119.4 / 118.3; no such card) there
+  is no question and the effect simply applies.
+- **What the answer causes is an event of its own, performed first.** Paid life is a
+  `Proposed::LoseLife` and a discard a `Proposed::Move(Discard)`, each through a nested
+  `Apply` frame pushed above the batch being modified: replaceable, they trigger
+  ("whenever you lose life"), and they happen before the permanent enters. So for
+  several permanents entering at once the second question sees the life already paid
+  (614.12b).
+- **The condition is judged as the event is modified**, for the player the permanent will
+  enter under the control of (109.5, 110.2): on the battlefield as it was before the
+  event, so the land never counts itself ("two or more other lands" is "two or more
+  lands") and lands entering together don't see each other — the batch is performed only
+  after all its events are modified. An "unless" whose condition holds is not an
+  applicable effect at all (no pointless choice between replacement effects); it is
+  checked again as it is applied. Entering tapped is not becoming tapped (110.5b: no
+  `Tapped` event).
+- **CR 614.13a:** a card being discarded for an effect that modifies how a permanent
+  enters can't be the entering card or any card moving in the same batch. The same
+  exclusion is applied to revealing — no rule says so, and no compiled card can tell the
+  difference (no reveal land asks for a card of its own types).
+- **Other permanents' entering** uses the existing `Replaces::OtherEnters` (the source must
+  already be on the battlefield, so "permanents enter tapped" never affects itself, 614.12
+  example). Only a permanent's own entering may have a condition or a choice; for others
+  "you" would be a different player, and those forms are blocked.
+- **Compiler:** `R:Event$ Moved | Destination$ Battlefield | ReplacementResult$ Updated`
+  with `DB$ Tap | ETB$ True` (`ConditionPresent$`/`ConditionCompare$`,
+  `ConditionCheckSVar$`/`ConditionSVarCompare$` — the conditions under which it is tapped,
+  negated into "unless"; `UnlessCost$ PayLife<N>` / `Reveal<1/A;B>` with
+  `UnlessPayer$ You`) or `DB$ PutCounter | ETB$ True`, on `Self` (or no `Defined$`,
+  Forge's default) or `ReplacedCard` (with `ActiveZones$ Battlefield`). Mox Diamond's
+  chain (discard, remembered; to the graveyard if none; to the battlefield if one;
+  cleanup) is recognized only exactly. `Destination$ Graveyard` with a `ChangeZone` of the
+  replaced card to exile or (shuffled, optionally revealed) into the library: "this
+  creature would die" (`ThisDies`), "a creature an opponent controls would die"
+  (`Dies`), "this card … from anywhere" (`ThisToGraveyard`, works in every zone,
+  CR 113.6b). Expressions `PlayerCount[Players|Opponents]$Amount`,
+  `…$HighestLifeTotal`, `…$LowestLifeTotal`.
+- **Filters (general, not only here):** alternatives that differ in exactly one
+  "at least one of" list — card types, subtypes or colors — and nothing else are one
+  selector ("Island.YouCtrl,Mountain.YouCtrl"; before, only bare card types merged). This
+  alone compiled about 120 more cards (Commander staples among them: Dockside
+  Extortionist, Archaeomancer, the Verges). The engine's text now joins several colors or
+  subtypes of one selector with "or". **Found while doing it:** Forge's `+` is "and", so
+  `Card.Red+White` ("a spell that's both red and white", the Mimics) would have read as
+  "red or white" — no compiled card had it yet; it is blocked now (`filter:two colors`).
+- **Oracle guard:** a card that says "unless" must say it in the engine's text too
+  (`oracle:says unless`). It blocks no current card.
+- **Read against the Oracle text:** all 256 newly compiled cards. No mis-compilation; texts
+  fixed: "the number of Islands you control is not 0" → "you control an Island", "an
+  opponent controls 8 or more lands" → "your opponents control …" (the engine counts all
+  of them together, as the cards mean), "Island Swamp card" → "Island or Swamp card".
+  Swarmyard Massacre counts "Insect, Rat, Spider, or Squirrel" permanents where the card
+  says creatures — Forge's script, compiled as written (a noncreature permanent of those
+  types would count).
+- **Heuristic agent:** reveals whenever it can; discards for a permanent that otherwise
+  goes to the graveyard; pays life only on its own turn, with at least 10 life left after
+  paying, not for a permanent that enters tapped anyway, and only if a card in its hand or
+  command zone costs exactly one more than its untapped lands (the mana is wanted now).
+  The app titles the question with the ability's text and labels the buttons "pay 2 life"
+  / "No: it enters tapped" / "No: it goes to the graveyard".
+- Golden hashes unchanged (state and event logs).
+- 9,305 → 9,561 of 34,463 scripts (27.7%); precons 149 → 150 of 275 deck slots.
+  `repl:Moved` fell from 135 cards blocked by it alone (353 in all) to none under that
+  name; what is left is named by form.
+- **Still blocked, by name:** "if this would enter, sacrifice … instead" (Lotus Vale and
+  the other sacrifice lands, `repl:Moved enters instead`); "enters tapped with N
+  [charge/depletion] counters" (`repl:Moved enters:Tap+SubAbility`, needs other counter
+  kinds); "lands you control enter untapped" (`repl:Moved enters:Untap`); "as this
+  enters, choose …" (`repl:Moved enters:ChooseType`, `…:ChoosePlayer`, `…:GenericChoice`);
+  enters as a copy (`param:repl Moved.Layer`); day/night (`repl:Moved enters:DayTime`);
+  "exile it instead. When you do, …" (Kalitas, Nemata: `repl:Moved to graveyard:
+  ChangeZone+SubAbility`); "if a card would be put into an opponent's graveyard from
+  anywhere" (`repl:Moved to graveyard:shape`: no vocabulary for other cards from anywhere);
+  leaving the battlefield to anywhere but a graveyard, from the stack, discards caused by
+  opponents (`repl:Moved`).
+- **Next here:** the sacrifice-instead lands (an `AsEnters::Sacrifice` with a count), other
+  counter kinds for the storage and Vivid lands, "lands you control enter untapped".
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…
