@@ -42,6 +42,30 @@ pub enum CastSource {
     /// stack. `source` is the object the resolving ability is on ("sacrifice another
     /// creature" is relative to it; `{T}` and "sacrifice this" are it).
     Payment { source: ObjectId, cost: Box<Cost> },
+    /// Cast this card with face `face` up (CR 712.8b: the back face of a modal
+    /// double-faced card). Only that face is evaluated (CR 712.8c). Once the card is on the
+    /// stack the frame's source is `Card`: the spell has that face up.
+    Face { card: ObjectId, face: u8 },
+}
+
+impl CastSource {
+    /// The card being cast, if a spell is.
+    fn spell(&self) -> Option<ObjectId> {
+        match self {
+            CastSource::Card(card) | CastSource::Face { card, .. } => Some(*card),
+            _ => None,
+        }
+    }
+}
+
+/// The card a spell source casts and the face it has up, or will have up on the stack
+/// (CR 712.8): a `Card` is cast with the face it shows (its front face in a hand).
+fn spell_face(st: &GameState, source: &CastSource) -> (ObjectId, u8) {
+    match source {
+        CastSource::Face { card, face } => (*card, *face),
+        CastSource::Card(card) => (*card, st.object(*card).face),
+        other => unreachable!("not a spell: {other:?}"),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,7 +191,7 @@ fn discard_candidates(
 /// The object a cost's "another" is relative to, and that pays `{T}`/"sacrifice this".
 fn cost_source(source: &CastSource) -> ObjectId {
     match source {
-        CastSource::Card(card) => *card,
+        CastSource::Card(card) | CastSource::Face { card, .. } => *card,
         CastSource::Ability { source, .. } => *source,
         CastSource::Trigger(t) => t.source,
         CastSource::Payment { source, .. } => *source,
@@ -178,7 +202,7 @@ fn cost_source(source: &CastSource) -> ObjectId {
 /// none (it can't target itself, CR 115.5).
 fn ability_source(source: &CastSource) -> Option<ObjectId> {
     match source {
-        CastSource::Card(_) => None,
+        CastSource::Card(_) | CastSource::Face { .. } => None,
         CastSource::Ability { source, .. } | CastSource::Payment { source, .. } => Some(*source),
         CastSource::Trigger(t) => Some(t.source),
     }
@@ -187,10 +211,7 @@ fn ability_source(source: &CastSource) -> Option<ObjectId> {
 /// CR 601.2h / 119.4: can `p` pay the non-mana parts of the cost at all?
 fn extra_payable(st: &GameState, p: PlayerId, source: &CastSource, prop: &Proposal) -> bool {
     let this = cost_source(source);
-    let card = match source {
-        CastSource::Card(card) => Some(*card),
-        _ => None,
-    };
+    let card = source.spell();
     // The card that is itself discarded for the cost can't also be the chosen discard.
     let card = card.or(prop.extra.discard_self.then_some(this));
     prop.extra.sacrifice.as_ref().is_none_or(|ch| {
@@ -205,31 +226,35 @@ fn extra_payable(st: &GameState, p: PlayerId, source: &CastSource, prop: &Propos
 
 fn proposal(st: &GameState, source: &CastSource) -> Proposal {
     match source {
-        CastSource::Card(card) => Proposal {
-            // CR 303.4a: an Aura spell targets what its enchant ability allows.
-            body: st.card_def(*card).spell_ability().cloned().or_else(|| {
-                st.card_def(*card).enchant().map(|f| {
-                    Body::Effect(card_model::Mode {
-                        targets: vec![f],
-                        groups: Vec::new(),
-                        effect: card_model::Effect::Seq(Vec::new()),
+        CastSource::Card(_) | CastSource::Face { .. } => {
+            let (card, face) = spell_face(st, source);
+            // CR 712.8c: only the face that will be up on the stack is evaluated.
+            let def = st.catalog.get(st.catalog.face(st.object(card).card, face));
+            Proposal {
+                // CR 303.4a: an Aura spell targets what its enchant ability allows.
+                body: def.spell_ability().cloned().or_else(|| {
+                    def.enchant().map(|f| {
+                        Body::Effect(card_model::Mode {
+                            targets: vec![f],
+                            groups: Vec::new(),
+                            effect: card_model::Effect::Seq(Vec::new()),
+                        })
                     })
-                })
-            }),
-            cost: chars(st, *card).mana_cost,
-            tap: None,
-            sacrifice: None,
-            // "As an additional cost to cast this spell, …"
-            extra: st
-                .card_def(*card)
-                .abilities
-                .iter()
-                .find_map(|a| match a {
-                    AbilityDef::AdditionalCost(c) => Some(c.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default(),
-        },
+                }),
+                cost: crate::layers::chars_as(st, card, face).mana_cost,
+                tap: None,
+                sacrifice: None,
+                // "As an additional cost to cast this spell, …"
+                extra: def
+                    .abilities
+                    .iter()
+                    .find_map(|a| match a {
+                        AbilityDef::AdditionalCost(c) => Some(c.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default(),
+            }
+        }
         CastSource::Ability { source, ability } => match st.catalog.ability(*ability) {
             AbilityDef::Activated { cost, body, .. } => Proposal {
                 body: Some(body.clone()),
@@ -287,8 +312,9 @@ fn total(cost: &Option<ManaCost>, x: u32, tax: u32, discount: u32) -> ManaRequir
 /// CR 601.2f: the generic mana cost reductions take off `card` as `p` casts it — from
 /// permanents `p` controls ("Dragon spells you cast cost {1} less") and from the spell
 /// itself ("this spell costs {1} less for each creature on the battlefield").
-pub(crate) fn cost_reduction(st: &GameState, p: PlayerId, card: ObjectId) -> u32 {
-    let c = chars(st, card);
+/// `face` is the face it is cast with (CR 712.8c).
+pub(crate) fn cost_reduction(st: &GameState, p: PlayerId, card: ObjectId, face: u8) -> u32 {
+    let c = crate::layers::chars_as(st, card, face);
     let facts = crate::layers::Facts {
         id: card,
         controller: p,
@@ -312,7 +338,8 @@ pub(crate) fn cost_reduction(st: &GameState, p: PlayerId, card: ObjectId) -> u32
             }
         }
     }
-    for a in &st.card_def(card).abilities {
+    let def = st.catalog.get(st.catalog.face(st.object(card).card, face));
+    for a in &def.abilities {
         if let AbilityDef::SelfCostReduction(amount) = a {
             total += crate::layers::count_amount(st, amount, card, p);
         }
@@ -337,11 +364,14 @@ pub(crate) enum Payee {
     /// A cost paid while something resolves (CR 118.12): neither casting a spell nor
     /// activating an ability, so mana restricted to those can't pay it.
     Cost,
+    /// A spell about to be cast with this face up (CR 712.8c): the card in its zone.
+    SpellFace(ObjectId, u8),
 }
 
 fn payee_of(source: &CastSource) -> Option<Payee> {
     match source {
         CastSource::Card(card) => Some(Payee::Spell(*card)),
+        CastSource::Face { card, face } => Some(Payee::SpellFace(*card, *face)),
         CastSource::Ability { source, .. } => Some(Payee::Ability(*source)),
         CastSource::Trigger(_) => None,
         CastSource::Payment { .. } => Some(Payee::Cost),
@@ -351,8 +381,12 @@ fn payee_of(source: &CastSource) -> Option<Payee> {
 /// CR 106.6: may mana restricted by `r` pay for `payee`, as `p` spends it?
 fn may_spend(st: &GameState, p: PlayerId, r: &card_model::ManaRestriction, payee: Payee) -> bool {
     match payee {
-        Payee::Spell(card) => {
-            let c = chars(st, card);
+        Payee::Spell(_) | Payee::SpellFace(..) => {
+            let (card, c) = match payee {
+                Payee::SpellFace(card, face) => (card, crate::layers::chars_as(st, card, face)),
+                Payee::Spell(card) => (card, chars(st, card)),
+                _ => unreachable!(),
+            };
             let facts = crate::layers::Facts {
                 id: card,
                 controller: p,
@@ -761,15 +795,46 @@ pub(crate) fn sorcery_timing(st: &GameState, p: PlayerId) -> bool {
     st.turn.active == p && st.turn.step.is_main_phase() && st.stack.is_empty()
 }
 
+/// The other faces (not the front) a card may be cast or played with: those of a modal
+/// double-faced card (CR 712.8b, 712.9).
+pub(crate) fn castable_faces(st: &GameState, card: ObjectId) -> Vec<u8> {
+    let o = st.object(card);
+    let def = st.catalog.get(o.card);
+    match def.layout {
+        // CR 712.8b; CR 709.3: a split card is cast as one of its halves.
+        card_model::Layout::Modal | card_model::Layout::Split => {
+            (1..=def.faces.len() as u8).collect()
+        }
+        // CR 716.3, 721.3: as an Adventure or an Omen — but not from exile after an
+        // Adventure (CR 716.3d).
+        card_model::Layout::Adventure | card_model::Layout::Omen if o.zone != Zone::Exile => {
+            alloc::vec![1]
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Whether `p` may begin casting/activating `source` now and could complete it (D-019).
 pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool {
     match &source {
-        CastSource::Card(card) => {
-            let o = st.object(*card);
-            // From your hand, or your commander from the command zone (CR 903.8).
-            let from_ok = o.owner == p
-                && (o.zone == Zone::Hand || (o.zone == Zone::Command && st.is_commander(*card)));
-            let c = chars(st, *card);
+        CastSource::Card(_) | CastSource::Face { .. } => {
+            let (card, face) = spell_face(st, &source);
+            let o = st.object(card);
+            // From your hand, or your commander from the command zone (CR 903.8), or a
+            // card you sent on an Adventure (CR 716.3d).
+            let from_ok = (o.owner == p
+                && (o.zone == Zone::Hand || (o.zone == Zone::Command && st.is_commander(card))))
+                || (o.zone == Zone::Exile && o.adventure == Some(p));
+            // CR 712.8b: another face only of a modal double-faced card (or a half of a
+            // split card, which is never cast whole: CR 709.3).
+            if face != 0 && !castable_faces(st, card).contains(&face) {
+                return false;
+            }
+            if face == 0 && st.catalog.get(o.card).layout.cast_by_faces_only() {
+                return false;
+            }
+            // CR 712.8c: only the face it would have up on the stack is evaluated.
+            let c = crate::layers::chars_as(st, card, face);
             if !from_ok || c.is(CardType::Land) {
                 return false;
             }
@@ -833,7 +898,13 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
         return false;
     }
     let (tax, discount) = match &source {
-        CastSource::Card(card) => (commander_tax(st, p, *card), cost_reduction(st, p, *card)),
+        CastSource::Card(_) | CastSource::Face { .. } => {
+            let (card, face) = spell_face(st, &source);
+            (
+                commander_tax(st, p, card),
+                cost_reduction(st, p, card, face),
+            )
+        }
         _ => (0, 0),
     };
     let payee = payee_of(&source);
@@ -927,12 +998,13 @@ impl CastFrame {
         loop {
             match self.stage {
                 CastStage::Announce => {
-                    if let CastSource::Card(card) = &self.source {
+                    if let Some(card) = self.source.spell() {
+                        let (_, face) = spell_face(st, &self.source);
                         // CR 903.8 / 601.2f: commander tax, determined before the card moves.
-                        self.tax = commander_tax(st, p, *card);
-                        self.discount = cost_reduction(st, p, *card);
-                        if st.object(*card).zone == Zone::Command {
-                            self.from_command = Some(st.object(*card).card_instance);
+                        self.tax = commander_tax(st, p, card);
+                        self.discount = cost_reduction(st, p, card, face);
+                        if st.object(card).zone == Zone::Command {
+                            self.from_command = Some(st.object(card).card_instance);
                         }
                     }
                     let put = |st: &mut GameState, a: GameAction| match execute(st, a) {
@@ -944,9 +1016,21 @@ impl CastFrame {
                         CastSource::Card(card) => {
                             move_object(st, *card, Zone::Stack, LibraryPosition::Top, Some(p))
                         }
+                        // CR 712.8b: put onto the stack with the chosen face up.
+                        CastSource::Face { card, face } => {
+                            let spell = crate::actions::move_object_face(
+                                st,
+                                *card,
+                                Zone::Stack,
+                                Some(p),
+                                *face,
+                            );
+                            self.source = CastSource::Card(*card);
+                            spell
+                        }
                         // CR 602.2a: the ability is created on the stack.
                         CastSource::Ability { source, ability } => {
-                            let source_card = st.object(*source).card;
+                            let source_card = st.face_card(*source);
                             // CR 602.2a: a card whose ability is activated from a hidden
                             // zone is revealed.
                             if st.object(*source).zone == Zone::Hand {

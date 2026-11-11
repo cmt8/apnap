@@ -252,23 +252,24 @@ impl Art {
         let tx = self.jobs.as_ref()?;
         let (path, url) = match &key {
             Key::Card(name, px) => {
-                let Some(card) = self.data.get(name) else {
+                // The face of that name: a two-sided card has a picture per face.
+                let Some(card) = self.data.face(name) else {
                     // Not a real card (or its data hasn't arrived yet: `poll` retries).
                     self.slots.insert(key, failed);
                     return None;
                 };
                 // The smallest of Scryfall's sizes that has enough pixels.
                 let kind =
-                    if *px > NORMAL_WIDTH && images::image_url(card, ImageKind::Large).is_some() {
+                    if *px > NORMAL_WIDTH && images::image_url(&card, ImageKind::Large).is_some() {
                         ImageKind::Large
                     } else {
                         ImageKind::Normal
                     };
-                let Some(path) = images::image_path(card, kind) else {
+                let Some(path) = images::image_path(&card, kind) else {
                     self.slots.insert(key, failed);
                     return None;
                 };
-                (path, images::image_url(card, kind).map(str::to_string))
+                (path, images::image_url(&card, kind).map(str::to_string))
             }
             Key::Symbol(code, _) => (images::symbol_path(code), Some(images::symbol_url(code))),
         };
@@ -395,7 +396,7 @@ impl Art {
 
     /// "Illustrated by …", for the enlarged view of a real card.
     pub fn credit(&self, name: &str) -> Option<String> {
-        let card = self.data.get(name)?;
+        let card = self.data.face(name)?;
         let artist = card.artist.as_deref()?;
         Some(match (&card.set, &card.collector_number) {
             (Some(set), Some(n)) => {

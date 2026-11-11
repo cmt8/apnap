@@ -58,6 +58,10 @@ pub struct StackObject {
     /// For triggered abilities: what else the triggering event carries.
     #[serde(default)]
     pub facts: crate::triggers::EventFacts,
+    /// For an ability of a permanent: how many times the permanent had transformed when
+    /// the ability was put on the stack (CR 701.27g).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_transforms: Option<u32>,
 }
 
 impl StackObject {

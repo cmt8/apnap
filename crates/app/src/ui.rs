@@ -393,6 +393,8 @@ pub fn anchor(o: &OptionDesc) -> Option<Anchor> {
     Some(match o {
         OptionDesc::PlayLand { card }
         | OptionDesc::CastSpell { card }
+        | OptionDesc::PlayLandFace { card, .. }
+        | OptionDesc::CastFace { card, .. }
         | OptionDesc::Card { card } => Anchor::Obj(*card),
         OptionDesc::ActivateAbility { source, .. }
         | OptionDesc::TapForMana { source, .. }
@@ -443,7 +445,10 @@ pub fn option_label(
             let text = v.stack.last().and_then(|top| {
                 // The card the text is written on: an ability can be another card's gift.
                 let (def, body) = match top.ability {
-                    None => (cat.get(top.card), cat.get(top.card).spell_ability()),
+                    None => {
+                        let def = cat.get(cat.face(top.card, top.face));
+                        (def, def.spell_ability())
+                    }
                     Some(a) => (
                         cat.get(a.card),
                         match cat.ability(a) {
@@ -534,6 +539,19 @@ pub fn option_label(
                 format!("{} — {text}", src.name)
             });
             text.unwrap_or_else(|| harness::text::option_line(v, o))
+        }
+        // A face that isn't up names itself (CR 712.8b, 712.9): "Play Malakir Mire".
+        OptionDesc::PlayLandFace { card, face } | OptionDesc::CastFace { card, face } => {
+            match find_object(v, *card) {
+                Some(ov) => {
+                    let name = &cat.get(cat.face(ov.card, *face)).name;
+                    match o {
+                        OptionDesc::PlayLandFace { .. } => format!("play {name}"),
+                        _ => format!("cast {name}"),
+                    }
+                }
+                None => harness::text::option_line(v, o),
+            }
         }
         other => harness::text::option_line(v, other),
     }
@@ -690,7 +708,7 @@ fn whereabouts(v: &PlayerView, id: ObjectId) -> String {
 
 /// A card's accessible name: everything the picture and its badges show, as text.
 fn card_text(o: &ObjectView, cat: &CardCatalog) -> String {
-    let def = cat.get(o.card);
+    let def = cat.get(cat.face(o.card, o.face));
     let cost = def
         .mana_cost
         .as_ref()
@@ -831,7 +849,7 @@ fn badges(cx: &Ctx<'_>, o: &ObjectView, place: Place) -> Vec<Badge> {
         ));
     }
     if let (true, Some(p), Some(t)) = (creature, o.power, o.toughness) {
-        let def = cx.cat.get(o.card);
+        let def = cx.cat.get(cx.cat.face(o.card, o.face));
         if let Some(fg) = pt_badge((def.power, def.toughness), (p, t)) {
             out.push(Badge::new(
                 Corner::BottomRight,
@@ -922,7 +940,8 @@ fn card(
         label.push_str(&format!("\nx{}", group.len()));
     }
     let look = CardLook {
-        def: cx.cat.get(o.card),
+        // The face that is up (CR 712.6).
+        def: cx.cat.get(cx.cat.face(o.card, o.face)),
         label: &label,
         height,
         tapped: o.tapped && on_battlefield,
@@ -939,7 +958,7 @@ fn card(
     }
     if resp.hovered() {
         let pv = Preview {
-            card: o.card,
+            card: cx.cat.face(o.card, o.face),
             object: Some(o.id),
         };
         ptr.hovered = Some(Hover {
@@ -983,6 +1002,7 @@ fn piles<'a>(cx: &Ctx<'_>, lands: &[&'a ObjectView]) -> Vec<Vec<&'a ObjectView>>
     let key = |o: &ObjectView| {
         (
             o.card,
+            o.face,
             o.tapped,
             o.owner,
             cx.options_at(Anchor::Obj(o.id)).is_empty(),
@@ -1648,9 +1668,26 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
     let screen = ctx.content_rect();
     let ppp = ctx.pixels_per_point();
     // The image's own size where the screen allows (one image pixel per screen pixel).
-    let height = (680.0 / ppp).max(500.0).min(screen.height() - 70.0);
-    let (card, _) = cardview::card_size(height, ppp);
+    let mut height = (680.0 / ppp).max(500.0).min(screen.height() - 70.0);
     let def = cx.cat.get(pv.card);
+    // Players may look at both faces of a double-faced card (CR 712.4): the other face is
+    // shown beside the one that is up.
+    let front = cx.cat.card_of(pv.card);
+    let others: Vec<&card_model::CardDef> = if cx.cat.get(front).layout.double_faced() {
+        (0..=cx.cat.get(front).faces.len() as u8)
+            .map(|i| cx.cat.face(front, i))
+            .filter(|&e| e != pv.card)
+            .map(|e| cx.cat.get(e))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let (mut card, _) = cardview::card_size(height, ppp);
+    let across = 1.0 + others.len() as f32;
+    if card.x * across + 6.0 * across + 12.0 > screen.width() {
+        height *= (screen.width() - 12.0 - 6.0 * across) / (card.x * across);
+        card = cardview::card_size(height, ppp).0;
+    }
     let credit = if def.token {
         art.token_credit(ctx, def)
     } else {
@@ -1718,7 +1755,11 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
         }
     }
     let lines = usize::from(credit.is_some()) + usize::from(!now.is_empty()) + gained.len();
-    let size = card + vec2(12.0, 12.0 + lines as f32 * 18.0);
+    let size = card
+        + vec2(
+            12.0 + others.len() as f32 * (card.x + 6.0),
+            12.0 + lines as f32 * 18.0,
+        );
     let (x, y) = zoom_position(screen, near, size, hover.in_hand);
     egui::Area::new(egui::Id::unique("zoomed card"))
         .order(egui::Order::Tooltip)
@@ -1731,8 +1772,13 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
                 .corner_radius(10.0)
                 .inner_margin(6.0)
                 .show(ui, |ui| {
-                    ui.set_max_width(card.x);
-                    cardview::card_large(ui, art, def, height);
+                    ui.set_max_width(card.x * across + 6.0 * (across - 1.0));
+                    ui.horizontal(|ui| {
+                        cardview::card_large(ui, art, def, height);
+                        for other in &others {
+                            cardview::card_large(ui, art, other, height);
+                        }
+                    });
                     if let Some(credit) = credit {
                         ui.add(egui::Label::new(RichText::new(credit).small().weak()).truncate());
                     }
@@ -1791,7 +1837,7 @@ fn side_panel(ui: &mut egui::Ui, art: &mut Art, cx: &Ctx<'_>, s: &Session, ptr: 
         ui.horizontal(|ui| {
             let opts = cx.options_at(Anchor::Obj(so.id));
             let look = CardLook {
-                def: cx.cat.get(so.card),
+                def: cx.cat.get(cx.cat.face(so.card, so.face)),
                 label: &format!("on the stack: {line}"),
                 height: 96.0,
                 tapped: false,
@@ -1805,7 +1851,7 @@ fn side_panel(ui: &mut egui::Ui, art: &mut Art, cx: &Ctx<'_>, s: &Session, ptr: 
             let resp = cardview::card_widget(ui, art, &look);
             if resp.hovered() {
                 let pv = Preview {
-                    card: so.card,
+                    card: cx.cat.face(so.card, so.face),
                     object: None,
                 };
                 ptr.hovered = Some(Hover {
@@ -1946,7 +1992,7 @@ fn card_strip(
                     ui.vertical(|ui| {
                         let chosen = cx.picked.contains(i);
                         let look = CardLook {
-                            def: cx.cat.get(o.card),
+                            def: cx.cat.get(cx.cat.face(o.card, o.face)),
                             label,
                             height: 150.0,
                             tapped: false,
@@ -1965,7 +2011,7 @@ fn card_strip(
                         if resp.hovered() {
                             ptr.hovered = Some(Hover {
                                 card: Preview {
-                                    card: o.card,
+                                    card: cx.cat.face(o.card, o.face),
                                     object: Some(o.id),
                                 },
                                 rect: resp.rect,
@@ -2986,5 +3032,37 @@ mod tests {
             option_label(&v, &cat, &d, option),
             "Test Golem — {T}: This deals 1 damage to any target."
         );
+    }
+
+    // A card with two faces (D-071): each option names the face it is about (CR 712.8b,
+    // 712.9), and the card is drawn with the face that is up.
+    #[test]
+    fn options_name_the_face_they_are_about() {
+        use engine_core::testing::Scenario;
+        use engine_core::zones::Zone;
+        let tide = "Name:Test Tide Charm\nManaCost:1 U\nTypes:Instant\n\
+            A:SP$ Draw | NumCards$ 1 | SpellDescription$ Draw a card.\nAlternateMode:Modal\n\
+            Oracle:Draw a card.\nALTERNATE\nName:Test Tide Flat\nManaCost:no cost\nTypes:Land\n\
+            A:AB$ Mana | Cost$ T | Produced$ U | SpellDescription$ Add {U}.\nOracle:{T}: Add {U}.";
+        let cat = harness::forge_test_catalog(&[tide], &[]);
+        let me = PlayerId(0);
+        let mut sc = Scenario::new(engine_core::GameConfig::commander(2), cat.clone(), 7);
+        for p in [me, PlayerId(1)] {
+            sc.library(p, "Forest", 10);
+        }
+        sc.cards(me, Zone::Battlefield, &["Island", "Island"]);
+        let card = sc.card(me, Zone::Hand, "Test Tide Charm");
+        let mut st = sc.build();
+        let d = engine_core::start(&mut st).next.expect("a decision");
+        let v = engine_core::view::player_view(&st, me);
+        let labels: Vec<String> = d
+            .options
+            .iter()
+            .filter(|o| anchor(o) == Some(Anchor::Obj(card)))
+            .map(|o| option_label(&v, &cat, &d, o))
+            .collect();
+        assert_eq!(labels, ["play Test Tide Flat", "cast Test Tide Charm"]);
+        let o = find_object(&v, card).unwrap();
+        assert_eq!(cat.get(cat.face(o.card, o.face)).name, "Test Tide Charm");
     }
 }

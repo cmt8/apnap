@@ -1,6 +1,8 @@
 //! Priority (CR 117 (2026-11-06)). Text: docs/rules-notes/117-priority-101.4-apnap.md.
 
-use super::cast::{CastFrame, CastSource, can_begin, mana_sources, sorcery_timing, tap_for_mana};
+use super::cast::{
+    CastFrame, CastSource, can_begin, castable_faces, mana_sources, sorcery_timing, tap_for_mana,
+};
 use super::resolve::ResolveFrame;
 use super::{ApplyFrame, Flow, Frame, Input, StateCheckFrame};
 use crate::decision::{ChoiceKind, OptionDesc};
@@ -86,13 +88,20 @@ impl PriorityFrame {
                     )))
                 }
             }
-            OptionDesc::PlayLand { card } => {
+            OptionDesc::PlayLand { card } | OptionDesc::PlayLandFace { card, .. } => {
                 // CR 116.2a / 305.1: a special action; the player receives priority again
                 // (117.3c). Entering the battlefield is replaceable ("enters tapped").
                 st.player_mut(p).lands_played_this_turn += 1;
                 let mut mv = Proposed::moving(card, Zone::Battlefield, MoveCause::PlayLand);
-                if let Proposed::Move { controller, .. } = &mut mv {
+                if let Proposed::Move {
+                    controller, face, ..
+                } = &mut mv
+                {
                     *controller = Some(p);
+                    // CR 712.9: it enters with the chosen land face up.
+                    if let OptionDesc::PlayLandFace { face: f, .. } = inp.picked_one().unwrap() {
+                        *face = *f;
+                    }
                 }
                 Flow::Continue(vec![again, Frame::Apply(ApplyFrame::new(st, vec![mv]))])
             }
@@ -100,6 +109,10 @@ impl PriorityFrame {
             OptionDesc::CastSpell { card } => Flow::Continue(vec![
                 again,
                 Frame::Cast(CastFrame::new(p, CastSource::Card(card))),
+            ]),
+            OptionDesc::CastFace { card, face } => Flow::Continue(vec![
+                again,
+                Frame::Cast(CastFrame::new(p, CastSource::Face { card, face })),
             ]),
             OptionDesc::ActivateAbility { source, ability } => Flow::Continue(vec![
                 again,
@@ -129,11 +142,25 @@ impl PriorityFrame {
 fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
     let mut opts = vec![OptionDesc::Pass];
     let hand = &st.zones.hands[p.index()];
+    // CR 716.3d: cards on an Adventure their controller may play from exile.
+    let adventures: Vec<crate::ids::ObjectId> = st
+        .zones
+        .exile
+        .iter()
+        .copied()
+        .filter(|&c| st.object(c).adventure == Some(p))
+        .collect();
     // CR 305.1–305.2: one land per turn, sorcery timing.
     if sorcery_timing(st, p) && st.player(p).lands_played_this_turn < 1 {
-        for &card in hand {
+        for &card in hand.iter().chain(&adventures) {
             if chars(st, card).is(CardType::Land) {
                 opts.push(OptionDesc::PlayLand { card });
+            }
+            // CR 712.9: a land face of a modal double-faced card.
+            for face in castable_faces(st, card) {
+                if crate::layers::chars_as(st, card, face).is(CardType::Land) {
+                    opts.push(OptionDesc::PlayLandFace { card, face });
+                }
             }
         }
     }
@@ -143,9 +170,15 @@ fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
         .command
         .iter()
         .filter(|&&c| st.object(c).owner == p);
-    for &card in hand.iter().chain(commanders) {
+    for &card in hand.iter().chain(commanders).chain(&adventures) {
         if can_begin(st, p, CastSource::Card(card)) {
             opts.push(OptionDesc::CastSpell { card });
+        }
+        // CR 712.8b: the other faces of a modal double-faced card.
+        for face in castable_faces(st, card) {
+            if can_begin(st, p, CastSource::Face { card, face }) {
+                opts.push(OptionDesc::CastFace { card, face });
+            }
         }
     }
     for &source in &st.zones.battlefield {

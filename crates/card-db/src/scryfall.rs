@@ -53,7 +53,45 @@ pub struct ScryfallCard {
     pub set_type: Option<String>,
     #[serde(default)]
     pub border_color: Option<String>,
+    /// The faces of a card with more than one (double-faced, split, adventurer, flip):
+    /// each with its own name, cost, type line, text — and, for a two-sided card, its own
+    /// picture (`image_uris` of the card itself is then absent).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub card_faces: Vec<ScryfallFace>,
 }
+
+/// One face of a [`ScryfallCard`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScryfallFace {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub mana_cost: Option<String>,
+    #[serde(default)]
+    pub type_line: String,
+    #[serde(default)]
+    pub oracle_text: Option<String>,
+    #[serde(default)]
+    pub power: Option<String>,
+    #[serde(default)]
+    pub toughness: Option<String>,
+    #[serde(default)]
+    pub colors: Option<Vec<String>>,
+    #[serde(default)]
+    pub image_uris: Option<ImageUris>,
+    #[serde(default)]
+    pub artist: Option<String>,
+}
+
+/// Scryfall layouts whose faces are separate cards' worth of characteristics.
+const FACED: [&str; 6] = [
+    "modal_dfc",
+    "transform",
+    "adventure",
+    "split",
+    "flip",
+    "prepare",
+];
 
 /// Where Scryfall serves this printing's images (we use two of the sizes).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,9 +108,42 @@ pub struct ImageUris {
 }
 
 impl ScryfallCard {
-    /// Cached before the image fields were stored: fetch it again.
+    /// Cached before the image fields (or the faces) were stored: fetch it again.
     fn is_stale(&self) -> bool {
-        self.id.is_none() || self.image_uris.as_ref().is_none_or(|u| u.large.is_none())
+        let no_faces = self.card_faces.is_empty() && FACED.contains(&self.layout.as_str());
+        let picture = self
+            .image_uris
+            .as_ref()
+            .or_else(|| self.card_faces.first().and_then(|f| f.image_uris.as_ref()));
+        self.id.is_none() || no_faces || picture.is_none_or(|u| u.large.is_none())
+    }
+
+    /// Face `i` of the card as a card of its own (face 0 of a one-faced card is the card).
+    /// A face with a picture of its own (the back of a double-faced card) gets an id of its
+    /// own, `<id>-<i>`, which names its cached image file.
+    pub fn face(&self, i: usize) -> Option<ScryfallCard> {
+        if self.card_faces.is_empty() {
+            return (i == 0).then(|| self.clone());
+        }
+        let f = self.card_faces.get(i)?;
+        let own_picture = f.image_uris.is_some();
+        Some(ScryfallCard {
+            name: f.name.clone(),
+            mana_cost: f.mana_cost.clone(),
+            type_line: f.type_line.clone(),
+            oracle_text: f.oracle_text.clone(),
+            power: f.power.clone(),
+            toughness: f.toughness.clone(),
+            colors: f.colors.clone().or_else(|| self.colors.clone()),
+            image_uris: f.image_uris.clone().or_else(|| self.image_uris.clone()),
+            artist: f.artist.clone().or_else(|| self.artist.clone()),
+            id: match (&self.id, own_picture && i > 0) {
+                (Some(id), true) => Some(format!("{id}-{i}")),
+                (id, _) => id.clone(),
+            },
+            card_faces: Vec::new(),
+            ..self.clone()
+        })
     }
 }
 
@@ -80,11 +151,65 @@ impl ScryfallCard {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ScryfallData {
     pub cards: BTreeMap<String, ScryfallCard>,
+    /// Every face name of a card with several faces: the key of its card and which face.
+    #[serde(skip)]
+    faces: BTreeMap<String, (String, usize)>,
 }
 
 impl ScryfallData {
+    /// The card called `name`: by its full name ("Front // Back") or the name of its front
+    /// face.
     pub fn get(&self, name: &str) -> Option<&ScryfallCard> {
-        self.cards.get(name)
+        if let Some(c) = self.cards.get(name) {
+            return Some(c);
+        }
+        match self.face_of(name) {
+            Some((key, 0)) => self.cards.get(&key),
+            _ => None,
+        }
+    }
+
+    /// The face called `name` as a card of its own ([`ScryfallCard::face`]): what is shown
+    /// for one face of a card.
+    pub fn face(&self, name: &str) -> Option<ScryfallCard> {
+        if let Some(c) = self.cards.get(name) {
+            return c.face(0);
+        }
+        let (key, i) = self.face_of(name)?;
+        self.cards.get(&key)?.face(i)
+    }
+
+    fn face_of(&self, name: &str) -> Option<(String, usize)> {
+        if !self.faces.is_empty() {
+            return self.faces.get(name).cloned();
+        }
+        self.cards.iter().find_map(|(key, c)| {
+            c.card_faces
+                .iter()
+                .position(|f| f.name == name)
+                .map(|i| (key.clone(), i))
+        })
+    }
+
+    /// Index the faces' names (after loading or adding cards).
+    pub fn index_faces(&mut self) {
+        self.faces.clear();
+        for (key, c) in &self.cards {
+            for (i, f) in c.card_faces.iter().enumerate() {
+                if f.name == *key {
+                    continue;
+                }
+                // Art cards and other extras share face names with real cards: the real
+                // one wins.
+                let keep_old = self
+                    .faces
+                    .get(&f.name)
+                    .is_some_and(|(old, _)| self.cards[old].is_real() || !c.is_real());
+                if !keep_old {
+                    self.faces.insert(f.name.clone(), (key.clone(), i));
+                }
+            }
+        }
     }
 
     pub fn by_oracle_id(&self, id: &str) -> Option<&ScryfallCard> {
@@ -155,6 +280,10 @@ pub fn load_cache() -> Result<ScryfallData, ScryfallError> {
     let path = cache_file();
     match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text)
+            .map(|mut d: ScryfallData| {
+                d.index_faces();
+                d
+            })
             .map_err(|e| ScryfallError::Io(format!("{}: {e}", path.display()))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ScryfallData::default()),
         Err(e) => Err(ScryfallError::Io(format!("{}: {e}", path.display()))),
@@ -264,8 +393,8 @@ impl ScryfallCard {
     }
 }
 
-/// Every card in the bulk file, by name (the front face's name for multi-faced cards is
-/// also a key).
+/// Every card in the bulk file, by name ("Front // Back" for a card with several faces;
+/// [`ScryfallData::get`] also finds it by its front face's name).
 pub fn load_bulk() -> Result<ScryfallData, ScryfallError> {
     use std::io::{BufRead, BufReader};
     let path = bulk_file();
@@ -294,6 +423,7 @@ pub fn load_bulk() -> Result<ScryfallData, ScryfallError> {
             data.cards.insert(card.name.clone(), card);
         }
     }
+    data.index_faces();
     Ok(data)
 }
 
@@ -464,6 +594,7 @@ pub fn fetch(names: &[String]) -> Result<(ScryfallData, usize), ScryfallError> {
     if fetched > 0 {
         save_cache(&data)?;
     }
+    data.index_faces();
     Ok((data, fetched))
 }
 
@@ -506,6 +637,7 @@ mod tests {
             token: true,
             key: None,
             granted: vec![],
+            ..CardDef::default()
         }
     }
 
@@ -589,5 +721,72 @@ mod tests {
         );
         // The blue flyer without abilities is never shown as the one that draws a card.
         assert!(token_has_other_text(&tokens[2]) && !token_has_other_text(&tokens[1]));
+    }
+
+    // A two-sided card: found by its full name or its front face's name; each face is a
+    // card of its own with its own picture (the back cached under `<id>-1`). Art cards that
+    // share a face name never win over the real card.
+    #[test]
+    fn faces_of_a_two_sided_card() {
+        let face = |name: &str, side: &str| {
+            serde_json::json!({
+                "name": name, "mana_cost": "", "type_line": "Land",
+                "oracle_text": "{T}: Add {U}.",
+                "image_uris": {
+                    "normal": format!("https://cards.scryfall.io/normal/{side}/a.jpg"),
+                    "large": format!("https://cards.scryfall.io/large/{side}/a.jpg"),
+                },
+            })
+        };
+        let real: ScryfallCard = serde_json::from_value(serde_json::json!({
+            "name": "Test Dawn // Test Dusk", "layout": "modal_dfc", "id": "abc-123",
+            "type_line": "Land // Land",
+            "card_faces": [face("Test Dawn", "front"), face("Test Dusk", "back")],
+        }))
+        .unwrap();
+        let art: ScryfallCard = serde_json::from_value(serde_json::json!({
+            "name": "Test Dawn // Test Dawn", "layout": "art_series", "id": "zzz",
+            "set_type": "memorabilia",
+            "card_faces": [face("Test Dawn", "front"), face("Test Dawn", "back")],
+        }))
+        .unwrap();
+        assert!(!real.is_stale());
+        let mut data = ScryfallData::default();
+        data.cards.insert(real.name.clone(), real.clone());
+        data.cards.insert(art.name.clone(), art);
+        data.index_faces();
+        assert_eq!(
+            data.get("Test Dawn").unwrap().name,
+            "Test Dawn // Test Dusk"
+        );
+        assert!(
+            data.get("Test Dusk").is_none(),
+            "a back face isn't the card"
+        );
+        let front = data.face("Test Dawn").unwrap();
+        let back = data.face("Test Dusk").unwrap();
+        assert_eq!(
+            (front.id.as_deref(), back.id.as_deref()),
+            (Some("abc-123"), Some("abc-123-1"))
+        );
+        assert!(
+            crate::images::image_url(&back, crate::images::ImageKind::Normal)
+                .unwrap()
+                .contains("/back/")
+        );
+        // The whole card's picture is its front face's.
+        assert!(
+            crate::images::image_url(&real, crate::images::ImageKind::Normal)
+                .unwrap()
+                .contains("/front/")
+        );
+        assert_ne!(
+            crate::images::image_path(&front, crate::images::ImageKind::Normal),
+            crate::images::image_path(&back, crate::images::ImageKind::Normal)
+        );
+        // A card cached without its faces is fetched again.
+        let mut old = real;
+        old.card_faces.clear();
+        assert!(old.is_stale());
     }
 }

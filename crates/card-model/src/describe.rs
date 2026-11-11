@@ -736,6 +736,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
         ),
         Effect::SetX(a) => format!("X is {}", amount(a)),
         Effect::Tap { what } => format!("tap {}", obj(mode, *what)),
+        Effect::Transform { what } => format!("transform {}", obj(mode, *what)),
         Effect::Untap { what } => format!("untap {}", obj(mode, *what)),
         Effect::TapAll(s) => format!("tap all {}", selector(s, true)),
         Effect::UntapAll(s) => format!("untap all {}", selector(s, true)),
