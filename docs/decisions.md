@@ -1418,8 +1418,11 @@ Rules text: docs/rules-notes/608.2h-its-controller-that-player.md. Tests:
 - Descriptions: an ability with several trigger events reads each in full ("enters or
   deals combat damage to a player", not "enters or player"); "you may have this deal …".
 - Golden hashes unchanged.
-- 9,305 → 9,520 of 34,463 scripts (27.6%); precons 149 → 152 of 275 deck slots. All 215
-  newly compiled cards were read against their Oracle text. Among the most played: Swords to Plowshares, Path to Exile, Beast
+- 9,305 → 9,520 of 34,463 scripts (27.6%) before D-067; precons 149 → 152 of 275 deck
+  slots. All 215 newly compiled cards were read against their Oracle text. Rebased onto
+  D-067 (9,560 alone): 9,776 (28.4%), precons 153 of 275. Two cards compile only in the
+  combination (Cavalier of Dawn, A-Elderfang Ritualist), both read; nothing main compiles
+  is blocked by this batch's guards. Among the most played: Swords to Plowshares, Path to Exile, Beast
   Within, An Offer You Can't Refuse, Rhystic Study, Solemn Simulacrum, Generous Gift, Swan
   Song, Smothering Tithe, Feed the Swarm, Assassin's Trophy, Stroke of Midnight, Chaos
   Warp, Sheoldred the Apocalypse, Consecrated Sphinx, Fecundity, Dictate of Kruphix.
@@ -1429,6 +1432,12 @@ Rules text: docs/rules-notes/608.2h-its-controller-that-player.md. Tests:
   player pays" (`unless:payer Player`); lasting effects about a player
   (`Effect:remembers TargetedController`); `TriggeredCardOwner` of a cast spell; `Targeted$`
   amounts with several targets; `TargetedAndYou`, `ParentTarget`.
+- **Known and not fixed (found reading the rebased cards):** "another target card from
+  your graveyard" in a dies trigger can target the dying card itself (the ability's
+  source is the old permanent, the card is a new object): Elderfang Ritualist (on main)
+  and A-Elderfang Ritualist. And "you may [X]. If you do, [Y]" compiled as "you may [X,
+  then Y]" still does Y when X turned out impossible (11 compiled cards, the same
+  convention as before this batch).
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
