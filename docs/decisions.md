@@ -1344,6 +1344,92 @@ Rules text: docs/rules-notes/614.12-enters-tapped-unless.md.
 - **Next here:** the sacrifice-instead lands (an `AsEnters::Sacrifice` with a count), other
   counter kinds for the storage and Vivid lands, "lands you control enter untapped".
 
+## D-068 Players other than "you": "its controller", "its owner", "that player" (2026-11-10)
+Rules text: docs/rules-notes/608.2h-its-controller-that-player.md. Tests:
+`crates/harness/tests/forge_their.rs` (three- and four-player games).
+- **What a target was (CR 608.2h, 608.2b).** As resolution begins, the resolve frame
+  records each legal target (`resolve::TargetInfo`: controller, owner, power, toughness,
+  mana value with X on the stack, deathtouch, lifelink) and brings the record up to date
+  before every step of the resolution while the target is still the object that was
+  targeted, where it was targeted. Once it has gone, the record is how it last existed
+  there — changed by an earlier instruction of the same spell, if one did ("target creature
+  gets +3/+0, exile it, its controller gains life equal to its power" gains 8 from a 5/4).
+  A target that was illegal as resolution began tells nothing: "its controller gains life"
+  doesn't happen (608.2b's last sentence). This replaces D-063's `target_controllers`
+  (who controlled the target as resolution began), which a control change or a pump
+  earlier in the same resolution would have read wrong.
+- **Vocabulary:** `PlayerRef::OwnerOf(slot)` ("its owner"; differs from "its controller"
+  under a control change); `Amount::OfTarget { slot, what }` ("its power / toughness / mana
+  value"); `Amount::HandOf(player)` ("the number of cards in that player's hand");
+  `DamageBy::Target(slot)` ("target creature deals damage to itself equal to its power":
+  the target is the source, with its lifelink and deathtouch); `Effect::PlayerMay { who,
+  effect }` ("that creature's controller may draw a card": that player is asked, CR 608.2d;
+  with `who` = you it is `May`); `ChooseCards::optional` ("its controller may search their
+  library", "each player may search": each searching player decides for themselves,
+  before looking; one who declines neither searches nor shuffles). `CreateToken` may name
+  several players ("each player creates"): each owns and controls their tokens (CR 111.2).
+- **Triggers carry "that player"** (`EventFacts::player`): who cast the spell (Forge's
+  `TriggeredActivator`, `TriggeredCardController` of `SpellCast`), whose step it is
+  (`TriggeredPlayer` of `Phase`), the defending player of an attacking, blocked or
+  unblocked creature (`TriggeredDefendingPlayer`; CR 506.2 — creatures here attack
+  players only). The player who drew or discarded is also `TriggeredCardController` /
+  `TriggeredCardOwner` of `Drawn` and `Discarded` (the card is in their hand/graveyard).
+- **"You" where the event can only be yours.** "That player" of an event only the
+  controller's own events trigger ("at the beginning of your upkeep", "whenever you draw")
+  is compiled as "you"; so is "its controller" of the ability's own source ("when this
+  dies, its controller draws a card", CR 603.3a). Both are exactly the same player; the
+  text now matches the Oracle's. A second (`Secondary$`) event added to such an ability
+  must have the same property, else it is blocked (`trig:Secondary about another object`).
+- **The compiler** resolves every player name of a script in one place
+  (`Tx::named_player`): `Defined$`, `TokenOwner$`, `UnlessPayer$`, `DefinedPlayer$`, a
+  trigger's `OptionalDecider$` and a draw's. Forge's draw asks the player who would draw
+  whatever `OptionalDecider$` says; it is compiled only where it names that player
+  (`param:Draw.OptionalDecider not the drawer`). A trigger whose decider is someone else
+  and that also costs something is blocked (`trig:OptionalDecider with a cost`).
+  `TargetedController`/`TargetedOwner` of a player or of a card in a graveyard is blocked
+  (Forge finds no controller there). `AITgts$`/`AITgtsStrict$` are accepted as AI hints
+  (never read by Forge's rules code); a test shows the card is identical without them.
+- **Mis-compilations found (older than this batch), fixed:**
+  - Opponents' cast triggers that hit "its controller" did nothing at all: the cast
+    trigger's "it" was taken for an object the event doesn't carry (Ishi-Ishi, Isolation
+    Cell, Spelltithe Enforcer). The spell is no "it" of a cast trigger now; "that player"
+    is the caster.
+  - "Each player / each opponent may search their library" was decided by the caster for
+    everyone (Boldwyr Heavyweights, Jungle Wayfinder, New Frontiers, Noble Benefactor,
+    Old-Growth Dryads, Veteran Explorer, Weird Harvest). Now each searcher decides.
+  - Found reading the new cards: "that player may search" where the script has no
+    `Optional$` but the Oracle says "may" (Volatile Fault, White Orchid Phantom) was being
+    made the caster's choice; the searcher decides now. Goblin Tinkerer ("that artifact
+    deals damage … to this creature", scripted as the creature damaging itself) and
+    Commander Mustard ("it deals 1 damage to defending player", scripted as life loss) are
+    now blocked by two new Oracle guards: `oracle:that one deals damage` and
+    `oracle:says damage`. Selectors' "non[color]" was missing from the text (Soot Imp's
+    "nonblack spell" read "spell"; the engine had it right).
+- **New Oracle guards:** `oracle:another player` — the card says "its controller", "its
+  owner", "that player", "defending player"… and the compiled card names nobody but you
+  (blocks no compiled card today: a regression guard); the two damage guards above; "may
+  pay" counts as answered by "unless … pays" (CR 118.12a: Smothering Tithe).
+- **Hidden information:** a library being searched is shown only to the searcher, and only
+  while searching — not while they decide whether to (view `shown`).
+- **The heuristic agent** treats an effect given to someone else (its controller's life,
+  token, card) as neither help nor harm when choosing a target; accepts "may" choices;
+  pays an opponent's "unless that player pays" (a tested case). The app titles a "may"
+  question with the card it is for (it can be an opponent's).
+- Descriptions: an ability with several trigger events reads each in full ("enters or
+  deals combat damage to a player", not "enters or player"); "you may have this deal …".
+- Golden hashes unchanged.
+- 9,305 → 9,520 of 34,463 scripts (27.6%); precons 149 → 152 of 275 deck slots. All 215
+  newly compiled cards were read against their Oracle text. Among the most played: Swords to Plowshares, Path to Exile, Beast
+  Within, An Offer You Can't Refuse, Rhystic Study, Solemn Simulacrum, Generous Gift, Swan
+  Song, Smothering Tithe, Feed the Swarm, Assassin's Trophy, Stroke of Midnight, Chaos
+  Warp, Sheoldred the Apocalypse, Consecrated Sphinx, Fecundity, Dictate of Kruphix.
+- **Still blocked, by design or for later:** "creature defending player controls" and
+  other selectors relative to a triggering player (`filter:.ControlledBy
+  TriggeredDefendingPlayer/TriggeredTarget/TriggeredPlayer`, ~40 cards alone); "unless any
+  player pays" (`unless:payer Player`); lasting effects about a player
+  (`Effect:remembers TargetedController`); `TriggeredCardOwner` of a cast spell; `Targeted$`
+  amounts with several targets; `TargetedAndYou`, `ParentTarget`.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…
