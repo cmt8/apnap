@@ -172,6 +172,7 @@ fn views(st: &GameState, ids: &[ObjectId]) -> Vec<ObjectView> {
 }
 
 pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
+    let rules = crate::players::in_force(st);
     PlayerView {
         viewer,
         turn_number: st.turn.turn_number,
@@ -206,8 +207,8 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
                 library_top: crate::players::library_top(st, p.id)
                     .filter(|_| crate::players::sees_library_top(st, viewer, p.id))
                     .map(|id| object_view(st, id)),
-                rules: crate::players::in_force(st)
-                    .into_iter()
+                rules: rules
+                    .iter()
                     .filter(|r| r.about(p.id))
                     .map(|r| r.rule.clone())
                     .collect(),

@@ -191,6 +191,11 @@ fn with_article(s: &str) -> String {
 fn spell_kind(s: &Selector) -> String {
     let mut words: Vec<String> = Vec::new();
     words.extend(s.colors.iter().map(|c| color(*c).to_string()));
+    if s.not_colors.len() == 5 {
+        words.push("colorless".to_string());
+    } else {
+        words.extend(s.not_colors.iter().map(|c| format!("non{}", color(*c))));
+    }
     words.extend(s.not_types.iter().map(|t| format!("non{}", card_type(*t))));
     let types: Vec<String> = s.types.iter().map(|t| card_type(*t).to_string()).collect();
     words.extend(s.subtypes.iter().cloned());
@@ -437,6 +442,21 @@ fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
                 }
             }
             ContinuousEffect::SwitchPT => format!("{become_} power-and-toughness switched"),
+            ContinuousEffect::RemoveTypes(ts) => {
+                let not = if plural { "aren't" } else { "isn't" };
+                let names: Vec<String> = ts
+                    .iter()
+                    .map(|t| {
+                        let name = card_type(*t);
+                        if plural {
+                            format!("{name}s")
+                        } else {
+                            with_article(name)
+                        }
+                    })
+                    .collect();
+                format!("{not} {}", join(names, "or"))
+            }
             ContinuousEffect::SetPTBy { power, toughness } => match (power, toughness) {
                 (Some(p), Some(t)) if p == t => {
                     format!("{have} power and toughness each equal to {}", amount(p))
@@ -1715,10 +1735,22 @@ fn ability(a: &AbilityDef) -> String {
                 }
             }
         }
-        AbilityDef::CostReduction { spells, amount: n } => format!(
-            "{} spells you cast cost {{{n}}} less to cast.",
-            capitalize(selector(spells, false).replace("permanent", "").trim())
-        ),
+        AbilityDef::CostReduction { spells, amount: n } => {
+            // "Colorless spells you cast with mana value 7 or greater cost {1} less".
+            let text = selector(spells, false);
+            let (kind, with) = match text.find(" with ") {
+                Some(i) => (&text[..i], &text[i..]),
+                None => (text.as_str(), ""),
+            };
+            let kind = kind.replace("permanent", "");
+            let kind = kind.trim();
+            let spells = if kind.is_empty() {
+                "Spells".to_string()
+            } else {
+                format!("{} spells", capitalize(kind))
+            };
+            format!("{spells} you cast{with} cost {{{n}}} less to cast.")
+        }
         AbilityDef::CombatRule { affected, rule } => {
             let (subject, plural) = match affected {
                 Affected::This => ("This creature".to_string(), false),

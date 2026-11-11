@@ -161,6 +161,9 @@ struct Tx<'a> {
     /// Compiling what an effect object carries: `EffectSource` is "this" (the source of
     /// the spell or ability that made it) and `IsRemembered` what it is about.
     in_effect: bool,
+    /// The line just compiled means nothing for the rules (only hints for Forge's AI): no
+    /// ability, and nothing blocked.
+    nothing: bool,
 }
 
 /// The kinds of ability a script gives to other objects.
@@ -510,6 +513,37 @@ fn cost_tokens(text: &str) -> Vec<&str> {
         out.push(&text[s..]);
     }
     out
+}
+
+/// CR 205.3i (2026-11-06): the land types.
+const LAND_TYPES: [&str; 17] = [
+    "Cave",
+    "Desert",
+    "Forest",
+    "Gate",
+    "Island",
+    "Lair",
+    "Locus",
+    "Mine",
+    "Mountain",
+    "Plains",
+    "Planet",
+    "Power-Plant",
+    "Sphere",
+    "Swamp",
+    "Tower",
+    "Town",
+    "Urza's",
+];
+
+/// A `Mode$ Continuous` line with nothing but whom it affects and hints for Forge's AI.
+fn only_ai_hints(rec: &Record) -> bool {
+    rec.params.iter().all(|(k, _)| {
+        matches!(
+            k.as_str(),
+            "Mode" | "Affected" | "AffectedDefined" | "AddSVar" | "Description"
+        )
+    })
 }
 
 /// A word of a filter that names players, not cards (`You`, `Player.Opponent`).
@@ -998,6 +1032,17 @@ impl<'a> Tx<'a> {
         }
         if let Some(c) = v.strip_prefix("Count$Devotion.").and_then(color) {
             return Some(Amount::Devotion(vec![c]));
+        }
+        // CR 700.5: "devotion to [color 1] and [color 2]".
+        if let Some((a, b)) = v
+            .strip_prefix("Count$DevotionDual.")
+            .and_then(|r| r.split_once('.'))
+            && let (Some(a), Some(b)) = (color(a), color(b))
+            && a != b
+        {
+            let mut cs = vec![a, b];
+            cs.sort();
+            return Some(Amount::Devotion(cs));
         }
         // `Count$Compare <variable> GE<n>.<then>.<otherwise>`.
         if let Some(rest) = v.strip_prefix("Count$Compare ") {
@@ -3828,6 +3873,7 @@ impl<'a> Tx<'a> {
     }
 
     fn static_ability(&mut self, rec: &'a Record) -> Option<AbilityDef> {
+        self.nothing = false;
         let mode = rec.get("Mode").unwrap_or("?");
         let rd = Rd::new(rec, format!("static {mode}"));
         let out = match mode {
@@ -3942,6 +3988,24 @@ impl<'a> Tx<'a> {
                 if let Some(types) = rd.get("AddType") {
                     effects.insert(0, self.added_types(types.split('&'))?);
                 }
+                // Layer 4: "isn't a creature" (card types only; the subtypes stay).
+                if let Some(types) = rd.get("RemoveType") {
+                    let mut ts = Vec::new();
+                    for t in types.split('&').map(str::trim) {
+                        match card_type(t) {
+                            Some(t) => ts.push(t),
+                            None => {
+                                self.block(format!("static:RemoveType {}", shape(t)));
+                                return None;
+                            }
+                        }
+                    }
+                    let at = effects
+                        .iter()
+                        .position(|e| !matches!(e, ContinuousEffect::AddTypes { .. }))
+                        .unwrap_or(effects.len());
+                    effects.insert(at, ContinuousEffect::RemoveTypes(ts));
+                }
                 // Layer 5: "is [color]" (not "in addition").
                 if let Some(colors) = rd.get("SetColor") {
                     let mut cs = Vec::new();
@@ -4052,6 +4116,18 @@ impl<'a> Tx<'a> {
                     }
                 }
                 if effects.is_empty() && rules.is_empty() {
+                    // Name what wasn't understood: the parameters that weren't read.
+                    let before = self.blockers.len();
+                    rd.finish(&mut self.blockers);
+                    if self.blockers.len() > before {
+                        return None;
+                    }
+                    // A line that only copies hints for Forge's AI to what it affects
+                    // (`AddSVar$`, checked above) says nothing about the rules.
+                    if rd.rec.get("AddSVar").is_some() && only_ai_hints(rd.rec) {
+                        self.nothing = true;
+                        return None;
+                    }
                     self.block("static:Continuous-nothing");
                     return None;
                 }
@@ -4490,10 +4566,22 @@ impl<'a> Tx<'a> {
             } else {
                 format!("{head}.{}", kept.join("+"))
             };
-            let s = self.card_selector(&text)?;
+            let mut s = self.card_selector(&text)?;
             if s != owned(s.clone()) || s.controller != Who::Any || s.other {
                 self.block("static:MayPlay filter");
                 return None;
+            }
+            // "Cast creature spells from the top of your library": a kind of card that
+            // isn't a land is cast, never played as a land — not even a land that is also
+            // that kind (a land creature). Only "cards" (`Card`), "permanent cards"
+            // (`Permanent`) and lands by type (CR 205.3i) take in lands, as Oracle's "play
+            // lands and cast spells" does.
+            let land_kind = matches!(head, "Card" | "Permanent")
+                || s.types.contains(&CardType::Land)
+                || (s.types.is_empty()
+                    && s.subtypes.iter().any(|t| LAND_TYPES.contains(&t.as_str())));
+            if !land_kind && !s.not_types.contains(&CardType::Land) {
+                s.not_types.push(CardType::Land);
             }
             sels.push(s);
         }
@@ -4746,6 +4834,7 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
         granted: Vec::new(),
         granting: 0,
         in_effect: false,
+        nothing: false,
     };
     let mut def = CardDef {
         name: face.name.clone(),
@@ -5172,6 +5261,7 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
                     abilities.push((order.statics[i], extra));
                 }
             }
+            None if std::mem::take(&mut tx.nothing) && tx.blockers.len() == before => {}
             None => tx.explained(before, "static"),
         }
     }

@@ -195,6 +195,22 @@ pub(crate) fn sync_control(st: &mut GameState) {
             crate::actions::GameAction::ControlChanged { object, controller },
         );
     }
+    // CR 506.4: an attacking or blocking creature that stops being a creature (a God
+    // whose devotion fell) is removed from combat.
+    if let Some(c) = &st.combat {
+        let v = view(st);
+        let mut gone: Vec<ObjectId> = Vec::new();
+        for a in &c.attackers {
+            for id in core::iter::once(a.attacker).chain(a.blockers.iter().copied()) {
+                if v.get(&id).is_some_and(|ch| !ch.is(CardType::Creature)) && !gone.contains(&id) {
+                    gone.push(id);
+                }
+            }
+        }
+        for object in gone {
+            crate::actions::execute(st, crate::actions::GameAction::RemoveFromCombat { object });
+        }
+    }
 }
 
 /// The current controller of `id`: layered on the battlefield (CR 613.1b), the controller of
@@ -545,6 +561,7 @@ fn layer_of(e: &ContinuousEffect) -> Layer {
         ContinuousEffect::SetPT(..) => Layer::L7b,
         ContinuousEffect::ModifyPT(..) | ContinuousEffect::ModifyPTBy { .. } => Layer::L7c,
         ContinuousEffect::SwitchPT => Layer::L7d,
+        ContinuousEffect::RemoveTypes(_) => Layer::L4,
     }
 }
 
@@ -847,7 +864,7 @@ impl Walk<'_> {
         };
         b.parts.iter().filter(|p| layer_of(p) == layer).any(|p| {
             [affected, counted].into_iter().flatten().any(|s| match p {
-                ContinuousEffect::AddTypes { .. } => true,
+                ContinuousEffect::AddTypes { .. } | ContinuousEffect::RemoveTypes(_) => true,
                 ContinuousEffect::SetColors(_) => !s.colors.is_empty(),
                 ContinuousEffect::AddKeywords(_) | ContinuousEffect::LoseKeywords(_) => {
                     !s.keywords.is_empty() || !s.not_keywords.is_empty()
@@ -931,6 +948,9 @@ fn apply_part(c: &mut Characteristics, part: &ContinuousEffect, you: PlayerId) {
         ContinuousEffect::SetPTBy { .. } => {}
         // Done by the walk, which knows the card the abilities are written on.
         ContinuousEffect::GrantAbilities(_) => {}
+        // CR 205.1: a type-removing effect; subtypes are kept (a God that isn't a
+        // creature is still a God).
+        ContinuousEffect::RemoveTypes(ts) => c.card_types.retain(|t| !ts.contains(t)),
         ContinuousEffect::SwitchPT => {
             if let (Some(p), Some(t)) = (c.power, c.toughness) {
                 c.power = Some(t);
@@ -1114,6 +1134,14 @@ fn compute(st: &GameState) -> View {
                     *t += n;
                 }
             }
+        }
+    }
+    // CR 208.3: "A noncreature permanent has no power or toughness, even if it's a card
+    // with a power and toughness printed on it" (a God that isn't a creature).
+    for c in view.values_mut() {
+        if !c.is(CardType::Creature) {
+            c.power = None;
+            c.toughness = None;
         }
     }
     view

@@ -324,6 +324,7 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                                 e,
                                 E::GainControl
                                     | E::AddTypes { .. }
+                                    | E::RemoveTypes(_)
                                     | E::SetColors(_)
                                     | E::SetPTBy { .. }
                             )

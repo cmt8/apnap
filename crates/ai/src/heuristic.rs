@@ -127,7 +127,8 @@ fn continuous_polarity(effects: &[ContinuousEffect]) -> Polarity {
             }
             ContinuousEffect::SetColors(_)
             | ContinuousEffect::SwitchPT
-            | ContinuousEffect::SetPTBy { .. } => {}
+            | ContinuousEffect::SetPTBy { .. }
+            | ContinuousEffect::RemoveTypes(_) => {}
         }
     }
     Polarity::Neutral
@@ -240,6 +241,8 @@ impl HeuristicAgent {
             .chain(&v.command)
             .chain(&v.exile)
             .chain(v.players.iter().flat_map(|p| &p.graveyard))
+            // The top card of a library this player may see (CR 401.5).
+            .chain(v.players.iter().filter_map(|p| p.library_top.as_ref()))
             // Cards the pending decision lets this player look at (a library search…).
             .chain(&v.revealed)
             .find(|o| o.id == id)

@@ -669,3 +669,102 @@ fn forms_not_compiled_yet_are_named() {
         "static:MayPlay remembered cards",
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// "As long as your devotion to red is less than five, this isn't a creature."
+
+fn smith_god() -> String {
+    "Name:Test Forge God\n\
+     ManaCost:3 R\n\
+     Types:Legendary Enchantment Creature God\n\
+     PT:6/5\n\
+     K:Indestructible\n\
+     S:Mode$ Continuous | AffectedDefined$ Self | RemoveType$ Creature | CheckSVar$ X | SVarCompare$ LT5 | Description$ Text.\n\
+     SVar:X:Count$Devotion.Red\n\
+     Oracle:Indestructible\\nAs long as your devotion to red is less than five, this isn't a creature."
+        .to_string()
+}
+
+// CR 700.5 (2026-11-06): devotion to red is the number of {R} among the mana costs of
+// permanents that player controls; CR 613.1d: removing a card type is a layer-4 effect;
+// CR 208.3: a noncreature permanent has no power or toughness. Forge: `AffectedDefined$
+// Self | RemoveType$ Creature | CheckSVar$ X | SVarCompare$ LT5`, `Count$Devotion.Red`.
+#[test]
+fn a_god_is_a_creature_only_with_enough_devotion() {
+    use card_model::CardType;
+    use engine_core::layers::chars;
+    let mut sc = scenario_n(3, &[&smith_god()]);
+    let god = sc.card(P0, Zone::Battlefield, "Test Forge God");
+    sc.card(P0, Zone::Battlefield, "Test Giant"); // {3}{R}{R}
+    sc.cards(P1, Zone::Battlefield, &["Test Giant", "Test Giant"]);
+    let s = Script::new(sc.build());
+    let c = chars(&s.st, god);
+    assert!(
+        !c.is(CardType::Creature),
+        "devotion 3: the opponent's red doesn't count"
+    );
+    assert!(c.is(CardType::Enchantment));
+    assert!(c.has_subtype("God"), "still a God");
+    assert_eq!((c.power, c.toughness), (None, None));
+
+    let mut sc = scenario_n(3, &[&smith_god()]);
+    let god = sc.card(P0, Zone::Battlefield, "Test Forge God");
+    sc.cards(P0, Zone::Battlefield, &["Test Giant", "Test Giant"]);
+    let s = Script::new(sc.build());
+    let c = chars(&s.st, god);
+    assert!(c.is(CardType::Creature), "devotion 5");
+    assert_eq!((c.power, c.toughness), (Some(6), Some(5)));
+}
+
+// CR 506.4: an attacking creature that stops being a creature is removed from combat.
+#[test]
+fn a_god_that_stops_being_a_creature_leaves_combat() {
+    let mut sc = scenario(&[&smith_god()]);
+    let god = sc.card(P0, Zone::Battlefield, "Test Forge God");
+    sc.cards(P0, Zone::Battlefield, &["Test Giant", "Test Giant"]);
+    sc.cards(P0, Zone::Battlefield, &["Forest", "Forest"]);
+    sc.card(P0, Zone::Hand, "Test Recall");
+    sc.turn(P0, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    // Attack with the God alone.
+    drive_until(&mut s, |s| s.kind() == ChoiceKind::DeclareAttackers);
+    while s.next.is_some() && s.kind() == ChoiceKind::DeclareAttackers {
+        let a = match s.options().first() {
+            Some(OptionDesc::Attack { attacker, .. }) => *attacker,
+            other => panic!("{other:?}"),
+        };
+        s.respond(Response::Pick(if a == god { vec![0] } else { vec![] }));
+    }
+    assert!(engine_core::layers::combat_role(&s.st, god).0);
+    drive_until(&mut s, |s| {
+        s.kind() == ChoiceKind::Priority && s.who() == P0
+    });
+    s.cast("Test Recall").target("Test Giant").pay().pass_all();
+    assert!(
+        !engine_core::layers::combat_role(&s.st, god).0,
+        "removed from combat"
+    );
+    let life = s.st.player(P1).life;
+    drive_until(&mut s, |s| s.st.turn.step == Step::PostcombatMain);
+    assert_eq!(s.st.player(P1).life, life, "it deals no combat damage");
+}
+
+// A line that only copies hints for Forge's AI to what it affects says nothing about the
+// rules: the card compiles without it.
+#[test]
+fn a_line_of_ai_hints_only_is_no_ability() {
+    let card = "Name:Test Hinted\nManaCost:1 W\nTypes:Creature Human\nPT:2/2\n\
+        S:Mode$ Continuous | Affected$ Creature.YouCtrl | AddSVar$ AE\n\
+        SVar:AE:SVar:HasAttackEffect:TRUE\nOracle:Text.";
+    assert_eq!(forge_test_blockers(card), [] as [&str; 0]);
+    let cat = forge_test_catalog(&[card], &[]);
+    let def = cat.get(cat.find("Test Hinted").unwrap());
+    assert!(def.abilities.is_empty());
+    // Anything else on such a line is named.
+    let other = card.replace("AddSVar$ AE", "AddSVar$ AE | CanBlockAny$ True");
+    assert!(
+        forge_test_blockers(&other)
+            .iter()
+            .any(|b| b == "param:static Continuous.CanBlockAny")
+    );
+}

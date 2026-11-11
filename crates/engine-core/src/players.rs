@@ -46,7 +46,9 @@ pub fn in_force(st: &GameState) -> Vec<InForce<'_>> {
     for &id in &st.zones.battlefield {
         let controller = controller_of(st, id);
         for (_, a) in abilities(st, id) {
+            // ("Cast this card from your graveyard" works off the battlefield only.)
             if let AbilityDef::PlayerRule { who, rule, only_if } = a
+                && !matches!(rule, PlayerRule::PlayThisFrom(_))
                 && crate::triggers::condition_holds(st, only_if.as_ref(), controller, id)
             {
                 out.push(InForce {

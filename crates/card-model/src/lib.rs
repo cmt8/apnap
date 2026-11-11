@@ -901,6 +901,10 @@ pub enum ContinuousEffect {
     /// abilities with these indices in [`CardDef::granted`] of the card this effect is
     /// written on. The affected object is the source of what it gains.
     GrantAbilities(Vec<u16>),
+    /// Layer 4: "isn't a [card type]" — the object loses these card types (its subtypes
+    /// stay, as a God that isn't a creature is still a God). CR 208.3: a permanent that
+    /// isn't a creature has no power or toughness.
+    RemoveTypes(Vec<CardType>),
 }
 
 /// Events a static replacement effect watches for (CR 614). M2 vocabulary.

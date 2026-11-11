@@ -6049,12 +6049,21 @@ fn effect_objects_not_compiled() {
         )),
         ["Effect:duration UntilEndOfCombat"]
     );
-    // "You have hexproof" is about a player: "You" is never a subtype of permanents.
-    let b = forge_test_blockers(
-        "Name:Test Warding Mask\nManaCost:2 W\nTypes:Enchantment\n\
-         S:Mode$ Continuous | Affected$ You | AddKeyword$ Hexproof | Description$ Text.\nOracle:Text.",
-    );
-    assert_eq!(b, ["filter:You"]);
+    // "You have hexproof" is about a player: "You" is never a subtype of permanents. It is
+    // a rule about the player (D-070, tests in forge_players.rs).
+    let mask = "Name:Test Warding Mask\nManaCost:2 W\nTypes:Enchantment\n\
+         S:Mode$ Continuous | Affected$ You | AddKeyword$ Hexproof | Description$ Text.\nOracle:Text.";
+    assert_eq!(forge_test_blockers(mask), [] as [&str; 0]);
+    let cat = forge_test_catalog(&[mask], &[]);
+    assert!(matches!(
+        cat.get(cat.find("Test Warding Mask").unwrap())
+            .abilities
+            .as_slice(),
+        [card_model::AbilityDef::PlayerRule {
+            rule: card_model::PlayerRule::Hexproof,
+            ..
+        }]
+    ));
 }
 
 // CR 113.12, 611.2c (2026-11-06): "can't block" is a rule about a creature, not an ability
