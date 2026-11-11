@@ -15,7 +15,8 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use card_model::{
-    AbilityDef, Body, CardCatalog, CardType, ContinuousEffect, CounterKind, Effect, Keyword,
+    AbilityDef, AsEnters, Body, CardCatalog, CardType, ContinuousEffect, CounterKind, Effect,
+    Keyword, ReplaceWith,
 };
 use engine_core::decision::{ChoiceKind, OptionDesc, PendingDecision, Primitive, Response};
 use engine_core::stack::Target;
@@ -900,6 +901,74 @@ impl HeuristicAgent {
     }
 }
 
+impl HeuristicAgent {
+    /// CR 614.12a: "as this enters, you may pay 2 life / reveal a card; if you don't, it
+    /// enters tapped". Revealing costs nothing: reveal. (Discarding for a permanent that
+    /// otherwise goes to the graveyard: always.) Life is paid only when the mana
+    /// is wanted now — on its own turn, a card in hand or the command zone that it could
+    /// cast only with this land untapped — with life to spare, and not for a permanent
+    /// that enters tapped anyway.
+    fn as_enters(
+        &self,
+        v: &PlayerView,
+        d: &PendingDecision,
+        ability: card_model::AbilityId,
+        tapped: bool,
+    ) -> usize {
+        let decline = d
+            .options
+            .iter()
+            .position(|o| *o == OptionDesc::Decline)
+            .unwrap_or(0);
+        let first = |want: fn(&OptionDesc) -> bool| d.options.iter().position(want);
+        // "If this would enter, you may discard a land card instead … if you don't, put it
+        // into its owner's graveyard": whatever is asked is worth the permanent.
+        if matches!(
+            self.catalog.ability(ability),
+            AbilityDef::Replacement {
+                with: ReplaceWith::EntersOnlyIfYou(_),
+                ..
+            }
+        ) {
+            return first(|o| matches!(o, OptionDesc::Card { .. } | OptionDesc::Accept))
+                .unwrap_or(decline);
+        }
+        if tapped {
+            return decline;
+        }
+        if let Some(i) = first(|o| matches!(o, OptionDesc::Card { .. })) {
+            return i;
+        }
+        let Some(pay) = d.options.iter().position(|o| *o == OptionDesc::Accept) else {
+            return decline;
+        };
+        let life_cost = match self.catalog.ability(ability) {
+            AbilityDef::Replacement {
+                with: ReplaceWith::EntersTappedUnlessYou(AsEnters::PayLife(n)),
+                ..
+            } => *n as i32,
+            _ => 0,
+        };
+        let me = Self::me(v);
+        let life = v.players.iter().find(|p| p.id == me).map_or(0, |p| p.life);
+        if v.active != me || life - life_cost < 10 {
+            return decline;
+        }
+        let untapped = v
+            .battlefield
+            .iter()
+            .filter(|o| o.controller == me && !o.tapped && o.card_types.contains(&CardType::Land))
+            .count() as u32;
+        let wanted = v
+            .hand
+            .iter()
+            .chain(v.command.iter().filter(|o| o.owner == me))
+            .filter(|o| !o.card_types.contains(&CardType::Land))
+            .any(|o| o.mana_value == untapped + 1);
+        if wanted { pay } else { decline }
+    }
+}
+
 impl Agent for HeuristicAgent {
     fn decide(&mut self, v: &PlayerView, d: &PendingDecision) -> Response {
         let me = Self::me(v);
@@ -1032,6 +1101,12 @@ impl Agent for HeuristicAgent {
                     .position(|o| matches!(o, OptionDesc::Accept))
                     .unwrap_or(0),
             ]),
+            (
+                ChoiceKind::AsEnters {
+                    ability, tapped, ..
+                },
+                _,
+            ) => Response::Pick(vec![self.as_enters(v, d, ability, tapped)]),
             _ => return self.fallback.decide(v, d),
         };
         if d.validate(&r).is_ok() {

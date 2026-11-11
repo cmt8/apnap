@@ -894,6 +894,33 @@ pub enum ReplaceWith {
     EntersWithCounted { kind: CounterKind, amount: Amount },
     /// "Prevent that damage" (CR 615.1a): all of it.
     Prevent,
+    /// "[This permanent] enters tapped unless [condition]" (CR 614.1d). The condition is
+    /// judged as the event is modified — on the battlefield as it is before the permanent
+    /// enters, so it never counts itself nor anything entering with it — for the player
+    /// it will enter under the control of (CR 109.5).
+    EntersTappedUnless(Condition),
+    /// "As this permanent enters, you may [do something]. If you don't, it enters tapped."
+    /// (CR 614.12a: chosen as the event is modified, by the player it will enter under the
+    /// control of; nothing uses the stack.)
+    EntersTappedUnlessYou(AsEnters),
+    /// "If this permanent would enter, you may [do something] instead. If you do, put it
+    /// onto the battlefield. If you don't, put it into its owner's graveyard." (CR 614.1a,
+    /// 614.12a: chosen as the event is modified, by the player it would enter under the
+    /// control of.)
+    EntersOnlyIfYou(AsEnters),
+}
+
+/// What a player may do as a permanent enters (CR 614.12a) so that it enters untapped.
+// Built once when the catalog loads, then only read (as `AbilityDef`).
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AsEnters {
+    /// "pay N life" (CR 119.4: only a player with at least N life can).
+    PayLife(u32),
+    /// "reveal a [selector] card from your hand" (CR 701.20; the card stays there).
+    Reveal(Selector),
+    /// "discard a [selector] card" (CR 701.9).
+    Discard(Selector),
 }
 
 /// An amount with a sign: "+X" or "-X".
@@ -1567,6 +1594,15 @@ pub enum Amount {
     LifeTotal,
     /// "That much", "that many": the amount of the triggering event (the damage dealt).
     TriggeringAmount,
+    /// The number of players in the game who are `who` relative to you ("the number of
+    /// opponents you have", CR 102.2–3; players who have left the game don't count).
+    Players(Who),
+    /// The highest or lowest life total among the players in the game who are `who`
+    /// relative to you (0 if it is negative, or if there are no such players).
+    LifeAmong {
+        players: Who,
+        highest: bool,
+    },
 }
 
 impl Amount {
@@ -1583,7 +1619,9 @@ impl Amount {
             | Amount::Devotion(_)
             | Amount::Greatest { .. }
             | Amount::HandSize
-            | Amount::LifeTotal => true,
+            | Amount::LifeTotal
+            | Amount::Players(_)
+            | Amount::LifeAmong { .. } => true,
             Amount::Calc(base, _) => base.stands_alone(),
             Amount::IfAtLeast { test, .. } => test.stands_alone(),
             Amount::X
@@ -1605,6 +1643,8 @@ impl Amount {
             Amount::Fixed(_)
             | Amount::HandSize
             | Amount::LifeTotal
+            | Amount::Players(_)
+            | Amount::LifeAmong { .. }
             | Amount::Domain
             | Amount::Devotion(_) => true,
             Amount::Count(s) => !s.looks_at_pt(),

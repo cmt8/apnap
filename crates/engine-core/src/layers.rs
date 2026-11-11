@@ -296,6 +296,15 @@ fn counted_selector(a: &card_model::Amount) -> Option<&Selector> {
 
 /// An amount read off the battlefield ("the number of …", "the total power of …"); 0 for
 /// amounts that depend on a resolving spell or ability.
+/// Is `player` `who`, relative to `you`?
+fn who_is(who: card_model::Who, player: PlayerId, you: PlayerId) -> bool {
+    match who {
+        card_model::Who::Any => true,
+        card_model::Who::You => player == you,
+        card_model::Who::Opponent => player != you,
+    }
+}
+
 pub fn count_amount(
     st: &GameState,
     a: &card_model::Amount,
@@ -413,6 +422,20 @@ pub fn count_amount(
             .unwrap_or(0),
         Amount::HandSize => st.zones.list(Zone::Hand, controller).len() as u32,
         Amount::LifeTotal => st.player(controller).life.max(0) as u32,
+        // CR 102.2–3: players still in the game.
+        Amount::Players(who) => st
+            .players
+            .iter()
+            .filter(|p| !p.has_lost && who_is(*who, p.id, controller))
+            .count() as u32,
+        Amount::LifeAmong { players, highest } => {
+            let lives = st
+                .players
+                .iter()
+                .filter(|p| !p.has_lost && who_is(*players, p.id, controller))
+                .map(|p| p.life.max(0) as u32);
+            if *highest { lives.max() } else { lives.min() }.unwrap_or(0)
+        }
         Amount::X
         | Amount::SourcePower
         | Amount::SourceToughness
@@ -688,7 +711,11 @@ impl Walk<'_> {
                     .sum()
             }
             // Nothing the walk is working out: cards in other zones, hands, life totals.
-            Amount::CardsIn { .. } | Amount::HandSize | Amount::LifeTotal => {
+            Amount::CardsIn { .. }
+            | Amount::HandSize
+            | Amount::LifeTotal
+            | Amount::Players(_)
+            | Amount::LifeAmong { .. } => {
                 count_amount(self.st, a, e.source, self.you(e, view)) as i32
             }
             Amount::Calc(base, op) => op.apply(self.amount(base, e, view).max(0) as u32) as i32,

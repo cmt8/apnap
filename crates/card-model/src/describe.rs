@@ -4,11 +4,11 @@
 //! vocabulary without describing it is a compile error.
 
 use crate::{
-    AbilityDef, ActivationZone, Affected, Amount, Body, Calc, CardDef, CardDest, CardType,
-    CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost, CounterKind, DamageBy,
-    DamagePer, DamageTo, EachPlayerAction, Effect, Keyword, ManaProduce, Measure, Mode, ObjFilter,
-    ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, Take, TargetFilter, TargetRef, Timing,
-    Trigger, TriggerStep, Who,
+    AbilityDef, ActivationZone, Affected, Amount, AsEnters, Body, Calc, CardDef, CardDest,
+    CardType, CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost, CounterKind,
+    DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword, ManaProduce, Measure, Mode,
+    ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, Take, TargetFilter, TargetRef,
+    Timing, Trigger, TriggerStep, Who,
 };
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -149,6 +149,20 @@ fn amount(a: &Amount) -> String {
         ),
         Amount::HandSize => "the number of cards in your hand".into(),
         Amount::LifeTotal => "your life total".into(),
+        Amount::Players(who) => match who {
+            Who::Opponent => "the number of opponents you have".into(),
+            Who::You => "1".into(),
+            Who::Any => "the number of players".into(),
+        },
+        Amount::LifeAmong { players, highest } => format!(
+            "the {} life total among {}",
+            if *highest { "highest" } else { "lowest" },
+            match players {
+                Who::Opponent => "your opponents",
+                Who::You => "you",
+                Who::Any => "all players",
+            }
+        ),
     }
 }
 
@@ -190,10 +204,18 @@ fn with_article(s: &str) -> String {
 /// "creature", "noncreature", "instant or sorcery", "blue Wizard".
 fn spell_kind(s: &Selector) -> String {
     let mut words: Vec<String> = Vec::new();
-    words.extend(s.colors.iter().map(|c| color(*c).to_string()));
+    // Each list is "at least one of".
+    if !s.colors.is_empty() {
+        words.push(join(
+            s.colors.iter().map(|c| color(*c).to_string()).collect(),
+            "or",
+        ));
+    }
     words.extend(s.not_types.iter().map(|t| format!("non{}", card_type(*t))));
     let types: Vec<String> = s.types.iter().map(|t| card_type(*t).to_string()).collect();
-    words.extend(s.subtypes.iter().cloned());
+    if !s.subtypes.is_empty() {
+        words.push(join(s.subtypes.clone(), "or"));
+    }
     if !types.is_empty() {
         words.push(join(types, "or"));
     }
@@ -271,8 +293,11 @@ fn selector(s: &Selector, plural: bool) -> String {
         (_, Some(false)) => out.push_str("nonblocking "),
         (None, None) => {}
     }
-    for c in &s.colors {
-        out.push_str(&format!("{c:?} ").to_lowercase());
+    // At least one of them: "white or blue permanent".
+    if !s.colors.is_empty() {
+        let colors = s.colors.iter().map(|c| color(*c).to_string()).collect();
+        out.push_str(&join(colors, "or"));
+        out.push(' ');
     }
     for c in &s.not_colors {
         out.push_str(&format!("non{c:?} ").to_lowercase());
@@ -1147,7 +1172,10 @@ fn body(b: &Body) -> String {
 
 /// "creature card", "Zombie card", "card".
 fn card_noun(s: &Selector) -> String {
-    let mut words: Vec<String> = s.subtypes.clone();
+    let mut words: Vec<String> = Vec::new();
+    if !s.subtypes.is_empty() {
+        words.push(join(s.subtypes.clone(), "or"));
+    }
     if !s.types.is_empty() {
         words.push(types(&s.types, "or"));
     }
@@ -1474,11 +1502,23 @@ fn condition(c: &Condition) -> String {
             };
             match what.controller {
                 Who::You => format!("if you control {things}"),
+                // Counted over all of them together.
+                Who::Opponent if plural => format!("if your opponents control {things}"),
                 Who::Opponent => format!("if an opponent controls {things}"),
                 Who::Any if plural => format!("if there are {things} on the battlefield"),
                 Who::Any => format!("if there is {things} on the battlefield"),
             }
         }
+    }
+}
+
+/// What a player may do as a permanent enters: "pay 2 life", "reveal an Island card from
+/// your hand".
+fn as_enters(act: &AsEnters) -> String {
+    match act {
+        AsEnters::PayLife(n) => format!("pay {n} life"),
+        AsEnters::Reveal(s) => format!("reveal {} from your hand", with_article(&card_noun(s))),
+        AsEnters::Discard(s) => format!("discard {}", with_article(&card_noun(s))),
     }
 }
 
@@ -1684,6 +1724,24 @@ fn ability(a: &AbilityDef) -> String {
                 }
                 ReplaceWith::Prevent => format!("{what}, prevent it."),
                 ReplaceWith::EntersTapped => format!("{what} enters tapped."),
+                ReplaceWith::EntersTappedUnless(c) => {
+                    let c = condition(c);
+                    format!(
+                        "{what} enters tapped unless {}.",
+                        c.strip_prefix("if ").unwrap_or(&c)
+                    )
+                }
+                ReplaceWith::EntersTappedUnlessYou(act) => format!(
+                    "As {} enters, you may {}. If you don't, it enters tapped.",
+                    what.to_lowercase(),
+                    as_enters(act)
+                ),
+                ReplaceWith::EntersOnlyIfYou(act) => format!(
+                    "If {} would enter, you may {} instead. If you do, put it onto the \
+                     battlefield. If you don't, put it into its owner's graveyard.",
+                    what.to_lowercase(),
+                    as_enters(act)
+                ),
                 ReplaceWith::EntersWithCounters { kind, n } => {
                     format!(
                         "{what} enters with {n} {} counter(s) on it.",

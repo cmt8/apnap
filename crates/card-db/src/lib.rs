@@ -13,7 +13,7 @@ pub mod scryfall;
 
 use card_model::{
     AbilityDef, ActivationZone, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript,
-    CardType, Cost, Effect, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces, Supertype,
+    CardType, Condition, Cost, Effect, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces, Supertype,
     TargetFilter, TargetRef, Trigger,
 };
 use serde::Deserialize;
@@ -634,6 +634,10 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                             ReplaceWith::EntersTapped
                                 | ReplaceWith::EntersWithCounters { .. }
                                 | ReplaceWith::EntersWithCounted { .. }
+                                // Its own: "you" is whoever it enters under the control of.
+                                | ReplaceWith::EntersTappedUnless(_)
+                                | ReplaceWith::EntersTappedUnlessYou(_)
+                                | ReplaceWith::EntersOnlyIfYou(_)
                         )
                         | (
                             Replaces::OtherEnters(_),
@@ -651,6 +655,14 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 {
                     p.push(at(
                         "counters counted from something a replacement can't know".into(),
+                    ));
+                }
+                // Judged before the permanent enters, with no spell or ability resolving.
+                if let ReplaceWith::EntersTappedUnless(Condition::Compare { amount, .. }) = with
+                    && !amount.stands_alone()
+                {
+                    p.push(at(
+                        "a condition counted from something a replacement can't know".into(),
                     ));
                 }
                 if !ok {

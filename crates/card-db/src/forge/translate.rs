@@ -11,10 +11,10 @@
 
 use super::parse::{Face, Record, Script};
 use card_model::{
-    AbilityDef, ActivationZone, Affected, Amount, BasicLandType, Body, Calc, CardDef, CardDest,
-    CardType, CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost, CostChoice,
-    CounterKind, DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword, ManaCost,
-    ManaProduce, ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef, PlayerRef,
+    AbilityDef, ActivationZone, Affected, Amount, AsEnters, BasicLandType, Body, Calc, CardDef,
+    CardDest, CardType, CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost,
+    CostChoice, CounterKind, DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword,
+    ManaCost, ManaProduce, ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef, PlayerRef,
     ReplaceWith, Replaces, Selector, Signed, Supertype, Take, TargetFilter, TargetGroup, TargetRef,
     Timing, Trigger, TriggerStep, Who,
 };
@@ -643,6 +643,12 @@ impl<'a> Tx<'a> {
                 "blocking" => s.blocking = Some(true),
                 _ => {
                     if let Some(c) = color(p) {
+                        // Forge's `+` is "and": "Card.Red+White" is red and white, which
+                        // `colors` (at least one of them) can't say.
+                        if !s.colors.is_empty() {
+                            self.block("filter:two colors");
+                            ok = false;
+                        }
                         s.colors.push(c);
                     } else if let Some(n) = p.strip_prefix("powerGE").and_then(|n| n.parse().ok()) {
                         s.power_min = Some(n);
@@ -980,6 +986,33 @@ impl<'a> Tx<'a> {
             "Count$CardsInYourHand" => return Some(Amount::HandSize),
             "Count$YourLifeTotal" => return Some(Amount::LifeTotal),
             _ => {}
+        }
+        // Over players in the game (docs/forge/script-format.md §6.5): how many there are,
+        // the highest or lowest life total among them.
+        if let Some((who, what)) = v
+            .strip_prefix("PlayerCount")
+            .and_then(|r| r.split_once('$'))
+        {
+            let who = match who {
+                "" | "Players" => Some(Who::Any),
+                "Opponents" => Some(Who::Opponent),
+                _ => None,
+            };
+            let amount = who.and_then(|players| match what {
+                "Amount" => Some(Amount::Players(players)),
+                "HighestLifeTotal" => Some(Amount::LifeAmong {
+                    players,
+                    highest: true,
+                }),
+                "LowestLifeTotal" => Some(Amount::LifeAmong {
+                    players,
+                    highest: false,
+                }),
+                _ => None,
+            });
+            if amount.is_some() {
+                return amount;
+            }
         }
         if let Some(c) = v.strip_prefix("Count$Devotion.").and_then(color) {
             return Some(Amount::Devotion(vec![c]));
@@ -4269,60 +4302,342 @@ impl<'a> Tx<'a> {
                 with: ReplaceWith::Prevent,
             });
         }
-        // "This permanent enters tapped."
-        let shape = (
-            event,
-            rd.get("ValidCard"),
-            rd.get("Destination"),
-            rd.get("ReplacementResult"),
+        if event == "Moved" && rd.rec.get("Destination") == Some("Battlefield") {
+            return self.moved_enters(&rd);
+        }
+        // Not compiled yet: named by the event alone, so that it ranks as one feature.
+        for key in [
+            "ValidCard",
+            "Destination",
+            "ReplacementResult",
+            "ReplaceWith",
+        ] {
+            rd.get(key);
+        }
+        rd.finish(&mut self.blockers);
+        self.block(format!("repl:{event}"));
+        None
+    }
+
+    /// `R:Event$ Moved | Destination$ Battlefield | ReplacementResult$ Updated` — how a
+    /// permanent enters (CR 614.1c–d, 614.12): "this permanent enters tapped [unless …]",
+    /// "as this enters, you may pay 2 life / reveal … If you don't, it enters tapped",
+    /// "[permanents] your opponents control enter tapped", "… enters with counters".
+    /// Text: docs/rules-notes/614.12-enters-tapped-unless.md.
+    fn moved_enters(&mut self, rd: &Rd<'a>) -> Option<AbilityDef> {
+        rd.get("Destination");
+        let this = match rd.get("ValidCard") {
+            Some("Card.Self") => None,
+            Some(f) => Some(self.selector(f)),
+            None => {
+                self.block("repl:Moved enters:any card");
+                Some(None)
+            }
+        };
+        // Its own ability works wherever the card is (Forge: no `ActiveZones`); another
+        // permanent's, from the battlefield (CR 614.12).
+        let zones_ok = matches!(
+            (rd.get("ActiveZones"), &this),
+            (None, None) | (Some("Battlefield"), Some(_))
         );
+        if !zones_ok {
+            self.block("repl:Moved enters:zones");
+        }
+        // Without `Updated` the move is cancelled and the ability does something else
+        // instead ("if this would enter, … instead").
+        let updated = rd.get("ReplacementResult") == Some("Updated");
         let with = rd.get("ReplaceWith").and_then(|n| self.sub(n));
         rd.finish(&mut self.blockers);
-        let tapped = with.is_some_and(|w| {
-            w.params
-                == [
-                    ("DB".to_string(), "Tap".to_string()),
-                    ("Defined".to_string(), "Self".to_string()),
-                    ("ETB".to_string(), "True".to_string()),
-                ]
-        });
-        if shape
-            == (
-                "Moved",
-                Some("Card.Self"),
-                Some("Battlefield"),
-                Some("Updated"),
-            )
-            && tapped
-        {
-            return Some(AbilityDef::Replacement {
-                replaces: Replaces::ThisEnters,
-                with: ReplaceWith::EntersTapped,
-            });
+        if !updated {
+            if this.is_none()
+                && zones_ok
+                && let Some(w) = with
+                && w.head() == Some(("DB", "Discard"))
+            {
+                return self.enters_instead(w).map(|with| AbilityDef::Replacement {
+                    replaces: Replaces::ThisEnters,
+                    with,
+                });
+            }
+            self.block("repl:Moved enters instead");
+            return None;
         }
-        self.block(format!("repl:{event}"));
+        let with = with.and_then(|w| self.enters_with_record(w, this.is_none()));
+        if !zones_ok || !updated {
+            return None;
+        }
+        let replaces = match this {
+            None => Replaces::ThisEnters,
+            Some(sel) => Replaces::OtherEnters(sel?),
+        };
+        Some(AbilityDef::Replacement {
+            replaces,
+            with: with?,
+        })
+    }
+
+    /// "If this would enter, you may discard a [land] card instead. If you do, put it onto
+    /// the battlefield. If you don't, put it into its owner's graveyard." Forge writes it as
+    /// one fixed chain: discard (optional, remembered), then move the card to the graveyard
+    /// if nothing was remembered, or to the battlefield if one was, then forget.
+    fn enters_instead(&mut self, rec: &'a Record) -> Option<ReplaceWith> {
+        let rd = Rd::new(rec, "repl Moved instead Discard");
+        let valid = rd.get("DiscardValid");
+        let shape = rd.get("Mode") == Some("TgtChoose")
+            && rd.get("RememberDiscarded") == Some("True")
+            && rd.get("Optional") == Some("True");
+        rd.get("AILogic");
+        let to_graveyard = rd.get("SubAbility").and_then(|n| self.sub(n));
+        rd.finish(&mut self.blockers);
+        let tail = to_graveyard.is_some_and(|r| self.instead_tail(r));
+        if !shape || !tail {
+            self.block("repl:Moved enters instead:shape");
+            return None;
+        }
+        let sel = self.card_selector(valid?)?;
+        Some(ReplaceWith::EntersOnlyIfYou(AsEnters::Discard(sel)))
+    }
+
+    /// The rest of [`Tx::enters_instead`]'s chain, exactly.
+    fn instead_tail(&mut self, to_graveyard: &'a Record) -> bool {
+        let (Some(x), Some(next)) = (
+            to_graveyard.get("ConditionCheckSVar"),
+            to_graveyard.get("SubAbility"),
+        ) else {
+            return false;
+        };
+        let moved = |dest: &str, cmp: &str| -> Vec<(String, String)> {
+            [
+                ("DB", "ChangeZone"),
+                ("Origin", "All"),
+                ("Destination", dest),
+                ("Defined", "ReplacedCard"),
+                ("ConditionCheckSVar", x),
+                ("ConditionSVarCompare", cmp),
+            ]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+        };
+        let same = |rec: &Record, mut want: Vec<(String, String)>| {
+            let mut have = rec.params.clone();
+            have.sort();
+            want.sort();
+            have == want
+        };
+        let mut want = moved("Graveyard", "EQ0");
+        want.push(("SubAbility".into(), next.to_string()));
+        if !same(to_graveyard, want) {
+            return false;
+        }
+        let Some(to_battlefield) = self.sub(next) else {
+            return false;
+        };
+        let mut want = moved("Battlefield", "EQ1");
+        if let Some(cleanup) = to_battlefield.get("SubAbility") {
+            want.push(("SubAbility".into(), cleanup.to_string()));
+            let Some(c) = self.sub(cleanup) else {
+                return false;
+            };
+            if !same(
+                c,
+                vec![
+                    ("DB".into(), "Cleanup".into()),
+                    ("ClearRemembered".into(), "True".into()),
+                ],
+            ) {
+                return false;
+            }
+        }
+        same(to_battlefield, want) && self.svar(x) == Some("Remembered$Amount")
+    }
+
+    /// The `ReplaceWith$` ability of an "enters" replacement: `DB$ Tap | ETB$ True` (with
+    /// a condition or an "unless" cost) or `DB$ PutCounter | ETB$ True`, on `Self` (its own
+    /// entering, `own`) or `ReplacedCard` (another permanent's).
+    fn enters_with_record(&mut self, rec: &'a Record, own: bool) -> Option<ReplaceWith> {
+        let api = rec.head().map(|h| h.1).unwrap_or("?");
+        if !matches!(rec.head(), Some(("DB", "Tap" | "PutCounter"))) {
+            self.block(format!("repl:Moved enters:{api}"));
+            return None;
+        }
+        let rd = Rd::new(rec, format!("repl Moved {api}"));
+        let etb = rd.get("ETB") == Some("True");
+        let whose = matches!(
+            (own, rd.get("Defined")),
+            // (An effect on a card is about the card itself unless it says otherwise.)
+            (true, Some("Self") | None) | (false, Some("ReplacedCard"))
+        );
+        if rd.get("SubAbility").is_some() {
+            self.block(format!("repl:Moved enters:{api}+SubAbility"));
+        }
+        let with = if api == "Tap" {
+            self.enters_tapped(&rd, own)
+        } else {
+            let kind = self.counter_kind(rd.get("CounterType"));
+            let amount = self.counted(rd.get("CounterNum").unwrap_or("1"), own && self.has_x_cost);
+            match (kind, amount) {
+                (Some(kind), Some(amount)) => Some(Self::enters_with(kind, amount)),
+                _ => None,
+            }
+        };
+        rd.finish(&mut self.blockers);
+        if !etb || !whose {
+            self.block(format!("repl:Moved enters:{api} not on the entering card"));
+            return None;
+        }
+        with
+    }
+
+    /// "Enters tapped", "… unless [condition]" (`ConditionPresent$`/`ConditionCompare$`,
+    /// `ConditionCheckSVar$`/`ConditionSVarCompare$`: when it is tapped), "… unless you
+    /// [pay N life / reveal a … card]" (`UnlessCost$`). Only a permanent's own entering
+    /// may have a condition or a choice ("you" is whoever it enters under the control of).
+    fn enters_tapped(&mut self, rd: &Rd<'a>, own: bool) -> Option<ReplaceWith> {
+        // When the tapping happens: an amount compared with a number.
+        let tap_if = match (rd.get("ConditionPresent"), rd.get("ConditionCheckSVar")) {
+            (None, None) => None,
+            (Some(filter), None) => {
+                let cmp = self.compare(rd.get("ConditionCompare").unwrap_or("GE1"));
+                let sel = self.selector(filter);
+                Some((Amount::Count(sel?), cmp?))
+            }
+            (None, Some(name)) => {
+                let cmp = self.compare(rd.get("ConditionSVarCompare").unwrap_or("GE1"));
+                let amount = match name.parse::<u32>() {
+                    Ok(n) => Some(Amount::Fixed(n)),
+                    Err(_) => self.expr(name),
+                };
+                let (amount, cmp) = (amount?, cmp?);
+                if !amount.stands_alone() {
+                    self.block("condition:amount needs the ability");
+                    return None;
+                }
+                Some((amount, cmp))
+            }
+            (Some(_), Some(_)) => {
+                self.block("condition:two");
+                return None;
+            }
+        };
+        let unless = match (rd.get("UnlessCost"), rd.get("UnlessPayer")) {
+            (None, None) => None,
+            (Some(cost), Some("You")) => Some(self.as_enters_cost(cost)?),
+            _ => {
+                self.block("repl:Moved enters:unless payer");
+                return None;
+            }
+        };
+        if !own && (tap_if.is_some() || unless.is_some()) {
+            self.block("repl:Moved enters:others unless");
+            return None;
+        }
+        match (tap_if, unless) {
+            (None, None) => Some(ReplaceWith::EntersTapped),
+            (None, Some(act)) => Some(ReplaceWith::EntersTappedUnlessYou(act)),
+            (Some((amount, (cmp, n))), None) => {
+                // Tapped if [amount cmp n]: untapped exactly when the opposite holds.
+                let Some((cmp, n)) = negate(cmp, n) else {
+                    self.block("condition:never or always");
+                    return None;
+                };
+                Some(ReplaceWith::EntersTappedUnless(match (amount, cmp, n) {
+                    (Amount::Count(what), Cmp::AtLeast, n) => {
+                        Condition::Control { what, at_least: n }
+                    }
+                    // "Not none" is "at least one".
+                    (Amount::Count(what), Cmp::Not, 0) => Condition::Control { what, at_least: 1 },
+                    (Amount::Count(what), Cmp::AtMost, _)
+                    | (Amount::Count(what), Cmp::Exactly, 0) => {
+                        Condition::ControlAtMost { what, at_most: n }
+                    }
+                    (amount, cmp, n) => Condition::Compare { amount, cmp, n },
+                }))
+            }
+            (Some(_), Some(_)) => {
+                self.block("repl:Moved enters:condition and unless");
+                None
+            }
+        }
+    }
+
+    /// `PayLife<N>` or `Reveal<1/<types>[/<text>]>` (card types or subtypes separated by
+    /// `;`, any one of them).
+    fn as_enters_cost(&mut self, cost: &str) -> Option<AsEnters> {
+        if let Some(n) = cost
+            .strip_prefix("PayLife<")
+            .and_then(|r| r.strip_suffix('>'))
+            .and_then(|n| n.parse::<u32>().ok())
+            .filter(|n| *n > 0)
+        {
+            return Some(AsEnters::PayLife(n));
+        }
+        let reveal = cost
+            .strip_prefix("Reveal<1/")
+            .and_then(|r| r.strip_suffix('>'))
+            .map(|r| r.split('/').next().unwrap_or(""));
+        if let Some(types) = reveal
+            && !types.is_empty()
+            && !types.contains(',')
+            // Pseudo-types: the whole hand, cards sharing a color, the card itself.
+            && !matches!(types, "Hand" | "SameColor" | "CARDNAME" | "NICKNAME")
+        {
+            let filter = types.split(';').collect::<Vec<_>>().join(",");
+            return self.card_selector(&filter).map(AsEnters::Reveal);
+        }
+        self.block(format!("repl:Moved enters:unless {}", shape(cost)));
         None
     }
 }
 
-/// Several selectors that differ only in card type are one selector.
+/// The comparison that holds exactly when `cmp n` doesn't; `None` if `cmp n` always or
+/// never holds.
+fn negate(cmp: Cmp, n: u32) -> Option<(Cmp, u32)> {
+    match cmp {
+        Cmp::AtLeast => Some((Cmp::AtMost, n.checked_sub(1)?)),
+        Cmp::AtMost => Some((Cmp::AtLeast, n.checked_add(1)?)),
+        Cmp::Exactly => Some((Cmp::Not, n)),
+        Cmp::Not => Some((Cmp::Exactly, n)),
+    }
+}
+
+/// Several selectors that differ only in one "at least one of" list — card type, subtype
+/// or color — each naming one, are one selector: "Island.YouCtrl,Mountain.YouCtrl" is
+/// "an Island or a Mountain you control" (X∧a ∨ X∧b = X∧(a∨b)).
 fn merge(mut sels: Vec<Selector>) -> Option<Selector> {
     if sels.len() == 1 {
         return sels.pop();
     }
-    let mut types = Vec::new();
-    for s in &sels {
+    merge_on(&sels, |s| &mut s.types)
+        .or_else(|| merge_on(&sels, |s| &mut s.subtypes))
+        .or_else(|| merge_on(&sels, |s| &mut s.colors))
+}
+
+/// [`merge`] over one list of the selector.
+fn merge_on<T: Clone + PartialEq>(
+    sels: &[Selector],
+    field: fn(&mut Selector) -> &mut Vec<T>,
+) -> Option<Selector> {
+    let mut rest: Option<Selector> = None;
+    let mut any_of: Vec<T> = Vec::new();
+    for s in sels {
         let mut bare = s.clone();
-        let t = std::mem::take(&mut bare.types);
-        if bare != Selector::default() || t.len() != 1 {
+        let v = std::mem::take(field(&mut bare));
+        let [one] = v.as_slice() else {
             return None;
+        };
+        match &rest {
+            None => rest = Some(bare),
+            Some(r) if *r == bare => {}
+            Some(_) => return None,
         }
-        types.extend(t);
+        if !any_of.contains(one) {
+            any_of.push(one.clone());
+        }
     }
-    Some(Selector {
-        types,
-        ..Selector::default()
-    })
+    let mut out = rest?;
+    *field(&mut out) = any_of;
+    Some(out)
 }
 
 /// A list of alternatives with those that are just a card type ("Artifact", "Enchantment")

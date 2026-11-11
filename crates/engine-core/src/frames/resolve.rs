@@ -386,7 +386,11 @@ impl ResolveFrame {
             | Amount::Devotion(_)
             | Amount::Greatest { .. }
             | Amount::HandSize
-            | Amount::LifeTotal => crate::layers::count_amount(st, a, self.source, self.controller),
+            | Amount::LifeTotal
+            | Amount::Players(_)
+            | Amount::LifeAmong { .. } => {
+                crate::layers::count_amount(st, a, self.source, self.controller)
+            }
             Amount::SourcePower => self
                 .source_chars(st)
                 .and_then(|c| c.power)
