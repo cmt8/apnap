@@ -817,6 +817,59 @@ fn damage_dealt_by_another_object_is_not_this_cards() {
     assert_eq!(forge_test_blockers(card), ["oracle:says damage"]);
 }
 
+// Read back against the card's text: where the card says "its controller" (or "that
+// player", "defending player"), the compiled card must name some player other than "you".
+#[test]
+fn a_card_that_names_another_player_must_not_compile_to_you() {
+    let card = "Name:Test Mercy\nManaCost:W\nTypes:Instant\n\
+        A:SP$ Destroy | ValidTgts$ Creature | SubAbility$ DBGain | SpellDescription$ Text.\n\
+        SVar:DBGain:DB$ GainLife | Defined$ You | LifeAmount$ 3\n\
+        Oracle:Destroy target creature. Its controller gains 3 life.";
+    assert_eq!(forge_test_blockers(card), ["oracle:another player"]);
+    let right = card.replace("Defined$ You", "Defined$ TargetedController");
+    assert_eq!(forge_test_blockers(&right), [] as [&str; 0]);
+}
+
+// CR 608.2h, 702.15b (2026-11-06): "target creature deals damage to itself equal to its
+// power" — the target is the source of the damage: its lifelink gains its controller life.
+// Forge: `DealDamage | DamageSource$ Targeted`. A card in a graveyard dealing damage is not
+// compiled (the engine knows nothing about a target there).
+#[test]
+fn a_target_deals_the_damage() {
+    let cards = [
+        spell(
+            "Test Penance",
+            "W",
+            "Sorcery",
+            "A:SP$ DealDamage | ValidTgts$ Creature | DamageSource$ Targeted | NumDmg$ X | SpellDescription$ Text.\n\
+             SVar:X:Targeted$CardPower",
+        ),
+        creature("Test Leech", "B", "3/3", "K:Lifelink"),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(3, &cards);
+    sc.card(P0, Zone::Battlefield, "Plains");
+    let leech = sc.card(P1, Zone::Battlefield, "Test Leech");
+    sc.card(P0, Zone::Hand, "Test Penance");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Penance").target_object(leech).pay();
+    settle(&mut s);
+    assert!(!on_battlefield(&s, leech));
+    assert_eq!((life(&s, P0), life(&s, P1)), (40, 43));
+    let b = forge_test_blockers(&creature(
+        "Test Exorcist",
+        "W",
+        "1/1",
+        "A:AB$ ChangeZone | Cost$ T | ValidTgts$ Creature | TgtZone$ Graveyard | Origin$ Graveyard | Destination$ Exile | SubAbility$ DBDamage | SpellDescription$ Text.\n\
+         SVar:DBDamage:DB$ DealDamage | Defined$ Self | NumDmg$ 1 | DamageSource$ Targeted",
+    ));
+    assert!(
+        b.iter()
+            .any(|x| x == "param:DealDamage.DamageSource=Targeted"),
+        "{b:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------------------
 // The defending player; players other than you creating tokens; another player's hand.
 

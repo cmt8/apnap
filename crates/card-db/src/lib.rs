@@ -963,7 +963,15 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
                 p("ApplyAll needs at least one effect".into());
             }
         }
-        Effect::DealDamage { to, amount: a, .. } => {
+        Effect::DealDamage { to, amount: a, by } => {
+            if let card_model::DamageBy::Target(i) = by {
+                match mode.targets.get(*i as usize) {
+                    Some(TargetFilter::Creature | TargetFilter::Permanent(_)) => {}
+                    other => p(format!(
+                        "DamageBy::Target({i}) needs a permanent, got {other:?}"
+                    )),
+                }
+            }
             match to {
                 TargetRef::Players(r) => player(r, p),
                 TargetRef::Object(r) => obj(r, p),

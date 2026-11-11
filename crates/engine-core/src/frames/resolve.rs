@@ -162,6 +162,9 @@ pub struct TargetInfo {
     pub toughness: Option<i32>,
     /// CR 202.3e: on the stack, X counts as the number chosen for it.
     pub mana_value: u32,
+    /// What its damage does (CR 702.2b, 702.15b).
+    pub deathtouch: bool,
+    pub lifelink: bool,
 }
 
 impl TargetInfo {
@@ -188,6 +191,8 @@ impl TargetInfo {
                     power: c.power,
                     toughness: c.toughness,
                     mana_value: printed + xs * s.x,
+                    deathtouch: c.has(Keyword::Deathtouch),
+                    lifelink: c.has(Keyword::Lifelink),
                 })
             }
             Zone::Battlefield => Some(TargetInfo {
@@ -198,6 +203,8 @@ impl TargetInfo {
                 power: c.power,
                 toughness: c.toughness,
                 mana_value: printed,
+                deathtouch: c.has(Keyword::Deathtouch),
+                lifelink: c.has(Keyword::Lifelink),
             }),
             _ => None,
         }
@@ -526,7 +533,8 @@ impl ResolveFrame {
     }
 
     fn damage(&self, st: &GameState, target: DamageTarget, amount: u32) -> Proposed {
-        self.damage_by(st, DamageBy::This, target, amount)
+        self.damage_by(st, 0, DamageBy::This, target, amount)
+            .expect("this spell or ability's source can deal damage")
     }
 
     /// CR 608.2h: "If an ability states that an object does something, it's the object as
@@ -534,22 +542,35 @@ impl ResolveFrame {
     fn damage_by(
         &self,
         st: &GameState,
+        k: usize,
         by: DamageBy,
         target: DamageTarget,
         amount: u32,
-    ) -> Proposed {
+    ) -> Option<Proposed> {
+        // A target that was illegal as resolution began deals nothing (CR 608.2b).
+        if let DamageBy::Target(i) = by {
+            let t = self.target_known(k, i)?;
+            return Some(Proposed::Damage {
+                source: t.object,
+                deathtouch: t.deathtouch,
+                lifelink: t.lifelink,
+                target,
+                amount,
+                combat: false,
+            });
+        }
         let (source, c) = match (by, self.subject) {
             (DamageBy::Triggering, Some(subject)) => (subject, self.subject_chars(st)),
             _ => (self.source, self.source_chars(st)),
         };
-        Proposed::Damage {
+        Some(Proposed::Damage {
             source,
             deathtouch: c.as_ref().is_some_and(|c| c.has(Keyword::Deathtouch)),
             lifelink: c.as_ref().is_some_and(|c| c.has(Keyword::Lifelink)),
             target,
             amount,
             combat: false,
-        }
+        })
     }
 
     pub(crate) fn run(mut self, st: &mut GameState, mut input: Option<Input>) -> Flow {
@@ -1388,12 +1409,12 @@ impl ResolveFrame {
                 // Several recipients ("to each opponent") are dealt damage at once.
                 self.recipients(st, k, to)
                     .into_iter()
-                    .map(|t| {
+                    .filter_map(|t| {
                         let t = match t {
                             Target::Player(p) => DamageTarget::Player(p),
                             Target::Object(o) => DamageTarget::Object(o),
                         };
-                        self.damage_by(st, by, t, amount)
+                        self.damage_by(st, k, by, t, amount)
                     })
                     .collect()
             }

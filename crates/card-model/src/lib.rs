@@ -1516,6 +1516,10 @@ pub enum DamageBy {
     This,
     /// The object whose event triggered the ability ("it deals damage …").
     Triggering,
+    /// The spell or permanent chosen for target slot `n` ("target creature deals damage
+    /// to itself equal to its power"): as it is, or as it last existed (CR 608.2h). No
+    /// damage if the target was illegal as resolution began (CR 608.2b).
+    Target(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

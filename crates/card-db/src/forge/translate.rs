@@ -1512,17 +1512,30 @@ impl<'a> Tx<'a> {
         }
         let out = match api {
             "DealDamage" => {
-                let by = match rd.get("DamageSource") {
+                let source = rd.get("DamageSource");
+                let to = match self.target(&rd, chain, false) {
+                    Some(slot) => Some(TargetRef::Target(slot)),
+                    None => self.recipient(&rd, chain, triggered),
+                };
+                let by = match source {
                     None => DamageBy::This,
                     Some("TriggeredCard") if triggered => DamageBy::Triggering,
+                    // "Target creature deals damage …": the chain's one target, a
+                    // permanent (it deals the damage as it last existed, CR 608.2h).
+                    Some("Targeted")
+                        if chain.targets.len() == 1
+                            && matches!(
+                                chain.targets[0],
+                                TargetFilter::Creature | TargetFilter::Permanent(_)
+                            ) =>
+                    {
+                        chain.refers_to_targets.set(true);
+                        DamageBy::Target(0)
+                    }
                     Some(other) => {
                         self.block(format!("param:DealDamage.DamageSource={other}"));
                         return None;
                     }
-                };
-                let to = match self.target(&rd, chain, false) {
-                    Some(slot) => Some(TargetRef::Target(slot)),
-                    None => self.recipient(&rd, chain, triggered),
                 };
                 let amount = rd.get("NumDmg").and_then(|n| self.amount(n, chain));
                 Effect::DealDamage {
@@ -5691,6 +5704,32 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
     });
     if narrowed && !plain.contains("you control") && !plain.contains("your") {
         missing.push("target you control");
+    }
+    // "Its controller gains life", "that player discards a card": the card names a player
+    // other than "you", and the compiled card must too (a script that writes `Defined$
+    // You` there would give it to the wrong player).
+    let other_player = [
+        "its controller",
+        "its owner ",
+        "that player",
+        "defending player",
+        "that creature's controller",
+        "that spell's controller",
+        "that permanent's controller",
+    ];
+    let named = [
+        "its controller",
+        "its owner",
+        "that player",
+        "target player",
+        "target opponent",
+        "each player",
+        "each opponent",
+        "their",
+    ];
+    if other_player.iter().any(|w| plain.contains(w)) && !named.iter().any(|w| compiled.contains(w))
+    {
+        missing.push("another player");
     }
     // "That artifact deals damage equal to its mana value to …": the other object is the
     // source of the damage (its color, lifelink and deathtouch count), which some scripts

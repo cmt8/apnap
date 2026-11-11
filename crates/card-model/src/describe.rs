@@ -600,10 +600,15 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             .join(". Then "),
         Effect::DealDamage { to, amount: a, by } => {
             let who = match by {
-                DamageBy::This => "this",
-                DamageBy::Triggering => "it",
+                DamageBy::This => "this".to_string(),
+                DamageBy::Triggering => "it".to_string(),
+                DamageBy::Target(i) => target(mode, TargetRef::Target(*i)),
             };
-            format!("{who} deals {} damage to {}", amount(a), target(mode, *to))
+            let to = match (by, to) {
+                (DamageBy::Target(i), TargetRef::Target(j)) if i == j => "itself".to_string(),
+                _ => target(mode, *to),
+            };
+            format!("{who} deals {} damage to {to}", amount(a))
         }
         Effect::DamageEachPlayer { amount: a } => {
             format!("this deals {} damage to each player", amount(a))
