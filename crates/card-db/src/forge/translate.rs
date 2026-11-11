@@ -4782,6 +4782,16 @@ fn ability_records(face: &Face) -> Vec<(String, Record)> {
         .collect()
 }
 
+/// Scripts found, by reading the compiled card against its Oracle text, to say something
+/// other than the card does. The compiler can't see that, so they are named here and
+/// never compile (invariant 8: a wrong card is worse than a missing one). Each entry says
+/// what differs; remove it when the pinned Forge commit has the script corrected.
+const SCRIPT_DIFFERS: &[(&str, &str)] = &[(
+    "Swarmyard Massacre",
+    "counts Insects, Rats, Spiders and Squirrels you control; the card counts *creatures* \
+     you control of those types (a noncreature permanent of such a type must not count)",
+)];
+
 /// Compile a script. `Err` lists every blocker found (not just the first).
 pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
     let mut early = Blockers::new();
@@ -4821,6 +4831,9 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
     };
     for line in &face.unknown {
         tx.block(format!("line:{}", line.split(':').next().unwrap_or("?")));
+    }
+    if SCRIPT_DIFFERS.iter().any(|(name, _)| *name == face.name) {
+        tx.block("script:differs from the card");
     }
     for (what, present) in [
         ("line:Loyalty", face.loyalty.is_some()),

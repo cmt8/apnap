@@ -138,14 +138,21 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-065): 9,305 of 34,463 scripts compile (27.0%); about 10,500 more are one feature
-away. Precons: `harness coverage --verbose` lists what blocks the rest. Feature tests live in `crates/harness/tests/forge_features.rs`: invented cards written
+Status (D-067): 9,560 of 34,463 scripts compile (27.7%); about 10,700 more are one feature
+away. Since 2026-11-10 the order of work is EDHREC popularity (the user's wish), not raw
+count: 60% of the 100 most played Commander cards compile, 39% of the top 1,000, 26% of
+the top 5,000 (`edhrec_rank` in the Scryfall bulk file in the cache, joined to
+`forge-coverage --why "" --all`). Precons: `harness coverage --verbose` lists what blocks
+the rest. Feature tests live in `crates/harness/tests/forge_features.rs` and, one file per
+feature area since D-066, `forge_<area>.rs` next to it: invented cards written
 in Forge's format, compiled by `harness::forge_test_catalog` and played (`forge_test_blockers`
 for "this must not compile"). Four guards catch compiler holes — keep them: a line that
 yields nothing without a named blocker is `unexplained:*`; every compiled card goes through
 `card_db::validate` (`invalid:*`); the compiled card is read back against its Oracle text
 for words Forge scripts leave out or add (`oracle:*`: "may", "another target", a target
-narrowed to "you control"); and the `forge-Np` soak plays random decks of all of them.
+narrowed to "you control", "unless"); and the `forge-Np` soak plays random decks of all of
+them. A script found by reading to differ from its card goes into `SCRIPT_DIFFERS` in
+`translate.rs` (`script:differs from the card`).
 References written from Forge's sources: `docs/forge/script-format.md` (file format, costs,
 filters, `Defined$`, expressions), `effects.md` (every effect API), and
 `triggers-statics-replacements-keywords.md`. Read the relevant section before compiling a
@@ -155,7 +162,10 @@ presence, `Defined$ Targeted` means every target of the chain, a trigger that ru
 Not built yet: the full generated-text-vs-Oracle round trip (a word-level guard exists),
 multi-face cards, searching another player's library, "X target creatures", mana abilities
 that cost mana (signets) or make different mana at once, counters other than +1/+1 and
--1/-1, "as this enters, choose …", regeneration, abilities given to cards that aren't on
+-1/-1, "as this enters, choose …" (how a permanent enters is otherwise built, D-067:
+`ReplaceWith::EntersTappedUnless…`, the choice asked inside `ApplyFrame` as
+`ChoiceKind::AsEnters`), "sacrifice … instead" lands, "lands enter untapped", "exile it
+instead. When you do, …", regeneration, abilities given to cards that aren't on
 the battlefield, "becomes tapped" and "becomes the target" triggers, protection, Sagas,
 and of Forge's "Effect" objects everything but combat rules and "prevent all damage"
 (`effects::Lasting`, D-065: no triggers, no characteristic changes, nothing about

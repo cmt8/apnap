@@ -815,3 +815,16 @@ fn heuristic_pays_life_for_an_untapped_land_only_when_it_wants_the_mana() {
     // Low on life.
     assert_eq!(shock_decision(&["Test Golem"], 2, 11), OptionDesc::Decline);
 }
+
+// A script known to differ from its card never compiles, whatever it says (invariant 8).
+#[test]
+fn a_script_known_to_differ_from_its_card_blocks() {
+    let card = "Name:Swarmyard Massacre\n\
+        ManaCost:3 B B\n\
+        Types:Sorcery\n\
+        A:SP$ Draw | NumCards$ 1 | SpellDescription$ Draw a card.\n\
+        Oracle:Draw a card.";
+    assert_eq!(forge_test_blockers(card), ["script:differs from the card"]);
+    let other = card.replace("Swarmyard Massacre", "Test Massacre");
+    assert_eq!(forge_test_blockers(&other), [] as [&str; 0]);
+}
