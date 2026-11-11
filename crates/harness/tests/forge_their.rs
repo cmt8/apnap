@@ -809,4 +809,201 @@ fn damage_dealt_by_another_object_is_not_this_cards() {
         SVar:X:Targeted$CardManaCost\n\
         Oracle:{R}, {T}: Destroy target artifact. That artifact deals damage equal to its mana value to Test Tinkerer.";
     assert_eq!(forge_test_blockers(card), ["oracle:that one deals damage"]);
+    // "Deals 1 damage" compiled as life loss (which some scripts write).
+    let card = "Name:Test Brawler\nManaCost:1 R\nTypes:Creature Goblin\nPT:1/2\n\
+        T:Mode$ Attacks | ValidCard$ Card.Self | Execute$ TrigLose | TriggerDescription$ Text.\n\
+        SVar:TrigLose:DB$ LoseLife | Defined$ TriggeredDefendingPlayer | LifeAmount$ 1\n\
+        Oracle:Whenever this creature attacks, it deals 1 damage to defending player.";
+    assert_eq!(forge_test_blockers(card), ["oracle:says damage"]);
+}
+
+// ---------------------------------------------------------------------------------------
+// The defending player; players other than you creating tokens; another player's hand.
+
+/// Go to the declaration of attackers and attack `defender` with `attacker` (and with
+/// nothing else).
+fn attack(s: &mut Script, attacker: ObjectId, defender: PlayerId) {
+    for _ in 0..200 {
+        if s.kind() == ChoiceKind::DeclareAttackers {
+            break;
+        }
+        s.pass();
+    }
+    while s.next.is_some() && s.kind() == ChoiceKind::DeclareAttackers {
+        let pick = s.options().iter().position(|o| {
+            matches!(o, OptionDesc::Attack { attacker: a, defender: d } if *a == attacker && *d == defender)
+        });
+        s.respond(Response::Pick(pick.into_iter().collect()));
+    }
+}
+
+// CR 506.2, 508.1m, 509.1h (2026-11-06): "defending player" of an attack trigger, and of a
+// creature that attacks and isn't blocked, is the player it attacks — not every opponent.
+// Forge: `TriggeredDefendingPlayer` of `Attacks` and `AttackerUnblocked`.
+#[test]
+fn the_defending_player() {
+    let cards = [
+        creature(
+            "Test Raidmaster",
+            "B",
+            "2/2",
+            "T:Mode$ Attacks | ValidCard$ Card.Self | Execute$ TrigLose | TriggerDescription$ Text.\n\
+             SVar:TrigLose:DB$ LoseLife | Defined$ TriggeredDefendingPlayer | LifeAmount$ 3",
+        ),
+        creature(
+            "Test Nightstalker",
+            "B",
+            "2/2",
+            "T:Mode$ AttackerUnblocked | ValidCard$ Card.Self | Execute$ TrigDiscard | TriggerDescription$ Text.\n\
+             SVar:TrigDiscard:DB$ Discard | Defined$ TriggeredDefendingPlayer | NumCards$ 1 | Mode$ TgtChoose",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(3, &cards);
+    let marauder = sc.card(P0, Zone::Battlefield, "Test Raidmaster");
+    let mut s = Script::new(sc.build());
+    attack(&mut s, marauder, P2);
+    settle(&mut s);
+    assert_eq!((life(&s, P0), life(&s, P1), life(&s, P2)), (40, 40, 37));
+
+    let mut sc = scenario(3, &cards);
+    let stalker = sc.card(P0, Zone::Battlefield, "Test Nightstalker");
+    sc.cards(P1, Zone::Hand, &["Forest", "Forest"]);
+    sc.cards(P2, Zone::Hand, &["Forest", "Forest"]);
+    let mut s = Script::new(sc.build());
+    attack(&mut s, stalker, P1);
+    for _ in 0..50 {
+        if s.kind() == ChoiceKind::Discard {
+            break;
+        }
+        match s.kind() {
+            ChoiceKind::DeclareBlockers => {
+                s.respond(Response::Pick(vec![]));
+            }
+            _ => {
+                s.pass();
+            }
+        }
+    }
+    assert_eq!((s.who(), s.kind()), (P1, ChoiceKind::Discard));
+    s.respond(Response::Pick(vec![0]));
+    assert_eq!((hand(&s, P1), hand(&s, P2)), (1, 2));
+}
+
+// CR 111.2 (2026-11-06): "each player creates", "target opponent creates": each of them
+// owns and controls their tokens. Forge: `TokenOwner$ Player`, `TokenOwner$ Targeted`.
+#[test]
+fn other_players_create_tokens() {
+    let cards = [
+        spell(
+            "Test Resurgence",
+            "G",
+            "Sorcery",
+            "A:SP$ Token | TokenScript$ g_3_3_test_beast | TokenOwner$ Player | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Hunting",
+            "G",
+            "Sorcery",
+            "A:SP$ Token | ValidTgts$ Opponent | TokenAmount$ 2 | TokenScript$ g_3_3_test_beast | TokenOwner$ Targeted | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(3, &cards);
+    sc.cards(P0, Zone::Battlefield, &["Forest", "Forest"]);
+    sc.cards(P0, Zone::Hand, &["Test Resurgence", "Test Hunting"]);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Resurgence").pay();
+    settle(&mut s);
+    assert_eq!(
+        permanents(&s, "Test Beast Token"),
+        [(P0, P0), (P1, P1), (P2, P2)]
+    );
+    s.cast("Test Hunting").target_player(P2).pay();
+    settle(&mut s);
+    let theirs = permanents(&s, "Test Beast Token")
+        .into_iter()
+        .filter(|t| *t == (P2, P2))
+        .count();
+    assert_eq!(theirs, 3);
+}
+
+// CR 608.2h (2026-11-06): "the number of cards in that player's hand" is counted as the
+// effect is applied. Forge: `TargetedPlayer$CardsInHand`, `TriggeredPlayer$CardsInHand`.
+#[test]
+fn the_number_of_cards_in_that_players_hand() {
+    let cards = [
+        spell(
+            "Test Gaze",
+            "R",
+            "Instant",
+            "A:SP$ DealDamage | ValidTgts$ Player | NumDmg$ X | SpellDescription$ Text.\n\
+             SVar:X:TargetedPlayer$CardsInHand",
+        ),
+        permanent(
+            "Test Vise",
+            "3",
+            "Artifact",
+            "T:Mode$ Phase | Phase$ Upkeep | ValidPlayer$ Opponent | TriggerZones$ Battlefield | Execute$ TrigDmg | TriggerDescription$ Text.\n\
+             SVar:TrigDmg:DB$ DealDamage | Defined$ TriggeredPlayer | NumDmg$ X\n\
+             SVar:X:TriggeredPlayer$CardsInHand/Minus.1",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(3, &cards);
+    sc.card(P0, Zone::Battlefield, "Mountain");
+    sc.card(P0, Zone::Hand, "Test Gaze");
+    sc.cards(P1, Zone::Hand, &["Forest"; 2]);
+    sc.cards(P2, Zone::Hand, &["Forest"; 5]);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Gaze").target_player(P2).pay();
+    settle(&mut s);
+    assert_eq!((life(&s, P1), life(&s, P2)), (40, 35));
+
+    // P1's upkeep (before P1's draw): 3 cards in hand, minus 1.
+    let mut sc = scenario(3, &cards);
+    sc.card(P0, Zone::Battlefield, "Test Vise");
+    sc.cards(P1, Zone::Hand, &["Forest"; 3]);
+    sc.turn(P0, Step::End);
+    let mut s = Script::new(sc.build());
+    for _ in 0..200 {
+        if s.st.turn.active == P1 && s.st.turn.step == Step::Draw {
+            break;
+        }
+        s.pass();
+    }
+    assert_eq!((life(&s, P0), life(&s, P1), life(&s, P2)), (40, 38, 40));
+}
+
+// The heuristic agent, asked by an opponent's "unless that player pays {1}", pays: the
+// cost is offered only when it can be afforded, and paying denies the opponent a card.
+#[test]
+fn the_ai_pays_an_opponents_tax() {
+    use ai::HeuristicAgent;
+    use engine_core::Agent;
+    let cards = [
+        permanent(
+            "Test Studies",
+            "2 U",
+            "Enchantment",
+            "T:Mode$ SpellCast | ValidCard$ Card | ValidActivatingPlayer$ Opponent | TriggerZones$ Battlefield | Execute$ TrigDraw | TriggerDescription$ Text.\n\
+             SVar:TrigDraw:DB$ Draw | Defined$ You | UnlessCost$ 1 | UnlessPayer$ TriggeredActivator | NumCards$ 1 | OptionalDecider$ You",
+        ),
+        creature("Test Sapling", "G", "1/1", ""),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(3, &cards);
+    sc.card(P0, Zone::Battlefield, "Test Studies");
+    sc.cards(P2, Zone::Battlefield, &["Forest", "Forest"]);
+    sc.card(P2, Zone::Hand, "Test Sapling");
+    sc.turn(P2, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Sapling").pay();
+    pass_until_asked(&mut s);
+    assert_eq!((s.who(), s.kind()), (P2, ChoiceKind::PayUnlessCost));
+    let mut ai = HeuristicAgent::new(7, s.st.catalog.clone());
+    let d = s.decision().clone();
+    let r = ai.decide(&player_view(&s.st, P2), &d);
+    let Response::Pick(picked) = r else { panic!() };
+    assert_eq!(d.options[picked[0]], OptionDesc::Accept);
 }

@@ -163,6 +163,17 @@ fn amount(a: &Amount) -> String {
                 Who::Any => "all players",
             }
         ),
+        Amount::HandOf(who) => {
+            let who = match who {
+                PlayerRef::TriggeringPlayer => "that player",
+                PlayerRef::Target(_) => "target player",
+                PlayerRef::ControllerOf(_) | PlayerRef::TriggeringController => "its controller",
+                PlayerRef::OwnerOf(_) => "its owner",
+                PlayerRef::You => "you",
+                PlayerRef::Each | PlayerRef::EachOpponent => "those players",
+            };
+            format!("the number of cards in {who}'s hand")
+        }
         Amount::OfTarget { what, .. } => match what {
             Measure::Power => "its power",
             Measure::Toughness => "its toughness",
@@ -763,6 +774,8 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             // that is a choice already says "you may".
             if text.starts_with("you may ") {
                 text
+            } else if let Some(rest) = text.strip_prefix("this deals ") {
+                format!("you may have this deal {rest}")
             } else {
                 format!("you may {}", text.strip_prefix("you ").unwrap_or(&text))
             }

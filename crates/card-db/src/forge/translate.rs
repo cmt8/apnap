@@ -424,8 +424,12 @@ impl TrigCtx {
                 it: &["TriggeredBlocker"],
                 ..TrigCtx::NOTHING
             },
-            Trigger::BecomesBlocked(_) | Trigger::Unblocked(_) => TrigCtx {
+            // Forge's `AttackerBlocked` / `AttackerUnblocked`: `TriggeredDefendingPlayer` is
+            // the player the attacker attacks.
+            Trigger::BecomesBlocked(f) | Trigger::Unblocked(f) => TrigCtx {
                 it: &["TriggeredAttacker"],
+                it_is_this: *f == ObjFilter::This,
+                players: &["TriggeredDefendingPlayer"],
                 ..TrigCtx::NOTHING
             },
             // "It" is the other creature.
@@ -941,7 +945,8 @@ impl<'a> Tx<'a> {
             | Amount::TriggeringToughness
             | Amount::TriggeringAmount
             | Amount::SacrificedPower
-            | Amount::OfTarget { .. } => Some(a),
+            | Amount::OfTarget { .. }
+            | Amount::HandOf(_) => Some(a),
             // Read off the battlefield: worked out once for the whole resolution (CR
             // 608.2h), as "X".
             _ => match &chain.x {
@@ -1046,6 +1051,29 @@ impl<'a> Tx<'a> {
             };
             if amount.is_some() {
                 return amount;
+            }
+        }
+        // "The number of cards in that player's hand", "in target player's hand".
+        if let Some((name, "CardsInHand")) = v.split_once('$') {
+            let who = if self.in_trigger && self.trig.is_player(name) {
+                Some(if self.trig.player_is_you {
+                    self.took_player_for_you = true;
+                    PlayerRef::You
+                } else {
+                    PlayerRef::TriggeringPlayer
+                })
+            } else if name == "TargetedPlayer" && self.chain_targets == Some(1) {
+                self.read_target = true;
+                Some(PlayerRef::Target(0))
+            } else {
+                None
+            };
+            if let Some(who) = who {
+                return Some(if who == PlayerRef::You {
+                    Amount::HandSize
+                } else {
+                    Amount::HandOf(who)
+                });
             }
         }
         // "Its power", "its mana value": of the chain's one target, as it last existed if
@@ -1536,8 +1564,12 @@ impl<'a> Tx<'a> {
                 match (api, rd.get("OptionalDecider")) {
                     (_, None) => e,
                     ("Draw", Some(name)) => {
-                        let decider =
-                            self.one_player(name, chain, triggered, "param:Draw.OptionalDecider=")?;
+                        // Forge only asks whether the key is there.
+                        let decider = if name == "True" {
+                            who
+                        } else {
+                            self.one_player(name, chain, triggered, "param:Draw.OptionalDecider=")?
+                        };
                         match who {
                             PlayerRef::You if decider == who => Effect::May(Box::new(e)),
                             PlayerRef::ControllerOf(_)
@@ -1992,11 +2024,26 @@ impl<'a> Tx<'a> {
             }
             "Token" => {
                 let script = rd.get("TokenScript");
+                // "Target opponent creates …": a target of this instruction, for whom.
+                let slot = self.target(&rd, chain, false);
+                if slot.is_some() && !matches!(rd.rec.get("TokenOwner"), Some("Targeted")) {
+                    self.block("Token:target not the creator");
+                    return None;
+                }
                 let count = self.amount(rd.get("TokenAmount").unwrap_or("1"), chain);
                 // Who creates the tokens, and so owns and controls them (CR 111.2): "its
                 // controller creates …" — of a target, or of the event's object.
                 let who = match rd.get("TokenOwner") {
                     None => Some(PlayerRef::You),
+                    Some("Player") => Some(PlayerRef::Each),
+                    Some("Player.Opponent" | "Opponent") => Some(PlayerRef::EachOpponent),
+                    // "Target opponent creates …": the chain's one target, a player.
+                    Some("Targeted" | "TargetedPlayer")
+                        if chain.targets.len() == 1 && chain.targets[0].allows_players() =>
+                    {
+                        chain.refers_to_targets.set(true);
+                        Some(PlayerRef::Target(0))
+                    }
                     Some(name) => {
                         self.one_player(name, chain, triggered, "param:Token.TokenOwner=")
                     }

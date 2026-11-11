@@ -391,7 +391,9 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                     | Trigger::Cast { .. }
                     | Trigger::BeginningOf { .. }
                     | Trigger::Attacks(_)
-                    | Trigger::AttacksAlone(_) => needs_player,
+                    | Trigger::AttacksAlone(_)
+                    | Trigger::BecomesBlocked(_)
+                    | Trigger::Unblocked(_) => needs_player,
                     _ => false,
                 }),
                 _ => false,
@@ -764,9 +766,9 @@ fn check_cost(cost: &Cost, p: &mut dyn FnMut(String)) {
 }
 
 /// The target slots whose power, toughness or mana value an effect reads.
-fn amounts_of_targets(e: &Effect, out: &mut Vec<u8>) {
+fn amounts_of_targets(e: &Effect, out: &mut Vec<u8>, hands: &mut Vec<PlayerRef>) {
     // Walk the serialized form: amounts sit in many places of many effects.
-    fn walk(v: &serde_json::Value, out: &mut Vec<u8>) {
+    fn walk(v: &serde_json::Value, out: &mut Vec<u8>, hands: &mut Vec<PlayerRef>) {
         match v {
             serde_json::Value::Object(m) => {
                 if let Some(serde_json::Value::Object(t)) = m.get("OfTarget")
@@ -774,14 +776,19 @@ fn amounts_of_targets(e: &Effect, out: &mut Vec<u8>) {
                 {
                     out.push(slot as u8);
                 }
-                m.values().for_each(|x| walk(x, out));
+                if let Some(who) = m.get("HandOf")
+                    && let Ok(who) = serde_json::from_value::<PlayerRef>(who.clone())
+                {
+                    hands.push(who);
+                }
+                m.values().for_each(|x| walk(x, out, hands));
             }
-            serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, out, hands)),
             _ => {}
         }
     }
     if let Ok(v) = serde_json::to_value(e) {
-        walk(&v, out);
+        walk(&v, out, hands);
     }
     out.sort_unstable();
     out.dedup();
@@ -841,11 +848,19 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         PlayerRef::OwnerOf(i) => of_object("PlayerRef::OwnerOf", *i, p),
         _ => {}
     };
-    // Amounts read off a target.
-    let mut targets_read = Vec::new();
-    amounts_of_targets(e, &mut targets_read);
+    // Amounts read off a target, or off another player's hand.
+    let (mut targets_read, mut hands) = (Vec::new(), Vec::new());
+    amounts_of_targets(e, &mut targets_read, &mut hands);
     for i in targets_read {
         of_object("Amount::OfTarget", i, p);
+    }
+    for who in hands {
+        match who {
+            PlayerRef::Each | PlayerRef::EachOpponent => {
+                p("Amount::HandOf counts one player's hand".into())
+            }
+            other => player(&other, p),
+        }
     }
     let obj = |r: &ObjRef, p: &mut dyn FnMut(String)| {
         if let ObjRef::Target(i) = r {

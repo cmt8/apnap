@@ -443,7 +443,8 @@ pub fn count_amount(
         | Amount::TriggeringToughness
         | Amount::TriggeringAmount
         | Amount::SacrificedPower
-        | Amount::OfTarget { .. } => 0,
+        | Amount::OfTarget { .. }
+        | Amount::HandOf(_) => 0,
     }
 }
 

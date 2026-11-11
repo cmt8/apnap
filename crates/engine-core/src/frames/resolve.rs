@@ -453,6 +453,10 @@ impl ResolveFrame {
             Amount::X => self.x,
             Amount::SacrificedPower => self.sacrificed_power,
             Amount::TriggeringAmount => self.facts.amount,
+            // CR 608.2h: counted as the effect is applied.
+            Amount::HandOf(who) => self
+                .player(st, k, *who)
+                .map_or(0, |p| st.zones.hands[p.index()].len() as u32),
             Amount::OfTarget { slot, what } => {
                 self.target_known(k, *slot).map_or(0, |t| match what {
                     card_model::Measure::Power => t.power.unwrap_or(0).max(0) as u32,
@@ -1538,14 +1542,17 @@ impl ResolveFrame {
             },
             Effect::CreateToken { token, count, who } => {
                 let token = st.catalog.find(&token).expect("validated by card-db");
-                match self.player(st, k, who) {
-                    Some(controller) => vec![Proposed::CreateTokens {
+                let count = self.amount(st, k, &count);
+                // CR 111.2: each player who creates tokens owns and controls them; "each
+                // player creates …" is one event (APNAP order, CR 101.4).
+                self.players_apnap(st, k, who)
+                    .into_iter()
+                    .map(|controller| Proposed::CreateTokens {
                         token,
-                        count: self.amount(st, k, &count),
+                        count,
                         controller,
-                    }],
-                    None => Vec::new(),
-                }
+                    })
+                    .collect()
             }
             Effect::PutCountersAll { what, kind, count } => {
                 let count = self.amount(st, k, &count);

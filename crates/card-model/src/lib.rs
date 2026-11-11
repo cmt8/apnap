@@ -1637,6 +1637,10 @@ pub enum Amount {
         slot: u8,
         what: Measure,
     },
+    /// The number of cards in the hand of one player other than you: "that player's
+    /// hand", "target player's hand" (as the effect is applied, CR 608.2h). 0 for a
+    /// player who has left the game.
+    HandOf(PlayerRef),
 }
 
 impl Amount {
@@ -1665,7 +1669,8 @@ impl Amount {
             | Amount::TriggeringToughness
             | Amount::TriggeringAmount
             | Amount::SacrificedPower
-            | Amount::OfTarget { .. } => false,
+            | Amount::OfTarget { .. }
+            | Amount::HandOf(_) => false,
         }
     }
 

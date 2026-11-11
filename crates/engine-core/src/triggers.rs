@@ -690,10 +690,26 @@ pub(crate) fn detect_blocks(st: &mut GameState, pairs: &[(ObjectId, ObjectId)]) 
                 .map(|id| (Some(id), EventFacts::default(), None))
                 .collect::<Vec<_>>()
         };
+        // "Defending player" (CR 506.2): the player an attacker attacks.
+        let defending = |hits: Vec<Hit>| -> Vec<Hit> {
+            hits.into_iter()
+                .map(|(it, mut facts, lki)| {
+                    facts.player = it.and_then(|a| {
+                        st.combat.as_ref().and_then(|c| {
+                            c.attackers
+                                .iter()
+                                .find(|x| x.attacker == a)
+                                .map(|x| x.defender)
+                        })
+                    });
+                    (it, facts, lki)
+                })
+                .collect()
+        };
         match t {
             Trigger::Blocks(f) => each(&mut pairs.iter().map(|(b, _)| *b), f),
-            Trigger::BecomesBlocked(f) => each(&mut pairs.iter().map(|(_, a)| *a), f),
-            Trigger::Unblocked(f) => each(&mut unblocked.iter().copied(), f),
+            Trigger::BecomesBlocked(f) => defending(each(&mut pairs.iter().map(|(_, a)| *a), f)),
+            Trigger::Unblocked(f) => defending(each(&mut unblocked.iter().copied(), f)),
             Trigger::BlockedBy { attacker, blocker } => pairs
                 .iter()
                 .filter(|(b, a)| hit(blocker, *b) && hit(attacker, *a))
