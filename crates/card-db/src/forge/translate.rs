@@ -3917,6 +3917,23 @@ impl<'a> Tx<'a> {
                         None
                     }
                 };
+                // Where the ability works: on the battlefield (Forge's default), or — for
+                // what an effect object carries — the command zone.
+                let mut from_graveyard = false;
+                if rd.rec.get("CharacteristicDefining").is_none() {
+                    match rd.get("EffectZone") {
+                        None | Some("Battlefield") => {}
+                        Some("Command") if self.in_effect => {}
+                        // "As long as this card is in your graveyard, …" (CR 113.6b).
+                        Some("Graveyard") if !self.in_effect && self.granting == 0 => {
+                            from_graveyard = true;
+                        }
+                        Some(z) => {
+                            self.block(format!("static:works from {}", shape(z)));
+                            return None;
+                        }
+                    }
+                }
                 let int = |t: Option<&str>| {
                     t.map_or(Some(0), |t| t.trim_start_matches('+').parse::<i32>().ok())
                 };
@@ -4155,6 +4172,20 @@ impl<'a> Tx<'a> {
                         }
                     }
                 }
+                // A static ability of a card in a graveyard: about permanents only (its own
+                // card isn't one), one ability.
+                if from_graveyard {
+                    let about_permanents = matches!(affected, Affected::All(_));
+                    if out.len() != 1 || !about_permanents {
+                        self.block("static:from the graveyard about the card itself");
+                        return None;
+                    }
+                    let a = out.remove(0);
+                    return Some(AbilityDef::FromZone {
+                        zone: ActivationZone::Graveyard,
+                        ability: Box::new(a),
+                    });
+                }
                 let first = out.remove(0);
                 self.additional.extend(out);
                 Some(first)
@@ -4300,6 +4331,10 @@ impl<'a> Tx<'a> {
     /// control have hexproof") become static abilities of their own. The first ability is
     /// returned, the rest go to `self.additional`.
     fn player_static(&mut self, rd: &Rd<'a>) -> Option<AbilityDef> {
+        // (Looked at below; read here so that an early failure names only what failed.)
+        for key in ["MayPlay", "MayLookAt", "AffectedZone", "EffectZone"] {
+            rd.get(key);
+        }
         if rd.get("AffectedDefined").is_some() {
             self.block("static:player rule AffectedDefined");
             return None;

@@ -1795,6 +1795,20 @@ fn ability(a: &AbilityDef) -> String {
         AbilityDef::Enchant(f) => {
             format!("Enchant {}", target_filter(f).trim_start_matches("target "))
         }
+        AbilityDef::FromZone { zone, ability: a } => {
+            let place = match zone {
+                ActivationZone::Graveyard => "in your graveyard",
+                ActivationZone::Hand => "in your hand",
+                ActivationZone::Battlefield => "on the battlefield",
+            };
+            let text = ability(a);
+            let mut chars = text.chars();
+            let rest: String = match chars.next() {
+                Some(first) => first.to_lowercase().chain(chars).collect(),
+                None => String::new(),
+            };
+            format!("As long as this card is {place}, {rest}")
+        }
         AbilityDef::PlayerRule { who, rule, only_if } => {
             let text = player_rule(*who, rule);
             match only_if {

@@ -768,3 +768,81 @@ fn a_line_of_ai_hints_only_is_no_ability() {
             .any(|b| b == "param:static Continuous.CanBlockAny")
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// "As long as this card is in your graveyard and you control a Mountain, creatures you
+// control have haste."
+
+/// A land with the type Mountain (so that the word is a known subtype to the compiler).
+const PEAK: &str = "Name:Test Peak\nTypes:Land Mountain\nOracle:";
+
+fn fury() -> String {
+    creature(
+        "Test Fury",
+        "3 R",
+        "Incarnation",
+        "2/2",
+        "S:Mode$ Continuous | Affected$ Creature.YouCtrl | EffectZone$ Graveyard | AddKeyword$ Haste | IsPresent$ Mountain.YouCtrl | Description$ Text.",
+    )
+}
+
+// CR 113.6b (2026-11-06): "An ability that states which zones it functions in functions
+// only from those zones." Forge: `EffectZone$ Graveyard` on a `Mode$ Continuous` line.
+// "You" is the card's owner.
+#[test]
+fn a_static_ability_that_works_from_the_graveyard() {
+    use card_model::Keyword;
+    use engine_core::layers::chars;
+    let mut sc = scenario_n(3, &[&fury(), PEAK]);
+    sc.card(P0, Zone::Graveyard, "Test Fury");
+    sc.card(P0, Zone::Battlefield, "Mountain");
+    let mine = sc.card(P0, Zone::Battlefield, "Test Golem");
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Golem");
+    sc.card(P1, Zone::Battlefield, "Mountain");
+    let s = Script::new(sc.build());
+    assert!(chars(&s.st, mine).has(Keyword::Haste));
+    assert!(
+        !chars(&s.st, theirs).has(Keyword::Haste),
+        "the owner's creatures only"
+    );
+
+    // Without a Mountain: nothing.
+    let mut sc = scenario(&[&fury(), PEAK]);
+    sc.card(P0, Zone::Graveyard, "Test Fury");
+    let mine = sc.card(P0, Zone::Battlefield, "Test Golem");
+    let s = Script::new(sc.build());
+    assert!(!chars(&s.st, mine).has(Keyword::Haste));
+
+    // On the battlefield the ability doesn't work, not even for the card itself.
+    let mut sc = scenario(&[&fury(), PEAK]);
+    let fury = sc.card(P0, Zone::Battlefield, "Test Fury");
+    sc.card(P0, Zone::Battlefield, "Mountain");
+    let mine = sc.card(P0, Zone::Battlefield, "Test Golem");
+    let s = Script::new(sc.build());
+    assert!(!chars(&s.st, mine).has(Keyword::Haste));
+    assert!(!chars(&s.st, fury).has(Keyword::Haste));
+}
+
+// Once the card leaves the graveyard, the effect is gone.
+#[test]
+fn the_graveyard_ability_ends_when_the_card_leaves_the_graveyard() {
+    use card_model::Keyword;
+    use engine_core::layers::chars;
+    let exile = "Name:Test Unearthing\nManaCost:B\nTypes:Instant\n\
+        A:SP$ ChangeZone | Origin$ Graveyard | Destination$ Exile | ValidTgts$ Card | TgtPrompt$ Text | SpellDescription$ Text.\n\
+        Oracle:Exile target card from a graveyard.";
+    let mut sc = scenario(&[&fury(), exile, PEAK]);
+    sc.card(P0, Zone::Graveyard, "Test Fury");
+    sc.cards(P0, Zone::Battlefield, &["Mountain", "Swamp"]);
+    let mine = sc.card(P0, Zone::Battlefield, "Test Golem");
+    sc.card(P0, Zone::Hand, "Test Unearthing");
+    sc.turn(P0, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    assert!(chars(&s.st, mine).has(Keyword::Haste));
+    s.cast("Test Unearthing")
+        .target("Test Fury")
+        .pay()
+        .pass_all();
+    assert!(s.find(P0, Zone::Exile, "Test Fury").is_some());
+    assert!(!chars(&s.st, mine).has(Keyword::Haste));
+}

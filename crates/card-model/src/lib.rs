@@ -485,6 +485,14 @@ pub enum AbilityDef {
         #[serde(default)]
         only_if: Option<Condition>,
     },
+    /// A static ability that functions only while its card is in `zone` (CR 113.6b): "as
+    /// long as this card is in your graveyard [and you control a Mountain], creatures you
+    /// control have haste". So far only a [`AbilityDef::Static`] about permanents, from the
+    /// graveyard; "you" is the card's owner.
+    FromZone {
+        zone: ActivationZone,
+        ability: Box<AbilityDef>,
+    },
 }
 
 /// What an [`AbilityDef::PlayerRule`] changes for the players it is about.

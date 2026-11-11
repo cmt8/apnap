@@ -310,7 +310,8 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 AbilityDef::Spell(_)
                 | AbilityDef::AdditionalCost(_)
                 | AbilityDef::Enchant(_)
-                | AbilityDef::SelfCostReduction(_) => false,
+                | AbilityDef::SelfCostReduction(_)
+                | AbilityDef::FromZone { .. } => false,
                 AbilityDef::Activated { from, cycling, .. } => {
                     *from == ActivationZone::Battlefield && !*cycling
                 }
@@ -506,6 +507,24 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                     .is_some_and(|r| r.spells.is_empty() && r.abilities.is_empty())
                 {
                     p.push(at("mana that can be spent on nothing".into()));
+                }
+            }
+            AbilityDef::FromZone { zone, ability } => {
+                let fits = *zone == ActivationZone::Graveyard
+                    && !granted
+                    && matches!(&**ability, AbilityDef::Static {
+                        affected: card_model::Affected::All(sel),
+                        effects,
+                        ..
+                    } if !sel.looks_at_pt()
+                        && effects.iter().all(|e| !matches!(
+                            e,
+                            card_model::ContinuousEffect::SetPTBy { .. }
+                        )));
+                if !fits {
+                    p.push(at(
+                        "only a static ability about permanents works from a graveyard".into(),
+                    ));
                 }
             }
             AbilityDef::PlayerRule { who, rule, .. } => {

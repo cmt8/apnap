@@ -575,6 +575,12 @@ enum Key {
     Resolved(u32),
     /// A static ability an object was given in this walk (layer 6), numbered as found.
     Granted(u32),
+    /// Printed ability `index` of card `source`, a static ability that works from the zone
+    /// the card is in (`AbilityDef::FromZone`, CR 113.6b).
+    FromZone {
+        source: ObjectId,
+        index: u16,
+    },
 }
 
 /// One continuous effect taking part in the walk.
@@ -612,6 +618,9 @@ struct Walk<'a> {
 
 impl Walk<'_> {
     fn exists(&self, e: &Eff<'_>, view: &View) -> bool {
+        if matches!(e.key, Key::FromZone { .. }) {
+            return self.started.contains_key(&e.key) || self.holds(e, view);
+        }
         match e.held {
             None => true,
             Some(held) => {
@@ -734,7 +743,7 @@ impl Walk<'_> {
             Key::Static { .. } | Key::Granted(_) => {
                 view.get(&e.source).map_or(e.controller, |c| c.controller)
             }
-            Key::Resolved(_) => e.controller,
+            Key::Resolved(_) | Key::FromZone { .. } => e.controller,
         }
     }
 
@@ -839,7 +848,8 @@ impl Walk<'_> {
     /// resolved effect (it exists until it ends and its set was locked in, CR 611.2c), nor
     /// for a static effect that began applying in an earlier layer (CR 613.6).
     fn can_depend(&self, a: &Eff<'_>) -> bool {
-        a.held.is_some() && !self.started.contains_key(&a.key)
+        (a.held.is_some() || matches!(a.key, Key::FromZone { .. }))
+            && !self.started.contains_key(&a.key)
     }
 
     /// A cheap, conservative pre-check for [`Walk::depends`]: could what `b` does in this
@@ -1004,6 +1014,41 @@ fn compute(st: &GameState) -> View {
             }
         }
     }
+    // CR 113.6b: static abilities of cards in graveyards that work from there ("as long as
+    // this card is in your graveyard, …"). Off the battlefield a card has only the
+    // abilities printed on it; "you" is its owner.
+    for p in 0..st.num_players() {
+        for &id in st.zones.list(Zone::Graveyard, PlayerId(p as u8)) {
+            let o = st.object(id);
+            for (i, a) in st.card_def(id).abilities.iter().enumerate() {
+                if let AbilityDef::FromZone {
+                    zone: card_model::ActivationZone::Graveyard,
+                    ability,
+                } = a
+                    && let AbilityDef::Static {
+                        affected,
+                        effects,
+                        only_if,
+                    } = &**ability
+                {
+                    effs.push(Eff {
+                        cond: only_if.as_ref(),
+                        key: Key::FromZone {
+                            source: id,
+                            index: i as u16,
+                        },
+                        timestamp: o.timestamp,
+                        source: id,
+                        controller: o.owner,
+                        parts: effects,
+                        affected: Aff::Dynamic(affected),
+                        card: o.card,
+                        held: None,
+                    });
+                }
+            }
+        }
+    }
     for ci in &st.continuous {
         effs.push(resolved(ci));
     }
@@ -1119,7 +1164,7 @@ fn compute(st: &GameState) -> View {
                     }
                 }
             }
-            if effs[pick].held.is_some() {
+            if effs[pick].held.is_some() || matches!(effs[pick].key, Key::FromZone { .. }) {
                 walk.started.entry(effs[pick].key).or_insert(set);
             }
         }
