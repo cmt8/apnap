@@ -14,7 +14,7 @@ pub mod scryfall;
 use card_model::{
     AbilityDef, ActivationZone, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript,
     CardType, Cost, Effect, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces, Supertype,
-    TargetFilter, TargetRef, Trigger,
+    TargetFilter, TargetRef, Trigger, Who,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -287,6 +287,10 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 AbilityDef::Replacement { replaces, with } => {
                     matches!(replaces, Replaces::Damage { .. }) && *with == ReplaceWith::Prevent
                 }
+                // "You may play an additional land this turn" (CR 611.2c: a rule).
+                AbilityDef::PlayerRule { rule, .. } => {
+                    !matches!(rule, card_model::PlayerRule::PlayThisFrom(_))
+                }
                 _ => false,
             };
             if !fits {
@@ -332,6 +336,10 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 AbilityDef::Mana { .. }
                 | AbilityDef::Triggered { .. }
                 | AbilityDef::CostReduction { .. } => true,
+                // "This card" may be cast from a zone: only its own, printed ability.
+                AbilityDef::PlayerRule { rule, .. } => {
+                    !matches!(rule, card_model::PlayerRule::PlayThisFrom(_))
+                }
             };
             if !fits {
                 p.push(at("not an ability another object can be given".into()));
@@ -404,6 +412,7 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
             }
             AbilityDef::Triggered { intervening_if, .. } => (intervening_if.as_ref(), false),
             AbilityDef::Static { only_if, .. } => (only_if.as_ref(), true),
+            AbilityDef::PlayerRule { only_if, .. } => (only_if.as_ref(), false),
             _ => (None, false),
         };
         if let Some(card_model::Condition::Compare { amount, .. }) = cond {
@@ -496,6 +505,34 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                     .is_some_and(|r| r.spells.is_empty() && r.abilities.is_empty())
                 {
                     p.push(at("mana that can be spent on nothing".into()));
+                }
+            }
+            AbilityDef::PlayerRule { who, rule, .. } => {
+                use card_model::PlayerRule as R;
+                match rule {
+                    R::AdditionalLandPlays(0) => p.push(at("no additional land".into())),
+                    R::PlayFrom { cards, .. } => {
+                        // The cards are in the player's own zone: whose they are and what
+                        // is on the battlefield isn't asked (`card_matches`).
+                        if cards.is_empty()
+                            || cards.iter().any(|s| {
+                                s.controller != Who::Any
+                                    || s.owner != Who::Any
+                                    || s.other
+                                    || s.tapped.is_some()
+                                    || s.attacking.is_some()
+                                    || s.blocking.is_some()
+                            })
+                        {
+                            p.push(at(
+                                "cards a rule lets a player play: card properties only".into()
+                            ));
+                        }
+                    }
+                    R::PlayThisFrom(zones) if zones.is_empty() || *who != Who::You => p.push(at(
+                        "\"cast this card from …\" names zones, for its owner".into(),
+                    )),
+                    _ => {}
                 }
             }
             AbilityDef::CombatRule { affected, .. } => {

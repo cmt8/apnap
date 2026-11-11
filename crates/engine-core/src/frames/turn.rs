@@ -212,10 +212,14 @@ impl StepStage {
     }
 }
 
-/// CR 514.1: the active player discards down to their maximum hand size.
+/// CR 514.1: the active player discards down to their maximum hand size (CR 402.2: which
+/// rules may change, or take away).
 pub(crate) fn cleanup_discard(st: &mut GameState, player: PlayerId, input: Option<Input>) -> Flow {
     let hand: Vec<_> = st.zones.hands[player.index()].clone();
-    let excess = hand.len().saturating_sub(st.config.max_hand_size as usize);
+    let excess = match crate::players::max_hand_size(st, player) {
+        Some(max) => hand.len().saturating_sub(max as usize),
+        None => 0,
+    };
     if let Some(inp) = input {
         // CR 701.9a: discarded cards go to the graveyard (replaceable, e.g. "exile instead").
         let moves = inp

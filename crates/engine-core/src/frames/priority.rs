@@ -129,9 +129,13 @@ impl PriorityFrame {
 fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
     let mut opts = vec![OptionDesc::Pass];
     let hand = &st.zones.hands[p.index()];
-    // CR 305.1–305.2: one land per turn, sorcery timing.
-    if sorcery_timing(st, p) && st.player(p).lands_played_this_turn < 1 {
-        for &card in hand {
+    // Cards a rule lets them play from another zone: their graveyard, the top of their
+    // library (CR 601.3, 116.2a).
+    let elsewhere = crate::players::playable_elsewhere(st, p);
+    // CR 305.1–305.2: lands, as many as they may play this turn, sorcery timing — from the
+    // hand, or from where a rule lets them.
+    if sorcery_timing(st, p) && crate::players::land_play_left(st, p) {
+        for &card in hand.iter().chain(&elsewhere) {
             if chars(st, card).is(CardType::Land) {
                 opts.push(OptionDesc::PlayLand { card });
             }
@@ -143,7 +147,7 @@ fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
         .command
         .iter()
         .filter(|&&c| st.object(c).owner == p);
-    for &card in hand.iter().chain(commanders) {
+    for &card in hand.iter().chain(commanders).chain(&elsewhere) {
         if can_begin(st, p, CastSource::Card(card)) {
             opts.push(OptionDesc::CastSpell { card });
         }

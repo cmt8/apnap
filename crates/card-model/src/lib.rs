@@ -474,6 +474,64 @@ pub enum AbilityDef {
         affected: Affected,
         rule: CombatRule,
     },
+    /// A static ability that changes a rule of the game for players rather than any
+    /// object's characteristics (CR 613.10, 613.11): "you have no maximum hand size", "you
+    /// may play an additional land on each of your turns", "you have hexproof", "you may
+    /// play lands from your graveyard". `who` is relative to the ability's controller; the
+    /// rule holds while `only_if` holds for that controller.
+    PlayerRule {
+        who: Who,
+        rule: PlayerRule,
+        #[serde(default)]
+        only_if: Option<Condition>,
+    },
+}
+
+/// What an [`AbilityDef::PlayerRule`] changes for the players it is about.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PlayerRule {
+    /// CR 402.2: "[You have] no maximum hand size".
+    NoMaximumHandSize,
+    /// "[Your] maximum hand size is N" (CR 402.2). Several of these and the next apply in
+    /// timestamp order (CR 613.11).
+    MaximumHandSize(u32),
+    /// "[Your] maximum hand size is increased (reduced) by N".
+    MaximumHandSizeBy(i32),
+    /// CR 305.2: "[You] may play N additional lands on each of [your] turns".
+    AdditionalLandPlays(u32),
+    /// CR 305.2: "[You] may play any number of lands on each of [your] turns".
+    AnyNumberOfLandPlays,
+    /// CR 702.11c: "[You have] hexproof" — can't be the target of spells or abilities
+    /// [your] opponents control.
+    Hexproof,
+    /// CR 702.18a: "[You have] shroud" — can't be the target of spells or abilities.
+    Shroud,
+    /// CR 401.5: "Play with the top card of your library revealed": every player sees it.
+    TopCardRevealed,
+    /// CR 401.5: "You may look at the top card of your library any time."
+    LookAtTopCard,
+    /// CR 601.3, 116.2a: "[You] may play lands and cast spells from [zone]" — the cards of
+    /// the player's own `zone` that match one of `cards` (a land is played, anything else
+    /// is cast). When and how is unchanged: a land is still the turn's land play, a spell
+    /// is cast at the time and for the cost it always is.
+    PlayFrom {
+        zone: PlayZone,
+        cards: Vec<Selector>,
+    },
+    /// "You may cast this card from your graveyard [or from exile]": an ability of the
+    /// card itself, which functions in those zones (CR 113.6f). Whoever owns the card is
+    /// "you".
+    PlayThisFrom(Vec<PlayZone>),
+}
+
+/// A zone a card may be played or cast from by a [`PlayerRule`] (its owner's, for the
+/// zones each player has).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PlayZone {
+    Graveyard,
+    /// The top card of the library only.
+    LibraryTop,
+    Exile,
 }
 
 /// What a [`AbilityDef::CombatRule`] forbids its affected creatures.
