@@ -534,6 +534,34 @@ fn the_heuristic_agent_taps_free_mana_first() {
     assert!(s.find(P0, Zone::Battlefield, "Test Cub").is_some());
 }
 
+// The heuristic agent doesn't cast a spell it could only pay for by sacrificing its own
+// creatures for mana (it may still use the altar once the spell is paid for otherwise).
+#[test]
+fn the_heuristic_agent_does_not_sacrifice_its_board_for_mana() {
+    let altar = "Name:Test Altar\nManaCost:3\nTypes:Artifact\n\
+        A:AB$ Mana | Cost$ Sac<1/Creature> | Produced$ C | Amount$ 2 | SpellDescription$ Add {C}{C}.\n\
+        Oracle:Sacrifice a creature: Add {C}{C}.";
+    let idol = "Name:Test Idol\nManaCost:4\nTypes:Artifact\nOracle:";
+    let decide = |lands: usize| {
+        let mut sc = scenario(&[altar, idol, BEAR]);
+        sc.card(P0, Zone::Battlefield, "Test Altar");
+        sc.cards(P0, Zone::Battlefield, &["Test Cub", "Test Cub"]);
+        for _ in 0..lands {
+            sc.card(P0, Zone::Battlefield, "Forest");
+        }
+        sc.card(P0, Zone::Hand, "Test Idol");
+        let s = Script::new(sc.build());
+        assert!(s.can_cast("Test Idol"), "the engine offers it");
+        let mut ai = HeuristicAgent::new(1, s.st.catalog.clone());
+        let d = s.decision().clone();
+        let r = ai.decide(&engine_core::player_view(&s.st, P0), &d);
+        let Response::Pick(i) = r else { panic!() };
+        matches!(d.options[i[0]], OptionDesc::CastSpell { .. })
+    };
+    assert!(!decide(0), "only by sacrificing both creatures");
+    assert!(decide(4), "four lands pay for it");
+}
+
 // What stays blocked (D-066), each with its name.
 #[test]
 fn mana_abilities_that_stay_blocked() {

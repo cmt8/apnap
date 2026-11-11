@@ -462,8 +462,59 @@ impl HeuristicAgent {
         best
     }
 
+    /// D-066: when `me` can make mana by sacrificing other permanents (Ashnod's Altar),
+    /// roughly how much mana they have without doing that — so as not to cast a spell by
+    /// sacrificing their board. `None` when they have no such ability.
+    fn mana_without_sacrifices(&self, v: &PlayerView, me: PlayerId) -> Option<u32> {
+        let mine: Vec<&ObjectView> = v
+            .battlefield
+            .iter()
+            .filter(|o| o.controller == me)
+            .collect();
+        let mana_of = |o: &ObjectView| -> Vec<(card_model::Cost, u32)> {
+            self.catalog
+                .get(o.card)
+                .abilities
+                .iter()
+                .chain(o.granted.iter().map(|a| self.catalog.ability(*a)))
+                .filter_map(|a| match a {
+                    AbilityDef::Mana { cost, produce, .. } => Some((cost.clone(), produce.count())),
+                    _ => None,
+                })
+                .collect()
+        };
+        let altar = mine
+            .iter()
+            .any(|o| mana_of(o).iter().any(|(cost, _)| cost.sacrifice.is_some()));
+        if !altar {
+            return None;
+        }
+        let pool = v
+            .players
+            .iter()
+            .find(|p| p.id == me)
+            .map_or(0, |p| p.mana_pool.total());
+        let mut n = pool;
+        for o in mine.into_iter().filter(|o| !o.tapped) {
+            let sick = o.card_types.contains(&CardType::Creature)
+                && o.summoning_sick
+                && !has(o, Keyword::Haste);
+            let best = mana_of(o)
+                .iter()
+                .filter(|(cost, _)| cost.sacrifice.is_none() && !(cost.tap && sick))
+                .map(|(cost, count)| {
+                    count.saturating_sub(cost.mana.as_ref().map_or(0, |m| m.mana_value()))
+                })
+                .max();
+            // A land's basic land types give it a mana ability too (CR 305.6).
+            n += best.unwrap_or(u32::from(o.card_types.contains(&CardType::Land)));
+        }
+        Some(n)
+    }
+
     fn priority(&mut self, v: &PlayerView, d: &PendingDecision) -> Response {
         let me = Self::me(v);
+        let affordable = self.mana_without_sacrifices(v, me);
         if self.ability_turn != v.turn_number {
             self.ability_turn = v.turn_number;
             self.ability_uses.clear();
@@ -500,6 +551,9 @@ impl HeuristicAgent {
                         continue;
                     };
                     let def = self.catalog.get(ov.card);
+                    if affordable.is_some_and(|n| ov.mana_value > n) {
+                        continue;
+                    }
                     let permanent =
                         !def.has_type(CardType::Instant) && !def.has_type(CardType::Sorcery);
                     // Creatures with flash: on an opponent's turn only when the stack is empty.
@@ -511,6 +565,15 @@ impl HeuristicAgent {
                 OptionDesc::ActivateAbility { source, ability } => {
                     let used = self.ability_uses.get(&(*source, *ability)).copied();
                     if used.unwrap_or(0) >= ABILITY_USES_PER_TURN {
+                        continue;
+                    }
+                    let mana = match self.catalog.ability(*ability) {
+                        AbilityDef::Activated { cost, .. } => {
+                            cost.mana.as_ref().map_or(0, |m| m.mana_value())
+                        }
+                        _ => 0,
+                    };
+                    if affordable.is_some_and(|n| mana > n) {
                         continue;
                     }
                     match Self::find(v, *source) {

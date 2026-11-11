@@ -65,3 +65,49 @@
 >
 > 701.21a To sacrifice a permanent, its controller moves it from the battlefield directly to its owner’s graveyard. A player can’t sacrifice something that isn’t a permanent, or something that’s a permanent they don’t control. Sacrificing a permanent doesn’t destroy it, so regeneration or other effects that replace destruction can’t affect this action.
 >
+
+## How apnap reads these rules (D-066)
+
+- **What is a mana ability (605.1a, 605.5a).** Forge's `AB$ Mana` / `AB$ ManaReflected`
+  becomes `AbilityDef::Mana`. A `SubAbility$` is part of the mana ability only if it has no
+  target and moves no card to or from a library: damage to, life loss and life gain of
+  its controller (`then`). A sub-ability that draws (Chromatic Sphere's "draw a card")
+  would make the ability a non-mana ability that uses the stack; it is blocked
+  (`Mana:sub Draw`), as is one with a target (`Mana:sub with a target`).
+- **Triggered abilities that add mana (605.1b, 605.5a).** Lotus Cobra's landfall triggers
+  on a land entering, not on a mana ability: an ordinary trigger. Its `DB$ Mana |
+  Produced$ Any` is `Effect::AddManaOf`; the color is chosen as it resolves. No triggered
+  *mana* ability (one that triggers from a mana ability) is compiled yet.
+- **Costs (602.2b, 601.2g–h, 118.3, 119.4).** A mana ability's cost may now include mana
+  (`{1}, {T}`), life, "sacrifice this", and "sacrifice a [permanent]" (one), with or
+  without `{T}`. It must tap or sacrifice something, so that no activation can be repeated
+  for ever. Its mana cost is paid from the player's unrestricted pool (605.3a lets the
+  player activate other mana abilities first: the engine offers the mana-costing ability
+  once the pool can pay for it). Life can be paid only if the player has that much
+  (119.4); what to sacrifice is chosen as it is activated.
+- **Resolving at once (605.3b).** Costs are paid (sacrifices and life loss go through the
+  replacement pipeline), then the mana is added, then the rest of what it says happens —
+  all before the player does anything else, without the stack. The pain land's damage is
+  dealt by the land (its last known information if it is gone).
+- **"Could produce" (106.7).** For `ManaProduce::Reflected` the engine collects the types
+  every mana ability of every matching permanent would make (costs ignored), following
+  other reflecting abilities, each permanent once. "Color" leaves out colorless; "type"
+  doesn't. No such type: no mana (106.5) — the ability is not offered.
+- **Mana of one type chosen, or each chosen (106.1b).** `Counted` and `Times` make all
+  their mana of one chosen type; `Combination` asks for each mana in turn; `Fixed` makes
+  exactly what it lists. A counted amount ("for each Swamp you control") is counted as
+  the ability resolves; it may only count permanents and not depend on tapped status, and
+  the ability may not sacrifice anything (the planner counts before it is used).
+
+| Rule | Test (`crates/harness/tests/forge_mana.rs`) |
+|---|---|
+| 106.3, 605.1a | `one_activation_adds_two_different_mana` |
+| 601.2g, 605.3a | `a_mana_ability_that_costs_mana`, `counted_mana_that_costs_mana_pays_for_a_spell` |
+| 605.3b | `what_a_mana_ability_also_does_happens_at_once` |
+| 106.1b, 605.3b | `counted_mana`, `mana_in_any_combination` |
+| 119.4, 118.3b | `a_mana_ability_that_costs_life` |
+| 601.2g–h, 701.21a | `sacrificing_a_creature_for_mana`, `a_sacrifice_for_mana_leaves_one_for_the_cost`, `tap_and_sacrifice_costs` |
+| 106.7, 106.5 | `mana_another_permanent_could_produce` |
+| 106.6, 109.2 | `mana_for_abilities_of_permanents_or_of_any_source`, `restricted_mana_of_open_types_still_pays` |
+| 605.5a, 605.5b | `effects_that_add_mana_of_a_chosen_color` |
+| 605.1a, 605.5a (blocked forms) | `mana_abilities_that_stay_blocked` |
