@@ -163,6 +163,12 @@ fn amount(a: &Amount) -> String {
                 Who::Any => "all players",
             }
         ),
+        Amount::OfTarget { what, .. } => match what {
+            Measure::Power => "its power",
+            Measure::Toughness => "its toughness",
+            Measure::ManaValue => "its mana value",
+        }
+        .into(),
     }
 }
 
@@ -211,6 +217,7 @@ fn spell_kind(s: &Selector) -> String {
             "or",
         ));
     }
+    words.extend(s.not_colors.iter().map(|c| format!("non{}", color(*c))));
     words.extend(s.not_types.iter().map(|t| format!("non{}", card_type(*t))));
     let types: Vec<String> = s.types.iter().map(|t| card_type(*t).to_string()).collect();
     if !s.subtypes.is_empty() {
@@ -259,6 +266,7 @@ fn player(mode: &Mode, r: PlayerRef) -> String {
         PlayerRef::TriggeringController => "its controller".into(),
         PlayerRef::TriggeringPlayer => "that player".into(),
         PlayerRef::ControllerOf(_) => "its controller".into(),
+        PlayerRef::OwnerOf(_) => "its owner".into(),
     }
 }
 
@@ -759,6 +767,28 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 format!("you may {}", text.strip_prefix("you ").unwrap_or(&text))
             }
         }
+        // "Its controller may draw a card": the instruction in the decider's own words.
+        Effect::PlayerMay { who, effect: inner } => {
+            let who = player(mode, *who);
+            let text = effect(mode, inner);
+            let rest = match text.strip_prefix(&format!("{who} ")) {
+                // "its controller draws a card" -> "draw a card".
+                Some(rest) => {
+                    let (verb, tail) = rest.split_once(' ').unwrap_or((rest, ""));
+                    let base = if verb.ends_with("ches") || verb.ends_with("shes") {
+                        &verb[..verb.len() - 2]
+                    } else if verb == "may" {
+                        // Already a choice of theirs ("its controller may search …").
+                        return text;
+                    } else {
+                        verb.strip_suffix('s').unwrap_or(verb)
+                    };
+                    format!("{base} {tail}")
+                }
+                None => text,
+            };
+            format!("{who} may {}", rest.trim_end())
+        }
         // The same instruction for each target of one "target" word.
         Effect::Together(v) => {
             let parts: Vec<String> = v.iter().map(|e| effect(mode, e)).collect();
@@ -788,6 +818,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             to,
             reveal,
             shuffle,
+            optional,
         } => {
             let who = player(mode, *who);
             let you = who == "you";
@@ -813,11 +844,21 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             let s = |base: &str| {
                 if you {
                     base.to_string()
+                } else if base.ends_with("ch") || base.ends_with("sh") {
+                    format!("{base}es")
                 } else {
                     format!("{base}s")
                 }
             };
             let mut out = match from {
+                CardZone::Library if *optional => {
+                    let mut t = format!("{who} may search {their} library for {what}");
+                    if *reveal {
+                        t.push_str(&format!(", reveal {it}"));
+                    }
+                    t.push_str(&format!(", put {it} {}", dest(*to, their)));
+                    t
+                }
                 CardZone::Library => {
                     let mut t = format!("{who} {} {their} library for {what}", s("search"));
                     if *reveal {
@@ -850,7 +891,12 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 }
             };
             if *shuffle {
-                out.push_str(&format!(", then {}", s("shuffle")));
+                let verb = if *optional {
+                    "shuffle".to_string()
+                } else {
+                    s("shuffle")
+                };
+                out.push_str(&format!(", then {verb}"));
             }
             out
         }
@@ -1095,6 +1141,7 @@ fn card_list(cards: &[Selector], plural: bool) -> String {
                 words.push(if plural { "other" } else { "another" }.to_string());
             }
             words.extend(s.colors.iter().map(|c| color(*c).to_string()));
+            words.extend(s.not_colors.iter().map(|c| format!("non{}", color(*c))));
             words.extend(s.supertypes.iter().map(|t| format!("{t:?}").to_lowercase()));
             words.extend(s.not_subtypes.iter().map(|t| format!("non-{t}")));
             words.extend(s.not_types.iter().map(|t| format!("non{}", card_type(*t))));
@@ -1338,12 +1385,17 @@ fn trigger(t: &Trigger) -> String {
             let parts: Vec<String> = v.iter().map(trigger).collect();
             let mut out = parts.first().cloned().unwrap_or_default();
             for p in parts.iter().skip(1) {
-                // The verb: the last word, or "becomes blocked".
-                let verb = match p.strip_suffix("becomes blocked") {
-                    Some(_) => "becomes blocked",
-                    None => p.rsplit(' ').next().unwrap_or(""),
-                };
-                out.push_str(&format!(" or {verb}"));
+                // What differs from the first event, after the words they share ("this
+                // permanent enters or deals combat damage to a player").
+                let first: Vec<&str> = out.split(' ').collect();
+                let words: Vec<&str> = p.split(' ').collect();
+                let shared = first
+                    .iter()
+                    .zip(&words)
+                    .take_while(|(a, b)| a == b)
+                    .count()
+                    .max(1);
+                out.push_str(&format!(" or {}", words[shared..].join(" ")));
             }
             out
         }

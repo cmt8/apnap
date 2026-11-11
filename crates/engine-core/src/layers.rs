@@ -442,7 +442,8 @@ pub fn count_amount(
         | Amount::TriggeringPower
         | Amount::TriggeringToughness
         | Amount::TriggeringAmount
-        | Amount::SacrificedPower => 0,
+        | Amount::SacrificedPower
+        | Amount::OfTarget { .. } => 0,
     }
 }
 

@@ -1331,6 +1331,10 @@ pub enum Effect {
         /// of that library, it is shuffled first (CR 701.24b).
         #[serde(default)]
         shuffle: bool,
+        /// Each of the players "may search": each decides for themselves, before looking,
+        /// whether to (and one who doesn't, doesn't shuffle either).
+        #[serde(default)]
+        optional: bool,
     },
     /// CR 701.22: scry N.
     Scry {
@@ -1438,6 +1442,14 @@ pub enum Effect {
         /// Ends when its source leaves the battlefield ("for as long as …").
         while_source: bool,
     },
+    /// "[Who] may [effect]": a player other than the controller decides as this resolves
+    /// ("that creature's controller may draw a card"). `who` is one player; a player who
+    /// has left the game decides nothing, and nothing happens. (With `who` = you this is
+    /// [`Effect::May`], which is what the compiler writes then.)
+    PlayerMay {
+        who: PlayerRef,
+        effect: Box<Effect>,
+    },
 }
 
 /// A zone an effect takes cards out of as it resolves.
@@ -1544,8 +1556,13 @@ pub enum PlayerRef {
     /// damage).
     TriggeringPlayer,
     /// "Its controller": the controller of the spell or permanent chosen for target slot
-    /// `n` ("counter target spell unless its controller pays {3}").
+    /// `n` ("counter target spell unless its controller pays {3}"): as it is now, or as
+    /// it last existed where it was targeted if it has left (CR 608.2h). Nobody, if the
+    /// target was illegal as the spell or ability began to resolve (CR 608.2b).
     ControllerOf(u8),
+    /// "Its owner": the owner of the spell or permanent chosen for target slot `n`
+    /// (CR 108.3) — not its controller, if someone else controls it.
+    OwnerOf(u8),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1612,6 +1629,14 @@ pub enum Amount {
         players: Who,
         highest: bool,
     },
+    /// "Its power", "its toughness", "its mana value" of the spell or permanent chosen for
+    /// target slot `slot`: as it is now, or as it last existed where it was targeted if it
+    /// has left (CR 608.2h) — "exile target creature; its controller gains life equal to
+    /// its power". 0 if the target was illegal as resolution began (CR 608.2b).
+    OfTarget {
+        slot: u8,
+        what: Measure,
+    },
 }
 
 impl Amount {
@@ -1639,7 +1664,8 @@ impl Amount {
             | Amount::TriggeringPower
             | Amount::TriggeringToughness
             | Amount::TriggeringAmount
-            | Amount::SacrificedPower => false,
+            | Amount::SacrificedPower
+            | Amount::OfTarget { .. } => false,
         }
     }
 

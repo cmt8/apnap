@@ -33,7 +33,7 @@ pub struct Compiled {
 
 /// Parameters that never affect the rules: descriptions shown to players, prompts, and
 /// hints for Forge's AI. (docs/forge/script-format.md, "keys a translator can ignore".)
-const TEXT_ONLY: [&str; 17] = [
+const TEXT_ONLY: [&str; 19] = [
     "ValidTgtsDesc",
     "UnlessAI",
     "ChangeTypeDesc",
@@ -51,6 +51,10 @@ const TEXT_ONLY: [&str; 17] = [
     "AINoRecursiveCheck",
     "IsCurse",
     "PrecostDesc",
+    // Which targets Forge's AI prefers ("destroy target permanent", aimed at expensive
+    // ones): never read by Forge's rules code (docs/forge/script-format.md, "AI only").
+    "AITgts",
+    "AITgtsStrict",
 ];
 
 /// A record being read: remembers which parameters were looked at, so that any that
@@ -161,6 +165,22 @@ struct Tx<'a> {
     /// Compiling what an effect object carries: `EffectSource` is "this" (the source of
     /// the spell or ability that made it) and `IsRemembered` what it is about.
     in_effect: bool,
+    /// The number of targets of the chain whose amount is being read (`None` outside an
+    /// effect's amount): `Targeted$…` is about its one target.
+    chain_targets: Option<usize>,
+    /// An amount just read is about the chain's target (`Targeted$…`).
+    read_target: bool,
+    /// The trigger bodies (by the name of what they execute) in which "its controller"
+    /// was taken for "you" because the event's object is the source itself: a second
+    /// event added to such an ability must be about the source too.
+    it_is_you: BTreeSet<String>,
+    /// The body being compiled took the event's object for the source (see `it_is_you`).
+    took_it_for_this: bool,
+    /// The trigger bodies in which "that player" was taken for "you": a second event
+    /// added to such an ability must happen to you too.
+    player_is_you: BTreeSet<String>,
+    /// The body being compiled took "that player" for "you".
+    took_player_for_you: bool,
 }
 
 /// The kinds of ability a script gives to other objects.
@@ -276,8 +296,15 @@ struct TrigCtx {
     it: &'static [&'static str],
     /// Names that mean the ability's own source.
     this: &'static [&'static str],
-    /// The name of "that player".
-    player: Option<&'static str>,
+    /// The names of "that player": the player the event happened to (also written as
+    /// the controller or owner of a card that is always theirs, like a card they drew).
+    players: &'static [&'static str],
+    /// "It" is the ability's own source ("when this creature dies"): its controller is
+    /// "you" (CR 603.3a — the controller of the source when it triggered).
+    it_is_this: bool,
+    /// "That player" is always the ability's controller ("at the beginning of your
+    /// upkeep", "whenever you draw a card"): it is "you".
+    player_is_you: bool,
     /// The expression for "that much".
     amount: Option<&'static str>,
     /// A permanent died: `TriggeredNewCardLKICopy` is the card it became in the graveyard.
@@ -298,7 +325,9 @@ impl Default for TrigCtx {
         TrigCtx {
             it: &["TriggeredCard"],
             this: &[],
-            player: None,
+            players: &[],
+            it_is_this: false,
+            player_is_you: false,
             amount: None,
             died: false,
             died_self: false,
@@ -310,7 +339,9 @@ impl TrigCtx {
     const NOTHING: TrigCtx = TrigCtx {
         it: &[],
         this: &[],
-        player: None,
+        players: &[],
+        it_is_this: false,
+        player_is_you: false,
         amount: None,
         died: false,
         died_self: false,
@@ -344,23 +375,49 @@ impl TrigCtx {
                         _ => &[],
                     },
                     this: if own { &["TriggeredSource"] } else { &[] },
-                    player: player.then_some("TriggeredTarget"),
+                    players: if player { &["TriggeredTarget"] } else { &[] },
+                    player_is_you: matches!(to, DamageTo::Player(Who::You)),
                     amount: Some("TriggerCount$DamageAmount"),
                     ..TrigCtx::NOTHING
                 }
             }
-            Trigger::GainsLife(_) | Trigger::LosesLife(_) => TrigCtx {
-                player: Some("TriggeredPlayer"),
+            Trigger::GainsLife(who) | Trigger::LosesLife(who) => TrigCtx {
+                players: &["TriggeredPlayer"],
+                player_is_you: *who == Who::You,
                 amount: Some("TriggerCount$LifeAmount"),
                 ..TrigCtx::NOTHING
             },
-            Trigger::Draws { .. } | Trigger::Discards(_) => TrigCtx {
-                player: Some("TriggeredPlayer"),
+            // The card drawn is in its owner's hand; the card discarded is in its owner's
+            // graveyard: its controller and owner are the player who drew or discarded it.
+            Trigger::Draws { who, .. } | Trigger::Discards(who) => TrigCtx {
+                players: &[
+                    "TriggeredPlayer",
+                    "TriggeredCardController",
+                    "TriggeredCardOwner",
+                ],
+                player_is_you: *who == Who::You,
+                ..TrigCtx::NOTHING
+            },
+            // Forge's `SpellCast`: `TriggeredActivator` is who cast it, and so is the
+            // controller of the spell (`TriggeredCard`). The spell itself is no "it" here.
+            Trigger::Cast { by, .. } => TrigCtx {
+                players: &["TriggeredActivator", "TriggeredCardController"],
+                player_is_you: *by == Who::You,
+                ..TrigCtx::NOTHING
+            },
+            // Forge's `Phase`: `TriggeredPlayer` is the player whose step it is.
+            Trigger::BeginningOf { whose, .. } => TrigCtx {
+                players: &["TriggeredPlayer"],
+                player_is_you: *whose == Who::You,
                 ..TrigCtx::NOTHING
             },
             Trigger::PlayerAttacks { .. } => TrigCtx::NOTHING,
-            Trigger::Attacks(_) | Trigger::AttacksAlone(_) => TrigCtx {
+            // Forge's `Attacks`: `TriggeredDefendingPlayer` is the player it attacks (this
+            // engine's creatures attack players only).
+            Trigger::Attacks(f) | Trigger::AttacksAlone(f) => TrigCtx {
                 it: &["TriggeredCard", "TriggeredAttacker"],
+                it_is_this: *f == ObjFilter::This,
+                players: &["TriggeredDefendingPlayer"],
                 ..TrigCtx::NOTHING
             },
             Trigger::Blocks(_) => TrigCtx {
@@ -406,10 +463,19 @@ impl TrigCtx {
             Trigger::Dies(f) => TrigCtx {
                 died: true,
                 died_self: *f == ObjFilter::This,
+                it_is_this: *f == ObjFilter::This,
+                ..TrigCtx::default()
+            },
+            Trigger::Enters(f) | Trigger::Leaves(f) => TrigCtx {
+                it_is_this: *f == ObjFilter::This,
                 ..TrigCtx::default()
             },
             _ => TrigCtx::default(),
         }
+    }
+
+    fn is_player(&self, name: &str) -> bool {
+        self.players.contains(&name)
     }
 }
 
@@ -859,15 +925,23 @@ impl<'a> Tx<'a> {
         if let Ok(n) = text.trim_start_matches('+').parse::<u32>() {
             return Some(Amount::Fixed(n));
         }
-        let a = self.expr(text)?;
+        self.chain_targets = Some(chain.targets.len());
+        self.read_target = false;
+        let a = self.expr(text);
+        self.chain_targets = None;
+        if std::mem::take(&mut self.read_target) {
+            chain.refers_to_targets.set(true);
+        }
+        let a = a?;
         match a {
-            // The announced X of the cost, or a property of the triggering object: used
-            // directly.
+            // The announced X of the cost, a property of the triggering object or of the
+            // target: used directly, where it is needed (CR 608.2h).
             Amount::X
             | Amount::TriggeringPower
             | Amount::TriggeringToughness
             | Amount::TriggeringAmount
-            | Amount::SacrificedPower => Some(a),
+            | Amount::SacrificedPower
+            | Amount::OfTarget { .. } => Some(a),
             // Read off the battlefield: worked out once for the whole resolution (CR
             // 608.2h), as "X".
             _ => match &chain.x {
@@ -972,6 +1046,28 @@ impl<'a> Tx<'a> {
             };
             if amount.is_some() {
                 return amount;
+            }
+        }
+        // "Its power", "its mana value": of the chain's one target, as it last existed if
+        // it is gone (CR 608.2h). Forge: the targets of this instruction or the nearest
+        // one before it that has any.
+        if let Some(what) = v.strip_prefix("Targeted$") {
+            let what = match what {
+                "CardPower" => Some(Measure::Power),
+                "CardToughness" => Some(Measure::Toughness),
+                "CardManaCost" => Some(Measure::ManaValue),
+                _ => None,
+            };
+            match (what, self.chain_targets) {
+                (Some(what), Some(1)) => {
+                    self.read_target = true;
+                    return Some(Amount::OfTarget { slot: 0, what });
+                }
+                (Some(_), Some(_)) => {
+                    self.block("expr:Targeted$ with no one target");
+                    return None;
+                }
+                _ => {}
             }
         }
         match v {
@@ -1089,33 +1185,70 @@ impl<'a> Tx<'a> {
 
     // ------------------------------------------------------------------ references
 
-    fn player(&mut self, rd: &Rd<'a>, chain: &Chain, triggered: bool) -> Option<PlayerRef> {
-        match rd.get("Defined") {
-            None | Some("You") => Some(PlayerRef::You),
-            Some("Player.Opponent" | "Opponent") => Some(PlayerRef::EachOpponent),
-            Some("Player") => Some(PlayerRef::Each),
-            // "Its controller": of the chain's one target, as resolution began.
-            Some("TargetedController") if chain.targets.len() == 1 => {
+    /// One player named by Forge's `Defined$`-style name, other than "each player" and
+    /// "each opponent": you; the controller or owner of the chain's one target; the
+    /// player the trigger's event happened to; the controller of the event's object.
+    /// `None` (nothing blocked yet) if the name is none of those.
+    fn named_player(&mut self, name: &str, chain: &Chain, triggered: bool) -> Option<PlayerRef> {
+        match name {
+            "You" => Some(PlayerRef::You),
+            // "Its controller" / "its owner": of the chain's one target (CR 608.2h). Forge
+            // finds no controller for a player or a card in a graveyard, so those are not
+            // compiled.
+            "TargetedController" | "TargetedOwner" if chain.targets.len() == 1 => {
+                if !matches!(
+                    chain.targets[0],
+                    TargetFilter::AnyTarget
+                        | TargetFilter::Creature
+                        | TargetFilter::Permanent(_)
+                        | TargetFilter::Spell
+                        | TargetFilter::SpellMatching(_)
+                ) {
+                    self.block(format!("defined:{name} of a player or card"));
+                    return None;
+                }
                 chain.refers_to_targets.set(true);
-                Some(PlayerRef::ControllerOf(0))
+                Some(if name == "TargetedController" {
+                    PlayerRef::ControllerOf(0)
+                } else {
+                    PlayerRef::OwnerOf(0)
+                })
             }
-            // "That player": the player the event happened to.
-            Some(name) if triggered && self.trig.player == Some(name) => {
-                Some(PlayerRef::TriggeringPlayer)
+            // "That player": the player the event happened to — "you", where only the
+            // ability's controller's events trigger it.
+            name if triggered && self.trig.is_player(name) => {
+                if self.trig.player_is_you {
+                    self.took_player_for_you = true;
+                    Some(PlayerRef::You)
+                } else {
+                    Some(PlayerRef::TriggeringPlayer)
+                }
             }
             // "Its controller": whoever controlled the event's object last (CR 608.2h);
-            // of this permanent, the ability's controller.
-            Some(name)
-                if triggered
-                    && name
-                        .strip_suffix("Controller")
-                        .is_some_and(|base| self.trig.named(base).is_some()) =>
+            // of this permanent, the ability's controller (CR 603.3a).
+            name if triggered
+                && name
+                    .strip_suffix("Controller")
+                    .is_some_and(|base| self.trig.named(base).is_some()) =>
             {
                 match self.trig.named(name.trim_end_matches("Controller")) {
                     Some(Named::This) => Some(PlayerRef::You),
+                    _ if self.trig.it_is_this => {
+                        self.took_it_for_this = true;
+                        Some(PlayerRef::You)
+                    }
                     _ => Some(PlayerRef::TriggeringController),
                 }
             }
+            _ => None,
+        }
+    }
+
+    fn player(&mut self, rd: &Rd<'a>, chain: &Chain, triggered: bool) -> Option<PlayerRef> {
+        match rd.get("Defined") {
+            None => Some(PlayerRef::You),
+            Some("Player.Opponent" | "Opponent") => Some(PlayerRef::EachOpponent),
+            Some("Player") => Some(PlayerRef::Each),
             Some("Targeted") => match chain.targets.len() {
                 0 => {
                     self.block("defined:Targeted-without-target");
@@ -1126,26 +1259,41 @@ impl<'a> Tx<'a> {
                     Some(PlayerRef::Target(n as u8 - 1))
                 }
             },
-            Some(other) => {
-                self.block(format!("defined:player {other}"));
-                None
-            }
+            Some(name) => self.one_player(name, chain, triggered, "defined:player "),
         }
+    }
+
+    /// [`Tx::named_player`], or a blocker `<what> <name>`.
+    fn one_player(
+        &mut self,
+        name: &str,
+        chain: &Chain,
+        triggered: bool,
+        what: &str,
+    ) -> Option<PlayerRef> {
+        let before = self.blockers.len();
+        let p = self.named_player(name, chain, triggered);
+        if p.is_none() && self.blockers.len() == before {
+            self.block(format!("{what}{name}"));
+        }
+        p
     }
 
     /// `Defined$` of an effect done to objects and players alike (damage). Forge's default
     /// is the card itself.
     fn recipient(&mut self, rd: &Rd<'a>, chain: &Chain, triggered: bool) -> Option<TargetRef> {
         match rd.rec.get("Defined") {
-            Some("You" | "Opponent" | "Player.Opponent" | "Player" | "TargetedController") => {
-                self.player(rd, chain, triggered).map(TargetRef::Players)
-            }
+            Some(
+                "You" | "Opponent" | "Player.Opponent" | "Player" | "TargetedController"
+                | "TargetedOwner",
+            ) => self.player(rd, chain, triggered).map(TargetRef::Players),
             // A player the event names.
             Some(name)
-                if self.trig.player == Some(name)
-                    || name
-                        .strip_suffix("Controller")
-                        .is_some_and(|base| self.trig.named(base).is_some()) =>
+                if triggered
+                    && (self.trig.is_player(name)
+                        || name
+                            .strip_suffix("Controller")
+                            .is_some_and(|base| self.trig.named(base).is_some())) =>
             {
                 self.player(rd, chain, triggered).map(TargetRef::Players)
             }
@@ -1377,11 +1525,42 @@ impl<'a> Tx<'a> {
                 };
                 let amount = self.amount(rd.get(key).unwrap_or("1"), chain);
                 let (who, amount) = (who?, amount?);
-                match api {
+                let e = match api {
                     "Draw" => Effect::Draw { who, amount },
                     "Mill" => Effect::Mill { who, amount },
                     "GainLife" => Effect::GainLife { who, amount },
                     _ => Effect::LoseLife { who, amount },
+                };
+                // "[They] may draw": Forge's draw asks the player who would draw, whatever
+                // `OptionalDecider$` names. Compiled where it names that one player.
+                match (api, rd.get("OptionalDecider")) {
+                    (_, None) => e,
+                    ("Draw", Some(name)) => {
+                        let decider =
+                            self.one_player(name, chain, triggered, "param:Draw.OptionalDecider=")?;
+                        match who {
+                            PlayerRef::You if decider == who => Effect::May(Box::new(e)),
+                            PlayerRef::ControllerOf(_)
+                            | PlayerRef::OwnerOf(_)
+                            | PlayerRef::TriggeringController
+                            | PlayerRef::TriggeringPlayer
+                                if decider == who =>
+                            {
+                                Effect::PlayerMay {
+                                    who,
+                                    effect: Box::new(e),
+                                }
+                            }
+                            _ => {
+                                self.block("param:Draw.OptionalDecider not the drawer");
+                                return None;
+                            }
+                        }
+                    }
+                    (api, Some(_)) => {
+                        self.block(format!("param:{api}.OptionalDecider"));
+                        return None;
+                    }
                 }
             }
             // A spell or a non-mana ability that adds mana: one type, any amount.
@@ -1814,13 +1993,14 @@ impl<'a> Tx<'a> {
             "Token" => {
                 let script = rd.get("TokenScript");
                 let count = self.amount(rd.get("TokenAmount").unwrap_or("1"), chain);
-                match rd.get("TokenOwner") {
-                    None | Some("You") => {}
-                    Some(other) => {
-                        self.block(format!("param:Token.TokenOwner={other}"));
-                        return None;
+                // Who creates the tokens, and so owns and controls them (CR 111.2): "its
+                // controller creates …" — of a target, or of the event's object.
+                let who = match rd.get("TokenOwner") {
+                    None => Some(PlayerRef::You),
+                    Some(name) => {
+                        self.one_player(name, chain, triggered, "param:Token.TokenOwner=")
                     }
-                }
+                };
                 let Some(script) = script else {
                     self.block("Token:no-script");
                     return None;
@@ -1829,7 +2009,7 @@ impl<'a> Tx<'a> {
                 Effect::CreateToken {
                     token: script.to_string(),
                     count: count?,
-                    who: PlayerRef::You,
+                    who: who?,
                 }
             }
             "PutCounter" => {
@@ -2293,30 +2473,29 @@ impl<'a> Tx<'a> {
         // Who pays: Forge's default is the controller of this instruction's target.
         let own_target =
             (chain.targets.len() == targets_before + 1).then_some(targets_before as u8);
-        let who = match payer {
-            Some("You") => PlayerRef::You,
-            None | Some("TargetedController") => match own_target {
-                Some(slot) => PlayerRef::ControllerOf(slot),
-                None => {
-                    self.block("unless:payer without a target");
+        let who = match (payer, own_target) {
+            (None | Some("TargetedController"), Some(slot)) => {
+                // Forge has no controller for a player or a card in a graveyard.
+                if !matches!(
+                    chain.targets[slot as usize],
+                    TargetFilter::AnyTarget
+                        | TargetFilter::Creature
+                        | TargetFilter::Permanent(_)
+                        | TargetFilter::Spell
+                        | TargetFilter::SpellMatching(_)
+                ) {
+                    self.block("unless:payer of a player or card");
                     return None;
                 }
-            },
-            Some(name) if triggered && self.trig.player == Some(name) => {
-                PlayerRef::TriggeringPlayer
+                PlayerRef::ControllerOf(slot)
             }
-            Some(name)
-                if triggered
-                    && name
-                        .strip_suffix("Controller")
-                        .is_some_and(|base| self.trig.named(base) == Some(Named::It)) =>
-            {
-                PlayerRef::TriggeringController
-            }
-            Some(other) => {
-                self.block(format!("unless:payer {other}"));
+            (None, None) => {
+                self.block("unless:payer without a target");
                 return None;
             }
+            // The controller of the chain's target, the player the event happened to, the
+            // controller of its object, you.
+            (Some(name), _) => self.one_player(name, chain, triggered, "unless:payer ")?,
         };
         if (cost.tap || cost.sacrifice_self) && who != PlayerRef::You {
             self.block("unless:cost uses the source");
@@ -2397,14 +2576,11 @@ impl<'a> Tx<'a> {
         let public = matches!(from, CardZone::Graveyard | CardZone::Battlefield);
         // Whose zone: the activator's unless `DefinedPlayer$` says otherwise.
         let who = match rd.get("DefinedPlayer") {
-            None | Some("You") => PlayerRef::You,
+            None => PlayerRef::You,
             Some("Player") => PlayerRef::Each,
             Some("Player.Opponent" | "Opponent") => PlayerRef::EachOpponent,
-            Some("TriggeredCardController") if triggered => PlayerRef::TriggeringController,
-            Some(other) => {
-                self.block(format!("defined:player {other}"));
-                return None;
-            }
+            // "Its controller searches their library": of the target, of the event's object.
+            Some(name) => self.one_player(name, chain, triggered, "defined:player ")?,
         };
         let filter = rd.get("ChangeType");
         let cards = match filter {
@@ -2461,6 +2637,9 @@ impl<'a> Tx<'a> {
             return None;
         }
         let shuffle = from == CardZone::Library && !no_shuffle;
+        // "May search": Forge asks each searching player (docs/forge/effects.md §1), before
+        // anything is looked at.
+        let optional = rd.get("Optional").is_some();
         let effect = Effect::ChooseCards {
             who,
             from,
@@ -2470,10 +2649,15 @@ impl<'a> Tx<'a> {
             to,
             reveal,
             shuffle,
+            optional: optional && who != PlayerRef::You,
         };
-        // "You may search…": one yes/no before anything is looked at.
-        if rd.get("Optional").is_some() {
-            return Some(Effect::May(Box::new(effect)));
+        // "You may search…": one yes/no of the controller's.
+        if optional {
+            return Some(if who == PlayerRef::You {
+                Effect::May(Box::new(effect))
+            } else {
+                effect
+            });
         }
         // The card says "you may search" where the script has a plain search: Forge lets
         // the search find nothing and always shuffles, the card lets the player leave the
@@ -2494,7 +2678,35 @@ impl<'a> Tx<'a> {
             })
             .count();
         if says_may == 1 && searches == 1 {
-            Some(Effect::May(Box::new(effect)))
+            // "You may search", or "that player may search": the searcher decides.
+            Some(match effect {
+                Effect::ChooseCards {
+                    who: PlayerRef::You,
+                    ..
+                } => Effect::May(Box::new(effect)),
+                Effect::ChooseCards {
+                    who,
+                    from,
+                    cards,
+                    count,
+                    must,
+                    to,
+                    reveal,
+                    shuffle,
+                    ..
+                } => Effect::ChooseCards {
+                    who,
+                    from,
+                    cards,
+                    count,
+                    must,
+                    to,
+                    reveal,
+                    shuffle,
+                    optional: true,
+                },
+                other => other,
+            })
         } else {
             self.block("ChangeZone:optional search differs from the card");
             None
@@ -3665,14 +3877,10 @@ impl<'a> Tx<'a> {
                 None => self.block("trig:zone unstated"),
                 Some(z) => self.block(format!("trig:zone {z}")),
             }
-            let optional = match rd.get("OptionalDecider") {
-                None => false,
-                Some("You") => true,
-                Some(o) => {
-                    self.block(format!("trig:OptionalDecider {o}"));
-                    false
-                }
-            };
+            // Who decides whether the ability does anything (decided once its event is
+            // known, below).
+            let decider = rd.get("OptionalDecider");
+            let optional = decider.is_some();
             let secondary = match rd.get("Secondary") {
                 None => false,
                 Some("True") => true,
@@ -3685,6 +3893,14 @@ impl<'a> Tx<'a> {
             let cond = self.condition(&rd);
             let exec = rd.get("Execute").unwrap_or("");
             rd.finish(&mut self.blockers);
+            if secondary
+                && let Some(event) = &event
+                && ((self.it_is_you.contains(exec) && !TrigCtx::of(event).it_is_this)
+                    || (self.player_is_you.contains(exec) && !TrigCtx::of(event).player_is_you))
+            {
+                self.block("trig:Secondary about another object");
+                return;
+            }
             if secondary
                 && let Some(event) = &event
                 && let Some((_, _, AbilityDef::Triggered { when, .. })) =
@@ -3706,14 +3922,32 @@ impl<'a> Tx<'a> {
             self.in_trigger = true;
             self.optional_trigger = optional;
             self.trig = event.as_ref().map(TrigCtx::of).unwrap_or_default();
+            self.took_it_for_this = false;
+            self.took_player_for_you = false;
+            // "You may …", or "that creature's controller may …" (CR 603.5: decided as
+            // the ability resolves). Forge asks this player whether the ability resolves.
+            let decider = match decider {
+                None => Some(None),
+                Some(name) => self
+                    .one_player(name, &Chain::default(), true, "trig:OptionalDecider ")
+                    .map(Some),
+            };
             let body = match self.sub(exec) {
                 Some(r) => self.body(r, true, "DB"),
                 None => None,
             };
+            if std::mem::take(&mut self.took_it_for_this) {
+                self.it_is_you.insert(exec.to_string());
+            }
+            if std::mem::take(&mut self.took_player_for_you) {
+                self.player_is_you.insert(exec.to_string());
+            }
             self.in_trigger = false;
             self.optional_trigger = false;
             self.trig = TrigCtx::default();
-            let (Some(when), Some(intervening_if), Some(mut body)) = (event, cond, body) else {
+            let (Some(when), Some(intervening_if), Some(mut body), Some(decider)) =
+                (event, cond, body, decider)
+            else {
                 self.explained(before, "trigger");
                 return;
             };
@@ -3729,12 +3963,26 @@ impl<'a> Tx<'a> {
                     ..
                 })
             );
-            if optional && !priced {
+            if priced && decider.is_some_and(|d| d != PlayerRef::You) {
+                // Forge asks the decider, then the activator pays.
+                self.block("trig:OptionalDecider with a cost");
+                return;
+            }
+            if let Some(decider) = decider
+                && !priced
+            {
                 // "You may": decided as the ability resolves.
+                let wrap = |effect: Effect| match decider {
+                    PlayerRef::You => Effect::May(Box::new(effect)),
+                    who => Effect::PlayerMay {
+                        who,
+                        effect: Box::new(effect),
+                    },
+                };
                 body = match body {
                     Body::Effect(m) => Body::Effect(Mode {
                         targets: m.targets,
-                        effect: Effect::May(Box::new(m.effect)),
+                        effect: wrap(m.effect),
                         groups: m.groups,
                     }),
                     modal => {
@@ -3794,6 +4042,10 @@ impl<'a> Tx<'a> {
                 self.equipment,
             );
             let outer_additional = std::mem::take(&mut self.additional);
+            let outer_took = (
+                std::mem::take(&mut self.took_it_for_this),
+                std::mem::take(&mut self.took_player_for_you),
+            );
             self.in_trigger = false;
             self.optional_trigger = false;
             self.trig = TrigCtx::default();
@@ -3832,6 +4084,7 @@ impl<'a> Tx<'a> {
                 self.equipment,
             ) = outer;
             let extra = std::mem::replace(&mut self.additional, outer_additional);
+            (self.took_it_for_this, self.took_player_for_you) = outer_took;
             let Some(a) = a else {
                 self.explained(before, "granted ability");
                 return None;
@@ -4824,6 +5077,12 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
         granted: Vec::new(),
         granting: 0,
         in_effect: false,
+        chain_targets: None,
+        read_target: false,
+        it_is_you: BTreeSet::new(),
+        took_it_for_this: false,
+        player_is_you: BTreeSet::new(),
+        took_player_for_you: false,
     };
     let mut def = CardDef {
         name: face.name.clone(),
@@ -5166,6 +5425,7 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
                         to: CardDest::Hand,
                         reveal: true,
                         shuffle: true,
+                        optional: false,
                     })
                 }
             };
@@ -5337,14 +5597,27 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
     };
     let mut missing = Vec::new();
     let mut compare = |plain: &str, compiled: &str| {
-        // "You may": an optional instruction, or "up to" some number of things.
-        if has_word(plain, "may") && !has_word(compiled, "may") && !compiled.contains("up to") {
+        // "You may": an optional instruction, or "up to" some number of things. "That
+        // player may pay {2}. If they don't, …" is the same as "… unless that player pays
+        // {2}" (CR 118.12a).
+        let unless = compiled
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .filter(|w| *w == "unless")
+            .count();
+        let plain_rest = plain.replacen("may pay", "pays", unless);
+        if has_word(&plain_rest, "may") && !has_word(compiled, "may") && !compiled.contains("up to")
+        {
             missing.push("says may");
         }
         // "Unless": a condition or a payment that lets it not happen ("enters tapped
         // unless you control an Island", "counter target spell unless its controller pays").
         if has_word(plain, "unless") && !has_word(compiled, "unless") {
             missing.push("says unless");
+        }
+        // "Deals 1 damage": not life loss, which some scripts write instead (no lifelink,
+        // no prevention, no damage triggers).
+        if has_word(plain, "damage") && !has_word(compiled, "damage") {
+            missing.push("says damage");
         }
         // "Another target creature": the ability's source can't be chosen.
         if (plain.contains("another target") || plain.contains("other target"))
@@ -5371,6 +5644,23 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
     });
     if narrowed && !plain.contains("you control") && !plain.contains("your") {
         missing.push("target you control");
+    }
+    // "That artifact deals damage equal to its mana value to …": the other object is the
+    // source of the damage (its color, lifelink and deathtouch count), which some scripts
+    // make the card itself.
+    for noun in [
+        "artifact",
+        "creature",
+        "permanent",
+        "land",
+        "enchantment",
+        "planeswalker",
+        "spell",
+        "source",
+    ] {
+        if plain.contains(&format!("that {noun} deals")) && !compiled.contains("it deals") {
+            missing.push("that one deals damage");
+        }
     }
     // "Is put into your graveyard from the battlefield" is about whose card it is; the
     // script may say whose creature it was.

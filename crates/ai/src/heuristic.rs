@@ -31,8 +31,31 @@ enum Polarity {
     Neutral,
 }
 
+/// Is an effect done to `who` something the spell's controller chooses a target for?
+/// "Its controller gains life", "that player draws": it goes to someone else, whoever is
+/// targeted — it says nothing about which target is best.
+fn aimed(who: &card_model::PlayerRef) -> bool {
+    matches!(
+        who,
+        card_model::PlayerRef::You | card_model::PlayerRef::Target(_)
+    )
+}
+
 fn effect_polarity(e: &Effect) -> Polarity {
     match e {
+        // Given to the target's controller, or to the player an event happened to (Beast
+        // Within's token, Swords to Plowshares' life): a price, not the point.
+        Effect::GainLife { who, .. }
+        | Effect::Draw { who, .. }
+        | Effect::CreateToken { who, .. }
+        | Effect::AddMana { who, .. }
+        | Effect::LoseLife { who, .. }
+            if !aimed(who) =>
+        {
+            Polarity::Neutral
+        }
+        // Another player's choice: what it does.
+        Effect::PlayerMay { effect, .. } => effect_polarity(effect),
         Effect::Seq(v) => v
             .iter()
             .map(effect_polarity)
@@ -1093,8 +1116,17 @@ impl Agent for HeuristicAgent {
                 };
                 Response::Pick(vec![d.options.iter().position(keeps).unwrap_or(0)])
             }
+            // "You may draw", "its controller may search their library": what a "may"
+            // offers is nearly always worth having.
+            (ChoiceKind::MayAbility, _) => Response::Pick(vec![
+                d.options
+                    .iter()
+                    .position(|o| matches!(o, OptionDesc::Accept))
+                    .unwrap_or(0),
+            ]),
             // Paying is nearly always right: it is offered only when it can be afforded,
-            // and it buys the effect or stops the harm.
+            // and it buys the effect or stops the harm — an opponent's "unless that player
+            // pays {1}" is a card (or a Treasure) they don't get.
             (ChoiceKind::PayUnlessCost, _) => Response::Pick(vec![
                 d.options
                     .iter()
