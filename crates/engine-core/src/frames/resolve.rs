@@ -111,6 +111,14 @@ pub enum Work {
         player: PlayerId,
         effect: Box<Effect>,
     },
+    /// "If you do, [then]": the instruction before it has been carried out; `then` happens
+    /// if that changed anything — any event since `since` (`GameState::event_count`). An
+    /// instruction with nothing left to act on (the card is gone) does nothing at all.
+    IfDone {
+        k: usize,
+        then: Box<Effect>,
+        since: u64,
+    },
 }
 
 /// The fixed part of a [`Work::ChooseCards`] (amounts already worked out, CR 608.2h).
@@ -306,7 +314,7 @@ impl ResolveFrame {
             t,
             self.controller,
             self.object,
-            self.ability_source(),
+            self.ability_source(st),
         )
         .then_some(t)
     }
@@ -416,8 +424,14 @@ impl ResolveFrame {
     }
 
     /// For an ability: the object it is on ("another target …" is other than it).
-    fn ability_source(&self) -> Option<ObjectId> {
-        (self.object != Some(self.source)).then_some(self.source)
+    fn ability_source(&self, st: &GameState) -> Option<ObjectId> {
+        (self.object != Some(self.source)).then(|| self.this_card(st))
+    }
+
+    /// What "another" is other than (`triggers::this_card`): the source, or the card it
+    /// became if this ability triggered on its leaving the battlefield.
+    fn this_card(&self, st: &GameState) -> ObjectId {
+        crate::triggers::this_card(st, self.source, self.subject, self.facts.moved)
     }
 
     /// The source's current characteristics, or its last known ones (CR 608.2h, 113.7a).
@@ -633,6 +647,11 @@ impl ResolveFrame {
                         self.work.push(Work::Eval { k, effect: unpaid });
                     }
                 },
+                Work::IfDone { k, then, since } => {
+                    if st.event_count > since {
+                        self.work.push(Work::Eval { k, effect: then });
+                    }
+                }
                 Work::PlayerMay { k, player, effect } => match input.take() {
                     None if st.in_game(player) => {
                         self.work.push(Work::PlayerMay { k, player, effect });
@@ -784,7 +803,7 @@ impl ResolveFrame {
                         let mut pool: Vec<ObjectId> = zone_cards(st, spec.from, p)
                             .into_iter()
                             .filter(|&id| {
-                                card_fits(st, id, &spec.cards, self.source, self.controller)
+                                card_fits(st, id, &spec.cards, self.this_card(st), self.controller)
                             })
                             .collect();
                         if library {
@@ -1102,7 +1121,7 @@ impl ResolveFrame {
                             .iter()
                             .copied()
                             .filter(|&id| {
-                                card_fits(st, id, &spec.cards, self.source, self.controller)
+                                card_fits(st, id, &spec.cards, self.this_card(st), self.controller)
                             })
                             .collect();
                         let (min, max) = match spec.take {
@@ -1361,7 +1380,7 @@ impl ResolveFrame {
                     t,
                     self.controller,
                     Some(top.id),
-                    self.ability_source(),
+                    self.ability_source(st),
                 );
             }
         }
@@ -1820,6 +1839,16 @@ impl ResolveFrame {
                 });
                 Vec::new()
             }
+            // CR 608.2c: "If you do" — whether the first instruction happened.
+            Effect::IfDone { first, then } => {
+                self.work.push(Work::IfDone {
+                    k,
+                    then,
+                    since: st.event_count,
+                });
+                self.work.push(Work::Eval { k, effect: first });
+                Vec::new()
+            }
             Effect::PlayerMay { who, effect } => {
                 if let Some(player) = self.player(st, k, who) {
                     self.work.push(Work::PlayerMay { k, player, effect });
@@ -1921,11 +1950,9 @@ impl ResolveFrame {
                 let players = self.players_apnap(st, k, whose);
                 let mut found: Vec<ObjectId> = Vec::new();
                 for &p in &players {
-                    found.extend(
-                        zone_cards(st, from, p)
-                            .into_iter()
-                            .filter(|&id| card_fits(st, id, &cards, self.source, self.controller)),
-                    );
+                    found.extend(zone_cards(st, from, p).into_iter().filter(|&id| {
+                        card_fits(st, id, &cards, self.this_card(st), self.controller)
+                    }));
                 }
                 // Permanents in timestamp order whoever controls them.
                 if from == CardZone::Battlefield {

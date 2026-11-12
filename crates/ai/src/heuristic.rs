@@ -56,6 +56,10 @@ fn effect_polarity(e: &Effect) -> Polarity {
         }
         // Another player's choice: what it does.
         Effect::PlayerMay { effect, .. } => effect_polarity(effect),
+        Effect::IfDone { first, then } => match effect_polarity(first) {
+            Polarity::Neutral => effect_polarity(then),
+            p => p,
+        },
         Effect::Seq(v) => v
             .iter()
             .map(effect_polarity)

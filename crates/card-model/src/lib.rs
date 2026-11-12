@@ -1450,6 +1450,13 @@ pub enum Effect {
         who: PlayerRef,
         effect: Box<Effect>,
     },
+    /// "[first]. If you do, [then]": `then` happens only if `first` did something (CR
+    /// 608.2c, 614.6) — "you may exile it. If you do, return another target card…" does
+    /// nothing more if the card to exile is already gone.
+    IfDone {
+        first: Box<Effect>,
+        then: Box<Effect>,
+    },
 }
 
 /// A zone an effect takes cards out of as it resolves.

@@ -1852,6 +1852,18 @@ impl<'a> Tx<'a> {
                     self.block("Dig:each player chooses");
                     return None;
                 }
+                // Another player's cards put onto the battlefield: Forge gives them to their
+                // owner; by CR 110.2a it is whoever the card tells to put them there. Only
+                // where nothing is chosen (the library's player reveals and puts them, as
+                // the engine's text says) is that the owner for sure.
+                let battlefield = |d: CardDest| matches!(d, CardDest::Battlefield { .. });
+                let theirs = take == Take::All
+                    && (rest_random || count == Some(Amount::Fixed(1)) || !in_library(rest))
+                    && !(valid.is_some() && !no_reveal && !reveal);
+                if who != PlayerRef::You && (battlefield(to) || battlefield(rest)) && !theirs {
+                    self.block("Dig:another player's cards onto the battlefield, chosen by you");
+                    return None;
+                }
                 Effect::Dig {
                     who,
                     count: count?,
@@ -4027,6 +4039,37 @@ impl<'a> Tx<'a> {
                 // Forge asks the decider, then the activator pays.
                 self.block("trig:OptionalDecider with a cost");
                 return;
+            }
+            // "You may [X]. If you do, [Y]": Forge runs the whole chain once its decider
+            // says yes; the card does Y only if X happened.
+            let if_you_do = rec.get("TriggerDescription").is_some_and(|d| {
+                let d = d.to_lowercase();
+                d.matches("if you do").count() + d.matches("this way").count() == 1
+                    && d.contains("may ")
+            });
+            if decider.is_some()
+                && !priced
+                && if_you_do
+                && let Body::Effect(m) = &mut body
+                && let Effect::Seq(v) = &mut m.effect
+            {
+                // The first instruction that does something ("where X is" comes with it).
+                let first = v
+                    .iter()
+                    .position(|e| !matches!(e, Effect::SetX(_)))
+                    .unwrap_or(0);
+                if first + 1 < v.len() {
+                    let then = v.split_off(first + 1);
+                    let first = std::mem::take(v);
+                    m.effect = Effect::IfDone {
+                        first: Box::new(Effect::Seq(first)),
+                        then: Box::new(if then.len() == 1 {
+                            then.into_iter().next().expect("one")
+                        } else {
+                            Effect::Seq(then)
+                        }),
+                    };
+                }
             }
             if let Some(decider) = decider
                 && !priced

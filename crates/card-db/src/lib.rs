@@ -765,6 +765,15 @@ fn check_cost(cost: &Cost, p: &mut dyn FnMut(String)) {
     }
 }
 
+/// Does this instruction define X for what follows ("…where X is", `SetX`)?
+fn first_sets_x(e: &Effect) -> bool {
+    match e {
+        Effect::SetX(_) => true,
+        Effect::Seq(v) => v.iter().any(first_sets_x),
+        _ => false,
+    }
+}
+
 /// The target slots whose power, toughness or mana value an effect reads.
 fn amounts_of_targets(e: &Effect, out: &mut Vec<u8>, hands: &mut Vec<PlayerRef>) {
     // Walk the serialized form: amounts sit in many places of many effects.
@@ -882,6 +891,10 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         }
         Effect::SetX(a) => amount(a, p),
         Effect::May(inner) => check_effect(inner, mode, has_x, p),
+        Effect::IfDone { first, then } => {
+            check_effect(first, mode, has_x, p);
+            check_effect(then, mode, has_x || first_sets_x(first), p);
+        }
         Effect::PlayerMay { who, effect } => {
             match who {
                 PlayerRef::Each | PlayerRef::EachOpponent => {
@@ -926,6 +939,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
                     Effect::Seq(_)
                         | Effect::May(_)
                         | Effect::PlayerMay { .. }
+                        | Effect::IfDone { .. }
                         | Effect::Together(_)
                         | Effect::SetX(_)
                 ) {

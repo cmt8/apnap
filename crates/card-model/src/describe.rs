@@ -184,6 +184,15 @@ fn amount(a: &Amount) -> String {
 }
 
 fn target_filter(f: &TargetFilter) -> String {
+    let text = target_filter_words(f);
+    // "Another target Elf card", not "target another Elf card".
+    match text.strip_prefix("target another ") {
+        Some(rest) => format!("another target {rest}"),
+        None => text,
+    }
+}
+
+fn target_filter_words(f: &TargetFilter) -> String {
     match f {
         TargetFilter::AnyTarget => "any target".into(),
         TargetFilter::Creature => "target creature".into(),
@@ -249,7 +258,10 @@ fn target(mode: &Mode, r: TargetRef) -> String {
                 .map_or("the target".to_string(), target_filter);
             // A slot that may stay empty (CR 115.3: "up to one target …").
             match mode.group_of(i as usize) {
-                Some(g) if g.count == 1 && g.min == 0 => format!("up to one {text}"),
+                Some(g) if g.count == 1 && g.min == 0 => match text.strip_prefix("another ") {
+                    Some(rest) => format!("up to one other {rest}"),
+                    None => format!("up to one {text}"),
+                },
                 _ => text,
             }
         }
@@ -785,6 +797,9 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 format!("you may {}", text.strip_prefix("you ").unwrap_or(&text))
             }
         }
+        Effect::IfDone { first, then } => {
+            format!("{}. If you do, {}", effect(mode, first), effect(mode, then))
+        }
         // "Its controller may draw a card": the instruction in the decider's own words.
         Effect::PlayerMay { who, effect: inner } => {
             let who = player(mode, *who);
@@ -947,7 +962,15 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             // player reveals …" has nothing to choose.)
             let each = matches!(who, PlayerRef::Each | PlayerRef::EachOpponent);
             let owner = player(mode, *who);
-            let (who, their) = match (owner.as_str(), each) {
+            // Nothing for the effect's controller to decide: every card that qualifies goes
+            // one way, the rest the other (and is not put back in an order of their
+            // choosing). Then the library's player is the one who reveals and puts them —
+            // and controls what they put onto the battlefield (CR 110.2a).
+            let rest_unordered = *rest_random
+                || *count == Amount::Fixed(1)
+                || !matches!(rest, CardDest::LibraryTop | CardDest::LibraryBottom);
+            let theirs = *take == Take::All && rest_unordered && !(*reveal_taken && !*reveal);
+            let (who, their) = match (owner.as_str(), each || theirs) {
                 ("you", _) => ("you".to_string(), "your".to_string()),
                 (_, true) => (owner.clone(), "their".to_string()),
                 (_, false) => ("you".to_string(), format!("{owner}'s")),
@@ -993,6 +1016,8 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             };
             let taken = if taken.starts_with("you may") {
                 format!("{taken} and put them")
+            } else if shown.is_empty() && !you {
+                format!("{who} puts {taken}")
             } else if shown.is_empty() {
                 format!("put {taken}")
             } else {

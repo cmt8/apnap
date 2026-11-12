@@ -206,6 +206,23 @@ fn queue_matching(st: &mut GameState, found: Vec<PendingTrigger>, conds: Vec<Opt
     }
 }
 
+/// What "another" is other than, for an ability of `source`: the source itself — or, once
+/// it has left the battlefield and triggered on doing so (`subject` is the source), the
+/// card it became there (`moved`). "When this creature dies, return another target
+/// creature card from your graveyard" can't return the dying creature (CR 603.10a: the
+/// ability looks back to the object that left; CR 400.7 makes its card a new object).
+pub(crate) fn this_card(
+    st: &GameState,
+    source: ObjectId,
+    subject: Option<ObjectId>,
+    moved: Option<ObjectId>,
+) -> ObjectId {
+    match moved {
+        Some(card) if subject == Some(source) && !st.objects.contains_key(&source) => card,
+        _ => source,
+    }
+}
+
 /// Detect triggers from a batch of performed events. `lki` holds every object that left
 /// the battlefield in this batch, as it existed just before the batch.
 pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap<ObjectId, Lki>) {

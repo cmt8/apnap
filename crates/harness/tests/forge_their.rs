@@ -1060,3 +1060,207 @@ fn the_ai_pays_an_opponents_tax() {
     let Response::Pick(picked) = r else { panic!() };
     assert_eq!(d.options[picked[0]], OptionDesc::Accept);
 }
+
+// ---------------------------------------------------------------------------------------
+// Follow-ups: who puts a card onto the battlefield; "another" after leaving; "if you do".
+
+// CR 110.2a (2026-11-06): "the owner of target permanent shuffles it into their library,
+// then reveals the top card of their library. If it's a permanent card, they put it onto
+// the battlefield" — the owner reveals (to everyone) and the owner controls what enters.
+// Forge: `Dig | Defined$ TargetedOwner | Reveal$ True | DestinationZone$ Battlefield`
+// (Chaos Warp). A dig of another player's library onto the battlefield in which the caster
+// chooses is not compiled.
+#[test]
+fn the_owner_reveals_and_puts_it_onto_the_battlefield() {
+    let cards = [spell(
+        "Test Warping",
+        "2 R",
+        "Instant",
+        "A:SP$ ChangeZone | Origin$ Battlefield | Destination$ Library | ValidTgts$ Permanent | SubAbility$ DBDig | Shuffle$ True | SpellDescription$ Text.\n\
+         SVar:DBDig:DB$ Dig | Defined$ TargetedOwner | DigNum$ 1 | Reveal$ True | DestinationZone$ Battlefield | DestinationZone2$ Library | LibraryPosition2$ 0 | ChangeNum$ All | ChangeValid$ Permanent",
+    )];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = scenario(3, &cards);
+    sc.cards(P0, Zone::Battlefield, &["Mountain", "Mountain", "Mountain"]);
+    // P1 owns the Golem; P2 controls it.
+    let golem = sc.card(P1, Zone::Battlefield, "Test Golem");
+    let puppetry = sc.card(P2, Zone::Battlefield, "Test Puppetry");
+    sc.attach(puppetry, golem);
+    sc.card(P0, Zone::Hand, "Test Warping");
+    let mut s = Script::new(sc.build());
+    let mine = |s: &Script, p: PlayerId| {
+        s.st.zones
+            .battlefield
+            .iter()
+            .filter(|id| engine_core::layers::chars(&s.st, **id).controller == p)
+            .count()
+    };
+    let before = (mine(&s, P0), mine(&s, P1), mine(&s, P2));
+    s.cast("Test Warping").target_object(golem).pay();
+    settle(&mut s);
+    // The owner (P1, not the controller P2, not the caster) revealed their top card — a
+    // land, a permanent card — and it entered under P1's control.
+    assert!(
+        s.count(
+            |e| matches!(e, Event::Revealed { player, cards } if *player == P1 && cards.len() == 1)
+        ) == 1
+    );
+    // P2 lost the Golem (and the Aura on it, put into its owner's graveyard).
+    assert_eq!(before, (3, 0, 2));
+    assert_eq!((mine(&s, P0), mine(&s, P1), mine(&s, P2)), (3, 1, 0));
+    // "Look at the top card of target player's library; you may put it onto the
+    // battlefield": who is told to put it there would be a guess.
+    let b = forge_test_blockers(&spell(
+        "Test Peeking",
+        "U",
+        "Sorcery",
+        "A:SP$ Dig | ValidTgts$ Player | DigNum$ 1 | ChangeNum$ 1 | Optional$ True | DestinationZone$ Battlefield | SpellDescription$ Text.",
+    ));
+    assert!(
+        b.iter()
+            .any(|x| x == "Dig:another player's cards onto the battlefield, chosen by you"),
+        "{b:?}"
+    );
+}
+
+// CR 400.7e, 603.10a, 603.3d (2026-11-06): "when this creature dies, return another target
+// Elf card from your graveyard to your hand" can't return the dying creature's own card;
+// with no other Elf card there, the ability has no target and is removed from the stack.
+// Forge: `ValidTgts$ Elf.Other+YouOwn` on a dies trigger (Elderfang Ritualist); and the
+// same for a card chosen as it resolves (`Hidden$`).
+#[test]
+fn another_target_card_is_not_the_dying_card() {
+    let cards = [
+        creature(
+            "Test Ritualist",
+            "1 B",
+            "3/1",
+            "T:Mode$ ChangesZone | Origin$ Battlefield | Destination$ Graveyard | ValidCard$ Card.Self | Execute$ TrigReturn | TriggerDescription$ Text.\n\
+             SVar:TrigReturn:DB$ ChangeZone | Origin$ Graveyard | Destination$ Hand | ValidTgts$ Elf.Other+YouOwn",
+        ),
+        creature(
+            "Test Gravedigger",
+            "1 B",
+            "2/2",
+            "T:Mode$ ChangesZone | Origin$ Battlefield | Destination$ Graveyard | ValidCard$ Card.Self | Execute$ TrigReturn | TriggerDescription$ Text.\n\
+             SVar:TrigReturn:DB$ ChangeZone | Origin$ Graveyard | Destination$ Hand | Hidden$ True | ChangeType$ Creature.Other+YouOwn | ChangeNum$ 1",
+        ),
+        spell(
+            "Test Smiting",
+            "B",
+            "Instant",
+            "A:SP$ Destroy | ValidTgts$ Creature | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let build = |graveyard: &[&str], dying: &str| {
+        let mut sc = scenario(3, &cards);
+        sc.card(P0, Zone::Battlefield, "Swamp");
+        let it = sc.card(P0, Zone::Battlefield, dying);
+        sc.cards(P0, Zone::Graveyard, graveyard);
+        sc.card(P0, Zone::Hand, "Test Smiting");
+        let mut s = Script::new(sc.build());
+        s.cast("Test Smiting").target_object(it).pay();
+        s.pass_all();
+        s
+    };
+    // Another Elf card in the graveyard: it is the only target offered.
+    let mut s = build(&["Test Elf"], "Test Ritualist");
+    assert_eq!(s.kind(), ChoiceKind::ChooseTargets { slot: 0 });
+    let offered: Vec<String> = s.options().iter().map(|o| s.describe(o)).collect();
+    assert_eq!(offered, ["target Test Elf"]);
+    s.respond(Response::Pick(vec![0]));
+    settle(&mut s);
+    assert!(s.find(P0, Zone::Hand, "Test Elf").is_some());
+    assert!(s.find(P0, Zone::Graveyard, "Test Ritualist").is_some());
+    // None: no target, the ability is removed; the Ritualist stays in the graveyard.
+    let mut s = build(&[], "Test Ritualist");
+    settle(&mut s);
+    assert!(s.find(P0, Zone::Graveyard, "Test Ritualist").is_some());
+    assert_eq!(hand(&s, P0), 0);
+    // Chosen as it resolves: the dying card isn't offered either.
+    let mut s = build(&["Test Elf"], "Test Gravedigger");
+    pass_until_asked(&mut s);
+    assert_eq!(s.kind(), ChoiceKind::ChooseCards);
+    let offered: Vec<String> = s.options().iter().map(|o| s.describe(o)).collect();
+    assert_eq!(offered, ["Test Elf"]);
+    s.respond(Response::Pick(vec![0]));
+    settle(&mut s);
+    assert!(s.find(P0, Zone::Hand, "Test Elf").is_some());
+    assert!(s.find(P0, Zone::Graveyard, "Test Gravedigger").is_some());
+    let mut s = build(&[], "Test Gravedigger");
+    settle(&mut s);
+    assert!(s.find(P0, Zone::Graveyard, "Test Gravedigger").is_some());
+}
+
+// CR 608.2c, 614.6 (2026-11-06): "you may exile it. If you do, you gain 3 life" — the life
+// only if it was exiled: not if the card had already left the graveyard. A card that says
+// "you may X, then Y" keeps doing both. Forge: a trigger with `OptionalDecider$` whose text
+// says "If you do" (the chain itself has no condition).
+#[test]
+fn if_you_do_needs_the_first_instruction_done() {
+    let cards = [
+        creature(
+            "Test Penitent",
+            "1 B",
+            "2/1",
+            "T:Mode$ ChangesZone | Origin$ Battlefield | Destination$ Graveyard | ValidCard$ Card.Self | Execute$ TrigExile | OptionalDecider$ You | TriggerDescription$ When CARDNAME dies, you may exile it. If you do, you gain 3 life.\n\
+             SVar:TrigExile:DB$ ChangeZone | Defined$ TriggeredNewCardLKICopy | Origin$ Graveyard | Destination$ Exile | SubAbility$ DBGain\n\
+             SVar:DBGain:DB$ GainLife | LifeAmount$ 3",
+        ),
+        creature(
+            "Test Pilgrim",
+            "1 B",
+            "2/1",
+            "T:Mode$ ChangesZone | Origin$ Battlefield | Destination$ Graveyard | ValidCard$ Card.Self | Execute$ TrigExile | OptionalDecider$ You | TriggerDescription$ When CARDNAME dies, you may exile it, then you gain 3 life.\n\
+             SVar:TrigExile:DB$ ChangeZone | Defined$ TriggeredNewCardLKICopy | Origin$ Graveyard | Destination$ Exile | SubAbility$ DBGain\n\
+             SVar:DBGain:DB$ GainLife | LifeAmount$ 3",
+        ),
+        spell(
+            "Test Smiting",
+            "B",
+            "Instant",
+            "A:SP$ Destroy | ValidTgts$ Creature | SpellDescription$ Text.",
+        ),
+        spell(
+            "Test Scattering",
+            "B",
+            "Instant",
+            "A:SP$ ChangeZone | Origin$ Graveyard | Destination$ Exile | ValidTgts$ Card | SpellDescription$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let build = |dying: &str| {
+        let mut sc = scenario(3, &cards);
+        sc.cards(P0, Zone::Battlefield, &["Swamp", "Swamp"]);
+        let it = sc.card(P0, Zone::Battlefield, dying);
+        sc.cards(P0, Zone::Hand, &["Test Smiting", "Test Scattering"]);
+        let mut s = Script::new(sc.build());
+        s.cast("Test Smiting").target_object(it).pay();
+        s.pass_all();
+        s
+    };
+    // It is exiled: then the life.
+    let mut s = build("Test Penitent");
+    accept(&mut s, P0, ChoiceKind::MayAbility);
+    settle(&mut s);
+    assert!(s.find(P0, Zone::Exile, "Test Penitent").is_some());
+    assert_eq!(life(&s, P0), 43);
+    // The card is gone before the trigger resolves: nothing to exile, no life.
+    let mut s = build("Test Penitent");
+    assert_eq!(s.kind(), ChoiceKind::Priority);
+    let card = s.find(P0, Zone::Graveyard, "Test Penitent").unwrap();
+    s.cast("Test Scattering").target_object(card).pay();
+    s.pass_all();
+    accept(&mut s, P0, ChoiceKind::MayAbility);
+    settle(&mut s);
+    assert_eq!(life(&s, P0), 40);
+    // "You may exile it, then gain 3 life": both, whatever became of the card.
+    let mut s = build("Test Pilgrim");
+    let card = s.find(P0, Zone::Graveyard, "Test Pilgrim").unwrap();
+    s.cast("Test Scattering").target_object(card).pay();
+    s.pass_all();
+    accept(&mut s, P0, ChoiceKind::MayAbility);
+    settle(&mut s);
+    assert_eq!(life(&s, P0), 43);
+}

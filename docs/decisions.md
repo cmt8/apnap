@@ -1432,12 +1432,36 @@ Rules text: docs/rules-notes/608.2h-its-controller-that-player.md. Tests:
   player pays" (`unless:payer Player`); lasting effects about a player
   (`Effect:remembers TargetedController`); `TriggeredCardOwner` of a cast spell; `Targeted$`
   amounts with several targets; `TargetedAndYou`, `ParentTarget`.
-- **Known and not fixed (found reading the rebased cards):** "another target card from
-  your graveyard" in a dies trigger can target the dying card itself (the ability's
-  source is the old permanent, the card is a new object): Elderfang Ritualist (on main)
-  and A-Elderfang Ritualist. And "you may [X]. If you do, [Y]" compiled as "you may [X,
-  then Y]" still does Y when X turned out impossible (11 compiled cards, the same
-  convention as before this batch).
+- **Follow-ups (2026-11-11), found reading the rebased cards; fixed:**
+  - **"Another target … card" in a dies trigger** could target the dying card itself (the
+    ability's source is the old permanent; its card in the graveyard is a new object,
+    CR 400.7). "Another" is now other than the card the source became when the ability
+    triggered on its leaving (`triggers::this_card`, CR 400.7e/603.10a), for targets
+    (when chosen and on resolution) and for cards chosen as it resolves (`Hidden$`).
+    With no other card, the trigger has no target and is removed (CR 603.3d). Affected:
+    Elderfang Ritualist, A-Elderfang Ritualist. Text: "another target Elf card" (was
+    "target another …": the wording of 122 cards).
+  - **"You may [X]. If you do, [Y]"** was "you may [X, then Y]": Y happened even when X
+    had nothing to act on. `Effect::IfDone { first, then }` (Y only if carrying out X made
+    an event happen, CR 608.2c/614.6), compiled for a trigger whose `OptionalDecider$`
+    makes the "may" and whose text says "If you do" (or "… this way") once. Cards: Ob
+    Nixilis the Fallen, Stockpiling Celebrant, Turntimber Ranger, Zealot il-Vec, Unlucky
+    Cabbage Merchant, A-Elderfang Ritualist. Cards whose "if you do" follows a single
+    instruction that always happens once chosen (Cream of the Crop, Fertile Thicket,
+    Planar Atlas, Munda, Precognition: "you may look at …") or a target that makes the
+    spell fizzle anyway (Energy Tap) were right before and are unchanged; "you may X, then
+    Y" keeps doing both. Limit: a replacement that turns X into another event (614.6)
+    still counts as X having happened.
+  - **Who reveals and who puts a card onto the battlefield (CR 110.2a).** The engine was
+    right — a card another player searches for or reveals from their own library enters
+    under their control (no controller given = its owner, the player told to put it
+    there) — but the text said "you reveal". It now says "its owner reveals the top card
+    of their library. Then its owner puts …" (Chaos Warp; Goblin Guide, Clear the Land).
+    Every compiled card that puts another player's card onto the battlefield (Path to
+    Exile, Assassin's Trophy, Chaos Warp, the "each player searches" cards, Metamorphose…)
+    gives it to the player who searched or revealed, as the cards say. A dig of another
+    player's library onto the battlefield in which you choose is not compiled
+    (`Dig:another player's cards onto the battlefield, chosen by you`; none compiled).
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
