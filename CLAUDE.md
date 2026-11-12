@@ -122,7 +122,7 @@ APNAP_TRACE=1 cargo run --release -p harness -- run --seed N --setup forge-4p   
 - `crates/xtask` — check-deps.
 - Engine extras: `stack.rs` (StackObject), `targeting.rs` (choose + 608.2b legality in one
   place), `frames/cast.rs` (601.2/602.2, and putting triggers on the stack), `frames/resolve.rs`
-  (work list), `replacement.rs` + `frames/apply.rs` (614–616 pipeline), `triggers.rs` +
+  (work list; last known information about targets in `TargetInfo`, D-068), `replacement.rs` + `frames/apply.rs` (614–616 pipeline), `triggers.rs` +
   `frames/put_triggers.rs` (603), `frames/check.rs` (117.5/704.3), `effects.rs` (resolved
   continuous effects, shields), `testing.rs` (feature `test-support`: scenario builder, D-022).
 
@@ -138,10 +138,9 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-067): 9,560 of 34,463 scripts compile (27.7%); about 10,700 more are one feature
-away. Since 2026-11-10 the order of work is EDHREC popularity (the user's wish), not raw
-count: 60% of the 100 most played Commander cards compile, 39% of the top 1,000, 26% of
-the top 5,000 (`edhrec_rank` in the Scryfall bulk file in the cache, joined to
+Status (D-068): 9,776 of 34,463 scripts compile (28.4%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-067: 60% of
+the 100 most played Commander cards compile, 39% of the top 1,000, 26% of the top 5,000 (`edhrec_rank` in the Scryfall bulk file in the cache, joined to
 `forge-coverage --why "" --all`). Precons: `harness coverage --verbose` lists what blocks
 the rest. Feature tests live in `crates/harness/tests/forge_features.rs` and, one file per
 feature area since D-066, `forge_<area>.rs` next to it: invented cards written
