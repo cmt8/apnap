@@ -1972,6 +1972,61 @@ Rules text: docs/rules-notes/608.2c-400.7j-those-cards.md.
   return them"); `Effect:remembers Remembered` (an effect object about noted cards: "exile
   the top card; you may play it this turn", 188 cards).
 
+## D-078 Comment lines in Forge scripts: ignored as Forge ignores them, but each text is reviewed (2026-11-12)
+
+Until now every `# …` line made its card uncompilable (`line:# TODO` was the single blocker
+of 6 of the 1,000 most played Commander cards, among them Demonic Tutor). Two things were
+established before changing that.
+
+- **Forge ignores them.** `forge-core/.../card/CardRules.java`, `Reader.readCard`:
+  `for (String line : script) { if (line.isEmpty() || line.charAt(0) == '#') { continue; } this.parseLine(line, this.faces[curFace]); }`.
+  The test is on the raw line's first character, so only a `#` in column 0 is a comment;
+  an indented `#` goes to `parseLine`, and a `#` inside a value is part of the value.
+  `parse.rs` follows that: a column-0 `#` line becomes `Face::comments` (text kept, lossless);
+  indented ones stay `unknown` lines (still blocked).
+- **Comments are where authors write that a script is wrong.** 135 distinct texts (210
+  lines, 198 cards). Most are about Forge's AI ("TODO: the AI will ..."), its internals ("X
+  Will get overwritten by Announce") or are section markers ("--- VARIANTS ---"). 16 say or
+  suggest that the script does not do what the card says ("Doesn't follow the strict wording
+  of the Oracle text currently", "TODO: need EnchantedLKI because it isn't enchanted
+  anymore if this is sacrificed", "This calculation isn't considering the remembered
+  player", a bare "TODO" ...).
+
+**Rule** (`crates/card-db/src/forge/comments.rs`, next to the other reviewed lists; kept in its
+own file so the 130 entries don't sit in `translate.rs`): a comment is compared after dropping
+the `#` and collapsing white space. It matches an entry exactly, or, if the entry ends in `*`,
+by prefix (long comments are listed by their first 60 characters: a typo fixed later in a
+sentence does not block the card, while a changed beginning does). In `HARMLESS` -> ignored.
+In `INCOMPLETE` -> `script:differs from the card` (the same blocker as `SCRIPT_DIFFERS`,
+raised by the comment instead of the card name, so a card gaining the same comment later is
+caught too; the entry holds the comment's own words as the reason). In neither ->
+`comment:unreviewed`. A Forge update that adds a comment therefore blocks that card until
+someone reads the comment and classifies it. Cards with an `INCOMPLETE` comment, 21 of
+them (`forge-coverage --why script:differs`): Dark Deal, Sycorax Commander, Hellfire, Cocoon,
+Frozen Solid, Liege of the Hollows, Quillmane Baku, The Madcap Jester, Transmute Artifact,
+Silent Gravestone, Helm of Obedience, Banish into Fable, Circus of the Sun, Elvish
+Impersonators, Robot Chicken, Bolshack Dragon, the three EDH Silver errata cards (1996
+World Champion, Celestine Cave Witch, Shichifukujin Dragon), plus the two found earlier by
+reading. None of them compiled before this change (every comment blocked); only Robot Chicken
+would compile now but for its comment, the others have further blockers, and the
+entries keep them blocked when those go away.
+
+**A hole this opened and closed.** `SVar:AFLifeLost:Number$0` + "# AFLifeLost will be set by
+LoseLife": Forge's effects write results into SVars named `AF…`; the script holds only the
+starting value. The compiler read `LifeAmount$ AFLifeLost` as the constant 0 ("Then X is
+0. Then you gain X life"), so Blood Tithe, Exsanguinate, Kokusho, Agent of Masks, Subversion
+-- and Scholar of Athreos, which already compiled this way -- would have gained no life.
+`expr` now blocks any name `AF` + capital letter (`expr:set by an effect AFLifeLost`);
+"life lost this way" is not built yet. Scholar of Athreos stops compiling (it was a wrong
+card).
+
+**Counts.** 10,300 -> 10,314 of 34,463 scripts (+15, -1). Top 100 by EDHREC 74 -> 75, top
+1,000 516 -> 522, top 5,000 1,571 -> 1,580. New: Demonic, Diabolic, Grim, Mystical and
+Personal Tutor, Imperial Seal, Natural Order, Aether Mutation, Aura Mutation, Consult the
+Necrosages, Culling the Weak, Embodiment of Spring, Kuro Pitlord, Sawtooth Loon, Utopia Vow --
+each read against its Oracle text. Most of the 57 `# TODO` cards stay blocked by something
+else (Proliferate, Flashback, copy effects ...).
+
 ## D-073 Replacement effects that change how much; tokens enter the battlefield (2026-11-12)
 Rules text: docs/rules-notes/614-doublers-603.2d-additional-triggers.md (with
 614-616-replacement-prevention.md).

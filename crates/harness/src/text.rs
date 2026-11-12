@@ -1,64 +1,184 @@
 //! Plain-text rendering of events, views and decisions for `watch` and `play`.
 //! This is UI code: it may see the full `GameState` to name things in the event log, but
 //! a human player's prompt is built from their `PlayerView` only.
+//!
+//! The engine's event order is not the order a reader wants (a spell's targets come before
+//! its `SpellCast`, a non-permanent spell's `Resolved` comes after its effects, a draw is a
+//! `ZoneChange` followed by `Drew`). The [`Narrator`] therefore keeps a little state: it
+//! counts priority passes to know when the top of the stack starts to resolve, buffers the
+//! details of a cast until the cast is announced, and holds back one event when the next
+//! one explains it.
 
+use card_model::describe;
 use engine_core::events::{DamageTarget, Event};
+use engine_core::mana::ManaType;
 use engine_core::stack::Target;
+use engine_core::turn::Step;
 use engine_core::view::{ObjectView, StackView};
+use engine_core::zones::Zone;
 use engine_core::{GameState, ObjectId, OptionDesc, PendingDecision, PlayerId, PlayerView};
 
 fn p(p: PlayerId) -> String {
     format!("P{}", p.0)
 }
 
+/// What the narrator remembers about an object id (CR 400.7 gives every move a new id).
+#[derive(Debug, Clone)]
+struct Info {
+    name: String,
+    owner: Option<PlayerId>,
+    creature: bool,
+}
+
+/// An event held back until the next one shows whether it needs a line of its own.
+#[derive(Debug, Clone)]
+enum Pend {
+    /// A permanent became tapped: for mana (next event `ManaAdded`), by attacking (next
+    /// event `AttackerDeclared`), or by something else.
+    Tap(ObjectId),
+    /// A zone change that a following event may already say (`Drew`, `Discarded`,
+    /// `Sacrificed`, `LandPlayed`).
+    Move { new: ObjectId, from: Zone, to: Zone },
+    /// Damage to a player: a `LifeChanged` right after is the same news.
+    Damage {
+        source: ObjectId,
+        target: PlayerId,
+        amount: u32,
+        combat: bool,
+    },
+    /// One card revealed (activating an ability from hand reveals it).
+    Reveal { player: PlayerId, card: ObjectId },
+    /// A discard that may turn out to be the cost of cycling.
+    Discard { player: PlayerId, card: ObjectId },
+}
+
 /// Tracks object names through zone changes (CR 400.7 gives every move a new id), so log
-/// lines can name objects that have since moved.
+/// lines can name objects that have since moved, and the state needed to put the engine's
+/// events into reading order.
 #[derive(Debug)]
 pub struct Narrator {
-    names: std::collections::BTreeMap<ObjectId, String>,
+    info: std::collections::BTreeMap<ObjectId, Info>,
     catalog: std::sync::Arc<card_model::CardCatalog>,
+    pend: Option<Pend>,
+    /// Consecutive `PriorityPassed` events since anything else happened.
+    passes: usize,
+    /// Players still in the game (a full round of passes is this many).
+    alive: usize,
+    /// Spells and abilities on the stack, bottom first, as announced.
+    stack: Vec<ObjectId>,
+    /// The stack object whose resolution is being narrated (its effects are indented).
+    resolving: Option<ObjectId>,
+    /// A spell moved to the stack whose `SpellCast` has not come yet, and where from.
+    casting: Option<Zone>,
+    /// Lines of that cast (targets, modes, payment), shown after the `casts` line.
+    cast_buf: Vec<String>,
+    /// Triggered abilities that have triggered but are not on the stack yet.
+    triggers: Vec<(ObjectId, PlayerId, card_model::AbilityId)>,
+    /// The ability just put on the stack, while nothing else has happened.
+    just_announced: Option<ObjectId>,
+    /// Permanents tapped for mana and mana added since the last payment.
+    mana_src: Vec<ObjectId>,
+    mana_added: Vec<ManaType>,
+    /// Permanents untapped in the untap step (one summary line).
+    untapped: Vec<ObjectId>,
+    step: Option<Step>,
+    /// Permanents tapped in the declare attackers step, until `AttackerDeclared` says
+    /// they attack (the engine taps them all before declaring).
+    attack_taps: Vec<ObjectId>,
+    active: Option<PlayerId>,
+    /// The damage just dealt, for "(X's damage)" on lifelink.
+    last_damage: Option<(ObjectId, u32)>,
+    /// Set by the settled `Move` before a `Sacrificed` / by `Reveal` before an activation.
+    sacrificed_died: bool,
+    from_hand: bool,
 }
 
 impl Narrator {
     pub fn new(st: &GameState) -> Self {
-        let names = st
+        let creature = |id: ObjectId| {
+            st.card_def(id)
+                .card_types
+                .contains(&card_model::CardType::Creature)
+        };
+        let info = st
             .objects
             .keys()
             .map(|&id| {
                 (
                     id,
-                    format!("{} ({})", st.card_def(id).name, p(st.object(id).owner)),
+                    Info {
+                        name: format!("{} ({})", st.card_def(id).name, p(st.object(id).owner)),
+                        owner: Some(st.object(id).owner),
+                        creature: creature(id),
+                    },
                 )
             })
             .collect();
         Narrator {
-            names,
+            info,
             catalog: st.catalog.clone(),
+            pend: None,
+            passes: 0,
+            alive: st.players_in_game(),
+            stack: Vec::new(),
+            resolving: None,
+            casting: None,
+            cast_buf: Vec::new(),
+            triggers: Vec::new(),
+            just_announced: None,
+            mana_src: Vec::new(),
+            mana_added: Vec::new(),
+            untapped: Vec::new(),
+            step: None,
+            attack_taps: Vec::new(),
+            active: None,
+            last_damage: None,
+            sacrificed_died: false,
+            from_hand: false,
         }
     }
 
     pub fn name(&self, id: ObjectId) -> String {
-        self.names
+        self.info
             .get(&id)
-            .cloned()
+            .map(|i| i.name.clone())
             .unwrap_or_else(|| format!("#{}", id.0))
     }
 
-    /// Narrate a batch of events, merging consecutive draws by the same player.
+    /// The name without the owner ("Forest", not "Forest (P0)").
+    fn short(&self, id: ObjectId) -> String {
+        let n = self.name(id);
+        match n.rsplit_once(" (P") {
+            Some((a, _)) => a.to_string(),
+            None => n,
+        }
+    }
+
+    fn owner(&self, id: ObjectId) -> Option<PlayerId> {
+        self.info.get(&id).and_then(|i| i.owner)
+    }
+
+    /// Narrate a batch of events, merging consecutive draws by the same player. State
+    /// carries over to the next batch (a cast or a resolution can span a decision).
     pub fn lines(&mut self, events: &[Event], viewer: Option<PlayerId>) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut last_drawer: Option<PlayerId> = None;
         for e in events {
+            let before = out.len();
+            self.feed(e, viewer, &mut out);
             let drawer = match e {
                 Event::Drew { player, .. } => Some(*player),
                 _ => None,
             };
-            let Some(line) = self.line(e, viewer) else {
-                continue;
-            };
-            match (drawer, last_drawer, out.last_mut()) {
-                (Some(d), Some(l), Some(prev)) if d == l => {
+            if out.len() > before {
+                if let (Some(d), Some(l)) = (drawer, last_drawer)
+                    && d == l
+                    && out.len() == before + 1
+                    && before > 0
+                {
+                    let line = out.pop().unwrap_or_default();
                     let what = line.split_once(" draws ").map_or("", |x| x.1);
+                    let prev = out.last_mut().expect("previous draw");
                     if what == "a card" {
                         *prev = merge_count(prev);
                     } else {
@@ -66,47 +186,824 @@ impl Narrator {
                         prev.push_str(what);
                     }
                 }
-                _ => out.push(line),
+                last_drawer = drawer;
             }
-            last_drawer = drawer;
         }
+        self.end_batch(viewer, &mut out);
         out
     }
 
-    /// Feed every event in order; returns its log line, if any.
+    /// Feed one event; returns its log line(s), joined by newlines, if any. (Some events
+    /// are held back until the next one, so a line may appear one call late.)
     pub fn line(&mut self, e: &Event, viewer: Option<PlayerId>) -> Option<String> {
+        let mut out = Vec::new();
+        self.feed(e, viewer, &mut out);
+        if out.is_empty() {
+            None
+        } else {
+            Some(out.join("\n"))
+        }
+    }
+
+    /// Nothing more will be said about the held-back events of this batch.
+    fn end_batch(&mut self, viewer: Option<PlayerId>, out: &mut Vec<String>) {
+        // A tap may still turn into a mana tap in the next batch (a choice of color).
+        if !matches!(self.pend, Some(Pend::Tap(_))) {
+            self.flush_pend(viewer, out);
+        }
+        self.flush_untaps(out);
+        self.drain_cast(out);
+    }
+
+    fn flush_attack_taps(&mut self, out: &mut Vec<String>) {
+        for o in std::mem::take(&mut self.attack_taps) {
+            let l = format!("  {} taps", self.name(o));
+            self.emit(l, out);
+        }
+    }
+
+    fn drain_cast(&mut self, out: &mut Vec<String>) {
+        self.casting = None;
+        out.append(&mut self.cast_buf);
+    }
+
+    fn flush_untaps(&mut self, out: &mut Vec<String>) {
+        if self.untapped.is_empty() {
+            return;
+        }
+        let ids = std::mem::take(&mut self.untapped);
+        let who = self.active.map_or(String::new(), |a| format!("{} ", p(a)));
+        out.push(format!(
+            "  {who}untaps {} permanent(s): {}",
+            ids.len(),
+            self.counted(&ids, 60)
+        ));
+    }
+
+    /// "4x Forest, Elf": names with counts, in order of first appearance, cut at `max`.
+    fn counted(&self, ids: &[ObjectId], max: usize) -> String {
+        let mut seen: Vec<(String, usize)> = Vec::new();
+        for &id in ids {
+            let n = self.short(id);
+            match seen.iter_mut().find(|(s, _)| *s == n) {
+                Some((_, c)) => *c += 1,
+                None => seen.push((n, 1)),
+            }
+        }
+        let mut s = String::new();
+        for (i, (n, c)) in seen.iter().enumerate() {
+            let part = if *c > 1 {
+                format!("{c}x {n}")
+            } else {
+                n.clone()
+            };
+            if i > 0 {
+                s.push_str(", ");
+            }
+            if s.len() + part.len() > max {
+                s.push_str("...");
+                break;
+            }
+            s.push_str(&part);
+        }
+        s
+    }
+
+    /// A line of the game log: indented under the resolving object, or kept back until the
+    /// cast it belongs to is announced.
+    fn emit(&mut self, line: String, out: &mut Vec<String>) {
+        let line = if self.resolving.is_some() && !line.starts_with('\n') {
+            format!("    {}", line.trim_start())
+        } else {
+            line
+        };
+        if self.casting.is_some() {
+            self.cast_buf.push(line);
+        } else {
+            out.push(line);
+        }
+    }
+
+    fn flush_pend(&mut self, viewer: Option<PlayerId>, out: &mut Vec<String>) {
+        let Some(pend) = self.pend.take() else {
+            return;
+        };
+        let line = match pend {
+            Pend::Tap(o) => Some(format!("  {} taps", self.name(o))),
+            Pend::Move { new, from, to } => self.zone_line(new, from, to, viewer),
+            Pend::Damage {
+                source,
+                target,
+                amount,
+                combat,
+            } => Some(self.damage_line(source, &p(target), amount, combat, "")),
+            Pend::Reveal { player, card } => {
+                Some(format!("  {} reveals {}", p(player), self.name(card)))
+            }
+            Pend::Discard { player, card } => {
+                Some(format!("{} discards {}", p(player), self.name(card)))
+            }
+        };
+        if let Some(l) = line {
+            self.emit(l, out);
+        }
+    }
+
+    fn damage_line(
+        &self,
+        source: ObjectId,
+        to: &str,
+        amount: u32,
+        combat: bool,
+        tail: &str,
+    ) -> String {
+        let kind = if combat { " combat damage" } else { " damage" };
+        format!("  {} deals {amount}{kind} to {to}{tail}", self.name(source))
+    }
+
+    /// Let the held-back event be explained by `e`. Returns true if `e` is used up.
+    fn settle(&mut self, e: &Event, viewer: Option<PlayerId>, out: &mut Vec<String>) -> bool {
+        let Some(pend) = self.pend.clone() else {
+            return false;
+        };
+        match (&pend, e) {
+            (Pend::Tap(o), Event::ManaAdded { .. }) => {
+                self.mana_src.push(*o);
+                self.pend = None;
+            }
+            (Pend::Tap(o), Event::AttackerDeclared { attacker, .. }) if o == attacker => {
+                self.pend = None;
+            }
+            (Pend::Move { new, from, to }, ev) => {
+                let explained = match (from, to, ev) {
+                    (Zone::Library, Zone::Hand, Event::Drew { card, .. }) => card == new,
+                    (Zone::Hand, Zone::Graveyard, Event::Discarded { card, .. }) => card == new,
+                    (Zone::Hand, Zone::Battlefield, Event::LandPlayed { land, .. }) => land == new,
+                    (Zone::Battlefield, Zone::Graveyard, Event::Sacrificed { object, .. }) => {
+                        if object == new {
+                            self.sacrificed_died = true;
+                        }
+                        object == new
+                    }
+                    _ => false,
+                };
+                if explained {
+                    self.pend = None;
+                } else {
+                    self.flush_pend(viewer, out);
+                }
+            }
+            (
+                Pend::Damage {
+                    source,
+                    target,
+                    amount,
+                    combat,
+                },
+                Event::LifeChanged {
+                    player,
+                    delta,
+                    life,
+                },
+            ) if player == target && *delta == -(*amount as i32) => {
+                self.pend = None;
+                let tail = format!(" ({} at {life})", p(*player));
+                let l = self.damage_line(*source, &p(*target), *amount, *combat, &tail);
+                self.emit(l, out);
+                return true;
+            }
+            (Pend::Reveal { card, .. }, Event::AbilityActivated { source, .. })
+                if card == source =>
+            {
+                self.from_hand = true;
+                self.pend = None;
+            }
+            (Pend::Discard { player, card }, Event::Cycled { card: c, .. }) if card == c => {
+                self.pend = None;
+                let l = format!("{} cycles {}", p(*player), self.name(*card));
+                self.emit(l, out);
+                return true;
+            }
+            _ => self.flush_pend(viewer, out),
+        }
+        false
+    }
+
+    /// CR 117.4: when every player passes in a row with something on the stack, its top
+    /// object starts to resolve, and everything until its `Resolved` belongs to it.
+    fn begin_resolution(&mut self, e: &Event, out: &mut Vec<String>) {
+        if self.passes >= self.alive
+            && self.resolving.is_none()
+            && let Some(&top) = self.stack.last()
+            && !matches!(e, Event::Fizzled { object } if *object == top)
+        {
+            self.resolving = Some(top);
+            out.push(format!("  {} resolves", self.name(top)));
+        }
+        self.passes = 0;
+    }
+
+    fn track_names(&mut self, e: &Event) {
         match e {
             Event::ZoneChange { old, new, .. } => {
-                let n = self.name(*old);
-                self.names.insert(*new, n);
+                if let Some(i) = self.info.get(old).cloned() {
+                    self.info.insert(*new, i);
+                }
             }
             Event::TokenCreated {
                 object,
                 card,
                 controller,
             } => {
-                let n = format!(
-                    "{} token ({})",
-                    self.catalog.get(*card).name,
-                    p(*controller)
+                let def = self.catalog.get(*card);
+                self.info.insert(
+                    *object,
+                    Info {
+                        name: format!("{} token ({})", def.name, p(*controller)),
+                        owner: Some(*controller),
+                        creature: def.card_types.contains(&card_model::CardType::Creature),
+                    },
                 );
-                self.names.insert(*object, n);
-            }
-            Event::AbilityActivated {
-                ability, source, ..
-            } => {
-                let n = format!("ability of {}", self.name(*source));
-                self.names.insert(*ability, n);
             }
             _ => {}
         }
-        event_line(self, e, viewer)
+    }
+
+    /// First ~40 characters of an ability's rules text.
+    fn tag(&self, id: card_model::AbilityId) -> String {
+        let def = self.catalog.get(id.card);
+        let text = describe::ability_text(def, self.catalog.ability(id));
+        let text: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.chars().count() > 40 {
+            let cut: String = text.chars().take(40).collect();
+            format!("{}...", cut.trim_end())
+        } else {
+            text
+        }
+    }
+
+    fn feed(&mut self, e: &Event, viewer: Option<PlayerId>, out: &mut Vec<String>) {
+        self.track_names(e);
+        if let Event::PriorityPassed { .. } = e {
+            self.flush_pend(viewer, out);
+            self.flush_untaps(out);
+            self.flush_attack_taps(out);
+            self.drain_cast(out);
+            self.passes += 1;
+            self.triggers.clear();
+            self.just_announced = None;
+            self.last_damage = None;
+            return;
+        }
+        if !matches!(e, Event::Untapped { .. }) {
+            self.flush_untaps(out);
+        }
+        if !matches!(e, Event::Tapped { .. } | Event::AttackerDeclared { .. }) {
+            self.flush_attack_taps(out);
+        }
+        self.begin_resolution(e, out);
+        if self.settle(e, viewer, out) {
+            self.last_damage = None;
+            self.just_announced = None;
+            return;
+        }
+        let announced = self.just_announced.take();
+        let last_damage = self.last_damage.take();
+        match e {
+            Event::GameStarted { seed, num_players } => out.push(format!(
+                "== game start: seed {seed}, {num_players} players =="
+            )),
+            Event::StartingPlayerChosen { chooser, starting } => {
+                let l = format!("{} chooses {} to go first", p(*chooser), p(*starting));
+                self.emit(l, out);
+            }
+            Event::Shuffled { player } => {
+                let l = format!("{} shuffles their library", p(*player));
+                self.emit(l, out);
+            }
+            Event::MulliganDeclared { player, mulligan } => {
+                let l = format!(
+                    "{} {}",
+                    p(*player),
+                    if *mulligan { "mulligans" } else { "keeps" }
+                );
+                self.emit(l, out);
+            }
+            Event::TurnBegan { turn, active } => {
+                self.drain_cast(out);
+                self.active = Some(*active);
+                self.mana_src.clear();
+                self.mana_added.clear();
+                self.triggers.clear();
+                out.push(format!("\n--- turn {turn}: {} ---", p(*active)));
+            }
+            Event::StepBegan { step } => {
+                self.step = Some(*step);
+                self.drain_cast(out);
+            }
+            Event::ZoneChange {
+                new, from, to, old, ..
+            } => {
+                let _ = old;
+                if *to == Zone::Stack && *from != Zone::Stack {
+                    // Announcing a spell (CR 601.2a): its details follow, `SpellCast` last.
+                    self.casting = Some(*from);
+                } else if matches!(
+                    (from, to),
+                    (Zone::Library, Zone::Hand)
+                        | (Zone::Hand, Zone::Graveyard)
+                        | (Zone::Battlefield, Zone::Graveyard)
+                        | (Zone::Hand, Zone::Battlefield)
+                ) {
+                    self.pend = Some(Pend::Move {
+                        new: *new,
+                        from: *from,
+                        to: *to,
+                    });
+                } else if let Some(l) = self.zone_line(*new, *from, *to, viewer) {
+                    self.emit(l, out);
+                }
+                if *from == Zone::Stack {
+                    self.stack.retain(|s| s != old);
+                }
+            }
+            Event::Drew { player, card } => {
+                let l = if viewer.is_some_and(|v| v != *player) {
+                    format!("{} draws a card", p(*player))
+                } else {
+                    format!("{} draws {}", p(*player), self.name(*card))
+                };
+                self.emit(l, out);
+            }
+            Event::DrewFromEmptyLibrary { player } => {
+                let l = format!("{} tries to draw from an empty library!", p(*player));
+                self.emit(l, out);
+            }
+            Event::LandPlayed { player, land } => {
+                let l = format!("{} plays {}", p(*player), self.name(*land));
+                self.emit(l, out);
+            }
+            Event::SpellCast { player, spell } => {
+                let from = self.casting.take();
+                let tail = match from {
+                    Some(Zone::Command) => " from the command zone",
+                    Some(Zone::Graveyard) => " from the graveyard",
+                    Some(Zone::Exile) => " from exile",
+                    Some(Zone::Library) => " from the library",
+                    _ => "",
+                };
+                let l = format!("{} casts {}{tail}", p(*player), self.name(*spell));
+                self.emit(l, out);
+                out.append(&mut self.cast_buf);
+                self.stack.push(*spell);
+            }
+            Event::Resolved { spell } => {
+                self.stack.retain(|s| s != spell);
+                if self.resolving == Some(*spell) {
+                    self.resolving = None;
+                } else {
+                    let l = format!("  {} resolves", self.name(*spell));
+                    self.emit(l, out);
+                }
+            }
+            Event::AttackerDeclared { attacker, defender } => {
+                self.attack_taps.retain(|o| o != attacker);
+                let l = format!("  {} attacks {}", self.name(*attacker), p(*defender));
+                self.emit(l, out);
+            }
+            Event::BlockerDeclared { blocker, attacker } => {
+                let l = format!("  {} blocks {}", self.name(*blocker), self.name(*attacker));
+                self.emit(l, out);
+            }
+            Event::DamageDealt {
+                source,
+                target,
+                amount,
+                combat,
+            } => {
+                self.last_damage = Some((*source, *amount));
+                match target {
+                    // Held back: a `LifeChanged` right after says the rest.
+                    DamageTarget::Player(q) => {
+                        self.pend = Some(Pend::Damage {
+                            source: *source,
+                            target: *q,
+                            amount: *amount,
+                            combat: *combat,
+                        })
+                    }
+                    DamageTarget::Object(o) => {
+                        let l = self.damage_line(*source, &self.name(*o), *amount, *combat, "");
+                        self.emit(l, out);
+                    }
+                }
+            }
+            Event::LifeChanged {
+                player,
+                delta,
+                life,
+            } => {
+                let l = if *delta >= 0 {
+                    let why = match last_damage {
+                        Some((s, a)) if a as i32 == *delta => {
+                            format!(" from {}'s damage", self.name(s))
+                        }
+                        _ => String::new(),
+                    };
+                    format!("  {} gains {delta} ({life}){why}", p(*player))
+                } else {
+                    format!("  {} loses {} ({life})", p(*player), -delta)
+                };
+                self.emit(l, out);
+            }
+            Event::Discarded { player, card } => {
+                self.pend = Some(Pend::Discard {
+                    player: *player,
+                    card: *card,
+                });
+            }
+            Event::Cycled { player, card } => {
+                let l = format!("{} cycles {}", p(*player), self.name(*card));
+                self.emit(l, out);
+            }
+            Event::AbilityActivated {
+                player,
+                ability,
+                source,
+            } => {
+                let trig = self
+                    .triggers
+                    .iter()
+                    .position(|(s, c, _)| s == source && c == player)
+                    .map(|i| self.triggers.remove(i).2);
+                let from_hand = std::mem::take(&mut self.from_hand);
+                let src = self.name(*source);
+                let l = match trig {
+                    Some(id) => {
+                        let n = format!("trigger of {src} [{}]", self.tag(id));
+                        self.info.insert(
+                            *ability,
+                            Info {
+                                name: n.clone(),
+                                owner: None,
+                                creature: false,
+                            },
+                        );
+                        format!("{} puts {n} on the stack", p(*player))
+                    }
+                    None => {
+                        let n = format!("ability of {src}");
+                        self.info.insert(
+                            *ability,
+                            Info {
+                                name: n.clone(),
+                                owner: None,
+                                creature: false,
+                            },
+                        );
+                        let from = if from_hand { " from hand" } else { "" };
+                        format!("{} activates {n}{from}", p(*player))
+                    }
+                };
+                self.stack.push(*ability);
+                self.just_announced = Some(*ability);
+                self.emit(l, out);
+            }
+            Event::ModesChosen { modes, .. } => {
+                self.keep_announced(announced);
+                let l = format!("  choosing mode {modes:?}");
+                self.emit(l, out);
+            }
+            Event::XChosen { x, .. } => {
+                self.keep_announced(announced);
+                let l = format!("  with X = {x}");
+                self.emit(l, out);
+            }
+            Event::TargetsChosen { targets, .. } => {
+                self.keep_announced(announced);
+                let ts: Vec<String> = targets
+                    .iter()
+                    .map(|t| match t {
+                        Target::Player(q) => p(*q),
+                        Target::Object(o) => self.name(*o),
+                    })
+                    .collect();
+                let l = if ts.is_empty() {
+                    "  with no targets".to_string()
+                } else {
+                    format!("  targeting {}", ts.join(", "))
+                };
+                self.emit(l, out);
+            }
+            Event::Fizzled { object } => {
+                self.stack.retain(|s| s != object);
+                if self.resolving == Some(*object) {
+                    self.resolving = None;
+                }
+                let l = format!(
+                    "  {} fizzles: all its targets are illegal",
+                    self.name(*object)
+                );
+                self.emit(l, out);
+            }
+            Event::Countered { object } => {
+                self.stack.retain(|s| s != object);
+                let l = format!("  {} is countered", self.name(*object));
+                self.emit(l, out);
+            }
+            Event::AbilityRemoved { ability } => {
+                if self.stack.contains(ability) {
+                    self.stack.retain(|s| s != ability);
+                    let n = self.name(*ability);
+                    let l = if announced == Some(*ability) {
+                        // CR 603.3c-d: a trigger with no legal mode or target.
+                        format!("  {n} is removed from the stack: no legal target (CR 603.3d)")
+                    } else {
+                        format!("  {n} ceases to exist (its controller left the game)")
+                    };
+                    self.emit(l, out);
+                }
+            }
+            Event::Sacrificed { player, object } => {
+                let died = std::mem::take(&mut self.sacrificed_died);
+                let note = match (died, self.info.get(object).is_some_and(|i| i.creature)) {
+                    (true, true) => " (it dies)",
+                    (true, false) => " (it is put into the graveyard)",
+                    _ => "",
+                };
+                let l = format!("{} sacrifices {}{note}", p(*player), self.name(*object));
+                self.emit(l, out);
+            }
+            Event::PlayerLeftGame { player } => {
+                self.alive = self.alive.saturating_sub(1);
+                let l = format!("{} leaves the game", p(*player));
+                self.emit(l, out);
+            }
+            Event::TokenCreated {
+                object, controller, ..
+            } => {
+                let l = format!("{} creates {}", p(*controller), self.name(*object));
+                self.emit(l, out);
+            }
+            Event::CountersPut { object, kind, n } => {
+                let l = format!(
+                    "  {} gets {n} {} counter(s)",
+                    self.name(*object),
+                    counter(*kind)
+                );
+                self.emit(l, out);
+            }
+            Event::CountersRemoved { object, kind, n } => {
+                let l = format!(
+                    "  {n} {} counter(s) removed from {}",
+                    counter(*kind),
+                    self.name(*object)
+                );
+                self.emit(l, out);
+            }
+            Event::Triggered {
+                source,
+                controller,
+                ability,
+            } => {
+                self.triggers.push((*source, *controller, *ability));
+                let l = format!("  {} triggers", self.name(*source));
+                self.emit(l, out);
+            }
+            Event::DamagePrevented { target, amount } => {
+                let t = match target {
+                    DamageTarget::Player(q) => p(*q),
+                    DamageTarget::Object(o) => self.name(*o),
+                };
+                let l = format!("  {amount} damage to {t} prevented");
+                self.emit(l, out);
+            }
+            Event::Replaced { source } => {
+                let l = format!("  ({}'s replacement effect applies)", self.name(*source));
+                self.emit(l, out);
+            }
+            Event::Attached { aura, to } => {
+                let l = format!(
+                    "  {} is now attached to {}",
+                    self.name(*aura),
+                    self.name(*to)
+                );
+                self.emit(l, out);
+            }
+            Event::Unattached { object } => {
+                let l = format!("  {} becomes unattached", self.name(*object));
+                self.emit(l, out);
+            }
+            Event::ControlChanged { object, controller } => {
+                let l = format!(
+                    "  {} gains control of {}",
+                    p(*controller),
+                    self.name(*object)
+                );
+                self.emit(l, out);
+            }
+            Event::BlockDeclarationIllegal { player } => {
+                let l = format!(
+                    "  {}'s block declaration was illegal and is undone",
+                    p(*player)
+                );
+                self.emit(l, out);
+            }
+            Event::RemovedFromCombat { object } => {
+                let l = format!("  {} is removed from combat", self.name(*object));
+                self.emit(l, out);
+            }
+            Event::Transformed { object, face } => {
+                let side = if *face == 0 { "front" } else { "back" };
+                let l = format!("  {} transforms ({side} face up)", self.name(*object));
+                self.emit(l, out);
+            }
+            Event::Tapped { object } => {
+                if self.step == Some(Step::DeclareAttackers) {
+                    self.attack_taps.push(*object);
+                } else {
+                    self.pend = Some(Pend::Tap(*object));
+                }
+            }
+            Event::Untapped { object } => {
+                if self.step == Some(Step::Untap) {
+                    self.untapped.push(*object);
+                } else {
+                    let l = format!("  {} untaps", self.name(*object));
+                    self.emit(l, out);
+                }
+            }
+            Event::ManaAdded { mana, .. } => self.mana_added.push(*mana),
+            Event::ManaPaid { amount, .. } => {
+                let srcs = std::mem::take(&mut self.mana_src);
+                let added = std::mem::take(&mut self.mana_added);
+                let mut l = format!("  (paid {amount}");
+                if !srcs.is_empty() || !added.is_empty() {
+                    l.push_str(": ");
+                    if !srcs.is_empty() {
+                        l.push_str(&self.counted(&srcs, 50));
+                        l.push_str(" -> ");
+                    }
+                    for m in &added {
+                        l.push_str(m.symbol());
+                    }
+                }
+                l.push(')');
+                self.emit(l, out);
+            }
+            Event::ManaEmptied { .. } => {
+                self.mana_src.clear();
+                self.mana_added.clear();
+            }
+            Event::SearchedLibrary { player } => {
+                let l = format!("  {} searches their library", p(*player));
+                self.emit(l, out);
+            }
+            Event::Revealed { player, cards } => {
+                if let [card] = cards.as_slice() {
+                    self.pend = Some(Pend::Reveal {
+                        player: *player,
+                        card: *card,
+                    });
+                } else {
+                    let names: Vec<String> = cards.iter().map(|c| self.name(*c)).collect();
+                    let l = format!("  {} reveals {}", p(*player), names.join(", "));
+                    self.emit(l, out);
+                }
+            }
+            Event::LookedAtLibrary { player, count } => {
+                let l = format!(
+                    "  {} looks at the top {count} card(s) of their library",
+                    p(*player)
+                );
+                self.emit(l, out);
+            }
+            Event::Scried {
+                player,
+                count,
+                bottom,
+            } => {
+                let l = format!("  {} scries {count} ({bottom} to the bottom)", p(*player));
+                self.emit(l, out);
+            }
+            Event::Surveilled {
+                player,
+                count,
+                graveyard,
+            } => {
+                let l = format!(
+                    "  {} surveils {count} ({graveyard} to the graveyard)",
+                    p(*player)
+                );
+                self.emit(l, out);
+            }
+            Event::LibraryArranged {
+                player,
+                top,
+                bottom,
+            } => {
+                let l = format!(
+                    "  {} puts {top} card(s) on top and {bottom} on the bottom of their library",
+                    p(*player)
+                );
+                self.emit(l, out);
+            }
+            // Hidden from everyone but the player who looked.
+            Event::LookedAt { player, cards } => {
+                if viewer.is_some_and(|v| v != *player) {
+                    return;
+                }
+                let names: Vec<String> = cards.iter().map(|c| self.name(*c)).collect();
+                let l = format!("  {} looks at {}", p(*player), names.join(", "));
+                self.emit(l, out);
+            }
+            Event::PlayerLost { player, reason } => {
+                let l = format!("{} LOSES ({reason:?})", p(*player));
+                self.emit(l, out);
+            }
+            Event::GameOver { winner } => {
+                self.flush_pend(viewer, out);
+                out.push(match winner {
+                    Some(w) => format!("== game over: {} wins ==", p(*w)),
+                    None => "== game over: draw ==".into(),
+                });
+            }
+            // Deliberately silent: bookkeeping with no news for a reader.
+            Event::PriorityPassed { .. }
+            | Event::ObjectLeftGame { .. }
+            | Event::CeasedToExist { .. }
+            | Event::ContinuousEffectBegan { .. }
+            | Event::DamageRemoved { .. } => {}
+        }
+    }
+
+    /// Targets and modes chosen for an ability just put on the stack belong to it.
+    fn keep_announced(&mut self, announced: Option<ObjectId>) {
+        self.just_announced = announced;
+    }
+
+    /// The line for an object changing zones; `None` if the other events say it.
+    /// Hidden-zone moves (library to hand, hand to library) are named only to players who
+    /// may know the card (its owner), CR 400.2.
+    fn zone_line(
+        &self,
+        new: ObjectId,
+        from: Zone,
+        to: Zone,
+        viewer: Option<PlayerId>,
+    ) -> Option<String> {
+        let n = self.name(new);
+        let zone = |z: Zone| match z {
+            Zone::Library => "the library",
+            Zone::Hand => "hand",
+            Zone::Battlefield => "the battlefield",
+            Zone::Graveyard => "the graveyard",
+            Zone::Stack => "the stack",
+            Zone::Exile => "exile",
+            Zone::Command => "the command zone",
+        };
+        let owner = self.owner(new);
+        let hidden = |owner: Option<PlayerId>| viewer.is_some() && viewer != owner;
+        let who = owner.map_or("a player".to_string(), p);
+        Some(match (from, to) {
+            (_, Zone::Stack) | (Zone::Stack, Zone::Graveyard) => return None,
+            (Zone::Library, Zone::Hand) | (Zone::Hand, Zone::Library) => {
+                let what = if hidden(owner) {
+                    "a card".to_string()
+                } else {
+                    n
+                };
+                format!("  {who} puts {what} from {} into {}", zone(from), zone(to))
+            }
+            (Zone::Battlefield, Zone::Graveyard) => {
+                if self.info.get(&new).is_some_and(|i| i.creature) {
+                    format!("  {n} dies")
+                } else {
+                    format!("  {n} is put into the graveyard")
+                }
+            }
+            (Zone::Stack, Zone::Battlefield) => format!("  {n} enters the battlefield"),
+            (Zone::Battlefield, Zone::Exile) => format!("  {n} is exiled"),
+            (Zone::Battlefield, Zone::Hand) => format!("  {n} is returned to hand"),
+            (Zone::Battlefield, Zone::Library) => format!("  {n} is put into the library"),
+            (_, Zone::Command) => format!("  {n} is put into the command zone"),
+            (f, Zone::Battlefield) => format!("  {n} enters the battlefield from {}", zone(f)),
+            (f, Zone::Graveyard) => format!("  {n} is put into the graveyard from {}", zone(f)),
+            (f, Zone::Exile) => format!("  {n} is exiled from {}", zone(f)),
+            (f, Zone::Hand) => format!("  {n} is returned to hand from {}", zone(f)),
+            (f, Zone::Library) => format!("  {n} is put into the library from {}", zone(f)),
+        })
     }
 }
 
-/// One line per interesting event; `None` for noise (priority passes, step markers, etc).
-/// `viewer`: if set, everyone else's draws render as "draws a card" (a player's own log).
-/// "P1 draws a card" → "P1 draws 2 cards" → "P1 draws 3 cards" ...
+fn counter(k: card_model::CounterKind) -> &'static str {
+    match k {
+        card_model::CounterKind::PlusOne => "+1/+1",
+        card_model::CounterKind::MinusOne => "-1/-1",
+    }
+}
+
+/// "P1 draws a card" -> "P1 draws 2 cards" -> "P1 draws 3 cards" ...
 fn merge_count(prev: &str) -> String {
     let (who, what) = prev.split_once(" draws ").unwrap_or((prev, ""));
     let n = match what {
@@ -118,125 +1015,6 @@ fn merge_count(prev: &str) -> String {
             .unwrap_or(1),
     };
     format!("{who} draws {} cards", n + 1)
-}
-
-fn event_line(st: &Narrator, e: &Event, viewer: Option<PlayerId>) -> Option<String> {
-    Some(match e {
-        Event::GameStarted { seed, num_players } => {
-            format!("== game start: seed {seed}, {num_players} players ==")
-        }
-        Event::StartingPlayerChosen { chooser, starting } => {
-            format!("{} chooses {} to go first", p(*chooser), p(*starting))
-        }
-        Event::MulliganDeclared { player, mulligan } => format!(
-            "{} {}",
-            p(*player),
-            if *mulligan { "mulligans" } else { "keeps" }
-        ),
-        Event::TurnBegan { turn, active } => format!("\n--- turn {turn}: {} ---", p(*active)),
-        Event::Drew { player, card } => {
-            if viewer.is_some_and(|v| v != *player) {
-                format!("{} draws a card", p(*player))
-            } else {
-                format!("{} draws {}", p(*player), st.name(*card))
-            }
-        }
-        Event::DrewFromEmptyLibrary { player } => {
-            format!("{} tries to draw from an empty library!", p(*player))
-        }
-        Event::LandPlayed { player, land } => format!("{} plays {}", p(*player), st.name(*land)),
-        Event::SpellCast { player, spell } => format!("{} casts {}", p(*player), st.name(*spell)),
-        Event::Resolved { spell } => format!("  {} resolves", st.name(*spell)),
-        Event::AttackerDeclared { attacker, defender } => {
-            format!("  {} attacks {}", st.name(*attacker), p(*defender))
-        }
-        Event::BlockerDeclared { blocker, attacker } => {
-            format!("  {} blocks {}", st.name(*blocker), st.name(*attacker))
-        }
-        Event::DamageDealt {
-            source,
-            target,
-            amount,
-            ..
-        } => {
-            let t = match target {
-                DamageTarget::Player(q) => p(*q),
-                DamageTarget::Object(o) => st.name(*o),
-            };
-            format!("  {} deals {amount} to {t}", st.name(*source))
-        }
-        Event::LifeChanged { player, life, .. } => format!("  {} is at {life} life", p(*player)),
-        Event::Discarded { player, card } => format!("{} discards {}", p(*player), st.name(*card)),
-        Event::ZoneChange {
-            new,
-            from: engine_core::zones::Zone::Battlefield,
-            to: engine_core::zones::Zone::Graveyard,
-            ..
-        } => format!("  {} dies", st.name(*new)),
-        Event::AbilityActivated {
-            player, ability, ..
-        } => {
-            format!("{} activates {}", p(*player), st.name(*ability))
-        }
-        Event::ModesChosen { modes, .. } => format!("  choosing mode {modes:?}"),
-        Event::XChosen { x, .. } => format!("  with X = {x}"),
-        Event::TargetsChosen { targets, .. } => {
-            let ts: Vec<String> = targets
-                .iter()
-                .map(|t| match t {
-                    Target::Player(q) => p(*q),
-                    Target::Object(o) => st.name(*o),
-                })
-                .collect();
-            format!("  targeting {}", ts.join(", "))
-        }
-        Event::Fizzled { object } => {
-            format!(
-                "  {} fizzles: all its targets are illegal",
-                st.name(*object)
-            )
-        }
-        Event::Countered { object } => format!("  {} is countered", st.name(*object)),
-        Event::Sacrificed { player, object } => {
-            format!("{} sacrifices {}", p(*player), st.name(*object))
-        }
-        Event::PlayerLeftGame { player } => format!("{} leaves the game", p(*player)),
-        Event::TokenCreated {
-            object, controller, ..
-        } => {
-            format!("{} creates {}", p(*controller), st.name(*object))
-        }
-        Event::CountersPut { object, kind, n } => {
-            format!("  {n} {kind:?} counter(s) on {}", st.name(*object))
-        }
-        Event::Triggered { source, .. } => format!("  {}'s ability triggers", st.name(*source)),
-        Event::DamagePrevented { amount, .. } => format!("  {amount} damage prevented"),
-        Event::Replaced { source } => {
-            format!("  ({}'s replacement effect applies)", st.name(*source))
-        }
-        Event::Revealed { player, cards } => {
-            let names: Vec<String> = cards.iter().map(|c| st.name(*c)).collect();
-            format!("  {} reveals {}", p(*player), names.join(", "))
-        }
-        // Hidden from everyone but the player who looked.
-        Event::LookedAt { player, cards } => {
-            if viewer.is_some_and(|v| v != *player) {
-                return None;
-            }
-            let names: Vec<String> = cards.iter().map(|c| st.name(*c)).collect();
-            format!("  {} looks at {}", p(*player), names.join(", "))
-        }
-        Event::Transformed { object, face } => {
-            let side = if *face == 0 { "front" } else { "back" };
-            format!("  {} transforms ({side} face up)", st.name(*object))
-        }
-        Event::PlayerLost { player, reason } => format!("{} LOSES ({reason:?})", p(*player)),
-        Event::GameOver { winner } => match winner {
-            Some(w) => format!("== game over: {} wins ==", p(*w)),
-            None => "== game over: draw ==".into(),
-        },
-        _ => return None,
-    })
 }
 
 fn obj(o: &ObjectView) -> String {
@@ -294,7 +1072,7 @@ pub fn board(v: &PlayerView) -> String {
                 let mut line = stack_name(s);
                 if !s.targets.is_empty() {
                     let ts: Vec<String> = s.targets.iter().map(|t| target_name(v, t)).collect();
-                    line.push_str(&format!(" → {}", ts.join(", ")));
+                    line.push_str(&format!(" -> {}", ts.join(", ")));
                 }
                 line
             })
