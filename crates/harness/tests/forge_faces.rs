@@ -879,3 +879,175 @@ fn split_cards_with_rules_of_their_own_block() {
             .any(|b| b.starts_with("kw:"))
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Faces together with how a permanent enters (D-067) and "its controller" (D-068).
+
+/// Subtypes are known to the compiler from the type lines of the cards it compiles.
+const ISLAND_TYPE: &str = "Name:Test Typeholder\nManaCost:no cost\nTypes:Land Island\nOracle:Text.";
+
+/// A modal card with two land faces: the front enters tapped; the back asks "as this
+/// enters, you may pay 3 life; if you don't, it enters tapped".
+const MIRE: &str = "Name:Test Sunken Path\n\
+    ManaCost:no cost\n\
+    Types:Land\n\
+    R:Event$ Moved | ValidCard$ Card.Self | Destination$ Battlefield | ReplacementResult$ Updated | ReplaceWith$ ETBTapped | Description$ CARDNAME enters tapped.\n\
+    SVar:ETBTapped:DB$ Tap | Defined$ Self | ETB$ True\n\
+    A:AB$ Mana | Cost$ T | Produced$ U | SpellDescription$ Add {U}.\n\
+    AlternateMode:Modal\n\
+    Oracle:Test Sunken Path enters tapped.\\n{T}: Add {U}.\n\
+    \n\
+    ALTERNATE\n\
+    \n\
+    Name:Test Sunken Mire\n\
+    ManaCost:no cost\n\
+    Types:Land\n\
+    R:Event$ Moved | ValidCard$ Card.Self | Destination$ Battlefield | ReplaceWith$ DBTap | ReplacementResult$ Updated | Description$ As CARDNAME enters, you may pay 3 life. If you don't, it enters tapped.\n\
+    SVar:DBTap:DB$ Tap | ETB$ True | Defined$ Self | UnlessCost$ PayLife<3> | UnlessPayer$ You\n\
+    A:AB$ Mana | Cost$ T | Produced$ B | SpellDescription$ Add {B}.\n\
+    Oracle:As Test Sunken Mire enters, you may pay 3 life. If you don't, it enters tapped.\\n{T}: Add {B}.";
+
+// CR 712.9, 614.12, 614.12a (2026-11-06): a land face played is checked as it would enter —
+// with that face's "as this enters" choice, never the other face's "enters tapped".
+#[test]
+fn a_land_face_asks_its_own_as_it_enters_choice() {
+    // The back face: asked; paying 3 life, it enters untapped.
+    let mut sc = scenario(&[MIRE]);
+    sc.card(P0, Zone::Hand, "Test Sunken Path");
+    let mut s = Script::new(sc.build());
+    s.play_face("Test Sunken Mire");
+    assert!(
+        matches!(s.kind(), ChoiceKind::AsEnters { .. }),
+        "{:?}",
+        s.kind()
+    );
+    assert_eq!(s.options(), [OptionDesc::Accept, OptionDesc::Decline]);
+    s.pick("pay", |_, o| *o == OptionDesc::Accept);
+    let land = the(&s, P0, Zone::Battlefield, "Test Sunken Path");
+    assert_eq!(s.st.object(land).face, 1);
+    assert!(
+        !s.st.object(land).tapped,
+        "the front's \"enters tapped\" isn't consulted"
+    );
+    assert_eq!(s.st.player(P0).life, 37);
+    // Declining: tapped.
+    let mut sc = scenario(&[MIRE]);
+    sc.card(P0, Zone::Hand, "Test Sunken Path");
+    let mut s = Script::new(sc.build());
+    s.play_face("Test Sunken Mire");
+    s.pick("decline", |_, o| *o == OptionDesc::Decline);
+    let land = the(&s, P0, Zone::Battlefield, "Test Sunken Path");
+    assert!(s.st.object(land).tapped);
+    assert_eq!(s.st.player(P0).life, 40);
+    // The front face: its own "enters tapped", and no choice.
+    let mut sc = scenario(&[MIRE]);
+    sc.card(P0, Zone::Hand, "Test Sunken Path");
+    let mut s = Script::new(sc.build());
+    s.pick("play the front", |_, o| {
+        matches!(o, OptionDesc::PlayLand { .. })
+    });
+    assert_eq!(s.kind(), ChoiceKind::Priority);
+    let land = the(&s, P0, Zone::Battlefield, "Test Sunken Path");
+    assert_eq!(s.st.object(land).face, 0);
+    assert!(s.st.object(land).tapped);
+    assert_eq!(s.st.player(P0).life, 40);
+}
+
+// CR 614.12: "enters tapped unless you control an Island" on a back land face, judged
+// before it enters.
+#[test]
+fn a_land_face_that_enters_tapped_unless() {
+    let charm = "Name:Test Check Charm\n\
+        ManaCost:1 U\n\
+        Types:Instant\n\
+        A:SP$ Draw | NumCards$ 1 | SpellDescription$ Draw a card.\n\
+        AlternateMode:Modal\n\
+        Oracle:Draw a card.\n\
+        \n\
+        ALTERNATE\n\
+        \n\
+        Name:Test Check Shore\n\
+        ManaCost:no cost\n\
+        Types:Land\n\
+        R:Event$ Moved | ValidCard$ Card.Self | Destination$ Battlefield | ReplaceWith$ DBTap | ReplacementResult$ Updated | Description$ Text.\n\
+        SVar:DBTap:DB$ Tap | ETB$ True | Defined$ Self | ConditionPresent$ Island.YouCtrl | ConditionCompare$ EQ0\n\
+        A:AB$ Mana | Cost$ T | Produced$ U | SpellDescription$ Add {U}.\n\
+        Oracle:Text.";
+    for (island, tapped) in [(false, true), (true, false)] {
+        let mut sc = scenario(&[charm, ISLAND_TYPE]);
+        if island {
+            sc.card(P0, Zone::Battlefield, "Island");
+        }
+        sc.card(P0, Zone::Hand, "Test Check Charm");
+        let mut s = Script::new(sc.build());
+        s.play_face("Test Check Shore");
+        let land = the(&s, P0, Zone::Battlefield, "Test Check Charm");
+        assert_eq!(s.st.object(land).tapped, tapped, "with an Island: {island}");
+    }
+}
+
+// CR 608.2h, 716.3b, 709.3b: "its controller gains life equal to its mana value" of a
+// countered spell cast as an Adventure, or as one half of a split card — the mana value of
+// what is on the stack; the countered Adventure goes to the graveyard (CR 716.3d is about
+// resolving).
+#[test]
+fn its_controller_and_mana_value_of_a_countered_face() {
+    let lesson = "Name:Test Lesson\nManaCost:U\nTypes:Instant\n\
+        A:SP$ Counter | TargetType$ Spell | ValidTgts$ Card | SubAbility$ DBGain | SpellDescription$ Text.\n\
+        SVar:DBGain:DB$ GainLife | Defined$ TargetedController | LifeAmount$ X\n\
+        SVar:X:Targeted$CardManaCost\nOracle:Text.";
+    let scorch = "Name:Test Scorch\nManaCost:1 R\nTypes:Instant\n\
+        A:SP$ DealDamage | ValidTgts$ Any | NumDmg$ 2 | SpellDescription$ Text.\n\
+        AlternateMode:Split\nOracle:Text.\n\nALTERNATE\n\nName:Test Frost\nManaCost:2 U\nTypes:Sorcery\n\
+        A:SP$ Draw | NumCards$ 2 | SpellDescription$ Draw two cards.\nOracle:Draw two cards.";
+    for (card, face, mv) in [
+        ("Test Errant Knight", "Test Quest Strike", 1),
+        ("Test Scorch // Test Frost", "Test Scorch", 2),
+    ] {
+        let mut sc = scenario(&[KNIGHT, lesson, scorch]);
+        sc.cards(P1, Zone::Battlefield, &["Mountain", "Mountain"]);
+        sc.card(P1, Zone::Hand, card);
+        sc.card(P0, Zone::Battlefield, "Island");
+        sc.card(P0, Zone::Hand, "Test Lesson");
+        sc.turn(P1, engine_core::turn::Step::PrecombatMain);
+        let mut s = Script::new(sc.build());
+        s.cast_face(face).target_player(P0).pay().pass();
+        assert_eq!(s.who(), P0);
+        s.cast("Test Lesson").target(face).pay();
+        for _ in 0..10 {
+            if s.st.stack.is_empty() {
+                break;
+            }
+            s.pass();
+        }
+        assert_eq!(s.st.player(P1).life, 40 + mv, "{face}");
+        assert_eq!(s.st.player(P0).life, 40);
+        let dead = s
+            .find(P1, Zone::Graveyard, card)
+            .unwrap_or_else(|| panic!("{card} in the graveyard"));
+        assert_eq!(s.st.object(dead).adventure, None);
+    }
+}
+
+// CR 202.3b, 608.2h: "its mana value" of a transformed permanent is its front face's.
+#[test]
+fn mana_value_of_a_transformed_permanent_as_a_target() {
+    let swarming = "Name:Test Swarming\nManaCost:B\nTypes:Sorcery\n\
+        A:SP$ Destroy | ValidTgts$ Creature | SubAbility$ DBLoseLife | SpellDescription$ Text.\n\
+        SVar:DBLoseLife:DB$ LoseLife | Defined$ You | LifeAmount$ X\n\
+        SVar:X:Targeted$CardManaCost\nOracle:Text.";
+    let mut sc = scenario(&[PUPA, swarming]);
+    sc.cards(P0, Zone::Battlefield, &["Swamp", "Forest"]);
+    let pupa = sc.card(P0, Zone::Battlefield, "Test Pupa"); // {G}
+    sc.card(P0, Zone::Hand, "Test Swarming");
+    let mut s = Script::new(sc.build());
+    s.tap("Forest", engine_core::mana::ManaType::Green);
+    s.activate("Test Pupa").pay().pass_all();
+    assert_eq!(s.st.object(pupa).face, 1);
+    s.cast("Test Swarming").target_object(pupa).pay().pass_all();
+    assert_eq!(
+        s.st.player(P0).life,
+        39,
+        "the Moth's mana value is the Pupa's: 1"
+    );
+}

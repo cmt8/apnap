@@ -1536,16 +1536,27 @@ face is CR 712.8, playing a land face 712.9, entering 712.10–712.11, "the same
   compiled right. Fixed: a later event about another subject is written out.
 - Golden state hashes re-blessed: the stable hasher writes a tag for every skipped serde
   field, so the new fields change every state hash. All 15 event-log hashes unchanged.
-- 9,305 → 9,426 of 34,463 scripts (real cards per Scryfall 9,225 → 9,342). By layout:
-  modal 27 of 101, transforming 18 of 399, adventurers 59 of 151, omens 5 of 16, split 6
-  of 128; and 6 cards about adventurers. All newly compiled cards were read against both faces' Oracle text.
-- **What is left, by kind** (cards blocked by it alone): transforming cards — battles
-  (`line:Defense`, 10), Sagas (`kw:Chapter`, 9), craft, and in all 36 day/night werewolves
-  (`kw:Daybound`), 32 disturb, 32 old werewolf conditions ("if no spells were cast last
-  turn"), "enters transformed" (`param:ChangeZone.Transformed`), `trig:Transformed`; modal
-  cards — "as this enters, you may pay 3 life" (`repl:Moved`, 17 in all); split cards —
-  Aftermath 13, Fuse 7, Rooms. Still blocked as layouts: `Flip`, `Meld`,
-  `Prepare`, `Specialize`, `Vengeance`.
+- On its own (on D-065) this was 9,305 → 9,426 of 34,463 scripts (real cards per Scryfall
+  9,225 → 9,342). All newly compiled cards were read against both faces' Oracle text.
+- **With D-067 and D-068** (rebased onto them): 9,776 → 9,906 of 34,463 (real 9,691 →
+  9,817). No card that compiled on either side stops compiling. By layout: modal 32 of
+  101, transforming 19 of 399, adventurers 63 of 151, omens 5 of 16, split 6 of 128.
+  Nine cards compile only in the combination, all read on both faces: the MDFC lands
+  with "as this land enters, you may pay 3 life" (Fell the Profane, Witch Enchanter,
+  Boggart Trawler, Pinnacle Monk, Razorgrass Ambush), adventurers and a transforming
+  card whose other text needed those batches (Scalding Viper's "that player", Brightcap
+  Badger, Curious Homunculus), and
+  Ishgard, the Holy See (a land with an Adventure). A land face's own "as it enters"
+  choice and "enters tapped unless" are read from the entering face (CR 712.9, 614.12);
+  "its mana value" of a target (`TargetInfo`) uses `Characteristics::mana_value`, so a
+  transformed permanent has its front face's (CR 202.3b) and a spell cast as an Adventure
+  or a split half has that face's (CR 716.3b, 709.3b).
+- **What is left, by kind** (cards blocked by it alone): transforming cards — disturb
+  (`kw:Disturb`, 14), Sagas (`kw:Chapter`, 10), battles (`line:Defense`, 10), craft, and in
+  all 36 day/night werewolves (`kw:Daybound`), 32 old werewolf conditions ("if no spells
+  were cast last turn"), "enters transformed" (`param:ChangeZone.Transformed`),
+  `trig:Transformed`; split cards — Aftermath 13, Fuse 8, Rooms. Still blocked as
+  layouts: `Flip`, `Meld`, `Prepare`, `Specialize`, `Vengeance`.
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
