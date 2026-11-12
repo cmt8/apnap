@@ -884,3 +884,130 @@ fn lands_are_every_basic_land_type() {
     let c = engine_core::layers::chars(&s.st, theirs);
     assert!(c.has_subtype("Mountain") && !c.has_subtype("Island"));
 }
+
+// ---------------------------------------------------------------------------------------
+// With D-067 (how a permanent enters) and D-068 (its controller, that player)
+
+/// A land with its own replacement effect `ReplaceWith$ DBTap` with these parameters.
+fn tap_land(name: &str, types: &str, tap: &str) -> String {
+    format!(
+        "Name:{name}\n\
+         ManaCost:no cost\n\
+         Types:{types}\n\
+         R:Event$ Moved | ValidCard$ Card.Self | Destination$ Battlefield | ReplaceWith$ DBTap | ReplacementResult$ Updated | Description$ Text.\n\
+         SVar:DBTap:DB$ Tap | ETB$ True | Defined$ Self{tap}\n\
+         Oracle:Text."
+    )
+}
+
+fn shock_land() -> String {
+    tap_land(
+        "Test Shoal",
+        "Land Island Swamp",
+        " | UnlessCost$ PayLife<2> | UnlessPayer$ You",
+    )
+}
+
+// CR 116.2a, 614.12a (2026-11-06): a land played from the graveyard enters the battlefield
+// like one played from the hand: "as this enters, you may pay 2 life" is still asked.
+#[test]
+fn a_land_from_the_graveyard_is_asked_as_it_enters() {
+    let shoal = shock_land();
+    let mut sc = scenario(&[&crucible(), &shoal]);
+    sc.card(P0, Zone::Battlefield, "Test Crucible");
+    let land = sc.card(P0, Zone::Graveyard, "Test Shoal");
+    main_phase(&mut sc, 0);
+    let mut s = Script::new(sc.build());
+    play(&mut s, land);
+    assert!(
+        matches!(s.kind(), ChoiceKind::AsEnters { .. }),
+        "asked as it enters: {:?}",
+        s.kind()
+    );
+    s.pick("pay", |_, o| *o == OptionDesc::Accept);
+    assert_eq!(s.st.player(P0).life, 38);
+    let on = s
+        .find(P0, Zone::Battlefield, "Test Shoal")
+        .expect("entered");
+    assert!(!s.st.object(on).tapped);
+    assert_eq!(s.st.player(P0).lands_played_this_turn, 1);
+}
+
+// The same from the top of the library; declining, it enters tapped.
+#[test]
+fn a_land_from_the_top_of_the_library_is_asked_as_it_enters() {
+    let shoal = shock_land();
+    let mut sc = scenario(&[&courser(), &shoal]);
+    sc.card(P0, Zone::Battlefield, "Test Courser");
+    let land = sc.card(P0, Zone::Library, "Test Shoal");
+    main_phase(&mut sc, 0);
+    let mut s = Script::new(sc.build());
+    assert_eq!(players::library_top(&s.st, P0), Some(land));
+    play(&mut s, land);
+    assert!(matches!(s.kind(), ChoiceKind::AsEnters { .. }));
+    s.pick("don't pay", |_, o| *o == OptionDesc::Decline);
+    assert_eq!(s.st.player(P0).life, 40);
+    let on = s
+        .find(P0, Zone::Battlefield, "Test Shoal")
+        .expect("entered");
+    assert!(s.st.object(on).tapped);
+}
+
+// CR 305.2: an additional land play is a land play like the first, lands that enter tapped
+// included.
+#[test]
+fn additional_land_plays_with_lands_that_enter_tapped() {
+    let slow = tap_land("Test Mire", "Land Swamp", "");
+    let mut sc = scenario(&[&explorer(), &slow]);
+    sc.card(P0, Zone::Battlefield, "Test Explorer");
+    sc.cards(P0, Zone::Hand, &["Test Mire", "Test Mire", "Test Mire"]);
+    sc.turn(P0, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    for _ in 0..2 {
+        let next = lands_offered(&s)[0];
+        play(&mut s, next);
+    }
+    assert!(lands_offered(&s).is_empty(), "two land plays");
+    let mires: Vec<_> =
+        s.st.zones
+            .battlefield
+            .iter()
+            .filter(|&&id| s.name(id) == "Test Mire")
+            .collect();
+    assert_eq!(mires.len(), 2);
+    assert!(mires.iter().all(|&&id| s.st.object(id).tapped));
+}
+
+// CR 115.10a (2026-11-06): a spell or ability targets only what it says "target" about.
+// "Destroy target creature. Its controller loses 2 life" doesn't target the player, so a
+// player with hexproof or shroud still loses the life (Forge: `Defined$ TargetedController`).
+#[test]
+fn hexproof_and_shroud_on_a_player_dont_stop_its_controller_effects() {
+    let ruin = "Name:Test Ruin\nManaCost:B\nTypes:Sorcery\n\
+        A:SP$ Destroy | ValidTgts$ Creature | TgtPrompt$ Text | SubAbility$ DBLose | SpellDescription$ Text.\n\
+        SVar:DBLose:DB$ LoseLife | Defined$ TargetedController | LifeAmount$ 2\n\
+        Oracle:Destroy target creature. Its controller loses 2 life.";
+    for keyword in ["Hexproof", "Shroud"] {
+        let ward = artifact(
+            "Test Veil",
+            &format!(
+                "S:Mode$ Continuous | Affected$ You | AddKeyword$ {keyword} | Description$ Text."
+            ),
+        );
+        let mut sc = scenario(&[&ward, ruin]);
+        sc.card(P1, Zone::Battlefield, "Test Veil");
+        let golem = sc.card(P1, Zone::Battlefield, "Test Golem");
+        sc.card(P0, Zone::Battlefield, "Swamp");
+        sc.card(P0, Zone::Hand, "Test Ruin");
+        sc.turn(P0, Step::PrecombatMain);
+        let mut s = Script::new(sc.build());
+        s.cast("Test Ruin");
+        s.target_object(golem).pay().pass_all();
+        assert!(!s.st.objects.contains_key(&golem), "{keyword}: destroyed");
+        assert_eq!(
+            s.st.player(P1).life,
+            38,
+            "{keyword}: its controller loses 2"
+        );
+    }
+}
