@@ -428,6 +428,9 @@ fn wants(req: &ManaRequirement, for_cost: bool, times: u32, out: &mut Vec<Want>)
                 out.push((1 << t, for_cost));
             }
         }
+        for m in req.hybrid_masks() {
+            out.push((m, for_cost));
+        }
         for _ in 0..req.generic {
             out.push((ALL, for_cost));
         }
@@ -915,6 +918,34 @@ pub(crate) fn goal_feasible(st: &GameState, p: PlayerId, goal: &PayGoal) -> bool
 /// The ways to pay `g` generic mana from the unrestricted `pool` (after `specific`):
 /// each a list of `g` types, in a stable order.
 fn allocations(pool: &ManaPool, req: &ManaRequirement) -> Vec<Vec<ManaType>> {
+    // CR 107.4e: first the color paying each hybrid symbol, in `HYBRID_PAIRS` order.
+    if req.hybrid_units() > 0 {
+        let masks = req.hybrid_masks();
+        let mut out = Vec::new();
+        fn choose(
+            masks: &[ManaMask],
+            chosen: &mut Vec<ManaType>,
+            req: &ManaRequirement,
+            pool: &ManaPool,
+            out: &mut Vec<Vec<ManaType>>,
+        ) {
+            let Some((&m, rest)) = masks.split_first() else {
+                for generic in allocations(pool, &req.with_hybrid(chosen)) {
+                    let mut a = chosen.clone();
+                    a.extend(generic);
+                    out.push(a);
+                }
+                return;
+            };
+            for t in types_in(m) {
+                chosen.push(t);
+                choose(rest, chosen, req, pool, out);
+                chosen.pop();
+            }
+        }
+        choose(&masks, &mut Vec::new(), req, pool, &mut out);
+        return out;
+    }
     if !req.payable_from(pool) {
         return Vec::new();
     }
@@ -946,6 +977,13 @@ fn allocations(pool: &ManaPool, req: &ManaRequirement) -> Vec<Vec<ManaType>> {
     out
 }
 
+/// The cost `req` paid with `paid` (the colors for its hybrid symbols, then the mana for
+/// its generic part): what `GameAction::PayMana` takes.
+fn payment(req: &ManaRequirement, paid: &[ManaType]) -> (ManaRequirement, [u32; 6]) {
+    let h = req.hybrid_units() as usize;
+    (req.with_hybrid(&paid[..h]), alloc_of(&paid[h..]))
+}
+
 fn alloc_of(paid: &[ManaType]) -> [u32; 6] {
     let mut a = [0u32; 6];
     for t in paid {
@@ -970,12 +1008,13 @@ fn simulate(
         execute(&mut sim, GameAction::Tap { object: w.id });
     }
     if w.cost.total() > 0 {
+        let (requirement, generic) = payment(&w.cost, paid);
         execute(
             &mut sim,
             GameAction::PayMana {
                 player: p,
-                requirement: w.cost,
-                generic: alloc_of(paid),
+                requirement,
+                generic,
             },
         );
     }
@@ -1374,27 +1413,17 @@ impl ManaFrame {
                         }
                     }
                     let w = self.way(st);
-                    if self.paid.len() as u32 >= w.cost.generic {
+                    if self.paid.len() as u32 >= w.cost.hybrid_units() + w.cost.generic {
                         self.stage = ManaStage::Pay;
                         continue;
                     }
-                    // Every complete way to pay that keeps the cost being paid payable;
-                    // the next mana is asked only if that is a real choice.
+                    // Every complete way to pay that keeps the cost being paid payable
+                    // (the colors for hybrid symbols first, then the generic part, each in
+                    // a fixed order); the next mana is asked only if that is a real choice.
                     let pool = st.player(p).mana_pool;
                     let fits: Vec<Vec<ManaType>> = allocations(&pool, &w.cost)
                         .into_iter()
-                        .filter(|a| {
-                            let mut rest = a.clone();
-                            self.paid
-                                .iter()
-                                .all(|t| match rest.iter().position(|x| x == t) {
-                                    Some(i) => {
-                                        rest.remove(i);
-                                        true
-                                    }
-                                    None => false,
-                                })
-                        })
+                        .filter(|a| a.starts_with(&self.paid))
                         .filter(|a| {
                             self.goal.as_ref().is_none_or(|g| {
                                 choice_keeps(st, p, g, &w, self.mana, &self.sacrifice, Some(a))
@@ -1403,15 +1432,9 @@ impl ManaFrame {
                         .collect();
                     let mut next: Vec<ManaType> = Vec::new();
                     for a in &fits {
-                        let mut rest = a.clone();
-                        for t in &self.paid {
-                            let i = rest.iter().position(|x| x == t).expect("extends");
-                            rest.remove(i);
-                        }
-                        for t in rest {
-                            if !next.contains(&t) {
-                                next.push(t);
-                            }
+                        let t = a[self.paid.len()];
+                        if !next.contains(&t) {
+                            next.push(t);
                         }
                     }
                     next.sort();
@@ -1440,12 +1463,13 @@ impl ManaFrame {
                         );
                     }
                     if w.cost.total() > 0 {
+                        let (requirement, generic) = payment(&w.cost, &self.paid);
                         execute(
                             st,
                             GameAction::PayMana {
                                 player: p,
-                                requirement: w.cost,
-                                generic: alloc_of(&self.paid),
+                                requirement,
+                                generic,
                             },
                         );
                     }

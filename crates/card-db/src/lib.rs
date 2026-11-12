@@ -211,6 +211,14 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
     if !land && !c.token && c.mana_cost.is_none() {
         p.push("non-land, non-token cards need a mana cost".into());
     }
+    // CR 107.4e: spells can't be paid for with hybrid mana yet (D-066).
+    if c.mana_cost.as_ref().is_some_and(|m| {
+        m.symbols
+            .iter()
+            .any(|s| matches!(s, card_model::ManaSymbol::Hybrid(..)))
+    }) {
+        p.push("a hybrid mana cost (D-066: not paid for yet)".into());
+    }
     if !c.land_types.is_empty() && !land {
         p.push("basic land types on a non-land".into());
     }
@@ -337,6 +345,12 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 p.push(at("not an ability another object can be given".into()));
                 continue;
             }
+        }
+        // CR 107.4e: hybrid mana is paid only in the costs of mana abilities so far (D-066).
+        if !matches!(a, AbilityDef::Mana { .. }) && format!("{a:?}").contains("Hybrid") {
+            p.push(at(
+                "hybrid mana outside a mana ability's cost (D-066)".into()
+            ));
         }
         // "The sacrificed creature's power" needs a sacrifice chosen as its cost is paid.
         if format!("{a:?}").contains("SacrificedPower") {

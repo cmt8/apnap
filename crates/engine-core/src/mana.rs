@@ -47,7 +47,25 @@ pub struct ManaRequirement {
     pub generic: u32,
     /// Indexed by `ManaType::index()`; the colorless slot means `{C}`.
     pub specific: [u32; 6],
+    /// Two-color hybrid symbols (CR 107.4e), indexed by [`HYBRID_PAIRS`] (D-066: so far
+    /// only in the costs of mana abilities).
+    #[serde(default)]
+    pub hybrid: [u32; 10],
 }
+
+/// The ten pairs of colors a hybrid symbol can have, as mana type indices.
+pub const HYBRID_PAIRS: [(usize, usize); 10] = [
+    (0, 1),
+    (0, 2),
+    (0, 3),
+    (0, 4),
+    (1, 2),
+    (1, 3),
+    (1, 4),
+    (2, 3),
+    (2, 4),
+    (3, 4),
+];
 
 impl ManaRequirement {
     /// The requirement for `cost` with `{X}` = `x` (CR 107.3a).
@@ -59,18 +77,78 @@ impl ManaRequirement {
                 ManaSymbol::Colored(c) => r.specific[ManaType::from_color(*c).index()] += 1,
                 ManaSymbol::Colorless => r.specific[ManaType::Colorless.index()] += 1,
                 ManaSymbol::X => r.generic += x,
+                ManaSymbol::Hybrid(a, b) => {
+                    let (a, b) = (
+                        ManaType::from_color(*a).index(),
+                        ManaType::from_color(*b).index(),
+                    );
+                    let pair = (a.min(b), a.max(b));
+                    let i = HYBRID_PAIRS
+                        .iter()
+                        .position(|p| *p == pair)
+                        .expect("a pair");
+                    r.hybrid[i] += 1;
+                }
             }
         }
         r
     }
 
     pub fn total(&self) -> u32 {
-        self.generic + self.specific.iter().sum::<u32>()
+        self.generic + self.specific.iter().sum::<u32>() + self.hybrid_units()
+    }
+
+    /// How many hybrid symbols it has.
+    pub fn hybrid_units(&self) -> u32 {
+        self.hybrid.iter().sum()
+    }
+
+    /// The types each hybrid symbol can be paid with, in [`HYBRID_PAIRS`] order.
+    pub fn hybrid_masks(&self) -> Vec<ManaMask> {
+        let mut out = Vec::new();
+        for (i, &(a, b)) in HYBRID_PAIRS.iter().enumerate() {
+            for _ in 0..self.hybrid[i] {
+                out.push((1 << a) | (1 << b));
+            }
+        }
+        out
+    }
+
+    /// With each hybrid symbol paid by the type chosen for it (in [`HYBRID_PAIRS`]
+    /// order): a requirement of specific and generic mana only.
+    pub fn with_hybrid(&self, choices: &[ManaType]) -> ManaRequirement {
+        debug_assert_eq!(choices.len() as u32, self.hybrid_units());
+        let mut r = *self;
+        r.hybrid = [0; 10];
+        for t in choices {
+            r.specific[t.index()] += 1;
+        }
+        r
     }
 
     /// Whether `pool` alone can pay the whole requirement.
     pub fn payable_from(&self, pool: &ManaPool) -> bool {
-        self.feasible(pool, &[])
+        if self.hybrid_units() == 0 {
+            return self.feasible(pool, &[]);
+        }
+        // CR 107.4e: each hybrid symbol by one of its two colors.
+        fn go(
+            r: &ManaRequirement,
+            masks: &[ManaMask],
+            chosen: &mut Vec<ManaType>,
+            pool: &ManaPool,
+        ) -> bool {
+            let Some((&m, rest)) = masks.split_first() else {
+                return r.with_hybrid(chosen).feasible(pool, &[]);
+            };
+            types_in(m).into_iter().any(|t| {
+                chosen.push(t);
+                let ok = go(r, rest, chosen, pool);
+                chosen.pop();
+                ok
+            })
+        }
+        go(self, &self.hybrid_masks(), &mut Vec::new(), pool)
     }
 
     /// Whether `pool` plus untapped sources can pay the requirement. Each source makes ONE

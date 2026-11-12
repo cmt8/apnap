@@ -3042,7 +3042,7 @@ impl<'a> Tx<'a> {
     /// `AB$ Mana` / `AB$ ManaReflected`: a mana ability (CR 605.1a; D-049, D-052, D-066).
     fn mana_ability(&mut self, rec: &'a Record, api: &str) -> Option<AbilityDef> {
         let rd = Rd::new(rec, api);
-        let cost = rd.get("Cost").and_then(|c| self.cost(c));
+        let cost = rd.get("Cost").and_then(|c| self.cost_of(c, true));
         let letter = |w: &&str| match *w {
             "W" => Some(ManaType::White),
             "U" => Some(ManaType::Blue),
@@ -3249,6 +3249,12 @@ impl<'a> Tx<'a> {
     }
 
     fn cost(&mut self, text: &str) -> Option<Cost> {
+        self.cost_of(text, false)
+    }
+
+    /// A cost; `hybrid`: two-color hybrid mana (`RW` = `{R/W}`) is understood (D-066: only
+    /// mana abilities can pay it so far).
+    fn cost_of(&mut self, text: &str, hybrid: bool) -> Option<Cost> {
         let mut cost = Cost::default();
         let mut mana = String::new();
         for tok in cost_tokens(text) {
@@ -3333,6 +3339,15 @@ impl<'a> Tx<'a> {
                         || matches!(tok, "W" | "U" | "B" | "R" | "G" | "C") =>
                 {
                     mana.push_str(&format!("{{{tok}}}"))
+                }
+                // CR 107.4e: `RW` is `{R/W}`.
+                (_, false)
+                    if hybrid
+                        && tok.len() == 2
+                        && tok.chars().all(|c| "WUBRG".contains(c))
+                        && tok.as_bytes()[0] != tok.as_bytes()[1] =>
+                {
+                    mana.push_str(&format!("{{{}/{}}}", &tok[..1], &tok[1..]))
                 }
                 _ => {
                     self.block(format!("cost:{kind}"));

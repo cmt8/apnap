@@ -562,6 +562,68 @@ fn the_heuristic_agent_does_not_sacrifice_its_board_for_mana() {
     assert!(decide(4), "four lands pay for it");
 }
 
+// CR 107.4e: a hybrid symbol in a mana ability's cost ("{R/W}, {T}: Add {R}{R}, {R}{W},
+// or {W}{W}" — a filter land) is paid with either color. Forge: `Cost$ RW T`.
+#[test]
+fn a_hybrid_cost_on_a_mana_ability() {
+    let prairie = "Name:Test Prairie\nManaCost:no cost\nTypes:Land\n\
+        A:AB$ Mana | Cost$ T | Produced$ C | SpellDescription$ Add {C}.\n\
+        A:AB$ Mana | Cost$ RW T | Produced$ Combo R W | Amount$ 2 | SpellDescription$ Add {R}{R}, {R}{W}, or {W}{W}.\n\
+        Oracle:{T}: Add {C}.\\n{R/W}, {T}: Add {R}{R}, {R}{W}, or {W}{W}.";
+    let knight = creature("Test Knight", "W W");
+    let mut sc = scenario(&[prairie, &knight]);
+    let land = sc.card(P0, Zone::Battlefield, "Test Prairie");
+    sc.card(P0, Zone::Battlefield, "Mountain");
+    sc.card(P0, Zone::Hand, "Test Knight");
+    let mut s = Script::new(sc.build());
+    assert!(s.can_cast("Test Knight"), "{{R}} pays {{R/W}}: {{W}}{{W}}");
+    let def = s.st.catalog.get(s.st.object(land).card);
+    assert_eq!(
+        card_model::describe::ability_text(def, &def.abilities[1]),
+        "{R/W}, {T}: Add 2 mana in any combination of {R} and/or {W}."
+    );
+    s.cast("Test Knight").tap("Mountain", ManaType::Red);
+    s.pick("the filter", |_, o| {
+        matches!(o, OptionDesc::TapForMana { source, mana: ManaType::White, ability: Some(_) } if *source == land)
+    });
+    s.pass_all();
+    assert!(s.find(P0, Zone::Battlefield, "Test Knight").is_some());
+    // With both colors floating, the player chooses which pays {R/W}.
+    let mut sc = scenario(&[prairie, &knight]);
+    sc.card(P0, Zone::Battlefield, "Test Prairie");
+    sc.cards(P0, Zone::Battlefield, &["Mountain", "Plains"]);
+    let mut s = Script::new(sc.build());
+    s.tap("Mountain", ManaType::Red)
+        .tap("Plains", ManaType::White);
+    s.pick("the filter", |_, o| {
+        matches!(
+            o,
+            OptionDesc::TapForMana {
+                mana: ManaType::Red,
+                ability: Some(_),
+                ..
+            }
+        )
+    });
+    assert_eq!(s.kind(), ChoiceKind::PayMana);
+    assert_eq!(s.options().len(), 2);
+    pick_mana(&mut s, ManaType::White);
+    assert_eq!(s.kind(), ChoiceKind::ChooseColor, "the second mana");
+    pick_mana(&mut s, ManaType::Red);
+    assert_eq!((pool(&s, ManaType::Red), pool(&s, ManaType::White)), (3, 0));
+    // A Forest can't pay {R/W}.
+    let mut sc = scenario(&[prairie, &knight]);
+    sc.card(P0, Zone::Battlefield, "Test Prairie");
+    sc.card(P0, Zone::Battlefield, "Forest");
+    sc.card(P0, Zone::Hand, "Test Knight");
+    let s = Script::new(sc.build());
+    assert!(!s.can_cast("Test Knight"));
+    // Hybrid mana anywhere else is not compiled yet.
+    let spell = "Name:Test Hybrid Spell\nManaCost:2\nTypes:Artifact\n\
+        A:AB$ Draw | Cost$ RW T | NumCards$ 1 | SpellDescription$ Draw a card.\nOracle:Text.";
+    assert_eq!(forge_test_blockers(spell), ["cost:RW"]);
+}
+
 // What stays blocked (D-066), each with its name.
 #[test]
 fn mana_abilities_that_stay_blocked() {

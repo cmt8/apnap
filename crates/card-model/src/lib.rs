@@ -75,6 +75,9 @@ pub enum ManaSymbol {
     Colorless,
     /// `{X}` (CR 107.3): its value is announced while casting.
     X,
+    /// A two-color hybrid symbol such as `{R/W}` (CR 107.4e): paid with either color. So
+    /// far only in the costs of mana abilities (D-066).
+    Hybrid(Color, Color),
 }
 
 /// The six mana types (CR 106.1b): five colors plus colorless.
@@ -151,7 +154,7 @@ impl ManaCost {
             .iter()
             .map(|s| match s {
                 ManaSymbol::Generic(n) => *n,
-                ManaSymbol::Colored(_) | ManaSymbol::Colorless => 1,
+                ManaSymbol::Colored(_) | ManaSymbol::Colorless | ManaSymbol::Hybrid(..) => 1,
                 // CR 202.3e: X is 0 everywhere except on the stack.
                 ManaSymbol::X => 0,
             })
@@ -172,6 +175,14 @@ impl ManaCost {
                 ManaSymbol::Colored(c) => out.push_str(ManaType::from_color(*c).symbol()),
                 ManaSymbol::Colorless => out.push_str("{C}"),
                 ManaSymbol::X => out.push_str("{X}"),
+                ManaSymbol::Hybrid(a, b) => {
+                    let letter =
+                        |c: &Color| ManaType::from_color(*c).symbol().trim_matches(['{', '}']);
+                    let _ = core::fmt::Write::write_fmt(
+                        &mut out,
+                        format_args!("{{{}/{}}}", letter(a), letter(b)),
+                    );
+                }
             }
         }
         out
@@ -190,6 +201,21 @@ impl ManaCost {
             };
             let sym = &body[..end];
             rest = &body[end + 1..];
+            let color = |l: &str| match l {
+                "W" => Some(Color::White),
+                "U" => Some(Color::Blue),
+                "B" => Some(Color::Black),
+                "R" => Some(Color::Red),
+                "G" => Some(Color::Green),
+                _ => None,
+            };
+            if let Some((a, b)) = sym.split_once('/') {
+                match (color(a), color(b)) {
+                    (Some(a), Some(b)) if a != b => symbols.push(ManaSymbol::Hybrid(a, b)),
+                    _ => return Err(ParseManaCostError),
+                }
+                continue;
+            }
             symbols.push(match sym {
                 "W" => ManaSymbol::Colored(Color::White),
                 "U" => ManaSymbol::Colored(Color::Blue),
@@ -309,10 +335,16 @@ impl CardDef {
         }
         let mut out: Vec<Color> = Vec::new();
         for s in self.mana_cost.iter().flat_map(|m| &m.symbols) {
-            if let ManaSymbol::Colored(c) = s
-                && !out.contains(c)
-            {
-                out.push(*c);
+            // CR 105.2, 107.4e: a hybrid symbol is both its colors.
+            let colors: &[Color] = match s {
+                ManaSymbol::Colored(c) => core::slice::from_ref(c),
+                ManaSymbol::Hybrid(a, b) => &[*a, *b],
+                _ => &[],
+            };
+            for c in colors {
+                if !out.contains(c) {
+                    out.push(*c);
+                }
             }
         }
         out.sort();
@@ -1725,8 +1757,11 @@ pub fn color_identity(def: &CardDef) -> Vec<Color> {
     let mut out: Vec<Color> = def.colors.clone().unwrap_or_default();
     let add_cost = |m: &ManaCost, out: &mut Vec<Color>| {
         for s in &m.symbols {
-            if let ManaSymbol::Colored(c) = s {
-                out.push(*c);
+            match s {
+                ManaSymbol::Colored(c) => out.push(*c),
+                // CR 903.4: a hybrid symbol counts as both its colors.
+                ManaSymbol::Hybrid(a, b) => out.extend([*a, *b]),
+                _ => {}
             }
         }
     };
