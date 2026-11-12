@@ -2743,6 +2743,38 @@ Rules text: docs/rules-notes/603-delayed.md. Tests: `crates/harness/tests/forge_
   and `AtEOT$` in a chain that already notes (Jaxis).
 - Golden: see the commit message.
 
+## D-083 Delayed abilities about targets, attackers and blockers; "at end of combat"; their wording (2026-11-12)
+Rules text: docs/rules-notes/603-delayed.md. Tests: `crates/harness/tests/forge_delayed.rs`.
+- **Wording:** a delayed ability about one object says "it" (`Effect::DelayedTrigger::one`,
+  set by the compiler where the object is one: a single target moved, one token made, the
+  card a creature became, the event's creature, the chain's one target); about several,
+  "those cards". A card put onto the battlefield with no controller named is "return it to
+  the battlefield under its owner's control" (CR 110.2a: that is what happens); "you
+  sacrifice those cards" is "sacrifice it". Text only: 30 compiled texts changed, nothing
+  else.
+- **About the chain's one target** (`RememberObjects$ Targeted | ParentTarget` where no link
+  moved it): "destroy it at the beginning of the next end step", "return it to its owner's
+  hand at end of combat" — affected while it is still that object (CR 603.7c; tested: a
+  target that left and came back is a new object and stays). Targets that may be players
+  or spells are named (`…remembers a target that may be a player`, `…a spell`).
+- **About the creature of the event** (`TriggeredAttackerLKICopy`, `TriggeredBlockerLKICopy`,
+  `TriggeredTargetLKICopy` — the creature it blocked, that blocked it, that it damaged):
+  Forge's LKI copy is the creature as it was when the trigger happened; the delayed ability
+  is about that permanent and touches it only while it is still that permanent. "At end of
+  combat" is the existing step trigger (CR 511.2); one created outside combat triggers at
+  the next end of combat. `TriggeredCardLKICopy` (an object that has left, e.g. a
+  sacrificed artifact copied later) stays blocked.
+- **Token copies at other times:** Forge's `AtEOT$ Your…` (your next end step) and `…Combat`
+  (the next end of combat) with `Sacrifice` / `Exile`; `Hand`, `Destroy`, `SacrificeCtrl`,
+  `…Upkeep` are named (`CopyPermanent:AtEOT <value>`).
+- **Named precisely now:** `DelayedTrigger:remembers Remembered (not noted by this chain)` /
+  `(in an effect)`, `…remembers Targeted (not the chain's one target)` / `(a target the chain
+  moved)`.
+- Newly compiled (8, all read against their Oracle text): Scrappy Bruiser, Aether Membrane,
+  Kaijin of the Vanishing Touch, Wall of Tears, Infernal Medusa, Lowland Basilisk, Ohran
+  Viper, Sosuke, Son of Seshiro. Most other cards of these shapes wait on other blockers
+  (`trig:Secondary-alone` for "blocks or becomes blocked by", Banding, Madness).
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

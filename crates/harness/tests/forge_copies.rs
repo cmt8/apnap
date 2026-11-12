@@ -602,12 +602,12 @@ fn copy_forms_not_compiled_are_named() {
     // Two abilities blocked by the same name: both are explained (the second isn't
     // `unexplained:` because the name was already raised).
     let twice = "Name:Test Twice\nManaCost:R\nTypes:Creature Human\nPT:1/1\n\
-        A:AB$ CopyPermanent | Cost$ T | ValidTgts$ Creature | AtEOT$ ExileCombat | SpellDescription$ Text.\n\
-        A:AB$ CopyPermanent | Cost$ 1 T | ValidTgts$ Creature | NumCopies$ 2 | AtEOT$ ExileCombat | SpellDescription$ Text.\n\
+        A:AB$ CopyPermanent | Cost$ T | ValidTgts$ Creature | AtEOT$ HandCombat | SpellDescription$ Text.\n\
+        A:AB$ CopyPermanent | Cost$ 1 T | ValidTgts$ Creature | NumCopies$ 2 | AtEOT$ HandCombat | SpellDescription$ Text.\n\
         Oracle:Text.";
     assert_eq!(
         forge_test_blockers(twice),
-        ["CopyPermanent:AtEOT ExileCombat"]
+        ["CopyPermanent:AtEOT HandCombat"]
     );
     // "Becomes a copy … until end of turn".
     let mirror = "Name:Test Mirror\nManaCost:2\nTypes:Artifact\n\
