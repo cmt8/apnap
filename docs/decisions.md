@@ -1797,6 +1797,20 @@ face is CR 712.8, playing a land face 712.9, entering 712.10–712.11, "the same
   "its mana value" of a target (`TargetInfo`) uses `Characteristics::mana_value`, so a
   transformed permanent has its front face's (CR 202.3b) and a spell cast as an Adventure
   or a split half has that face's (CR 716.3b, 709.3b).
+- **With D-070 and D-066** (merged): 10,163 → 10,300 of 34,463 (real 10,076 → 10,209).
+  By layout: modal 33 of 101, transforming 22 of 399, adventurers 66 of 151, omens 5 of
+  16, split 6 of 128. Seven cards compile only in the combination, all read on both
+  faces: Growing Rites of Itlimoc, Storm the Vault, Mystic Skull (mana abilities that
+  count, cost mana, or are given), Sea Gate Restoration ("no maximum hand size" and the
+  pay-3-life land), Beanstalk Wurm and Beorn ("play an additional land"), Rosethorn
+  Acolyte (an Adventure that adds mana). Letter of Acceptance, which compiled on this
+  branch alone, is blocked by D-066's `oracle:{T}` guard, as on main. **A rule that lets
+  a player play or cast cards from another zone judges its cards by the face that would
+  be played or cast** (CR 601.3e, 712.8c, 712.9): "you may play lands from your
+  graveyard" lets a modal card be played as its land face, not cast as its spell face;
+  `players::may_play_face`, `targeting::card_matches_as`. A card sent on an Adventure is
+  one more such permission (only as itself, CR 716.3d). Restricted mana is judged by the
+  face being cast (`Payee::SpellFace`).
 - **What is left, by kind** (cards blocked by it alone): transforming cards — disturb
   (`kw:Disturb`, 14), Sagas (`kw:Chapter`, 10), battles (`line:Defense`, 10), craft, and in
   all 36 day/night werewolves (`kw:Daybound`), 32 old werewolf conditions ("if no spells
