@@ -296,19 +296,138 @@ fn cr_800_4a_a_delayed_ability_of_a_player_who_left_never_triggers() {
     let _ = P1;
 }
 
+/// "Target creature gets +1/+0. Destroy it at the beginning of the next end step."
+const LATER: &str = "Name:Test Later\nManaCost:W\nTypes:Instant\n\
+    A:SP$ Pump | ValidTgts$ Creature | NumAtt$ +1 | SubAbility$ DelTrig | SpellDescription$ Text.\n\
+    SVar:DelTrig:DB$ DelayedTrigger | Mode$ Phase | Phase$ End of Turn | Execute$ TrigDestroy | RememberObjects$ Targeted | TriggerDescription$ Text.\n\
+    SVar:TrigDestroy:DB$ Destroy | Defined$ DelayTriggerRemembered\n\
+    Oracle:Target creature gets +1/+0 until end of turn. Destroy it at the beginning of the next end step.";
+
+// CR 603.7c (2026-11-06): a delayed ability about a target the effect didn't move affects
+// it at the beginning of the next end step — while it is still the same object.
+#[test]
+fn cr_603_7c_destroy_the_target_at_the_beginning_of_the_next_end_step() {
+    let mut sc = scenario(&[LATER, HEALER]);
+    sc.cards(P0, Zone::Battlefield, &["Plains", "Plains"]);
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Healer");
+    let other = sc.card(P1, Zone::Battlefield, "Test Healer");
+    sc.cards(P0, Zone::Hand, &["Test Later", "Test Later"]);
+    sc.turn(P0, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Later");
+    s.target_object(theirs).pay().pass_all();
+    assert_eq!(s.st.delayed[0].objects, vec![theirs]);
+    // The second one's target leaves and comes back: a new object, not destroyed.
+    s.cast("Test Later");
+    s.target_object(other).pay().pass_all();
+    let card = engine_core::actions::move_object(
+        &mut s.st,
+        other,
+        Zone::Hand,
+        engine_core::zones::LibraryPosition::Top,
+        None,
+    );
+    let back = engine_core::actions::move_object(
+        &mut s.st,
+        card,
+        Zone::Battlefield,
+        engine_core::zones::LibraryPosition::Top,
+        None,
+    );
+    to_cleanup(&mut s);
+    assert!(!s.st.objects.contains_key(&theirs), "destroyed");
+    assert_eq!(
+        s.st.object(back).zone,
+        Zone::Battlefield,
+        "a new object: stays"
+    );
+}
+
+/// "Whenever this creature blocks a creature, return that creature to its owner's hand at
+/// end of combat."
+const TEARS: &str = "Name:Test Tears\nManaCost:1 U\nTypes:Creature Wall\nPT:0/4\nK:Defender\n\
+    T:Mode$ AttackerBlocked | ValidCard$ Creature | ValidBlocker$ Card.Self | Execute$ DelTrig | TriggerDescription$ Text.\n\
+    SVar:DelTrig:DB$ DelayedTrigger | Mode$ Phase | Phase$ EndCombat | ValidPlayer$ Player | Execute$ TrigBounce | RememberObjects$ TriggeredAttackerLKICopy | TriggerDescription$ Text.\n\
+    SVar:TrigBounce:DB$ ChangeZone | Origin$ Battlefield | Destination$ Hand | Defined$ DelayTriggerRememberedLKI\n\
+    Oracle:Defender\\nWhenever this creature blocks a creature, return that creature to its owner's hand at end of combat.";
+
+// CR 603.7, 511.2 (2026-11-06): "at end of combat" — the creature it blocked (as it was
+// when the trigger happened, Forge's LKI copy) goes back to its owner's hand when the end
+// of combat step begins, if it is still that permanent (CR 603.7c).
+#[test]
+fn cr_603_7_return_the_blocked_creature_at_end_of_combat() {
+    let mut sc = scenario(&[TEARS, HEALER]);
+    let wall = sc.card(P0, Zone::Battlefield, "Test Tears");
+    let attacker = sc.card(P1, Zone::Battlefield, "Test Healer");
+    sc.turn(P1, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    drive_until(&mut s, |s| s.kind() == ChoiceKind::DeclareAttackers);
+    while s.next.is_some() && s.kind() == ChoiceKind::DeclareAttackers {
+        let pick = if s
+            .options()
+            .iter()
+            .any(|o| matches!(o, OptionDesc::Attack { attacker: a, .. } if *a == attacker))
+        {
+            vec![0]
+        } else {
+            vec![]
+        };
+        s.respond(Response::Pick(pick));
+    }
+    drive_until(&mut s, |s| s.kind() == ChoiceKind::DeclareBlockers);
+    let i = s
+        .options()
+        .iter()
+        .position(|o| matches!(o, OptionDesc::Block { blocker, .. } if *blocker == wall))
+        .expect("the wall may block");
+    s.respond(Response::Pick(vec![i]));
+    drive_until(&mut s, |s| s.st.turn.step == Step::PostcombatMain);
+    assert!(
+        s.find(P1, Zone::Hand, "Test Healer").is_some(),
+        "returned at end of combat"
+    );
+}
+
+// Forge: `AtEOT$ ExileCombat` / `YourSacrifice` — "exile it at end of combat",
+// "sacrifice it at the beginning of your next end step".
+#[test]
+fn token_copies_exiled_at_end_of_combat() {
+    let twin = twin("ExileCombat").replace(
+        "ExileCombat it at the beginning of the next end step",
+        "Exile it at end of combat",
+    );
+    let t = text_of(&[&twin], "Test Twin");
+    assert!(t.contains("at end of combat, exile it"), "{t}");
+    let mut sc = scenario(&[&twin, HEALER]);
+    sc.cards(P0, Zone::Battlefield, &["Plains"]);
+    let orig = sc.card(P0, Zone::Battlefield, "Test Healer");
+    sc.card(P0, Zone::Hand, "Test Twin");
+    sc.turn(P0, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Twin");
+    s.target_object(orig).pay().pass_all();
+    s.pass_all();
+    assert_eq!(named(&s, "Test Healer").len(), 2);
+    drive_until(&mut s, |s| s.st.turn.step == Step::PostcombatMain);
+    assert_eq!(named(&s, "Test Healer"), vec![orig]);
+}
+
 #[test]
 fn delayed_forms_not_compiled_are_named() {
-    // A delayed ability about the target (an object the effect didn't move).
-    let target = "Name:Test Later\nManaCost:W\nTypes:Instant\n\
-        A:SP$ Pump | ValidTgts$ Creature | NumAtt$ +1 | SubAbility$ DelTrig | SpellDescription$ Text.\n\
-        SVar:DelTrig:DB$ DelayedTrigger | Mode$ Phase | Phase$ End of Turn | Execute$ TrigDestroy | RememberObjects$ Targeted | TriggerDescription$ Text.\n\
-        SVar:TrigDestroy:DB$ Destroy | Defined$ DelayTriggerRemembered\nOracle:Text.";
-    assert!(forge_test_blockers(target).contains(&"DelayedTrigger:remembers Targeted".to_string()));
-    // "… at end of combat" (another window) for a token copy.
+    // A delayed ability about remembered cards of a chain that doesn't forget them.
+    let kept = "Name:Test Kept\nManaCost:W\nTypes:Instant\n\
+        A:SP$ ChangeZone | ValidTgts$ Creature | Origin$ Battlefield | Destination$ Exile | RememberChanged$ True | SubAbility$ DelTrig | SpellDescription$ Text.\n\
+        SVar:DelTrig:DB$ DelayedTrigger | Mode$ Phase | Phase$ End of Turn | Execute$ TrigReturn | RememberObjects$ Remembered\n\
+        SVar:TrigReturn:DB$ ChangeZone | Defined$ DelayTriggerRemembered | Origin$ Exile | Destination$ Battlefield\n\
+        Oracle:Text.";
+    assert!(
+        forge_test_blockers(kept)
+            .contains(&"DelayedTrigger:remembers Remembered (not noted by this chain)".to_string())
+    );
+    // "… at end of combat" back to the hand: another action.
     let combat = "Name:Test Combat Twin\nManaCost:R\nTypes:Sorcery\n\
-        A:SP$ CopyPermanent | ValidTgts$ Creature | AtEOT$ ExileCombat | SpellDescription$ Text.\nOracle:Text.";
-    assert!(forge_test_blockers(combat).contains(&"CopyPermanent:AtEOT ExileCombat".to_string()));
-    let _ = (ChoiceKind::Priority, OptionDesc::Pass);
+        A:SP$ CopyPermanent | ValidTgts$ Creature | AtEOT$ HandCombat | SpellDescription$ Text.\nOracle:Text.";
+    assert!(forge_test_blockers(combat).contains(&"CopyPermanent:AtEOT HandCombat".to_string()));
 }
 
 /// The rules text of the card named `name` in the catalog these cards compile to.
