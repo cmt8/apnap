@@ -57,6 +57,17 @@ A script is a list of lines. For each line:
 - Lines may come in any order, except that `Name` must come first in each face (it creates
   the face that the following lines fill in), and face separators switch the current face.
 
+**Comments (D-078).** The test is on the raw line, `line.isEmpty() || line.charAt(0) == '#'`
+(`CardRules.Reader.readCard`): only a `#` in column 0 makes a comment, and the line never
+reaches `parseLine`. A `#` anywhere else (indented, or inside a value) is ordinary text. The
+corpus has 135 distinct comments on 210 lines in 198 cards: AI notes ("TODO: the AI won't
+..."), notes on how SVars are used, `# --- VARIANTS ---` markers, and a handful that say a
+script is wrong or incomplete ("Doesn't follow the strict wording of the Oracle text",
+"TODO: need EnchantedLKI ..."). Forge ignores all of them; the compiler ignores the ones in
+`forge/comments.rs`'s `HARMLESS` list, blocks the ones in `INCOMPLETE`
+(`script:differs from the card`), and blocks any comment in neither (`comment:unreviewed`).
+(`mkzip.sh` in the cards folder is not a card and starts with `#!/bin/sh`.)
+
 Every line type the reader recognises:
 
 | Key | Count | Value | Meaning |

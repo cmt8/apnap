@@ -1121,6 +1121,16 @@ impl<'a> Tx<'a> {
 
     /// The value of a script variable (`SVar:X:Count$…`).
     fn expr(&mut self, name: &str) -> Option<Amount> {
+        // `AFLifeLost` and its kind: Forge's effects write their result into an SVar of
+        // this name ("will be set by LoseLife"); the script only holds the starting value
+        // (`Number$0`), which is not what the card means (D-078).
+        if name
+            .strip_prefix("AF")
+            .is_some_and(|r| r.starts_with(char::is_uppercase))
+        {
+            self.block(format!("expr:set by an effect {name}"));
+            return None;
+        }
         if SET_WHILE_RESOLVING.contains(&name) {
             self.block(format!("expr:set while resolving {name}"));
             return None;
@@ -6489,31 +6499,6 @@ const SCRIPT_DIFFERS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Comment lines of Forge scripts (`# …`) that have been read, with every card they are
-/// on, and that say nothing about what the card does: notes on Forge's AI, or on how the
-/// script works where the compiler reads that part by its meaning anyway. A comment is
-/// matched by its beginning. A comment that admits the script differs from the card ("TODO:
-/// need EnchantedLKI…", "Doesn't follow the strict wording of the Oracle text") must never
-/// be listed here.
-const COMMENTS_READ: &[&str] = &[
-    // Tutors (Demonic, Diabolic, Grim, Mystical, Personal, Imperial Seal…).
-    "# TODO: The AI will currently search for the most expensive valid card in the library.",
-    "# TODO: Improve the tutoring logic for the AI.",
-    "# TODO: improve AI tutoring logic",
-    // Consult the Necrosages, Culling the Weak, Embodiment of Spring, Kuro, Sawtooth Loon,
-    // Utopia Vow, Natural Order (and the other "SacAndUpgrade" cards).
-    "# TODO: The AI will pretty much always use this to draw cards",
-    "# TODO: Improve the mana ritual AI",
-    "# TODO: Just like with Sakura-Tribe Elder, the AI",
-    "# TODO: the AI can be improved for this",
-    "# TODO: The AI is bad with the \"put two cards on the bottom of your library\" thing",
-    "# TODO: For AI, this acts as a curse spell",
-    "# AI Preference is needed to make the AI consider the ability.",
-    // The script variable Forge's life loss sets as it resolves: read by its meaning
-    // ("the life lost this way", `Tx::expr`), never by the value written in the script.
-    "# AFLifeLost will be set by LoseLife",
-];
-
 /// Script variables that Forge's own code sets while a spell or ability resolves
 /// (`sa.setSVar(…)`): the value written in the script is only a placeholder
 /// (`SVar:AFLifeLost:Number$0`). Reading one by its written value would be wrong, so each
@@ -6714,13 +6699,12 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
         ..CardDef::default()
     };
     for line in &face.unknown {
-        // A comment line (Forge ignores it) that has been read and says nothing about
-        // what the card does. Any other comment may be admitting a difference from the
-        // card, so it stays a blocker until someone reads it.
-        if line.starts_with('#') && COMMENTS_READ.iter().any(|c| line.starts_with(c)) {
-            continue;
-        }
         tx.block(format!("line:{}", line.split(':').next().unwrap_or("?")));
+    }
+    // Comments (D-078): reviewed ones are ignored, as Forge does; one that says the script
+    // is incomplete, or one nobody has read, blocks.
+    for b in super::comments::blockers(&face.comments) {
+        tx.block(b);
     }
     if SCRIPT_DIFFERS.iter().any(|(name, _)| *name == face.name) {
         tx.block("script:differs from the card");

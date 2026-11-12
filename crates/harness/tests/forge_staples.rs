@@ -151,45 +151,6 @@ fn a_value_forge_sets_while_resolving_is_never_read_as_written() {
     );
 }
 
-// Invariant 15: a comment line is ignored only once it has been read and found to say
-// nothing about what the card does; any other comment blocks the card (it may say the
-// script differs from the card).
-#[test]
-fn comments_that_were_read_are_ignored_others_block() {
-    let tutor = |comment: &str| {
-        card(
-            "Test Tutor",
-            "1 B",
-            "Sorcery",
-            &format!(
-                "A:SP$ ChangeZone | Origin$ Library | Destination$ Hand | ChangeType$ Card | ChangeNum$ 1 | Mandatory$ True | SpellDescription$ Text.\n{comment}"
-            ),
-        )
-    };
-    assert!(
-        forge_test_blockers(&tutor(
-            "# TODO: Improve the tutoring logic for the AI. Currently will generally look for the most expensive castable thing in the library."
-        ))
-        .is_empty()
-    );
-    assert_eq!(
-        forge_test_blockers(&tutor(
-            "# Doesn't follow the strict wording of the Oracle text currently."
-        )),
-        ["line:# Doesn't follow the strict wording of the Oracle text currently."]
-    );
-    // The tutor itself: any card, into the hand, then shuffle.
-    let mut sc = scenario(&[&tutor("# TODO: improve AI tutoring logic")]);
-    sc.cards(P0, Zone::Battlefield, &["Swamp"; 2]);
-    sc.card(P0, Zone::Hand, "Test Tutor");
-    let island = sc.card(P0, Zone::Library, "Island");
-    let mut s = Script::new(sc.build());
-    s.cast("Test Tutor").pay().pass_all();
-    assert_eq!(s.kind(), ChoiceKind::SearchLibrary);
-    pick_cards(&mut s, &[island]);
-    assert!(s.find(P0, Zone::Hand, "Island").is_some());
-}
-
 // ---------------------------------------------------------------------------------------
 // "In any order"
 

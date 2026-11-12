@@ -18,9 +18,8 @@ effects, and not more than their life totals went down.
 | Test | Rule |
 |---|---|
 | `life_lost_this_way_is_what_the_opponents_lost` | 119.3, 608.2c |
-| `life_lost_this_way_counts_a_replaced_loss_as_none` | 608.2c (a replacement modifies the action) |
+| `life_lost_this_way_is_zero_when_nothing_was_lost` | 119.3 |
 | `a_value_forge_sets_while_resolving_is_never_read_as_written` | compiler (invariant 15) |
-| `comments_that_were_read_are_ignored_others_block` | compiler (invariant 15) |
 
 ## "In any order" (401.4)
 

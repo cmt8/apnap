@@ -3,6 +3,7 @@
 //! `CardDef`, refusing any card that has a line or parameter it doesn't understand. The
 //! scripts themselves are fetched into the user's cache, never committed.
 
+pub mod comments;
 pub mod library;
 pub mod parse;
 pub mod translate;
