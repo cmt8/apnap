@@ -2174,9 +2174,15 @@ EDHREC order.
   cards: Atraxa, Karn's Bastion, Evolution Sage, Flux Channeler, Inexorable Tide… The
   heuristic agent picks its own permanents with +1/+1 counters and others' with -1/-1.
 - Golden hashes unchanged (state and event logs).
-- 9,891 → 9,968 of 34,463 scripts on base `0365ace`; after merging main `ef30f04`: 10,593
-  (main alone: 10,524). Top 100 by EDHREC rank 81 of 95 compile (main: 79), top 1,000
-  54.9% (main: 53.8%). Every newly compiled card was read against its Oracle text.
+- 9,891 → 9,968 of 34,463 scripts on base `0365ace`; merged with main `b2647ec` (D-072):
+  10,827 (main alone: 10,758; +69, none lost, no engine text changed — a card-by-card diff
+  of `forge-coverage --sample 1` against main's build). Top 100 by EDHREC rank 86 of 95
+  (main: 84), top 1,000 56.1% (main: 55.0%), top 5,000 33.9% (33.2%). Every newly compiled
+  card was read against its Oracle text.
+- With D-072: a flashback spell's "you gain life equal to the life lost this way" counts a
+  loss that takes an opponent below 0 in full (CR 119.3: an opponent at 1 life who loses 3
+  has lost 3 — the Gray Merchant ruling); a land returned to hand to pay an alternative
+  cost isn't offered to "untap up to N lands".
 - **Next (in the coordinator's order):** Path of Ancestry, Myriad Landscape, delayed
   triggers (Arcane Denial, Mana Drain), pay X life, Ponder / Sensei's Divining Top
   (`api:RearrangeTopOfLibrary`), Channel lands, Esper Sentinel, City of Brass (`trig:Taps`),
