@@ -12,12 +12,12 @@
 use super::parse::{Face, Record, Script};
 use card_model::{
     AbilityDef, ActivationZone, Affected, AltCost, AltKind, AltKindName, Amount, AsEnters,
-    BasicLandType, Body, Calc, CardDef, CardDest, CardType, CardZone, Cmp, Color, CombatRule,
-    Condition, ContinuousEffect, Cost, CostChoice, CounterKind, DamageBy, DamagePer, DamageTo,
-    EachPlayerAction, Effect, Keyword, Layout, ManaCost, ManaProduce, ManaRestriction, ManaType,
-    Measure, Mode, ObjFilter, ObjRef, PlayZone, PlayerRef, PlayerRule, ReplaceWith, Replaces,
-    Selector, Signed, Supertype, Take, TargetFilter, TargetGroup, TargetRef, Timing, Trigger,
-    TriggerStep, Who, ChoiceOf, OfChosen,
+    BasicLandType, Body, Calc, CardDef, CardDest, CardType, CardZone, ChoiceOf, Cmp, Color,
+    CombatRule, Condition, ContinuousEffect, Cost, CostChoice, CounterKind, DamageBy, DamagePer,
+    DamageTo, EachPlayerAction, Effect, Keyword, Layout, ManaCost, ManaProduce, ManaRestriction,
+    ManaType, Measure, Mode, ObjFilter, ObjRef, OfChosen, PlayZone, PlayerRef, PlayerRule,
+    ReplaceWith, Replaces, Selector, Signed, Supertype, Take, TargetFilter, TargetGroup, TargetRef,
+    Timing, Trigger, TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -2072,6 +2072,11 @@ impl<'a> Tx<'a> {
                 }
             }
             "DestroyAll" => {
+                // Forge destroys on the battlefield whatever this says.
+                if !matches!(rd.get("Zone"), None | Some("Battlefield")) {
+                    self.block("param:DestroyAll.Zone");
+                    return None;
+                }
                 let sel = self.valid_cards(&rd, api);
                 Effect::DestroyAll(sel?)
             }
@@ -2560,6 +2565,12 @@ impl<'a> Tx<'a> {
                 // Layer 4: types added (nothing is removed: the `Remove…` keys are not
                 // read, so a script that has them is not compiled).
                 if let Some(types) = rd.get("Types") {
+                    // (The chosen type of a resolving effect is not carried into what it
+                    // makes last: only a static ability adds it.)
+                    if types.split(',').any(|t| t.trim() == "ChosenType") {
+                        self.block("Animate:Types ChosenType");
+                        return None;
+                    }
                     effects.push(self.added_types(types.split(','))?);
                 }
                 // Layer 5: only "becomes [these colors]", not "in addition".
@@ -3484,8 +3495,17 @@ impl<'a> Tx<'a> {
         &mut self,
         words: impl Iterator<Item = &'t str>,
     ) -> Option<ContinuousEffect> {
+        let words: Vec<&str> = words.map(str::trim).collect();
+        // "Is the chosen type in addition to its other types" (CR 607.2d, 205.3d).
+        if words.contains(&"ChosenType") {
+            if words.len() == 1 {
+                return Some(ContinuousEffect::AddChosenType);
+            }
+            self.block("type added:ChosenType and others");
+            return None;
+        }
         let (mut card_types, mut subtypes, mut land_types) = (Vec::new(), Vec::new(), Vec::new());
-        for word in words.map(str::trim) {
+        for word in words {
             if let Some(t) = card_type(word) {
                 card_types.push(t);
                 continue;
@@ -4081,6 +4101,10 @@ impl<'a> Tx<'a> {
         };
         let rec = self.sub(svar)?;
         let rd = Rd::new(rec, format!("ETBReplacement {api}"));
+        // Applied to the entering card (as every choice here is).
+        if !matches!(rd.get("ETB"), None | Some("True")) {
+            self.block(format!("param:ETBReplacement {api}.ETB"));
+        }
         let what = self.choice(&rd, api);
         if rd.get("SubAbility").is_some() {
             self.block(format!("kw:ETBReplacement:{api}+SubAbility"));
@@ -5022,6 +5046,12 @@ impl<'a> Tx<'a> {
                 None if own_event => {}
                 // An ability something is given works where that thing is given it.
                 None if self.granting > 0 => {}
+                // "Whenever a creature you control of the chosen type enters": only a
+                // permanent has a choice (made as it entered), so it can trigger nowhere else.
+                None if rec.get("ValidCard").is_some_and(|v| {
+                    v.split(['.', '+', ','])
+                        .any(|w| w == "ChosenType" || w == "ChosenColor")
+                }) => {}
                 None => self.block("trig:zone unstated"),
                 Some(z) => self.block(format!("trig:zone {z}")),
             }
@@ -5685,9 +5715,19 @@ impl<'a> Tx<'a> {
                         Err(_) => self.expr(amount),
                     }
                     .map(AbilityDef::SelfCostReduction),
-                    // "[These] spells you cast cost {N} less to cast."
-                    (Some(f), None | Some("Battlefield"), Some("You")) => {
+                    // "[These] spells you cast cost {N} less to cast." / with no `Activator$`,
+                    // anyone's spells ("creature spells of the chosen type cost {2} less").
+                    (Some(f), None | Some("Battlefield"), activator @ (Some("You") | None)) => {
+                        let anyone = activator.is_none();
                         let spells = self.card_selector(f);
+                        if anyone
+                            && spells
+                                .as_ref()
+                                .is_some_and(|s| s.controller != Who::Any || s.owner != Who::Any)
+                        {
+                            self.block("static:ReduceCost-whose");
+                            return None;
+                        }
                         let n = amount.parse::<u32>().ok().or_else(|| {
                             self.block("static:ReduceCost-variable");
                             None
@@ -5695,6 +5735,7 @@ impl<'a> Tx<'a> {
                         Some(AbilityDef::CostReduction {
                             spells: spells?,
                             amount: n?,
+                            anyone,
                         })
                     }
                     _ => {
@@ -6771,6 +6812,11 @@ const SCRIPT_DIFFERS: &[(&str, &str)] = &[
         "gives its trigger to Spirit *creatures*; the card says \"all Spirits\" (a noncreature \
          Kindred Spirit must get it too)",
     ),
+    (
+        "For the Ancestors",
+        "takes creature cards of the chosen type; the card says \"cards of the chosen type\" (a \
+         Kindred card of that type may be taken too)",
+    ),
 ];
 
 /// Compile a script. `Err` lists every blocker found (not just the first), on every face.
@@ -7368,6 +7414,12 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
             }
             continue;
         }
+        // CR 702.73a: changeling, a characteristic-defining ability — printed only (one
+        // given by another effect would not be a CDA, CR 604.3a, so `keyword` doesn't know it).
+        if k == "Changeling" {
+            def.keywords.push(Keyword::Changeling);
+            continue;
+        }
         match keyword(k) {
             Some(k) => def.keywords.push(k),
             None => {
@@ -7436,6 +7488,9 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
             }
         }
     }
+    for b in chosen_blockers(&def) {
+        tx.block(b);
+    }
     // Forge scripts leave out some things the card says where its AI would never choose
     // otherwise ("you may put a counter", "another target creature" on an ability that
     // sacrifices its source). The card as compiled is read back against its Oracle text
@@ -7455,6 +7510,54 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
     } else {
         Err(tx.blockers)
     }
+}
+
+/// Where "the chosen type / color" is written somewhere the engine doesn't read it from
+/// (D-076): named, never dropped.
+fn chosen_blockers(def: &CardDef) -> Vec<&'static str> {
+    let refers = |x: &dyn core::fmt::Debug| format!("{x:?}").contains("chosen: Some(");
+    let mut out = Vec::new();
+    for a in &def.abilities {
+        match a {
+            // "When this dies, … of the chosen type": the ability is put on the stack after
+            // its source has left, and the choice isn't carried that far.
+            AbilityDef::Triggered { when, body, .. }
+                if refers(body)
+                    && when.events().iter().any(|t| {
+                        matches!(
+                            t,
+                            Trigger::Dies(ObjFilter::This) | Trigger::Leaves(ObjFilter::This)
+                        )
+                    }) =>
+            {
+                out.push("chosen:in a trigger on its source leaving")
+            }
+            // (A rule about players reads its source's choice: `players::may_play_with`.)
+            AbilityDef::FromZone { .. } if refers(a) => out.push("chosen:in another zone"),
+            AbilityDef::Mana {
+                spend: Some(r),
+                cost,
+                ..
+            } if refers(r) => {
+                let not = r
+                    .spells
+                    .iter()
+                    .chain(&r.abilities)
+                    .chain(&r.sources)
+                    .any(|s| s.chosen == Some(OfChosen::NotType));
+                let several = r.spells.len() > 1 || r.abilities.len() > 1 || r.sources.len() > 1;
+                if not || cost.sacrifice_self || cost.sacrifice.is_some() || several {
+                    out.push("chosen:mana restriction shape");
+                }
+            }
+            _ => {}
+        }
+    }
+    // An ability given to another object would look for that object's choice.
+    if def.granted.iter().any(|a| refers(a)) {
+        out.push("chosen:in an ability given to another object");
+    }
+    out
 }
 
 /// Rules text in lower case without "(reminder text)", split into what is said outright
@@ -7527,6 +7630,17 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
     compare(&plain, &compiled);
     if !def.granted.is_empty() {
         compare(&quoted, &compiled_quoted);
+    }
+    // "Choose a creature type" / "of the chosen type": a choice, and what refers to it, are
+    // said by the card exactly where the compiled card says them (D-076).
+    for phrase in ["chosen type", "chosen color", "choose a creature type"] {
+        // ("Choose a creature type. Draw a card for each permanent you control of that
+        // type": the type just chosen.)
+        let said = plain.replace("of that type", "of the chosen type");
+        if said.contains(phrase) != compiled.contains(phrase) {
+            missing.push("says chosen");
+            break;
+        }
     }
     // "{T}" in a cost: a script can leave it out (Lotus Ring's given "{T}, Sacrifice this
     // creature: …" is scripted as "Sacrifice this"), and a mana ability without it can be

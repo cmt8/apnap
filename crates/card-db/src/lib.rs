@@ -940,6 +940,8 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                                 | ReplaceWith::EntersTappedUnless(_)
                                 | ReplaceWith::EntersTappedUnlessYou(_)
                                 | ReplaceWith::EntersOnlyIfYou(_)
+                                // "As this enters, choose …" (CR 614.12a).
+                                | ReplaceWith::Choose(_)
                         )
                         | (
                             Replaces::OtherEnters(_),

@@ -828,7 +828,11 @@ impl Narrator {
                     card_model::Chosen::CreatureType(t) => t.name().to_string(),
                     card_model::Chosen::Color(c) => format!("{c:?}").to_lowercase(),
                 };
-                let l = format!("  {} chooses {value} for {}", p(*player), self.name(*object));
+                let l = format!(
+                    "  {} chooses {value} for {}",
+                    p(*player),
+                    self.name(*object)
+                );
                 self.emit(l, out);
             }
             Event::Tapped { object } => {

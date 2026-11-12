@@ -5,10 +5,10 @@
 
 use crate::{
     AbilityDef, ActivationZone, Affected, Amount, AsEnters, Body, Calc, CardDef, CardDest,
-    CardType, CardZone, ChoiceOf, Cmp, Color, CombatRule, OfChosen, Condition, ContinuousEffect, Cost, CounterKind,
-    DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword, ManaProduce, Measure, Mode,
-    ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, Take, TargetFilter, TargetRef,
-    Timing, Trigger, TriggerStep, Who,
+    CardType, CardZone, ChoiceOf, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost,
+    CounterKind, DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword, ManaProduce,
+    Measure, Mode, ObjFilter, ObjRef, OfChosen, PlayerRef, ReplaceWith, Replaces, Selector, Take,
+    TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
 };
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -2043,15 +2043,11 @@ fn ability(a: &AbilityDef) -> String {
             spend.as_ref().map_or(String::new(), |r| {
                 let mut uses: Vec<String> = Vec::new();
                 if !r.spells.is_empty() {
+                    // "Cast Elf or Goblin spells", "cast creature spells of the chosen type".
                     uses.push(format!(
-                        "cast {}",
-                        join(
-                            r.spells
-                                .iter()
-                                .map(|s| format!("{} spells{}", spell_kind(s), of_chosen(s, true)))
-                                .collect(),
-                            "or"
-                        )
+                        "cast {} spells{}",
+                        join(r.spells.iter().map(spell_kind).collect(), "or"),
+                        r.spells.first().map_or("", |s| of_chosen(s, true))
                     ));
                 }
                 if !r.abilities.is_empty() {
@@ -2067,8 +2063,9 @@ fn ability(a: &AbilityDef) -> String {
                     uses.push("activate an ability".to_string());
                 } else if !r.sources.is_empty() {
                     uses.push(format!(
-                        "activate abilities of {} sources",
-                        join(r.sources.iter().map(spell_kind).collect(), "or")
+                        "activate abilities of {} sources{}",
+                        join(r.sources.iter().map(spell_kind).collect(), "or"),
+                        r.sources.first().map_or("", |s| of_chosen(s, true))
                     ));
                 }
                 format!(" Spend this mana only to {}.", join(uses, "or"))
@@ -2156,7 +2153,11 @@ fn ability(a: &AbilityDef) -> String {
             let others;
             let what = match replaces {
                 Replaces::OtherEnters(s) => {
-                    others = format!("Each {}", selector(s, false));
+                    // "Each other creature you control …".
+                    others = format!(
+                        "Each {}",
+                        selector(s, false).replacen("another ", "other ", 1)
+                    );
                     others.as_str()
                 }
                 Replaces::CreateTokens => "If an effect would create tokens under your control",
@@ -2227,7 +2228,11 @@ fn ability(a: &AbilityDef) -> String {
                 }
             }
         }
-        AbilityDef::CostReduction { spells, amount: n } => {
+        AbilityDef::CostReduction {
+            spells,
+            amount: n,
+            anyone,
+        } => {
             // "Colorless spells you cast with mana value 7 or greater cost {1} less".
             let text = selector(spells, false);
             // "… spells you cast with power 4 or greater", "… of the chosen type".
@@ -2246,7 +2251,8 @@ fn ability(a: &AbilityDef) -> String {
             } else {
                 format!("{} spells", capitalize(kind))
             };
-            format!("{spells} you cast{with} cost {{{n}}} less to cast.")
+            let cast = if *anyone { "" } else { " you cast" };
+            format!("{spells}{cast}{with} cost {{{n}}} less to cast.")
         }
         AbilityDef::CombatRule { affected, rule } => {
             let (subject, plural) = match affected {

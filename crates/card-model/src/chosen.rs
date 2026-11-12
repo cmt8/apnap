@@ -464,7 +464,10 @@ mod tests {
     #[test]
     fn creature_types_are_sorted_and_found() {
         assert!(CREATURE_TYPES.windows(2).all(|w| w[0] < w[1]));
-        assert_eq!(CreatureType::named("Elf").map(CreatureType::name), Some("Elf"));
+        assert_eq!(
+            CreatureType::named("Elf").map(CreatureType::name),
+            Some("Elf")
+        );
         assert!(is_creature_type("Time Lord") && is_creature_type("C'tan"));
         assert!(!is_creature_type("Forest") && !is_creature_type("Equipment"));
         let t = CreatureType::named("Zombie").unwrap();

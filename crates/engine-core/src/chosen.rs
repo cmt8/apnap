@@ -51,9 +51,9 @@ pub fn of_source(st: &GameState, source: ObjectId) -> &[Chosen] {
     st.stack
         .iter()
         .rev()
-        .find(|s| {
-            matches!(s.kind, crate::stack::StackKind::Ability { source: x, .. } if x == source)
-        })
+        .find(
+            |s| matches!(s.kind, crate::stack::StackKind::Ability { source: x, .. } if x == source),
+        )
         .map_or(&[], |s| s.chosen.as_slice())
 }
 
@@ -84,7 +84,11 @@ pub fn options(st: &GameState, player: PlayerId, what: ChoiceOf) -> Vec<OptionDe
                 {
                     continue;
                 }
-                for t in def.creature_types.iter().filter_map(|n| CreatureType::named(n)) {
+                for t in def
+                    .creature_types
+                    .iter()
+                    .filter_map(|n| CreatureType::named(n))
+                {
                     *count.entry(t).or_default() += 1;
                 }
             }

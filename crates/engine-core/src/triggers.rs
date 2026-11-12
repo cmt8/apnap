@@ -112,7 +112,13 @@ fn filter_hit(
 ) -> bool {
     // "Of the chosen type": the source's choice (CR 607.2d).
     let matches = |sel: &Selector| {
-        matches_parts(&crate::chosen::bind(sel, chosen), c, facts, source, controller)
+        matches_parts(
+            &crate::chosen::bind(sel, chosen),
+            c,
+            facts,
+            source,
+            controller,
+        )
     };
     match filter {
         ObjFilter::This => id == source,
@@ -144,7 +150,13 @@ pub(crate) fn condition_holds(
             st.zones
                 .list(crate::zones::Zone::Graveyard, controller)
                 .iter()
-                .filter(|&&id| crate::targeting::card_matches(st, id, &crate::chosen::bind_for(st, cards, source)))
+                .filter(|&&id| {
+                    crate::targeting::card_matches(
+                        st,
+                        id,
+                        &crate::chosen::bind_for(st, cards, source),
+                    )
+                })
                 .count()
                 >= *at_least as usize
         }
@@ -338,7 +350,16 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                             attacking,
                             blocking,
                         };
-                        if filter_hit(filter, e, &c, facts, src.id, src.controller, src.host, &src.chosen) {
+                        if filter_hit(
+                            filter,
+                            e,
+                            &c,
+                            facts,
+                            src.id,
+                            src.controller,
+                            src.host,
+                            &src.chosen,
+                        ) {
                             found.push(PendingTrigger {
                                 controller: src.controller,
                                 source: src.id,
@@ -824,7 +845,16 @@ fn object_hit(
             .is_some_and(|o| o.zone == crate::zones::Zone::Battlefield);
     match filter {
         ObjFilter::Matching(_) if !on_battlefield => false,
-        _ => filter_hit(filter, id, &c, facts, src.id, src.controller, src.host, &src.chosen),
+        _ => filter_hit(
+            filter,
+            id,
+            &c,
+            facts,
+            src.id,
+            src.controller,
+            src.host,
+            &src.chosen,
+        ),
     }
 }
 
@@ -1043,9 +1073,7 @@ pub(crate) fn detect_cast(st: &mut GameState, caster: PlayerId, spell: ObjectId)
                     && who_matches(*by, caster, src.controller)
                     && ((types.is_empty() && spells.is_empty())
                         || types.iter().any(|t| spell_chars.is(*t))
-                        || spells
-                            .iter()
-                            .any(|s| {
+                        || spells.iter().any(|s| {
                             // "A creature spell of the chosen type" (CR 607.2d).
                             let s = crate::chosen::bind(s, &src.chosen);
                             crate::targeting::card_matches(st, spell, &s)

@@ -365,12 +365,15 @@ pub(crate) fn cost_reduction(st: &GameState, p: PlayerId, card: ObjectId, face: 
     };
     let mut total = 0;
     for &id in &st.zones.battlefield {
-        if controller_of(st, id) != p {
-            continue;
-        }
+        let yours = controller_of(st, id) == p;
         // CLAUDE.md invariant 4: only abilities the permanent currently has.
         for (_, a) in abilities(st, id) {
-            if let AbilityDef::CostReduction { spells, amount } = a
+            if let AbilityDef::CostReduction {
+                spells,
+                amount,
+                anyone,
+            } = a
+                && (yours || *anyone)
                 && crate::layers::matches_parts(
                     &crate::chosen::bind_for(st, spells, id),
                     &c,
@@ -456,9 +459,9 @@ pub(crate) fn may_spend(
                 attacking: false,
                 blocking: false,
             };
-            r.spells
-                .iter()
-                .any(|s| crate::layers::matches_parts(&crate::chosen::bind(s, chosen), &c, facts, card, p))
+            r.spells.iter().any(|s| {
+                crate::layers::matches_parts(&crate::chosen::bind(s, chosen), &c, facts, card, p)
+            })
         }
         Payee::Ability(source) => {
             let c = chars(st, source);
@@ -1378,7 +1381,9 @@ impl CastFrame {
                 for (i, r) in st.player(p).restricted_mana.iter().enumerate() {
                     let n = &mut need[r.mana.index()];
                     let amount = r.amount.min(*n);
-                    if amount > 0 && may_spend(st, p, restriction(st, r), r.chosen.as_slice(), payee) {
+                    if amount > 0
+                        && may_spend(st, p, restriction(st, r), r.chosen.as_slice(), payee)
+                    {
                         *n -= amount;
                         release.push((i as u32, amount));
                     }

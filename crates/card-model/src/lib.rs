@@ -541,7 +541,14 @@ pub enum AbilityDef {
     },
     /// A static ability: "[Selector] spells you cast cost {N} less to cast" (generic mana
     /// only, CR 118.7a). The selector is matched against the spell being cast.
-    CostReduction { spells: Selector, amount: u32 },
+    CostReduction {
+        spells: Selector,
+        amount: u32,
+        /// Spells any player casts ("creature spells of the chosen type cost {2} less"),
+        /// not only the controller's ("… spells you cast").
+        #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+        anyone: bool,
+    },
     /// "This spell costs {N} less to cast[, where N is …]": functions while it is cast.
     SelfCostReduction(Amount),
     /// An activated mana ability (CR 605.1a): no target, adds mana, resolves at once

@@ -225,9 +225,11 @@ fn may_play_with(
         rules.iter().any(|r| match r.rule {
             PlayerRule::PlayFrom { zone: z, cards } => {
                 *z == zone
-                    && cards
-                        .iter()
-                        .any(|s| crate::targeting::card_matches_as(st, card, face, s))
+                    && cards.iter().any(|s| {
+                        // "Creature spells of the chosen type" (CR 607.2d).
+                        let s = crate::chosen::bind_for(st, s, r.source);
+                        crate::targeting::card_matches_as(st, card, face, &s)
+                    })
             }
             _ => false,
         })

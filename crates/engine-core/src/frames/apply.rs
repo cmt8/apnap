@@ -126,8 +126,11 @@ impl ApplyFrame {
                     Proposed::Move { object, .. },
                 ) = (&answer, &p.event)
                 {
-                    self.chosen
-                        .push((*object, inp.decision.player, crate::chosen::answer(&answer)));
+                    self.chosen.push((
+                        *object,
+                        inp.decision.player,
+                        crate::chosen::answer(&answer),
+                    ));
                 }
                 let (event, caused) = apply_chosen(st, key, p.event, &answer);
                 self.queue.insert(
