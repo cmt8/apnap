@@ -310,3 +310,35 @@ fn delayed_forms_not_compiled_are_named() {
     assert!(forge_test_blockers(combat).contains(&"CopyPermanent:AtEOT ExileCombat".to_string()));
     let _ = (ChoiceKind::Priority, OptionDesc::Pass);
 }
+
+/// The rules text of the card named `name` in the catalog these cards compile to.
+fn text_of(cards: &[&str], name: &str) -> String {
+    let cat = forge_test_catalog(cards, &[]);
+    let def = cat.get(cat.find(name).expect("compiled"));
+    card_model::describe::rules_text(def).join(" / ")
+}
+
+// The delayed ability's text says what the card says (D-083): "it" for one object, and
+// "under its owner's control" where no one else is named (CR 110.2a).
+#[test]
+fn a_delayed_ability_about_one_object_says_it() {
+    let t = text_of(&[FLICKER], "Test Flicker");
+    assert!(
+        t.contains("return it to the battlefield under its owner's control"),
+        "{t}"
+    );
+    let twin = twin("Sacrifice");
+    let t = text_of(&[&twin], "Test Twin");
+    assert!(t.contains("sacrifice it"), "{t}");
+    let twin = twin_n("Exile", 2);
+    let t = text_of(&[&twin], "Test Twins");
+    assert!(t.contains("exile those cards"), "{t}");
+}
+
+fn twin_n(at_eot: &str, n: u32) -> String {
+    format!(
+        "Name:Test Twins\nManaCost:W\nTypes:Sorcery\n\
+         A:SP$ CopyPermanent | ValidTgts$ Creature.YouCtrl | TgtPrompt$ Select target creature you control | NumCopies$ {n} | AtEOT$ {at_eot} | SpellDescription$ Text.\n\
+         Oracle:Create two tokens that are copies of target creature you control. {at_eot} them at the beginning of the next end step."
+    )
+}
