@@ -96,6 +96,8 @@ Comprehensive Rules effective 2026-11-06, quoted verbatim. Tests:
 | `a_shield_replaces_lethal_damage_and_deathtouch` | 704.5g, 704.5h, 702.2b |
 | `a_shield_doesnt_replace_sacrifice_or_toughness_zero` | 701.21a, 704.5f |
 | `a_regenerating_attacker_is_removed_from_combat` | 701.19a, 506.4 |
+| `a_regenerated_blocker_leaves_combat_and_deals_no_damage` | 701.19a, 506.4, 509.1h, 510.4 |
+| `a_regenerated_attacker_leaves_combat_and_deals_no_damage` | 701.19a, 506.4, 510.4 |
 | `a_shield_ends_at_cleanup` | 701.19a ("this turn"), 514.2 |
 | `cant_be_regenerated_on_a_destroy_instruction` | 701.19c |
 | `cant_be_regenerated_this_turn_is_a_lasting_rule` | 701.19c, 611.2 |
