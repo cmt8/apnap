@@ -3184,7 +3184,25 @@ impl<'a> Tx<'a> {
                 },
             });
         };
-        let cost = self.cost(price)?;
+        // "Unless [they] pay {X}, where X is …" (CR 118.12, 107.3): the cost is {X}, with X
+        // worked out as this instruction is reached (the chain's X).
+        let cost = if price == "X" && self.face.svars.contains_key("X") {
+            match self.amount("X", chain) {
+                Some(Amount::X) => Cost {
+                    mana: Some(ManaCost {
+                        symbols: vec![card_model::ManaSymbol::X],
+                    }),
+                    ..Cost::default()
+                },
+                Some(_) => {
+                    self.block("unless:cost X of something else");
+                    return None;
+                }
+                None => return None,
+            }
+        } else {
+            self.cost(price)?
+        };
         if cost == Cost::default() || cost.discard_self || cost.exile_self {
             self.block("unless:cost");
             return None;
@@ -5086,10 +5104,27 @@ impl<'a> Tx<'a> {
                     types.clear();
                     spells.clear();
                 }
+                // "… their first noncreature spell each turn" (Forge's TriggerSpellCast:
+                // the spells matching `ValidCard$` the caster cast this turn, this one
+                // included, compared; only `EQ<n>` is compiled).
+                let nth = match rd.get("ActivatorThisTurnCast") {
+                    None => Some(None),
+                    Some(c) => match c.strip_prefix("EQ").and_then(|n| n.parse::<u32>().ok()) {
+                        Some(n) if n > 0 => Some(Some(n)),
+                        _ => {
+                            self.block(format!(
+                                "param:trig SpellCast.ActivatorThisTurnCast {}",
+                                shape(c)
+                            ));
+                            None
+                        }
+                    },
+                };
                 Some(Trigger::Cast {
                     by: by?,
                     types,
                     spells,
+                    nth: nth?,
                 })
             }
             "Attacks" => {
@@ -8128,6 +8163,7 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
                                 not_types: vec![CardType::Creature],
                                 ..Selector::default()
                             }],
+                            nth: None,
                         },
                         intervening_if: None,
                         body: pump_one(ObjRef::This),

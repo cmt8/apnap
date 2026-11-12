@@ -1309,7 +1309,12 @@ pub(crate) fn detect_cast(st: &mut GameState, caster: PlayerId, spell: ObjectId)
                 continue;
             };
             for t in when.events() {
-                if let Trigger::Cast { by, types, spells } = t
+                if let Trigger::Cast {
+                    by,
+                    types,
+                    spells,
+                    nth,
+                } = t
                     && who_matches(*by, caster, src.controller)
                     && ((types.is_empty() && spells.is_empty())
                         || types.iter().any(|t| spell_chars.is(*t))
@@ -1318,6 +1323,34 @@ pub(crate) fn detect_cast(st: &mut GameState, caster: PlayerId, spell: ObjectId)
                             let s = crate::chosen::bind(s, &src.chosen);
                             crate::targeting::card_matches(st, spell, &s)
                         }))
+                    // "Their first noncreature spell each turn": this one is the nth of its
+                    // kind they cast this turn, each judged as it was cast.
+                    && nth.is_none_or(|n| {
+                        let kind = |l: &Lki| {
+                            (types.is_empty() && spells.is_empty())
+                                || types.iter().any(|t| l.chars.is(*t))
+                                || spells.iter().any(|s| {
+                                    let s = crate::chosen::bind(s, &src.chosen);
+                                    crate::layers::matches_parts(
+                                        &s,
+                                        &l.chars,
+                                        Facts {
+                                            id: spell,
+                                            controller: l.controller,
+                                            owner: l.owner,
+                                            is_token: l.is_token,
+                                            tapped: false,
+                                            attacking: false,
+                                            blocking: false,
+                                        },
+                                        src.id,
+                                        src.controller,
+                                    )
+                                })
+                        };
+                        st.player(caster).cast_this_turn.iter().filter(|l| kind(l)).count()
+                            == n as usize
+                    })
                 {
                     found.push(PendingTrigger {
                         controller: src.controller,

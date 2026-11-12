@@ -1441,6 +1441,7 @@ impl CastFrame {
         if let CastSource::Card(_) = self.source {
             let spell = self.object.unwrap();
             st.emit(Event::SpellCast { player: p, spell });
+            execute(st, GameAction::NoteCast { player: p, spell });
             // CR 601.2i: "whenever ... casts" abilities trigger now.
             triggers::detect_cast(st, p, spell);
         }

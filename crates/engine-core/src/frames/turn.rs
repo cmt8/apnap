@@ -41,6 +41,7 @@ pub(crate) fn begin_turn(st: &mut GameState, active: PlayerId) {
     for p in &mut st.players {
         p.lands_played_this_turn = 0;
         p.drawn_this_turn = 0;
+        p.cast_this_turn.clear();
     }
     // CR 302.6: permanents the active player has controlled continuously since their most
     // recent turn began are no longer summoning sick.

@@ -241,7 +241,10 @@ fn becomes_tapped_triggers_on_every_tapping_and_never_on_a_tapped_permanent() {
     sc.card(P0, Zone::Battlefield, "Island");
     sc.card(P0, Zone::Hand, "Test Hoarfrost Grip");
     let mut s = Script::new(sc.build());
-    s.cast("Test Hoarfrost Grip").target_object(gate2).pay().pass_all();
+    s.cast("Test Hoarfrost Grip")
+        .target_object(gate2)
+        .pay()
+        .pass_all();
     assert_eq!(life(&s, P0), 40);
     assert_eq!(s.count(|e| matches!(e, Event::Triggered { .. })), 0);
     // An opponent's effect taps it: it triggers, and its controller is dealt the damage.
@@ -251,7 +254,10 @@ fn becomes_tapped_triggers_on_every_tapping_and_never_on_a_tapped_permanent() {
     sc.card(P1, Zone::Hand, "Test Hoarfrost Grip");
     let mut s = Script::new(sc.build());
     s.pass();
-    s.cast("Test Hoarfrost Grip").target_object(gate3).pay().pass_all();
+    s.cast("Test Hoarfrost Grip")
+        .target_object(gate3)
+        .pay()
+        .pass_all();
     drive_until(&mut s, |s| {
         s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
     });
@@ -286,4 +292,133 @@ fn entering_tapped_is_not_becoming_tapped() {
         text[1],
         "Whenever this land becomes tapped, this land deals 1 damage to you."
     );
+}
+
+fn sentinel() -> String {
+    card(
+        "Test Watchful Sentinel",
+        "W",
+        "Artifact Creature Human Soldier\nPT:1/1",
+        "T:Mode$ SpellCast | ValidCard$ Card.nonCreature | ValidActivatingPlayer$ Player.Opponent | ActivatorThisTurnCast$ EQ1 | Execute$ TrigDraw | TriggerZones$ Battlefield | TriggerDescription$ Text.\n\
+         SVar:TrigDraw:DB$ Draw | Defined$ You | UnlessCost$ X | UnlessPayer$ TriggeredActivator | NumCards$ 1\n\
+         SVar:X:Count$CardPower",
+    )
+}
+
+fn notion() -> String {
+    card(
+        "Test Passing Notion",
+        "U",
+        "Sorcery",
+        "A:SP$ GainLife | LifeAmount$ 1 | SpellDescription$ Text.",
+    )
+}
+
+fn hand(s: &Script, p: PlayerId) -> usize {
+    s.st.zones.list(Zone::Hand, p).len()
+}
+
+// CR 601.2i (2026-11-06): a spell "becomes cast"; "whenever an opponent casts their first
+// noncreature spell each turn" counts that player's noncreature spells cast this turn, each
+// judged as it was cast, this one included (Forge: `ActivatorThisTurnCast$ EQ1` with
+// `ValidCard$ Card.nonCreature`). CR 118.12: "draw a card unless that player pays {X}, where
+// X is this creature's power" (`UnlessCost$ X`, X worked out as it resolves, CR 107.3,
+// 608.2h).
+#[test]
+fn an_opponents_first_noncreature_spell_each_turn() {
+    let bear = card("Test Plain Cub", "G", "Creature Bear", "PT:2/2");
+    let mut sc = scenario(&[&sentinel(), &notion(), &bear]);
+    sc.card(P0, Zone::Battlefield, "Test Watchful Sentinel");
+    sc.cards(
+        P1,
+        Zone::Battlefield,
+        &["Island", "Island", "Island", "Forest"],
+    );
+    sc.cards(
+        P1,
+        Zone::Hand,
+        &[
+            "Test Plain Cub",
+            "Test Passing Notion",
+            "Test Passing Notion",
+        ],
+    );
+    sc.turn(P1, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    // A creature spell first: not a noncreature spell, nothing triggers.
+    s.cast("Test Plain Cub").pay();
+    assert_eq!(s.count(|e| matches!(e, Event::Triggered { .. })), 0);
+    s.pass_all();
+    // The first noncreature spell: it triggers; P1 may pay {1} (the Sentinel's power).
+    let before = hand(&s, P0);
+    s.cast("Test Passing Notion").pay();
+    assert_eq!(s.count(|e| matches!(e, Event::Triggered { .. })), 1);
+    drive_until(&mut s, |s| s.kind() == ChoiceKind::PayUnlessCost);
+    assert_eq!(s.who(), P1);
+    s.pick("decline", |_, o| matches!(o, OptionDesc::Decline));
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+    });
+    assert_eq!(hand(&s, P0), before + 1, "P1 didn't pay: P0 drew");
+    // The second noncreature spell this turn: no trigger.
+    s.cast("Test Passing Notion").pay();
+    assert_eq!(s.count(|e| matches!(e, Event::Triggered { .. })), 1);
+    let cat = forge_test_catalog(&[&sentinel()], &[]);
+    let text =
+        card_model::describe::rules_text(cat.get(cat.find("Test Watchful Sentinel").unwrap()));
+    assert_eq!(
+        text,
+        [
+            "Whenever an opponent casts their first noncreature spell each turn, X is its power. Then draw a card unless that player pays {X}."
+        ]
+    );
+}
+
+// The same next turn: "each turn" counts this turn's spells only. And paying {X} is
+// paying the amount X is as the ability resolves: with power 3 that is {3}, which a player
+// with two untapped lands can't pay, so they aren't asked (CR 118.3).
+#[test]
+fn each_turn_starts_over_and_x_is_the_power_as_it_resolves() {
+    let pump = card(
+        "Test Sentinel Rally",
+        "W",
+        "Instant",
+        "A:SP$ Pump | ValidTgts$ Creature | NumAtt$ +2 | SpellDescription$ Text.",
+    );
+    let mut sc = scenario(&[&sentinel(), &notion(), &pump]);
+    let sentinel = sc.card(P0, Zone::Battlefield, "Test Watchful Sentinel");
+    sc.card(P0, Zone::Battlefield, "Plains");
+    sc.card(P0, Zone::Hand, "Test Sentinel Rally");
+    sc.cards(P1, Zone::Battlefield, &["Island", "Island", "Island"]);
+    sc.cards(P1, Zone::Hand, &["Test Passing Notion"]);
+    sc.turn(P1, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    let before = hand(&s, P0);
+    s.cast("Test Passing Notion").pay();
+    // P1 passes with the trigger on the stack; P0 makes the Sentinel 3/1.
+    s.pass();
+    s.cast("Test Sentinel Rally")
+        .target_object(sentinel)
+        .pay()
+        .pass_all();
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+    });
+    assert!(
+        !s.answered
+            .iter()
+            .any(|d| d.kind == ChoiceKind::PayUnlessCost),
+        "{{3}} can't be paid with two lands"
+    );
+    assert_eq!(hand(&s, P0), before, "P0 cast the Rally from its hand");
+    assert_eq!(
+        s.count(|e| matches!(e, Event::Drew { player, .. } if *player == P0)),
+        1
+    );
+    // Next turn (P0's), then P1's turn again: P1's first noncreature spell triggers anew.
+    let turn = s.st.turn.turn_number;
+    drive_until(&mut s, |s| {
+        s.st.turn.turn_number > turn && s.st.turn.active == P1
+    });
+    assert!(s.st.player(P1).cast_this_turn.is_empty());
 }

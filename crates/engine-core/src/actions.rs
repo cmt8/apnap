@@ -76,6 +76,12 @@ pub enum GameAction {
         target: Target,
         amount: u32,
     },
+    /// CR 601.2i: `player` cast `spell` (remembered as it is now, for "their first … spell
+    /// each turn").
+    NoteCast {
+        player: PlayerId,
+        spell: ObjectId,
+    },
     /// CR 701.19a: create a regeneration shield on a permanent ("regenerate it").
     AddRegenerationShield {
         object: ObjectId,
@@ -457,6 +463,11 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 remaining: amount,
                 regenerate: false,
             });
+            ActionResult::Done
+        }
+        GameAction::NoteCast { player, spell } => {
+            let lki = crate::triggers::snapshot(st, spell);
+            st.player_mut(player).cast_this_turn.push(lki);
             ActionResult::Done
         }
         GameAction::AddRegenerationShield { object } => {

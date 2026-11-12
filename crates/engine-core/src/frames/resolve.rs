@@ -2591,10 +2591,19 @@ impl ResolveFrame {
             }
             Effect::Pay {
                 who,
-                cost,
+                mut cost,
                 paid,
                 unpaid,
             } => {
+                // "… unless that player pays {X}, where X is …": X is the amount this
+                // resolution worked out (CR 107.3, 608.2h).
+                if let Some(m) = &mut cost.mana {
+                    for s in &mut m.symbols {
+                        if *s == card_model::ManaSymbol::X {
+                            *s = card_model::ManaSymbol::Generic(self.x);
+                        }
+                    }
+                }
                 match self.player(st, k, who) {
                     Some(player) => self.work.push(Work::Pay {
                         k,

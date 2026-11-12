@@ -2641,6 +2641,7 @@ fn trigger_event(t: &Trigger) -> String {
             by,
             types: ts,
             spells,
+            nth,
         } => {
             // "a creature or artifact spell", "a noncreature spell", "a Spirit spell".
             let mut kinds: Vec<String> = Vec::new();
@@ -2656,15 +2657,32 @@ fn trigger_event(t: &Trigger) -> String {
                 _ if ts.is_empty() => join(kinds, "or"),
                 _ => format!("{} spell or {}", kinds[0], join(kinds[1..].to_vec(), "or")),
             };
-            format!(
-                "Whenever {} {}",
-                match by {
-                    Who::Any => "a player casts",
-                    Who::You => "you cast",
-                    Who::Opponent => "an opponent casts",
-                },
-                with_article(&what)
-            )
+            match nth {
+                None => format!(
+                    "Whenever {} {}",
+                    match by {
+                        Who::Any => "a player casts",
+                        Who::You => "you cast",
+                        Who::Opponent => "an opponent casts",
+                    },
+                    with_article(&what)
+                ),
+                // "Whenever an opponent casts their first noncreature spell each turn".
+                Some(n) => format!(
+                    "Whenever {} {} {what} each turn",
+                    match by {
+                        Who::Any => "a player casts their",
+                        Who::You => "you cast your",
+                        Who::Opponent => "an opponent casts their",
+                    },
+                    match n {
+                        1 => "first".to_string(),
+                        2 => "second".to_string(),
+                        3 => "third".to_string(),
+                        n => format!("{n}th"),
+                    }
+                ),
+            }
         }
     }
 }
@@ -4158,6 +4176,7 @@ mod tests {
                     by: Who::You,
                     types: Vec::new(),
                     spells: vec![spell_with(4), spell_with(5), spell_with(6)],
+                    nth: None,
                 },
                 intervening_if: None,
                 body: Body::Effect(mode(Effect::Draw {

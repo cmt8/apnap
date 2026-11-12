@@ -859,6 +859,11 @@ pub enum Trigger {
         /// What the spell is on the stack is compared; who controls it is `by`.
         #[serde(default)]
         spells: Vec<Selector>,
+        /// "… casts their first noncreature spell each turn": only the `nth` spell of this
+        /// kind that player has cast this turn (each judged as it was cast). Serialized only
+        /// when set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nth: Option<u32>,
     },
     /// CR 508.1m: "Whenever [filter] attacks" — it is declared as an attacker.
     Attacks(ObjFilter),
