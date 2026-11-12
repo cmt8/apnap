@@ -2587,6 +2587,7 @@ impl ResolveFrame {
                 player,
                 amount,
                 objects,
+                ..
             } => {
                 let turn = st.turn.turn_number;
                 let facts = crate::triggers::EventFacts {

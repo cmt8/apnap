@@ -1093,6 +1093,36 @@ const LASTING: char = '\u{2}';
 /// Starts the "what it is about" of a delayed triggered ability: when it can trigger.
 const DELAYED: char = '\u{3}';
 
+/// The text of a delayed ability about objects (CR 603.7c), worded as cards say it: "it"
+/// for one object, "those cards" for several; a card put onto the battlefield with no
+/// controller named goes there under its owner's control (CR 110.2a).
+fn delayed_objects(text: &str, one: bool) -> String {
+    let (it, its, owners) = if one {
+        ("it", "its", "its owner's")
+    } else {
+        ("those cards", "their", "their owner's")
+    };
+    let _ = its;
+    text.replace(
+        "put those cards onto the battlefield tapped under your control",
+        &format!("return {it} to the battlefield tapped under your control"),
+    )
+    .replace(
+        "put those cards onto the battlefield under your control",
+        &format!("return {it} to the battlefield under your control"),
+    )
+    .replace(
+        "put those cards onto the battlefield tapped",
+        &format!("return {it} to the battlefield tapped under {owners} control"),
+    )
+    .replace(
+        "put those cards onto the battlefield",
+        &format!("return {it} to the battlefield under {owners} control"),
+    )
+    .replace("you sacrifice those cards", &format!("sacrifice {it}"))
+    .replace("those cards", it)
+}
+
 /// Replace each marker `continuous` left with the quoted text of that ability of
 /// `def.granted` (which can quote others in turn).
 fn quote_granted(def: &CardDef, text: &str, top: bool) -> String {
@@ -1110,9 +1140,16 @@ fn quote_granted(def: &CardDef, text: &str, top: bool) -> String {
                 // A delayed triggered ability (CR 603.7): "at the beginning of the next
                 // upkeep", "… of your next main phase", "… of the next turn's upkeep".
                 let delayed = about.strip_prefix(DELAYED);
-                if let Some((when, much)) = delayed.map(|d| d.split_once('|').unwrap_or((d, ""))) {
+                if let Some(d) = delayed {
+                    let mut parts = d.split('|');
+                    let when = parts.next().unwrap_or("");
+                    let much = parts.next().unwrap_or("");
+                    let objects = parts.next().unwrap_or("");
                     if !much.is_empty() {
                         text = text.replace("that much", much);
+                    }
+                    if !objects.is_empty() {
+                        text = delayed_objects(&text, objects == "it");
                     }
                     let next = if when == "next-turn" {
                         "the next turn's"
@@ -1519,6 +1556,8 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             ability,
             window,
             amount: much,
+            objects,
+            one,
             ..
         } => {
             let when = match window {
@@ -1541,7 +1580,13 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 Some(a) => amount(a),
                 None => String::new(),
             };
-            format!("{LASTING}{ability}|{DELAYED}{when}|{much}{LASTING}")
+            // Whom it is about: "it" (one object), "those cards", or nothing.
+            let about = match (objects, one) {
+                (None, _) => "",
+                (Some(_), true) => "it",
+                (Some(_), false) => "them",
+            };
+            format!("{LASTING}{ability}|{DELAYED}{when}|{much}|{about}{LASTING}")
         }
         Effect::AttachThis { to } => format!("attach this permanent to {}", obj(mode, *to)),
         // "You may have that player shuffle."
@@ -5050,6 +5095,7 @@ mod tests {
                     player: None,
                     amount: None,
                     objects: None,
+                    one: false,
                 },
             )))],
             granted: vec![delayed],

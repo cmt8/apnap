@@ -2048,6 +2048,9 @@ pub enum Effect {
         /// while each is still the same object, where it was.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         objects: Option<ObjRef>,
+        /// Those objects are one object: the text says "it" (CR 603.7c).
+        #[serde(default, skip_serializing_if = "is_false")]
+        one: bool,
     },
     /// "[Who] may draw up to N cards": the player who would draw chooses how many, from 0
     /// to N, as it resolves (CR 107.1c, 608.2d), then draws that many.
