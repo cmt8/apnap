@@ -2342,6 +2342,12 @@ fn power_toughness(s: &Selector) -> String {
 
 /// " with mana value 3 or less" (empty if the selector doesn't ask).
 fn mana_value(s: &Selector) -> String {
+    if let Some(a) = &s.mana_value_at_most {
+        return match &**a {
+            Amount::X => " with mana value X or less".to_string(),
+            a => format!(" with mana value less than or equal to {}", amount(a)),
+        };
+    }
     match (s.mana_value_min, s.mana_value_max) {
         (None, None) => String::new(),
         (Some(a), Some(b)) if a == b => format!(" with mana value {a}"),

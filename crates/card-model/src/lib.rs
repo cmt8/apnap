@@ -810,6 +810,12 @@ pub struct Selector {
     /// (card-db sees to that).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen: Option<OfChosen>,
+    /// "With mana value X or less", where X is worked out as the spell or ability
+    /// resolves (its X, a count): only in the cards a search or a look at the top cards
+    /// chooses among ([`Effect::ChooseCards`], [`Effect::Dig`]), where the resolution turns
+    /// it into `mana_value_max` (card-db sees to that). Serialized only when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_value_at_most: Option<Box<Amount>>,
 }
 
 impl Selector {

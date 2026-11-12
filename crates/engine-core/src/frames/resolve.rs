@@ -843,6 +843,25 @@ impl ResolveFrame {
         }
     }
 
+    /// CR 608.2h: "with mana value X or less" — X worked out now, as a plain bound.
+    fn fix_mana_values(
+        &self,
+        st: &GameState,
+        k: usize,
+        cards: Vec<card_model::Selector>,
+    ) -> Vec<card_model::Selector> {
+        cards
+            .into_iter()
+            .map(|mut s| {
+                if let Some(a) = s.mana_value_at_most.take() {
+                    let v = self.amount(st, k, &a);
+                    s.mana_value_max = Some(s.mana_value_max.map_or(v, |m| m.min(v)));
+                }
+                s
+            })
+            .collect()
+    }
+
     /// CR 608.2h: amounts in a one-shot continuous effect are worked out once, as it begins.
     fn fix_amounts(
         &self,
@@ -2615,6 +2634,7 @@ impl ResolveFrame {
             } => {
                 // CR 608.2h: how many is worked out once, now.
                 let count = self.amount(st, k, &count);
+                let cards = self.fix_mana_values(st, k, cards);
                 self.work.push(Work::ChooseCards {
                     spec: Box::new(ChooseSpec {
                         from,
@@ -2768,6 +2788,7 @@ impl ResolveFrame {
                 rest_random,
             } => {
                 let n = self.amount(st, k, &count);
+                let cards = self.fix_mana_values(st, k, cards);
                 let spec = DigSpec {
                     reveal,
                     take,

@@ -344,3 +344,75 @@ fn everything_of_a_kind_from_graveyards() {
         ["ChangeZoneAll:Graveyard->Library"]
     );
 }
+
+// CR 107.3a (2026-11-06): X is announced as the spell is cast; CR 608.2h: an amount an
+// instruction needs is worked out as it is applied. "Search your library for a green
+// creature card with mana value X or less" — the bound is the X paid; "… less than or equal
+// to the number of lands you control" — counted as it resolves. Forge: `cmcLEX` with
+// `SVar:X:Count$xPaid` / `Count$Valid Land.YouCtrl`.
+#[test]
+fn a_mana_value_bound_worked_out_as_it_resolves() {
+    let zenith = card(
+        "Test Sun Search",
+        "X G",
+        "Sorcery",
+        "A:SP$ ChangeZone | Origin$ Library | Destination$ Battlefield | ChangeType$ Creature.Green+cmcLEX | ChangeNum$ 1 | SpellDescription$ Text.\nSVar:X:Count$xPaid",
+    );
+    let small = card("Test Sprout Cub", "1 G", "Creature Bear", "PT:2/2");
+    let big = card("Test Grown Cub", "2 G", "Creature Bear", "PT:3/3");
+    let mut sc = scenario(&[&zenith, &small, &big]);
+    sc.cards(P0, Zone::Library, &["Test Sprout Cub", "Test Grown Cub"]);
+    sc.cards(P0, Zone::Battlefield, &["Forest", "Forest", "Forest"]);
+    sc.card(P0, Zone::Hand, "Test Sun Search");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Sun Search").x(2).pay().pass_all();
+    assert_eq!(s.kind(), ChoiceKind::SearchLibrary);
+    let names: Vec<String> = s
+        .options()
+        .iter()
+        .filter_map(|o| match o {
+            OptionDesc::Card { card } => Some(s.name(*card)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, ["Test Sprout Cub"], "mana value 2 or less only");
+    // A counted bound: "… less than or equal to the number of lands you control" (two).
+    let counted = card(
+        "Test Land Count Search",
+        "G",
+        "Sorcery",
+        "A:SP$ ChangeZone | Origin$ Library | Destination$ Hand | ChangeType$ Creature.cmcLEX | ChangeNum$ 1 | SpellDescription$ Text.\nSVar:X:Count$Valid Land.YouCtrl",
+    );
+    let mut sc = scenario(&[&counted, &small, &big]);
+    sc.cards(P0, Zone::Library, &["Test Sprout Cub", "Test Grown Cub"]);
+    sc.cards(P0, Zone::Battlefield, &["Forest", "Forest"]);
+    sc.card(P0, Zone::Hand, "Test Land Count Search");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Land Count Search").pay().pass_all();
+    let names: Vec<String> = s
+        .options()
+        .iter()
+        .filter_map(|o| match o {
+            OptionDesc::Card { card } => Some(s.name(*card)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, ["Test Sprout Cub"]);
+    let cat = forge_test_catalog(&[&counted], &[]);
+    let text =
+        card_model::describe::rules_text(cat.get(cat.find("Test Land Count Search").unwrap()));
+    assert_eq!(
+        text,
+        [
+            "Search your library for a creature card with mana value less than or equal to the number of lands you control, reveal it, put it into your hand, then shuffle."
+        ]
+    );
+    // Outside a search there is no resolution to work it out in: not compiled.
+    let static_ = card(
+        "Test Odd Anthem",
+        "1 G",
+        "Enchantment",
+        "S:Mode$ Continuous | Affected$ Creature.cmcLEX | AddPower$ 1 | Description$ Text.\nSVar:X:Count$Valid Land.YouCtrl",
+    );
+    assert!(!forge_test_blockers(&static_).is_empty());
+}

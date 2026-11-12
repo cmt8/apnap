@@ -34,7 +34,9 @@ pub struct Compiled {
 
 /// Parameters that never affect the rules: descriptions shown to players, prompts, and
 /// hints for Forge's AI. (docs/forge/script-format.md, "keys a translator can ignore".)
-const TEXT_ONLY: [&str; 21] = [
+const TEXT_ONLY: [&str; 22] = [
+    // The largest X Forge's AI would announce: never read by forge-game.
+    "AIXMax",
     // A hint for Forge's AI (respond to its own activation): never read by forge-game.
     "AIRespondsToOwnAbility",
     // How the cost reads in the ability's description (`SpellAbility.getDescription`):
@@ -252,6 +254,9 @@ struct Tx<'a> {
     /// The line just compiled means nothing for the rules (only hints for Forge's AI): no
     /// ability, and nothing blocked.
     nothing: bool,
+    /// Reading the cards a search or a look at the top cards chooses among: "with mana
+    /// value X or less" may be counted as it resolves (`Selector::mana_value_at_most`).
+    counted_mana_value: bool,
     /// Compiling a chain whose "remembered" cards are its own (D-069): it remembers, and
     /// its last link forgets. Only there do `Remembered`, `IsRemembered`, `Remembered$…`
     /// mean "those cards".
@@ -971,6 +976,19 @@ impl<'a> Tx<'a> {
                     // Mana value ("converted mana cost" in Forge's words).
                     } else if let Some(n) = p.strip_prefix("cmcLE").and_then(|n| n.parse().ok()) {
                         s.mana_value_max = Some(n);
+                    // "With mana value X or less" (X a script variable): where a search or a
+                    // look at the top cards chooses (`counted_mana_value`), worked out as it
+                    // resolves.
+                    } else if let Some(name) = p.strip_prefix("cmcLE")
+                        && self.counted_mana_value
+                        && self.face.svars.contains_key(name)
+                    {
+                        let a = self.expr(name)?;
+                        if !matches!(a, Amount::X) && !a.stands_alone() {
+                            self.block("filter:cmcLE of something that needs the ability");
+                            return None;
+                        }
+                        s.mana_value_at_most = Some(Box::new(a));
                     } else if let Some(n) = p.strip_prefix("cmcGE").and_then(|n| n.parse().ok()) {
                         s.mana_value_min = Some(n);
                     } else if let Some(n) =
@@ -2393,10 +2411,12 @@ impl<'a> Tx<'a> {
                     self.block("Dig:ChangeNum");
                 }
                 let valid = rd.get("ChangeValid");
+                self.counted_mana_value = true;
                 let cards = match valid {
                     None => Some(Vec::new()),
                     Some(f) => self.card_alts(f, true),
                 };
+                self.counted_mana_value = false;
                 // A library position is a literal here, and the bottom is the default.
                 let place = |tx: &mut Self,
                              zone: Option<&str>,
@@ -3801,10 +3821,12 @@ impl<'a> Tx<'a> {
             Some(name) => self.one_player(name, chain, triggered, "defined:player ")?,
         };
         let filter = rd.get("ChangeType");
+        self.counted_mana_value = true;
         let cards = match filter {
             None => Some(Vec::new()),
             Some(f) => self.card_alts(f, from != CardZone::Battlefield),
         };
+        self.counted_mana_value = false;
         // Choosing among "those cards" (D-069) looks at nothing new.
         if cards
             .as_ref()
@@ -8357,6 +8379,7 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
         player_is_you: BTreeSet::new(),
         took_player_for_you: false,
         nothing: false,
+        counted_mana_value: false,
         memory: false,
     };
     let mut def = CardDef {
