@@ -448,3 +448,27 @@ fn a_regenerated_attacker_leaves_combat_and_deals_no_damage() {
             .is_some_and(|c| c.attackers.iter().any(|a| a.attacker == t));
     assert!(!attacking, "no longer attacking");
 }
+
+// CR 118.12 with CR 701.19c: "you may pay {U}. If you don't, destroy target creature. It
+// can't be regenerated." The rider is part of what happens if nothing is paid; the text must
+// not read as though paying avoided the rider. Forge: `NoRegen$ True | UnlessCost$ U |
+// UnlessPayer$ You`.
+#[test]
+fn a_rider_inside_an_unless_cost_reads_as_part_of_the_unpaid_instruction() {
+    let mist = card(
+        "Test Mist Rider",
+        "2 U",
+        "Creature Human Knight\nPT:2/2",
+        "T:Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield | ValidCard$ Card.Self | Execute$ TrigDestroy | TriggerDescription$ Text.\n\
+         SVar:TrigDestroy:DB$ Destroy | ValidTgts$ Creature | NoRegen$ True | UnlessCost$ U | UnlessPayer$ You",
+    );
+    let cat = forge_test_catalog(&[&mist], &[]);
+    let def = cat.get(cat.find("Test Mist Rider").unwrap());
+    let text = card_model::describe::rules_text(def).join(" ");
+    assert!(
+        text.contains(
+            "you may pay {U}. If you don't, destroy target creature. It can't be regenerated."
+        ),
+        "{text}"
+    );
+}

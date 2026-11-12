@@ -1873,7 +1873,15 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 }
                 join(parts, "and")
             };
-            if nothing(paid) {
+            // "… It can't be regenerated" must not read as what the payment avoids.
+            if nothing(paid) && matches!(**unpaid, Effect::CantBeRegenerated(_)) {
+                let dont = if you { "you don't" } else { "they don't" };
+                format!(
+                    "{who} may {}. If {dont}, {}",
+                    action(false),
+                    effect(mode, unpaid)
+                )
+            } else if nothing(paid) {
                 format!("{} unless {who} {}", effect(mode, unpaid), action(!you))
             } else {
                 let does = if you { "you do" } else { "they do" };

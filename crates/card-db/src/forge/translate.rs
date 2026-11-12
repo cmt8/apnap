@@ -7658,6 +7658,11 @@ fn ability_records(face: &Face) -> Vec<(String, Record)> {
 /// what differs; remove it when the pinned Forge commit has the script corrected.
 const SCRIPT_DIFFERS: &[(&str, &str)] = &[
     (
+        "Knight of the Mists",
+        "destroys target Knight *creature*; the card says \"target Knight\" (a Kindred Knight \
+         permanent that isn't a creature is a legal target, CR 308.2)",
+    ),
+    (
         "Swarmyard Massacre",
         "counts Insects, Rats, Spiders and Squirrels you control; the card counts *creatures* \
          you control of those types (a noncreature permanent of such a type must not count)",
