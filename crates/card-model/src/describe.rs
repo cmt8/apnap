@@ -664,7 +664,10 @@ fn quote_granted(def: &CardDef, text: &str) -> String {
                 // A delayed triggered ability (CR 603.7): "at the beginning of the next
                 // upkeep", "… of your next main phase", "… of the next turn's upkeep".
                 let delayed = about.strip_prefix(DELAYED);
-                if let Some(when) = delayed {
+                if let Some((when, much)) = delayed.map(|d| d.split_once('|').unwrap_or((d, ""))) {
+                    if !much.is_empty() {
+                        text = text.replace("that much", much);
+                    }
                     let next = if when == "next-turn" {
                         "the next turn's"
                     } else {
@@ -969,14 +972,32 @@ fn effect(mode: &Mode, e: &Effect) -> String {
         // The delayed ability's own text, filled in by `quote_granted` ("at the beginning
         // of the next upkeep, …").
         Effect::DelayedTrigger {
-            ability, window, ..
+            ability,
+            window,
+            amount: much,
+            ..
         } => {
             let when = match window {
                 DelayWindow::Next => "next",
                 DelayWindow::ThisTurn => "this-turn",
                 DelayWindow::NextTurn => "next-turn",
             };
-            format!("{LASTING}{ability}|{DELAYED}{when}{LASTING}")
+            // What "that much" of the delayed ability is.
+            let much = match much {
+                Some(Amount::OfTarget {
+                    slot,
+                    what: Measure::ManaValue,
+                }) if matches!(
+                    mode.targets.get(*slot as usize),
+                    Some(TargetFilter::Spell | TargetFilter::SpellMatching(_))
+                ) =>
+                {
+                    "that spell's mana value".to_string()
+                }
+                Some(a) => amount(a),
+                None => String::new(),
+            };
+            format!("{LASTING}{ability}|{DELAYED}{when}|{much}{LASTING}")
         }
         Effect::AttachThis { to } => format!("attach this permanent to {}", obj(mode, *to)),
         // "You may have that player shuffle."
