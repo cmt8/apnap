@@ -2027,6 +2027,51 @@ Necrosages, Culling the Weak, Embodiment of Spring, Kuro Pitlord, Sawtooth Loon,
 each read against its Oracle text. Most of the 57 `# TODO` cards stay blocked by something
 else (Proliferate, Flashback, copy effects ...).
 
+## D-075 The most played Commander cards no feature family covers, part 1 (2026-11-12)
+Rules text: docs/rules-notes/d075-commander-staples.md. Tests:
+`crates/harness/tests/forge_staples.rs`. Each feature is general (every card using it), in
+EDHREC order.
+- **"The life lost this way"** (CR 119.3, 608.2c): `Amount::LifeLostThisWay` (appended) —
+  what the players' life totals actually went down by in the "lose life" instruction just
+  before it (`Work::LifeLost` snapshots the totals; `ResolveFrame::life_lost`, serialized
+  only when set). Forge's `AFLifeLost`, compiled only right after a `LoseLife` in the same
+  chain (`expr:AFLifeLost not after a life loss` otherwise). D-078's guard on `AF…`
+  variables stays for every other use (its test now uses another `AF` name); D-075 adds
+  `SET_WHILE_RESOLVING`, the other variables Forge's code writes as it resolves
+  (`PreventedDamage`, `AffectedX` — counted per affected card in a static —, `Votes`,
+  die-roll results…): never read by their written value (`expr:set while resolving …`).
+  Scholar of Athreos, which D-078 found and blocked, compiles again, now right; with it
+  Exsanguinate, Gray Merchant of Asphodel, Kokusho, Blood Tithe, Agent of Masks,
+  Subversion, Debt to the Deathless.
+- **"In any order"** (CR 401.4): `Reorder$` on a `ChangeZone` to a library (Brainstorm,
+  Brainsurge, Brainstone, Riverwise Augur, Congregation at Dawn, Dwarven Recruiter, Scouting
+  Trek). The engine already has cards put on a library ordered by their owner; elsewhere
+  `param:ChangeZone.Reorder not to a library`.
+- **"Untap up to N lands"** (CR 701.26b): `Effect::UntapChosen { what, count }` and
+  `ChoiceKind::Untap` (both appended) — anyone's permanents matching (Forge's `UntapType$`
+  is not limited to yours), chosen as it resolves, not targets; only tapped ones are
+  offered. Chosen by another player: `param:Untap.UntapUpTo by another player`. Frantic
+  Search, Snap, Peregrine Drake, Palinchron, Great Whale, Treachery, Rewind, Unwind, Cloud
+  of Faeries, Pore Over the Pages. The heuristic agent untaps its own permanents; the app
+  titles the choice "Choose what to untap".
+- **Proliferate** (CR 701.34a): `Effect::Proliferate`, `ChoiceKind::Proliferate`
+  (appended): any number of permanents that have a counter, each gets one more of each
+  kind, all in one replaceable event. Players have no counters in this engine (every card
+  that gives poison, energy or experience is blocked), so only permanents are offered —
+  when player counters arrive, proliferate must offer players too. `Amount$ N` is N
+  proliferates in a row (a non-number is `param:Proliferate.Amount not a number`). 40
+  cards: Atraxa, Karn's Bastion, Evolution Sage, Flux Channeler, Inexorable Tide… The
+  heuristic agent picks its own permanents with +1/+1 counters and others' with -1/-1.
+- Golden hashes unchanged (state and event logs).
+- 9,891 → 9,968 of 34,463 scripts on base `0365ace`; after merging main `ef30f04`: 10,593
+  (main alone: 10,524). Top 100 by EDHREC rank 81 of 95 compile (main: 79), top 1,000
+  54.9% (main: 53.8%). Every newly compiled card was read against its Oracle text.
+- **Next (in the coordinator's order):** Path of Ancestry, Myriad Landscape, delayed
+  triggers (Arcane Denial, Mana Drain), pay X life, Ponder / Sensei's Divining Top
+  (`api:RearrangeTopOfLibrary`), Channel lands, Esper Sentinel, City of Brass (`trig:Taps`),
+  cumulative upkeep, variable charm counts, attack costs (Propaganda), Big Score, Mana
+  Vault, regeneration / "can't be regenerated" (CR 701.19).
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…
