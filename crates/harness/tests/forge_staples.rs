@@ -354,3 +354,73 @@ fn proliferate_gives_each_chosen_permanent_another_counter_of_each_kind() {
         ["Proliferate. Then proliferate."]
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// With D-072's alternative costs
+
+// CR 119.3 (2026-11-06): a player who loses more life than they have still loses all of
+// it — their life total goes below 0 (CR 119.6: a player can have a negative life total;
+// 704.5a then makes them lose). So "you gain life equal to the life lost this way" counts
+// all of it, here for a spell cast for its flashback cost (CR 702.34a).
+#[test]
+fn life_lost_this_way_counts_a_loss_below_zero_and_works_with_flashback() {
+    let rite = card(
+        "Test Late Rite",
+        "3 B",
+        "Sorcery",
+        "K:Flashback:4 B\n\
+         A:SP$ LoseLife | Defined$ Player.Opponent | LifeAmount$ 3 | SubAbility$ DBGainLife | SpellDescription$ Text.\n\
+         SVar:DBGainLife:DB$ GainLife | Defined$ You | LifeAmount$ AFLifeLost\n\
+         SVar:AFLifeLost:Number$0",
+    );
+    let mut sc = scenario_n(3, &[&rite]);
+    sc.cards(P0, Zone::Battlefield, &["Swamp"; 5]);
+    sc.card(P0, Zone::Graveyard, "Test Late Rite");
+    sc.life(P1, 1);
+    sc.turn(P0, engine_core::turn::Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    assert!(!s.can_cast("Test Late Rite"));
+    s.cast_with("Test Late Rite").pay();
+    // Before it resolves P1 is still in the game at 1 life.
+    s.pass_all();
+    assert_eq!(life(&s, P2), 37);
+    assert_eq!(life(&s, P0), 46, "3 from each opponent, P1's 3 included");
+    assert!(s.find(P0, Zone::Exile, "Test Late Rite").is_some());
+}
+
+// CR 701.26b with CR 118.9 / 601.2h: a land returned to its owner's hand to pay an
+// alternative cost is no longer a permanent; "untap up to two lands" can't choose it.
+#[test]
+fn untap_up_to_n_after_a_land_was_returned_to_pay_the_cost() {
+    let gush = card(
+        "Test Rush",
+        "4 U",
+        "Instant",
+        "S:Mode$ AlternativeCost | ValidSA$ Spell.Self | EffectZone$ All | Cost$ Return<1/Land> | Description$ Text.\n\
+         A:SP$ Untap | UntapUpTo$ True | UntapType$ Land | Amount$ 2 | SpellDescription$ Text.",
+    );
+    let mut sc = scenario(&[&gush]);
+    let island = sc.card(P0, Zone::Battlefield, "Island");
+    let forest = sc.card(P0, Zone::Battlefield, "Forest");
+    let swamp = sc.card(P0, Zone::Battlefield, "Swamp");
+    for l in [island, forest, swamp] {
+        sc.tapped(l);
+    }
+    sc.card(P0, Zone::Hand, "Test Rush");
+    let mut s = Script::new(sc.build());
+    s.cast_with("Test Rush");
+    assert_eq!(s.kind(), ChoiceKind::ReturnToHand);
+    pick_cards(&mut s, &[island]);
+    s.pass_all();
+    assert!(s.find(P0, Zone::Hand, "Island").is_some());
+    assert_eq!(s.kind(), ChoiceKind::Untap);
+    let offered: Vec<ObjectId> = s
+        .options()
+        .iter()
+        .filter_map(|o| match o {
+            OptionDesc::Card { card } => Some(*card),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(offered, [forest, swamp]);
+}

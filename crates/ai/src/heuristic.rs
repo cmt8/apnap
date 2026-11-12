@@ -108,9 +108,10 @@ fn effect_polarity(e: &Effect) -> Polarity {
         | Effect::MoveAll { .. } => Polarity::Neutral,
         Effect::TapAll(_)
         | Effect::UntapAll(_)
+        | Effect::SacrificeThis
+        | Effect::ControllerSacrificesThis
         | Effect::UntapChosen { .. }
-        | Effect::Proliferate
-        | Effect::SacrificeThis => Polarity::Neutral,
+        | Effect::Proliferate => Polarity::Neutral,
         Effect::PutCountersAll { .. } | Effect::ThisSpellTo { .. } => Polarity::Neutral,
         Effect::PutCounters { kind, .. } => match kind {
             CounterKind::PlusOne => Polarity::Help,
@@ -651,6 +652,55 @@ impl HeuristicAgent {
                     }
                     self.spell_score(v, entry, None)
                 }
+                // An alternative cost (CR 118.9): taken when it costs no more than mana
+                // and life it can spare — never cards from its hand or permanents for
+                // nothing — and then preferred: free beats paying, overload beats one
+                // target, flashback is a spell from the graveyard.
+                OptionDesc::CastWith {
+                    card,
+                    face,
+                    ability,
+                } => {
+                    let Some(ov) = Self::find(v, *card) else {
+                        continue;
+                    };
+                    let AbilityDef::AlternativeCost(alt) = self.catalog.ability(*ability) else {
+                        continue;
+                    };
+                    let c = &alt.cost;
+                    let pitches = c.sacrifice.is_some()
+                        || c.discard.is_some()
+                        || c.exile_from_hand.is_some()
+                        || c.return_to_hand.is_some()
+                        || (c.life > 0 && Self::life(v, me) <= 10 + i64::from(c.life));
+                    if pitches {
+                        continue;
+                    }
+                    let entry = self.catalog.face(ov.card, *face);
+                    let def = self.catalog.get(entry);
+                    let permanent =
+                        !def.has_type(CardType::Instant) && !def.has_type(CardType::Sorcery);
+                    if permanent && !my_main && !v.stack.is_empty() {
+                        continue;
+                    }
+                    let base = self.spell_score(v, entry, None);
+                    match &alt.kind {
+                        card_model::AltKind::Rather if c.mana.is_none() => base + 30,
+                        card_model::AltKind::Rather => base + 5,
+                        card_model::AltKind::Overload(_) => base + 15,
+                        card_model::AltKind::Flashback => base - 2,
+                        // Evoke: only when it can't be cast at all, for what entering does.
+                        card_model::AltKind::Evoke => {
+                            let castable = d.options.iter().any(
+                                |x| matches!(x, OptionDesc::CastSpell { card: c2 } if c2 == card && *face == 0),
+                            );
+                            if castable {
+                                continue;
+                            }
+                            base / 3
+                        }
+                    }
+                }
                 OptionDesc::ActivateAbility { source, ability } => {
                     let used = self.ability_uses.get(&(*source, *ability)).copied();
                     if used.unwrap_or(0) >= ABILITY_USES_PER_TURN {
@@ -1145,10 +1195,11 @@ impl Agent for HeuristicAgent {
                 };
                 Response::Pick(vec![d.options.iter().position(|o| *o == want).unwrap_or(0)])
             }
-            (ChoiceKind::MulliganBottom | ChoiceKind::Discard, Primitive::PickN { min, .. }) => {
-                self.pick_worst(v, d, *min, |o| Self::hand_keep_value(v, o))
-            }
-            (ChoiceKind::Sacrifice, Primitive::PickN { min, .. }) => {
+            (
+                ChoiceKind::MulliganBottom | ChoiceKind::Discard | ChoiceKind::ExileFromHand,
+                Primitive::PickN { min, .. },
+            ) => self.pick_worst(v, d, *min, |o| Self::hand_keep_value(v, o)),
+            (ChoiceKind::Sacrifice | ChoiceKind::ReturnToHand, Primitive::PickN { min, .. }) => {
                 self.pick_worst(v, d, *min, value)
             }
             // A search, or cards to put somewhere from hand: as many as allowed, the most
@@ -1195,6 +1246,21 @@ impl Agent for HeuristicAgent {
                 self.choose_modes(v, d, *min)
             }
             (ChoiceKind::ChooseTargets { slot }, _) => self.choose_targets(v, d, slot),
+            // "Pay X life" (an additional cost): never more than a third of its life.
+            (ChoiceKind::ChooseX, Primitive::PickNumber { max, .. })
+                if v.stack.last().is_some_and(|top| {
+                    top.ability.is_none()
+                        && self
+                            .catalog
+                            .get(top.card)
+                            .abilities
+                            .iter()
+                            .any(|a| matches!(a, AbilityDef::AdditionalCost(c) if c.life_x))
+                }) =>
+            {
+                let third = (Self::life(v, Self::me(v)).max(0) / 3) as u32;
+                Response::Number((*max).min(third))
+            }
             (ChoiceKind::ChooseX, Primitive::PickNumber { max, .. }) => Response::Number(*max),
             // Trample: as much as allowed to the player (lethal to blockers is required first).
             (ChoiceKind::AssignCombatDamage, Primitive::PickNumber { max, .. }) => {

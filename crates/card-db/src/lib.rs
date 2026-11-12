@@ -322,7 +322,11 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
     if kw.len() != c.keywords.len() {
         p.push("duplicate keyword".into());
     }
-    let card_has_x = c.mana_cost.as_ref().is_some_and(|m| m.has_x());
+    // X in the mana cost, or "pay X life" in the additional cost (CR 107.3a).
+    let card_has_x = c.mana_cost.as_ref().is_some_and(|m| m.has_x())
+        || c.abilities
+            .iter()
+            .any(|a| matches!(a, AbilityDef::AdditionalCost(x) if x.life_x));
     // "Has [quoted ability]" names an ability of the card's `granted` list.
     let text = format!("{:?}", (&c.abilities, &c.granted));
     for list in text.split("GrantAbilities([").skip(1) {
@@ -399,6 +403,7 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
             let fits = match a {
                 AbilityDef::Spell(_)
                 | AbilityDef::AdditionalCost(_)
+                | AbilityDef::AlternativeCost(_)
                 | AbilityDef::Enchant(_)
                 | AbilityDef::SelfCostReduction(_)
                 | AbilityDef::FromZone { .. } => false,
@@ -543,6 +548,7 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
             AbilityDef::Triggered { intervening_if, .. } => (intervening_if.as_ref(), false),
             AbilityDef::Static { only_if, .. } => (only_if.as_ref(), true),
             AbilityDef::PlayerRule { only_if, .. } => (only_if.as_ref(), false),
+            AbilityDef::AlternativeCost(alt) => (alt.only_if.as_ref(), false),
             _ => (None, false),
         };
         if let Some(card_model::Condition::Compare { amount, .. }) = cond {
@@ -602,6 +608,9 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                     ));
                 }
                 let has_x = cost.mana.as_ref().is_some_and(|m| m.has_x());
+                if cost.life_x {
+                    p.push(at("\"pay X life\" is only a spell's additional cost".into()));
+                }
                 if *cost == Cost::default() {
                     p.push(at("activated ability with no cost".into()));
                 }
@@ -743,13 +752,70 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                         "an additional cost is a sacrifice, a discard or life, nothing else".into(),
                     ));
                 }
-                if cost.sacrifice.is_none() && cost.discard.is_none() && cost.life == 0 {
+                if cost.sacrifice.is_none()
+                    && cost.discard.is_none()
+                    && cost.life == 0
+                    && !cost.life_x
+                    && cost.exile_from_hand.is_none()
+                    && cost.return_to_hand.is_none()
+                {
                     p.push(at("an additional cost of nothing".into()));
                 }
                 if c.has_type(CardType::Land) {
                     p.push(at("lands aren't cast: no additional cost".into()));
                 }
                 check_cost(cost, &mut |m| p.push(at(m)));
+            }
+            AbilityDef::AlternativeCost(alt) => {
+                use card_model::AltKind;
+                // CR 118.9: paid rather than the mana cost; it doesn't name the card in a
+                // zone, and isn't `{T}` (D-072).
+                let cost = &alt.cost;
+                if cost.tap
+                    || cost.sacrifice_self
+                    || cost.discard_self
+                    || cost.exile_self
+                    || cost.life_x
+                {
+                    p.push(at(
+                        "an alternative cost doesn't tap or move its own card".into()
+                    ));
+                }
+                if c.has_type(CardType::Land) {
+                    p.push(at("lands aren't cast: no alternative cost".into()));
+                }
+                let additional = c.abilities.iter().find_map(|a| match a {
+                    AbilityDef::AdditionalCost(x) => Some(x),
+                    _ => None,
+                });
+                match cost.with(additional.unwrap_or(&Cost::default())) {
+                    None => p.push(at(
+                        "an alternative cost that chooses what the additional cost chooses".into(),
+                    )),
+                    Some(all) => {
+                        check_cost(&all, &mut |m| p.push(at(m)));
+                        if all.discard.is_some() && all.exile_from_hand.is_some() {
+                            p.push(at(
+                                "a cost that both discards and exiles from the hand".into()
+                            ));
+                        }
+                    }
+                }
+                match &alt.kind {
+                    AltKind::Flashback | AltKind::Overload(_) if !instant_or_sorcery => p.push(at(
+                        "flashback and overload are on instants and sorceries".into(),
+                    )),
+                    AltKind::Evoke if instant_or_sorcery => {
+                        p.push(at("evoke is on permanent cards".into()))
+                    }
+                    _ => {}
+                }
+                if let AltKind::Overload(body) = &alt.kind {
+                    if body.modes().iter().any(|m| !m.targets.is_empty()) {
+                        p.push(at("an overloaded spell has no targets (CR 702.96b)".into()));
+                    }
+                    check_body(body, card_has_x, &mut |m| p.push(at(m)));
+                }
             }
             AbilityDef::Triggered { body, .. } => {
                 check_body(body, false, &mut |m| p.push(at(m)));
@@ -972,7 +1038,34 @@ pub(crate) fn mana_side_effect(e: &Effect) -> bool {
 }
 
 fn check_cost(cost: &Cost, p: &mut dyn FnMut(String)) {
-    for (what, choice) in [("sacrifice", &cost.sacrifice), ("discard", &cost.discard)] {
+    // CR 601.2g–h: a permanent sacrificed for mana is gone; the engine keeps enough for one
+    // choice of permanents, not for two (D-072).
+    if cost.sacrifice.is_some() && cost.return_to_hand.is_some() {
+        p("a cost that both sacrifices and returns permanents".into());
+    }
+    if let Some(e) = &cost.exile_from_hand {
+        for s in &e.what {
+            let asked = card_model::Selector {
+                types: s.types.clone(),
+                not_types: s.not_types.clone(),
+                subtypes: s.subtypes.clone(),
+                not_subtypes: s.not_subtypes.clone(),
+                colors: s.colors.clone(),
+                not_colors: s.not_colors.clone(),
+                other: s.other,
+                ..Default::default()
+            };
+            if asked != *s {
+                p("cards exiled from a hand are asked for types, subtypes and colors".into());
+            }
+        }
+    }
+    for (what, choice) in [
+        ("sacrifice", &cost.sacrifice),
+        ("discard", &cost.discard),
+        ("exile", &cost.exile_from_hand),
+        ("return", &cost.return_to_hand),
+    ] {
         if let Some(ch) = choice {
             if ch.count == 0 {
                 p(format!("a cost to {what} nothing"));
@@ -1331,7 +1424,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             selector(what, p);
             amount(a, p);
         }
-        Effect::SacrificeThis => {}
+        Effect::SacrificeThis | Effect::ControllerSacrificesThis => {}
         Effect::AttachThis { to } => {
             if *to == ObjRef::Noted {
                 p("attach to one of those cards: which?".into());

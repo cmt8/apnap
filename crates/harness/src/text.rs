@@ -1136,6 +1136,15 @@ pub fn option_line(v: &PlayerView, o: &OptionDesc) -> String {
         OptionDesc::CastFace { card, face } => {
             format!("cast {} with face {face} up", view_name(v, *card))
         }
+        OptionDesc::CastWith {
+            card,
+            face,
+            ability,
+        } => format!(
+            "cast {} (face {face}) for its alternative cost (ability {})",
+            view_name(v, *card),
+            ability.index
+        ),
         OptionDesc::TapForMana {
             source,
             mana,
