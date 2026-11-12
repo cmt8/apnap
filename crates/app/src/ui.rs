@@ -1434,7 +1434,7 @@ fn player_area(
         // Rules about the player: "no maximum hand size", "hexproof", extra land plays.
         if !pl.rules.is_empty() {
             let text: Vec<String> = pl.rules.iter().map(player_rule_text).collect();
-            ui.label(RichText::new("ⓘ").color(BLUE))
+            ui.label(RichText::new("(i)").color(BLUE))
                 .on_hover_text(text.join("\n"));
         }
         let n = pl.graveyard.len();

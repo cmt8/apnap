@@ -185,3 +185,96 @@ fn the_glyph_check_notices_a_missing_character() {
     h.run();
     assert!(!*h.state());
 }
+
+/// The characters among `wanted` the app's fonts cannot draw.
+fn undrawable(wanted: &BTreeSet<char>) -> Vec<char> {
+    let mut h = Harness::builder().build_ui_state(
+        |ui, (wanted, missing): &mut (Vec<char>, Vec<char>)| {
+            let font = FontId::proportional(14.0);
+            missing.clear();
+            for c in wanted.iter() {
+                if !ui.ctx().fonts_mut(|f| f.has_glyph(&font, *c)) {
+                    missing.push(*c);
+                }
+            }
+        },
+        (wanted.iter().copied().collect::<Vec<_>>(), Vec::new()),
+    );
+    h.run();
+    h.state().1.clone()
+}
+
+/// The non-ASCII characters inside the string and character literals of Rust source `src`
+/// (comments skipped): what the app writes on the screen of its own.
+fn literal_chars(src: &str) -> BTreeSet<char> {
+    let mut out = BTreeSet::new();
+    let cs: Vec<char> = src.chars().collect();
+    let mut i = 0;
+    while i < cs.len() {
+        match cs[i] {
+            '/' if cs.get(i + 1) == Some(&'/') => {
+                while i < cs.len() && cs[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '/' if cs.get(i + 1) == Some(&'*') => {
+                while i + 1 < cs.len() && !(cs[i] == '*' && cs[i + 1] == '/') {
+                    i += 1;
+                }
+                i += 2;
+            }
+            '"' => {
+                i += 1;
+                while i < cs.len() && cs[i] != '"' {
+                    if cs[i] == '\\' {
+                        i += 1;
+                    } else if !cs[i].is_ascii() {
+                        out.insert(cs[i]);
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            // A character literal ('x', '…'); not a lifetime ('a).
+            '\'' if cs.get(i + 2) == Some(&'\'') => {
+                if !cs[i + 1].is_ascii() {
+                    out.insert(cs[i + 1]);
+                }
+                i += 3;
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// The app's own fixed labels (menu entries, prompts, badges) can be drawn too.
+#[test]
+fn the_apps_own_labels_only_use_characters_the_fonts_can_draw() {
+    let sources = [
+        include_str!("../src/ui.rs"),
+        include_str!("../src/cardview.rs"),
+        include_str!("../src/combat.rs"),
+        include_str!("../src/session.rs"),
+        include_str!("../src/art.rs"),
+        include_str!("../src/lib.rs"),
+        include_str!("../src/main.rs"),
+    ];
+    let wanted: BTreeSet<char> = sources.iter().flat_map(|s| literal_chars(s)).collect();
+    // The labels do use some: the scan sees them.
+    assert!(wanted.contains(&'—') && wanted.contains(&'…'), "{wanted:?}");
+    let missing = undrawable(&wanted);
+    assert!(
+        missing.is_empty(),
+        "the app's fonts cannot draw: {missing:?}"
+    );
+}
+
+/// The scan reads literals, not comments, and the check reports an undrawable label.
+#[test]
+fn the_label_check_notices_an_undrawable_label() {
+    let src = "// a comment with \u{24D8} is not drawn\nui.label(\"\u{24D8} rules\"); let c = '\u{2026}';";
+    let found = literal_chars(src);
+    assert_eq!(found, BTreeSet::from(['\u{24D8}', '\u{2026}']));
+    assert_eq!(undrawable(&found), vec!['\u{24D8}']);
+}
