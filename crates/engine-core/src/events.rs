@@ -314,6 +314,13 @@ pub enum Event {
     TargetsChanged {
         object: ObjectId,
     },
+    /// CR 707.10: `controller` put `copy`, a copy of the spell or ability `original`, on
+    /// the stack (not cast, not activated).
+    CopiedOnStack {
+        copy: ObjectId,
+        original: ObjectId,
+        controller: PlayerId,
+    },
     /// CR 508.1b: the attacker just declared (`AttackerDeclared`, with the planeswalker's
     /// controller as the defending player) attacks this planeswalker.
     AttacksPlaneswalker {

@@ -108,6 +108,7 @@ pub fn new_game_with_commanders(
         shields: Vec::new(),
         lasting: Vec::new(),
         delayed: Vec::new(),
+        left_stack: Vec::new(),
         loyalty_activated: Vec::new(),
         next_effect_id: 0,
         commanders: Vec::new(),

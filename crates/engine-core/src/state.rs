@@ -170,6 +170,11 @@ pub struct GameState {
     /// Delayed triggered abilities waiting for their event (CR 603.7).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delayed: Vec<crate::effects::Delayed>,
+    /// The spells and abilities that left the stack while it wasn't empty, as they last
+    /// were there (CR 608.2h): "copy that spell" once it has been countered. Forgotten
+    /// when the stack is empty (nothing on it can refer to them any more).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left_stack: Vec<(StackObject, Option<GameObject>)>,
     /// CR 606.3: the permanents a loyalty ability of which has been activated this turn
     /// (cleared as each turn begins; a permanent that changes zones is a new object).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
