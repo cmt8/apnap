@@ -2413,23 +2413,38 @@ Rules text: docs/rules-notes/614.12a-607.2d-chosen-type-color.md. Tests:
 - **Read against the Oracle text:** all newly compiled cards. `For the Ancestors` takes
   *creature* cards of the chosen type where the card says "cards of the chosen type" (a
   Kindred card of that type): `SCRIPT_DIFFERS`.
-- Golden hashes: RESULT.
-- COUNTS
-- **A token copy** of a permanent with an as-enters choice (D-073/D-074): the choice is asked
-  from `replacement::applicable` for an entering object's *printed* card (`st.card_def`) and
-  set in `perform` for a `Proposed::Move` to the battlefield. A token created as an object
-  of that card that enters through the same stage would be asked; a permanent that enters
-  as a copy of another card (copiable values from layer 1) would not, until `applicable`
-  reads the entering object's copiable abilities, and created tokens need `perform` to give
-  them the choice too.
-- **Still blocked, by name:** Cavern of Souls (`param:Mana.AddsNoCounter`: the other half,
-  "that spell can't be countered", is another branch's; the restriction half is built and
-  tested), Three Tree City and Utopia Sprawl / Caged Sun / Gauntlet of Power / Heraldic Banner
-  (`Mana:produced` "of the chosen color" and mana triggers), Herald's Horn
-  (`api:PeekAndReveal`), Door of Destinies (charge counters), Path of Ancestry
-  (`param:Mana.TriggersWhenSpent`), Kindred Summons (`api:DigUntil`), Kindred Charge
-  (`api:CopyPermanent`), Roaming Throne (`static:Panharmonicon`, D-073's), Coat of Arms
-  (`filter:.sharesCreatureTypeWith`), Arcane Adaptation (`…AffectedZone`), Stuffy Doll
+- **Golden hashes:** all 15 event logs unchanged; every state hash moved, because the stable
+  hasher marks each field skipped by `skip_serializing_if` (`hash.rs`, `skip_field`) and the
+  catalog's selectors now have one more such field (`Selector::chosen`), as do objects, stack
+  objects and frames. Re-blessed.
+- **Numbers** (on main 0b956d9: 10,914 of 34,463): 10,993 compile (31.9%), +79, none lost.
+  By EDHREC rank: top 300 212 → 217, top 1,000 578 → 593, top 2,000 945 → 965, top 5,000
+  1,733 → 1,768. Among them: Plague Engineer, Patchwork Banner, Unclaimed Territory,
+  Secluded Courtyard, Three Tree City, Vanquisher's Banner, Kindred Discovery, Urza's
+  Incubator, Metallic Mimic, Adaptive Automaton, Icon of Ancestry, Pillar of Origins,
+  Realmwalker, Kindred Dominance, Kindred Judgment, Distant Melody, Crippling Fear, Raise the
+  Palisade, Cover of Darkness, Chronicle of Victory, Etchings of the Chosen, Bloodline
+  Pretender, Species Specialist, Belbe's Portal, Engineered Plague, Xenograft, Hall of
+  Triumph, the changelings (Changeling Outcast, Taurean Mauler, Universal Automaton, Crib
+  Swap…), cards that make changeling tokens (Black Market Connections, Irregular Cohort,
+  Personify), Helm of Awakening and Arcane Melee (anyone's cost reduction). Precon deck
+  slots: not measured.
+- **Tokens and copies (D-073, D-074):** `ApplyFrame::chosen` keeps a choice by the place of
+  its event in the batch, and `perform` gives it to the permanent a `Move` *or* a
+  `TokenEnters` puts onto the battlefield. But `replacement::applicable` offers a
+  permanent's own "as this enters" abilities only for a `Move` (from the face the card
+  enters with): a token entering (`TokenEnters`, no object yet) is not asked today, so a
+  token copy of a permanent with an as-enters choice would enter with no choice (its "of the
+  chosen type" then means nothing, CR 607.5a). For copies, `applicable` would have to read
+  the entering object's copiable abilities (layer 1) rather than its card.
+- **Still blocked, by name:** Cavern of Souls (`param:Mana.AddsNoCounter`: "that spell can't
+  be countered" as a property of the mana; the restriction half is built and tested), Roaming
+  Throne (only `kw:Ward` left: its additional trigger of the chosen type is built and
+  tested), Utopia Sprawl / Caged Sun / Gauntlet of Power / Heraldic Banner (`Mana:produced`
+  "of the chosen color" and mana triggers), Herald's Horn (`api:PeekAndReveal`), Door of
+  Destinies (charge counters), Path of Ancestry (`param:Mana.TriggersWhenSpent`), Kindred
+  Summons (`api:DigUntil`), Kindred Charge (`api:CopyPermanent`), Coat of Arms
+  (`expr:set while resolving AffectedX`), Arcane Adaptation (`…AffectedZone`), Stuffy Doll
   (choose a player), Nykthos / Nyx Lotus (a permanent's ability choosing a color, devotion to
   it), Thriving lands (a color other than one), Cloud Key / Serra's Emissary (a card type),
   Multiversal Passage / Banner of Kinship (`R:Event$ Moved` with a choice and more).

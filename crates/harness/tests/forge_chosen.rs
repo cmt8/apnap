@@ -511,6 +511,54 @@ fn enters_trigger_of_the_chosen_type() {
     assert_eq!(hand(&s), before - 1, "cast a Goblin, drew a card");
 }
 
+// CR 603.2d, 607.2d: "If a triggered ability of another creature you control of the chosen
+// type triggers, it triggers an additional time" (D-073's `Panharmonicon`, read with this
+// permanent's choice).
+#[test]
+fn additional_trigger_for_creatures_of_the_chosen_type() {
+    let throne = format!(
+        "Name:Test Wandering Seat\nManaCost:4\nTypes:Artifact Creature Golem\nPT:4/4\n{CHOOSE_CT}\n\
+         S:Mode$ Continuous | AffectedDefined$ Self | AddType$ ChosenType | Description$ Text.\n\
+         S:Mode$ Panharmonicon | ValidCard$ Creature.Other+YouCtrl+ChosenType | Description$ Text.\n\
+         Oracle:As this creature enters, choose a creature type.\\nThis creature is the chosen type in addition to its other types.\\nIf a triggered ability of another creature you control of the chosen type triggers, it triggers an additional time."
+    );
+    let greeter = |name: &str, ty: &str| {
+        format!(
+            "Name:{name}\nManaCost:G\nTypes:Creature {ty}\nPT:1/1\n\
+             T:Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield | ValidCard$ Card.Self | Execute$ TrigGain | TriggerDescription$ Text.\n\
+             SVar:TrigGain:DB$ GainLife | Defined$ You | LifeAmount$ 1\n\
+             Oracle:When this creature enters, you gain 1 life."
+        )
+    };
+    let elf = greeter("Test Greeting Elf", "Elf");
+    let goblin = greeter("Test Greeting Goblin", "Goblin");
+    let mut sc = scenario(&[&throne, &elf, &goblin]);
+    sc.cards(P0, Zone::Battlefield, &["Forest"; 6]);
+    sc.cards(
+        P0,
+        Zone::Hand,
+        &[
+            "Test Wandering Seat",
+            "Test Greeting Elf",
+            "Test Greeting Goblin",
+        ],
+    );
+    let mut s = Script::new(sc.build());
+    s.cast("Test Wandering Seat").pay().pass_all();
+    choose(&mut s, "Elf");
+    let life = s.st.player(P0).life;
+    s.cast("Test Greeting Elf").pay().pass_all();
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+    });
+    assert_eq!(s.st.player(P0).life, life + 2, "an Elf's trigger twice");
+    s.cast("Test Greeting Goblin").pay().pass_all();
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+    });
+    assert_eq!(s.st.player(P0).life, life + 3, "a Goblin's once");
+}
+
 // ---------------------------------------------------------------------------------------
 // "Choose a creature type" as a spell resolves (CR 608.2c).
 
