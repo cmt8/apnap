@@ -2367,7 +2367,11 @@ Rules text: docs/rules-notes/d075-commander-staples.md (sections 205.3i, 603.7, 
   hint. Ponder, Sensei's Divining Top, Index, Natural Selection, Portent, Halimar Depths.
 - **`CostDesc$` is text only** (how the cost reads in Forge's description; the cost is
   `Cost$`). Big Score, Unexpected Windfall, Tormenting Voice, Cathartic Reunion.
-- Golden hashes unchanged.
+- **Golden state hashes re-blessed; all 15 event logs unchanged.** The stable hasher writes a
+  tag for a field that `skip_serializing_if` skips (`hash.rs`, `skip_field`), so a new
+  top-level `GameState` field changes every state hash even while it is empty
+  (`GameState::delayed`). Fields skipped inside frames (`ResolveFrame::life_lost`,
+  `ChooseSpec::share_land_type`) only show while a resolution is suspended.
 - Against main `0b956d9` (D-073 merged), by a card-by-card diff of `forge-coverage --sample 1`:
   77 cards newly compile, none stops compiling, no engine text changes. All 77 were read
   against their Oracle text. Among the most played: Arcane Denial, Mana Drain, Ponder,
