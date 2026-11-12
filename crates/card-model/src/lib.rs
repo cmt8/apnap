@@ -557,6 +557,12 @@ pub struct Selector {
     /// Not used for cards outside the battlefield, where `controller` is the owner.
     #[serde(default)]
     pub owner: Who,
+    /// `Some(true)`: one of "those cards" — what an earlier instruction of the resolving
+    /// spell or ability noted ([`Effect::Note`]); `Some(false)`: not one of them ("destroy
+    /// all other creatures" after creating tokens). Only the resolving effect knows them:
+    /// card-db allows this only in the selectors of one-shot effects it filters itself.
+    #[serde(default)]
+    pub noted: Option<bool>,
 }
 
 impl Selector {
@@ -1379,6 +1385,10 @@ pub enum Effect {
         to: CardDest,
         #[serde(default)]
         shuffle: bool,
+        /// Onto the battlefield under this player's control ("return that card to the
+        /// battlefield under your control"); `None`: under its owner's.
+        #[serde(default)]
+        controller: Option<PlayerRef>,
     },
     /// Everything in a zone that matches, at once: "return all creatures to their owners'
     /// hands", "exile all artifacts", "return all creature cards from your graveyard to
@@ -1450,6 +1460,19 @@ pub enum Effect {
         who: PlayerRef,
         effect: Box<Effect>,
     },
+    /// Perform the instruction, and remember what it did for the rest of this resolution
+    /// (CR 608.2c, 400.7j): the cards it moved — as the objects they became — and the
+    /// tokens it created are "those cards" ([`ObjRef::Noted`], [`Selector::noted`],
+    /// [`Amount::Noted`]). Of a [`Effect::Dig`], only the cards put in its first place.
+    /// Forge's "remembered" cards of a chain that forgets them when it ends (D-069); not
+    /// the same as what a lasting effect is about (`ObjFilter::Remembered`).
+    Note(Box<Effect>),
+    /// "If [condition], [instruction]": the condition is checked as this instruction is
+    /// reached (CR 608.2c); amounts in it are counted then, and may count "those cards".
+    If {
+        test: Condition,
+        then: Box<Effect>,
+    },
 }
 
 /// A zone an effect takes cards out of as it resolves.
@@ -1474,6 +1497,11 @@ pub enum CardDest {
     Exile,
     LibraryTop,
     LibraryBottom,
+    /// Nowhere: the cards chosen stay where they are, found ("search your library for up
+    /// to two basic land cards, reveal those cards, put one onto the battlefield and the
+    /// other into your hand"). Only for a search whose cards are noted ([`Effect::Note`])
+    /// for the instructions after it.
+    Stay,
 }
 
 /// How many of the cards a [`Effect::Dig`] looks at are taken.
@@ -1506,6 +1534,10 @@ pub enum ObjRef {
     /// triggered the ability: the card it became in the zone it went to, for as long as it
     /// is still there (CR 400.7).
     TriggeringCard,
+    /// "Those cards", "that card", "it": each of the cards an earlier instruction of this
+    /// resolution noted ([`Effect::Note`]), while it is still where this resolution put it
+    /// — in a public zone (CR 400.7j), or found by a search and not moved.
+    Noted,
 }
 
 /// Which object deals the damage of a `DealDamage`.
@@ -1567,6 +1599,14 @@ pub enum PlayerRef {
     /// "Its owner": the owner of the spell or permanent chosen for target slot `n`
     /// (CR 108.3) — not its controller, if someone else controls it.
     OwnerOf(u8),
+    /// The players who control "those cards" ([`Effect::Note`]) — as each is now if it is
+    /// on the battlefield, otherwise as it last was before it moved (CR 608.2h: "each
+    /// player who sacrificed a creature this way").
+    NotedControllers,
+    /// The players in the game who control none of "those cards" (as for
+    /// [`PlayerRef::NotedControllers`]): "each player who didn't sacrifice a creature this
+    /// way".
+    NotNotedControllers,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1645,6 +1685,14 @@ pub enum Amount {
     /// hand", "target player's hand" (as the effect is applied, CR 608.2h). 0 for a
     /// player who has left the game.
     HandOf(PlayerRef),
+    /// The number of "those cards" ([`Effect::Note`]) that match any of the selectors (no
+    /// selectors: all of them) — "for each creature destroyed this way", "if it's a
+    /// Spirit". Wherever they went, they count; each as it is now if this resolution can
+    /// still find it, otherwise as it last was before it moved (CR 608.2h).
+    Noted(Vec<Selector>),
+    /// The total power, toughness or mana value of "those cards" ("its mana value", "that
+    /// creature's power"), each as for [`Amount::Noted`].
+    NotedTotal(Measure),
 }
 
 impl Amount {
@@ -1674,7 +1722,9 @@ impl Amount {
             | Amount::TriggeringAmount
             | Amount::SacrificedPower
             | Amount::OfTarget { .. }
-            | Amount::HandOf(_) => false,
+            | Amount::HandOf(_)
+            | Amount::Noted(_)
+            | Amount::NotedTotal(_) => false,
         }
     }
 

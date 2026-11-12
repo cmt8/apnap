@@ -444,7 +444,9 @@ pub fn count_amount(
         | Amount::TriggeringAmount
         | Amount::SacrificedPower
         | Amount::OfTarget { .. }
-        | Amount::HandOf(_) => 0,
+        | Amount::HandOf(_)
+        | Amount::Noted(_)
+        | Amount::NotedTotal(_) => 0,
     }
 }
 

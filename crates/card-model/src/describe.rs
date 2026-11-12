@@ -170,7 +170,10 @@ fn amount(a: &Amount) -> String {
                 PlayerRef::ControllerOf(_) | PlayerRef::TriggeringController => "its controller",
                 PlayerRef::OwnerOf(_) => "its owner",
                 PlayerRef::You => "you",
-                PlayerRef::Each | PlayerRef::EachOpponent => "those players",
+                PlayerRef::Each
+                | PlayerRef::EachOpponent
+                | PlayerRef::NotedControllers
+                | PlayerRef::NotNotedControllers => "those players",
             };
             format!("the number of cards in {who}'s hand")
         }
@@ -180,6 +183,25 @@ fn amount(a: &Amount) -> String {
             Measure::ManaValue => "its mana value",
         }
         .into(),
+        Amount::Noted(cards) if cards.is_empty() => "the number of those cards".into(),
+        Amount::Noted(cards) => format!(
+            "the number of those cards that are {}",
+            join(
+                cards
+                    .iter()
+                    .map(|s| with_article(&card_list(core::slice::from_ref(s), false)))
+                    .collect(),
+                "or"
+            )
+        ),
+        Amount::NotedTotal(what) => format!(
+            "the total {} of those cards",
+            match what {
+                Measure::Power => "power",
+                Measure::Toughness => "toughness",
+                Measure::ManaValue => "mana value",
+            }
+        ),
     }
 }
 
@@ -265,6 +287,7 @@ fn obj(mode: &Mode, r: ObjRef) -> String {
         ObjRef::Triggering => "it".into(),
         ObjRef::ThisCard => "this card".into(),
         ObjRef::TriggeringCard => "that card".into(),
+        ObjRef::Noted => "those cards".into(),
     }
 }
 
@@ -278,6 +301,8 @@ fn player(mode: &Mode, r: PlayerRef) -> String {
         PlayerRef::TriggeringPlayer => "that player".into(),
         PlayerRef::ControllerOf(_) => "its controller".into(),
         PlayerRef::OwnerOf(_) => "its owner".into(),
+        PlayerRef::NotedControllers => "their controllers".into(),
+        PlayerRef::NotNotedControllers => "each player who controlled none of those cards".into(),
     }
 }
 
@@ -369,6 +394,7 @@ fn selector(s: &Selector, plural: bool) -> String {
     if !s.names.is_empty() {
         out.push_str(&format!(" named {}", s.names.join(" or ")));
     }
+    out.push_str(noted(s.noted));
     match s.owner {
         Who::Any => {}
         Who::You => out.push_str(" you own"),
@@ -874,15 +900,25 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                     if *reveal {
                         t.push_str(&format!(", reveal {it}"));
                     }
-                    t.push_str(&format!(", put {it} {}", dest(*to, their)));
+                    if *to != CardDest::Stay {
+                        t.push_str(&format!(", put {it} {}", dest(*to, their)));
+                    }
                     t
+                }
+                // Choosing among cards found before: no new search.
+                CardZone::Library
+                    if !cards.is_empty() && cards.iter().all(|c| c.noted == Some(true)) =>
+                {
+                    format!("{who} {} {what} {}", s("put"), dest(*to, their))
                 }
                 CardZone::Library => {
                     let mut t = format!("{who} {} {their} library for {what}", s("search"));
                     if *reveal {
                         t.push_str(&format!(", {} {it}", s("reveal")));
                     }
-                    t.push_str(&format!(", {} {it} {}", s("put"), dest(*to, their)));
+                    if *to != CardDest::Stay {
+                        t.push_str(&format!(", {} {it} {}", s("put"), dest(*to, their)));
+                    }
                     t
                 }
                 CardZone::Hand | CardZone::Graveyard => {
@@ -1058,13 +1094,31 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 format!("put this spell {}", dest(*to, "its owner's"))
             }
         }
-        Effect::PutInto { what, to, shuffle } => {
+        Effect::PutInto {
+            what,
+            to,
+            shuffle,
+            controller,
+        } => {
             if *shuffle {
                 format!("shuffle {} into its owner's library", obj(mode, *what))
             } else {
-                format!("put {} {}", obj(mode, *what), dest(*to, "its owner's"))
+                let under = match controller {
+                    None => String::new(),
+                    Some(PlayerRef::You) => " under your control".to_string(),
+                    Some(p) => format!(" under the control of {}", player(mode, *p)),
+                };
+                format!(
+                    "put {} {}{under}",
+                    obj(mode, *what),
+                    dest(*to, "its owner's")
+                )
             }
         }
+        // What the instruction does is what it says; the instructions after it say
+        // "those cards".
+        Effect::Note(inner) => effect(mode, inner),
+        Effect::If { test, then } => format!("{}, {}", condition(test), effect(mode, then)),
         Effect::MoveAll {
             from,
             whose,
@@ -1122,6 +1176,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 CardDest::LibraryBottom => {
                     format!("put {what} on the bottom of their owners' libraries")
                 }
+                CardDest::Stay => format!("leave {what} where they are"),
             };
             if *shuffle && *to != CardDest::LibraryTop {
                 out.push_str(", then those players shuffle");
@@ -1141,6 +1196,7 @@ fn dest(to: CardDest, whose: &str) -> String {
         CardDest::Exile => "into exile".to_string(),
         CardDest::LibraryTop => format!("on top of {whose} library"),
         CardDest::LibraryBottom => format!("on the bottom of {whose} library"),
+        CardDest::Stay => "where they are".to_string(),
     }
 }
 
@@ -1169,6 +1225,11 @@ fn card_list(cards: &[Selector], plural: bool) -> String {
             if !s.types.is_empty() {
                 words.push(types(&s.types, "or"));
             }
+            match s.token {
+                Some(true) => words.push("token".to_string()),
+                Some(false) => words.insert(0, "nontoken".to_string()),
+                None => {}
+            }
             words.push(noun.to_string());
             let mut out = words.join(" ");
             for k in &s.keywords {
@@ -1184,6 +1245,7 @@ fn card_list(cards: &[Selector], plural: bool) -> String {
             if !s.names.is_empty() {
                 out.push_str(&format!(" named {}", s.names.join(" or ")));
             }
+            out.push_str(noted(s.noted));
             match s.controller {
                 Who::Any => {}
                 Who::You => out.push_str(" you own"),
@@ -1193,6 +1255,15 @@ fn card_list(cards: &[Selector], plural: bool) -> String {
         })
         .collect();
     join(parts, "or")
+}
+
+/// " among those cards" / " other than those cards" (empty if the selector doesn't ask).
+fn noted(n: Option<bool>) -> &'static str {
+    match n {
+        None => "",
+        Some(true) => " among those cards",
+        Some(false) => " other than those cards",
+    }
 }
 
 /// " with mana value 3 or less" (empty if the selector doesn't ask).
