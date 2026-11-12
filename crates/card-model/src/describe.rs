@@ -393,7 +393,9 @@ fn acting_player(e: &Effect) -> Option<PlayerRef> {
         | Effect::Surveil { who, .. }
         | Effect::Sacrifice { who, .. }
         | Effect::CreateToken { who, .. } => Some(*who),
-        Effect::Note(inner) => acting_player(inner),
+        // The sentence that starts it.
+        Effect::Note(inner) | Effect::IfDone { first: inner, .. } => acting_player(inner),
+        Effect::Seq(v) => v.first().and_then(acting_player),
         _ => None,
     }
 }
@@ -4275,5 +4277,28 @@ mod tests {
             ..Selector::default()
         };
         assert_eq!(selector(&dwarves, true), "Dwarves or Equipment");
+    }
+
+    #[test]
+    fn a_whole_optional_sequence_starts_with_who_does_the_first_thing() {
+        // Ob Nixilis: "you may have target player lose 3 life. If you do, put …".
+        let m = with_targets(
+            vec![TargetFilter::Player],
+            Effect::May(Box::new(Effect::IfDone {
+                first: Box::new(Effect::LoseLife {
+                    who: PlayerRef::Target(0),
+                    amount: Amount::Fixed(3),
+                }),
+                then: Box::new(Effect::PutCounters {
+                    what: ObjRef::This,
+                    kind: CounterKind::PlusOne,
+                    count: Amount::Fixed(3),
+                }),
+            })),
+        );
+        assert_eq!(
+            text(&spell(m)),
+            "You may have target player lose 3 life. If you do, put three +1/+1 counters on this spell."
+        );
     }
 }
