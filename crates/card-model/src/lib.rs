@@ -1735,6 +1735,10 @@ pub enum Effect {
         /// whether to (and one who doesn't, doesn't shuffle either).
         #[serde(default)]
         optional: bool,
+        /// "… cards that share a land type" (CR 205.3i): every card chosen has a land type
+        /// that every other chosen card has too. Chosen one at a time.
+        #[serde(default, skip_serializing_if = "is_false")]
+        share_land_type: bool,
     },
     /// CR 701.22: scry N.
     Scry {
@@ -1903,6 +1907,48 @@ pub enum Effect {
     /// once. (Players have no counters in this engine yet: no card that gives them
     /// compiles. When one does, they must be offered too.)
     Proliferate,
+    /// CR 603.7: create a delayed triggered ability — "at the beginning of the next
+    /// turn's upkeep, draw a card", "at the beginning of your next main phase, add {C}
+    /// equal to that spell's mana value". `ability` indexes [`CardDef::granted`]: an
+    /// [`AbilityDef::Triggered`] (so far only "at the beginning of [step]"). It triggers
+    /// once (CR 603.7c) and is then gone; its controller is this spell or ability's
+    /// controller (CR 603.7d) and its source this one's source (CR 603.7e).
+    DelayedTrigger {
+        ability: u16,
+        window: DelayWindow,
+        /// "That player" of the delayed ability, fixed now (CR 603.7c: it refers to
+        /// what was determined as the delayed ability was created).
+        #[serde(default)]
+        player: Option<PlayerRef>,
+        /// "That much" of the delayed ability, fixed now.
+        #[serde(default)]
+        amount: Option<Amount>,
+    },
+    /// "[Who] may draw up to N cards": the player who would draw chooses how many, from 0
+    /// to N, as it resolves (CR 107.1c, 608.2d), then draws that many.
+    DrawUpTo {
+        who: PlayerRef,
+        amount: Amount,
+    },
+    /// CR 701.24a: the players shuffle their libraries.
+    Shuffle {
+        who: PlayerRef,
+    },
+}
+
+/// When a delayed triggered ability ([`Effect::DelayedTrigger`]) can trigger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DelayWindow {
+    /// The next time its event happens, whenever that is.
+    Next,
+    /// Only this turn ("… this turn"): it ends at cleanup (CR 514.2).
+    ThisTurn,
+    /// Only during the next turn ("at the beginning of the next turn's upkeep").
+    NextTurn,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// A zone an effect takes cards out of as it resolves.

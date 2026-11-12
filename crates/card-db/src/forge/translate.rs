@@ -14,10 +14,10 @@ use card_model::{
     AbilityDef, ActivationZone, Affected, AltCost, AltKind, AltKindName, Amount, AsEnters,
     BasicLandType, Body, Calc, CardDef, CardDest, CardType, CardZone, Cmp, Color, CombatRule,
     Condition, ContinuousEffect, Cost, CostChoice, CounterKind, DamageBy, DamagePer, DamageTo,
-    EachPlayerAction, Effect, Keyword, Layout, ManaCost, ManaProduce, ManaRestriction, ManaType,
-    Measure, Mode, ObjFilter, ObjRef, PlayZone, PlayerRef, PlayerRule, ReplaceWith, Replaces,
-    Selector, Signed, Supertype, Take, TargetFilter, TargetGroup, TargetRef, Timing, Trigger,
-    TriggerCause, TriggerStep, Who,
+    DelayWindow, EachPlayerAction, Effect, Keyword, Layout, ManaCost, ManaProduce, ManaRestriction,
+    ManaType, Measure, Mode, ObjFilter, ObjRef, PlayZone, PlayerRef, PlayerRule, ReplaceWith,
+    Replaces, Selector, Signed, Supertype, Take, TargetFilter, TargetGroup, TargetRef, Timing,
+    Trigger, TriggerCause, TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -34,7 +34,12 @@ pub struct Compiled {
 
 /// Parameters that never affect the rules: descriptions shown to players, prompts, and
 /// hints for Forge's AI. (docs/forge/script-format.md, "keys a translator can ignore".)
-const TEXT_ONLY: [&str; 19] = [
+const TEXT_ONLY: [&str; 21] = [
+    // A hint for Forge's AI (respond to its own activation): never read by forge-game.
+    "AIRespondsToOwnAbility",
+    // How the cost reads in the ability's description (`SpellAbility.getDescription`):
+    // the cost itself is `Cost$`.
+    "CostDesc",
     "ValidTgtsDesc",
     "UnlessAI",
     "ChangeTypeDesc",
@@ -159,6 +164,9 @@ struct Chain {
     groups: Vec<TargetGroup>,
     /// The group the record being compiled has just made: (first slot, slots).
     fresh_group: Option<(u8, u8)>,
+    /// A "counter target spell" link remembered its target (`RememberTargets$`) or that
+    /// spell's mana value (`RememberCounteredCMC$`): its target slot, and which.
+    countered: Option<(u8, bool, bool)>,
 }
 
 struct Tx<'a> {
@@ -227,7 +235,9 @@ struct Tx<'a> {
 /// The parameters with which a link of a chain remembers cards on the card (Forge's
 /// `Remember…$`) that the compiler knows. Any other (`RememberRevealed$`, …) is not read
 /// and blocks the card.
-const REMEMBER: [&str; 8] = [
+const REMEMBER: [&str; 9] = [
+    // A countered spell's mana value, for a delayed trigger of the chain (CR 603.7c).
+    "RememberCounteredCMC",
     "RememberChanged",
     "RememberTargets",
     "RememberLKI",
@@ -1844,7 +1854,14 @@ impl<'a> Tx<'a> {
                 };
                 let amount = self.amount(rd.get(key).unwrap_or("1"), chain);
                 let (who, amount) = (who?, amount?);
+                // "May draw up to N cards": the drawer chooses how many.
+                let upto = api == "Draw" && rd.get("Upto").is_some();
+                if upto && matches!(who, PlayerRef::Each | PlayerRef::EachOpponent) {
+                    self.block("param:Draw.Upto for several players");
+                    return None;
+                }
                 let e = match api {
+                    "Draw" if upto => Effect::DrawUpTo { who, amount },
                     "Draw" => Effect::Draw { who, amount },
                     "Mill" => Effect::Mill { who, amount },
                     "GainLife" => Effect::GainLife { who, amount },
@@ -2103,10 +2120,60 @@ impl<'a> Tx<'a> {
                     }
                 };
                 chain.targets.push(filter);
+                let slot = chain.targets.len() as u8 - 1;
+                // What a later delayed trigger of the chain remembers of it (CR 603.7c):
+                // only in a chain that forgets at its end.
+                let (targets, cmc) = (
+                    rd.get("RememberTargets").is_some(),
+                    rd.get("RememberCounteredCMC").is_some(),
+                );
+                if targets || cmc {
+                    if !self.memory {
+                        self.block("param:Counter.Remember… kept after the chain");
+                        return None;
+                    }
+                    chain.countered = Some((slot, targets, cmc));
+                }
                 Effect::Counter {
-                    what: TargetRef::Target(chain.targets.len() as u8 - 1),
+                    what: TargetRef::Target(slot),
                 }
             }
+            // "Look at the top N cards of [a player's] library, then put them back in any
+            // order. You may shuffle." (docs/forge/effects.md): the activator looks and
+            // orders (CR 401.4 is about cards put there by an effect, so the order is theirs
+            // to choose), then may have that library shuffled.
+            "RearrangeTopOfLibrary" => {
+                let slot = self.target(&rd, chain, false);
+                let who = match slot {
+                    Some(i) => Some(PlayerRef::Target(i)),
+                    None => self.player(&rd, chain, triggered),
+                };
+                let count = rd.get("NumCards").and_then(|n| self.amount(n, chain));
+                let shuffle = rd.get("MayShuffle").is_some();
+                let (who, count) = (who?, count?);
+                if matches!(who, PlayerRef::Each | PlayerRef::EachOpponent) {
+                    self.block("RearrangeTopOfLibrary:several libraries");
+                    return None;
+                }
+                let dig = Effect::Dig {
+                    who,
+                    count,
+                    reveal: false,
+                    take: Take::Exactly(0),
+                    cards: Vec::new(),
+                    to: CardDest::LibraryTop,
+                    reveal_taken: false,
+                    rest: CardDest::LibraryTop,
+                    rest_random: false,
+                };
+                if shuffle {
+                    Effect::Seq(vec![dig, Effect::May(Box::new(Effect::Shuffle { who }))])
+                } else {
+                    dig
+                }
+            }
+            // CR 603.7: "at the beginning of the next …, [do something]".
+            "DelayedTrigger" => self.delayed_trigger(&rd, chain)?,
             "DestroyAll" => {
                 let sel = self.valid_cards(&rd, api);
                 Effect::DestroyAll(sel?)
@@ -3436,6 +3503,8 @@ impl<'a> Tx<'a> {
             return None;
         }
         let shuffle = from == CardZone::Library && !no_shuffle;
+        // "… that share a land type" (CR 205.3i).
+        let share_land_type = rd.get("ShareLandType").is_some();
         // "May search": Forge asks each searching player (docs/forge/effects.md §1), before
         // anything is looked at.
         let optional = rd.get("Optional").is_some();
@@ -3449,6 +3518,7 @@ impl<'a> Tx<'a> {
             reveal,
             shuffle,
             optional: optional && who != PlayerRef::You,
+            share_land_type,
         };
         // "You may search…": one yes/no of the controller's.
         if optional {
@@ -3492,6 +3562,7 @@ impl<'a> Tx<'a> {
                     to,
                     reveal,
                     shuffle,
+                    share_land_type,
                     ..
                 } => Effect::ChooseCards {
                     who,
@@ -3503,6 +3574,7 @@ impl<'a> Tx<'a> {
                     reveal,
                     shuffle,
                     optional: true,
+                    share_land_type,
                 },
                 other => other,
             })
@@ -3790,6 +3862,169 @@ impl<'a> Tx<'a> {
     }
 
     /// The body of a spell, activated ability or trigger: a single mode, or a Charm.
+    /// A delayed triggered ability (docs/forge/effects.md §24, CR 603.7): so far "at the
+    /// beginning of [step]", remembering nothing, the countered spell's mana value, or its
+    /// controller. The line is the trigger: `Mode$`, `Phase$`, `ValidPlayer$`, `Execute$`.
+    fn delayed_trigger(&mut self, rd: &Rd<'a>, chain: &mut Chain) -> Option<Effect> {
+        if rd.rec.get("Mode") != Some("Phase") {
+            self.block(format!(
+                "DelayedTrigger:mode {}",
+                rd.rec.get("Mode").unwrap_or("?")
+            ));
+            return None;
+        }
+        rd.get("Mode");
+        let mut steps = Vec::new();
+        for name in rd.get("Phase").unwrap_or("").split(',') {
+            match phase_step(name.trim()) {
+                Some(s) => steps.push(s),
+                None => {
+                    self.block(format!("trig:Phase {}", name.trim()));
+                    return None;
+                }
+            }
+        }
+        let whose = match rd.get("ValidPlayer") {
+            None | Some("Player") => Who::Any,
+            Some("You") => Who::You,
+            Some("Opponent" | "Player.Opponent") => Who::Opponent,
+            Some(other) => {
+                self.block(format!("trig:Phase player {other}"));
+                return None;
+            }
+        };
+        let events: Vec<Trigger> = steps
+            .into_iter()
+            .map(|step| Trigger::BeginningOf { step, whose })
+            .collect();
+        let when = match events.len() {
+            0 => {
+                self.block("DelayedTrigger:no phase");
+                return None;
+            }
+            1 => events.into_iter().next().expect("one"),
+            _ => Trigger::Any(events),
+        };
+        let window = match (rd.get("ThisTurn").is_some(), rd.get("NextTurn").is_some()) {
+            (false, false) => DelayWindow::Next,
+            (true, false) => DelayWindow::ThisTurn,
+            (false, true) => DelayWindow::NextTurn,
+            (true, true) => {
+                self.block("DelayedTrigger:this turn and next turn");
+                return None;
+            }
+        };
+        // CR 603.7b: one with a stated duration ("this turn") triggers each time; Forge's
+        // (and the engine's) triggers once. Two different steps of one turn ("your main
+        // phase this turn") differ, unless the card says "next".
+        if window == DelayWindow::ThisTurn
+            && matches!(when, Trigger::Any(_))
+            && !self
+                .face
+                .oracle
+                .as_deref()
+                .is_some_and(|o| o.to_lowercase().contains("next"))
+        {
+            self.block("DelayedTrigger:this turn, more than once");
+            return None;
+        }
+        // What it remembers, fixed as it is created (CR 603.7c).
+        let mut player = None;
+        let mut amount = None;
+        let mut counter_first = false;
+        if rd.get("RememberNumber").is_some() {
+            match chain.countered {
+                // "That spell's mana value": as it last was on the stack (CR 608.2h).
+                Some((slot, _, true)) => {
+                    amount = Some(Amount::OfTarget {
+                        slot,
+                        what: Measure::ManaValue,
+                    });
+                    counter_first = true;
+                }
+                _ => {
+                    self.block("DelayedTrigger:RememberNumber of something else");
+                    return None;
+                }
+            }
+        }
+        match rd.get("RememberObjects") {
+            None => {}
+            // "Its controller": of the countered spell's target.
+            Some("RememberedController") => match chain.countered {
+                Some((slot, true, _)) => player = Some(PlayerRef::ControllerOf(slot)),
+                _ => {
+                    self.block("DelayedTrigger:remembers the controller of something else");
+                    return None;
+                }
+            },
+            Some(_) => {
+                self.block("DelayedTrigger:remembers objects");
+                return None;
+            }
+        }
+        // The delayed ability: compiled as a trigger with that event, whose "that
+        // player" / "that much" are what it remembers.
+        let exec = rd.get("Execute").unwrap_or("");
+        let saved = (
+            self.in_trigger,
+            self.optional_trigger,
+            std::mem::take(&mut self.trig),
+            self.memory,
+        );
+        self.in_trigger = true;
+        self.optional_trigger = false;
+        self.memory = false;
+        let mut trig = TrigCtx::of(&when);
+        if player.is_some() {
+            trig.players = &["DelayTriggerRemembered"];
+            trig.player_is_you = false;
+        }
+        if amount.is_some() {
+            trig.amount = Some("Count$TriggerRememberAmount");
+        }
+        self.trig = trig;
+        let body = match self.sub(exec) {
+            Some(r) => self.body(r, true, "DB"),
+            None => {
+                self.block("DelayedTrigger:no Execute");
+                None
+            }
+        };
+        (
+            self.in_trigger,
+            self.optional_trigger,
+            self.trig,
+            self.memory,
+        ) = saved;
+        let index = self.granted.len() as u16;
+        self.granted.push(AbilityDef::Triggered {
+            when,
+            intervening_if: None,
+            body: body?,
+        });
+        let delayed = Effect::DelayedTrigger {
+            ability: index,
+            window,
+            player,
+            amount,
+        };
+        // Forge remembers the mana value only of a spell that was countered: with
+        // nothing countered there is nothing to add (the delayed ability does nothing),
+        // so it is made only if the counter happened.
+        if counter_first && let Some(first) = chain.effects.pop() {
+            if !matches!(first, Effect::Counter { .. }) {
+                self.block("DelayedTrigger:RememberNumber not right after the counter");
+                return None;
+            }
+            return Some(Effect::IfDone {
+                first: Box::new(first),
+                then: Box::new(delayed),
+            });
+        }
+        Some(delayed)
+    }
+
     fn body(&mut self, rec: &'a Record, triggered: bool, root: &str) -> Option<Body> {
         if rec.head().map(|h| h.1) != Some("Charm") {
             return self.mode(rec, triggered, root).map(Body::Effect);
@@ -4620,17 +4855,10 @@ impl<'a> Tx<'a> {
                 }
             }
             "Phase" => {
-                let step = match rd.get("Phase") {
-                    Some("Upkeep") => Some(TriggerStep::Upkeep),
-                    Some("Draw") => Some(TriggerStep::DrawStep),
-                    // CR 513.1a: "at end of turn" is "at the beginning of the end step".
-                    Some("End of Turn" | "End Of Turn") => Some(TriggerStep::EndStep),
-                    Some("BeginCombat") => Some(TriggerStep::BeginCombat),
-                    Some("EndCombat") => Some(TriggerStep::EndCombat),
-                    Some("Main1") => Some(TriggerStep::PrecombatMain),
-                    Some("Main2") => Some(TriggerStep::PostcombatMain),
-                    other => {
-                        self.block(format!("trig:Phase {}", other.unwrap_or("?")));
+                let step = match rd.get("Phase").and_then(phase_step) {
+                    Some(s) => Some(s),
+                    None => {
+                        self.block(format!("trig:Phase {}", rd.rec.get("Phase").unwrap_or("?")));
                         None
                     }
                 };
@@ -7156,6 +7384,21 @@ impl<'a> Tx<'a> {
 
 /// The comparison that holds exactly when `cmp n` doesn't; `None` if `cmp n` always or
 /// never holds.
+/// A step of Forge's `Phase$` (docs/forge/triggers-statics-replacements-keywords.md).
+fn phase_step(name: &str) -> Option<TriggerStep> {
+    match name {
+        "Upkeep" => Some(TriggerStep::Upkeep),
+        "Draw" => Some(TriggerStep::DrawStep),
+        // CR 513.1a: "at end of turn" is "at the beginning of the end step".
+        "End of Turn" | "End Of Turn" => Some(TriggerStep::EndStep),
+        "BeginCombat" => Some(TriggerStep::BeginCombat),
+        "EndCombat" => Some(TriggerStep::EndCombat),
+        "Main1" => Some(TriggerStep::PrecombatMain),
+        "Main2" => Some(TriggerStep::PostcombatMain),
+        _ => None,
+    }
+}
+
 fn negate(cmp: Cmp, n: u32) -> Option<(Cmp, u32)> {
     match cmp {
         Cmp::AtLeast => Some((Cmp::AtMost, n.checked_sub(1)?)),
@@ -7811,6 +8054,7 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
                         reveal: true,
                         shuffle: true,
                         optional: false,
+                        share_land_type: false,
                     })
                 }
             };

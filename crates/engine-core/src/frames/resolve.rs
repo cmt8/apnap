@@ -57,6 +57,10 @@ pub enum Work {
         /// The player choosing now has said they will ("may search": `spec.optional`).
         #[serde(default)]
         willing: bool,
+        /// The cards the player choosing now has chosen so far, where they choose one at a
+        /// time (`spec.share_land_type`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        partial: Vec<ObjectId>,
     },
     /// CR 701.24: these players shuffle their libraries.
     Shuffle { players: Vec<PlayerId> },
@@ -142,6 +146,8 @@ pub enum Work {
     },
     /// CR 701.34a: the controller proliferates.
     Proliferate,
+    /// `player` chooses how many cards, up to `max`, to draw; then draws them.
+    DrawUpTo { player: PlayerId, max: u32 },
 }
 
 /// One of "those cards" (D-069): a card an instruction of this resolution moved, or a
@@ -192,6 +198,9 @@ pub struct ChooseSpec {
     /// Each player decides whether to (`Effect::ChooseCards::optional`).
     #[serde(default)]
     pub optional: bool,
+    /// Every card chosen shares a land type with each other one (CR 205.3i).
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub share_land_type: bool,
 }
 
 /// The fixed part of a [`Work::Dig`].
@@ -992,6 +1001,30 @@ impl ResolveFrame {
                         );
                     }
                 }
+                Work::DrawUpTo { player, max } => {
+                    let n = match input.take() {
+                        Some(inp) => match inp.response {
+                            crate::decision::Response::Number(n) => n,
+                            ref r => unreachable!("not a number: {r:?}"),
+                        },
+                        None if st.in_game(player) && max > 0 => {
+                            self.work.push(Work::DrawUpTo { player, max });
+                            return Flow::ask(
+                                Frame::Resolve(Box::new(self)),
+                                player,
+                                ChoiceKind::DrawUpTo,
+                                Primitive::PickNumber { min: 0, max },
+                                Vec::new(),
+                            );
+                        }
+                        None => 0,
+                    };
+                    if n > 0 {
+                        let events = (0..n).map(|_| Proposed::Draw { player }).collect();
+                        let apply = self.apply(st, events);
+                        return Flow::Continue(vec![Frame::Resolve(Box::new(self)), apply]);
+                    }
+                }
                 Work::Proliferate => {
                     if let Some(inp) = input.take() {
                         // One event: another counter of each kind on each one, at once.
@@ -1012,11 +1045,8 @@ impl ResolveFrame {
                             })
                             .collect();
                         if !events.is_empty() {
-                            let apply = ApplyFrame::new(st, events);
-                            return Flow::Continue(vec![
-                                Frame::Resolve(Box::new(self)),
-                                Frame::Apply(apply),
-                            ]);
+                            let apply = self.apply(st, events);
+                            return Flow::Continue(vec![Frame::Resolve(Box::new(self)), apply]);
                         }
                         continue;
                     }
@@ -1183,6 +1213,7 @@ impl ResolveFrame {
                     mut next,
                     mut chosen,
                     mut willing,
+                    mut partial,
                 } => {
                     if let Some(inp) = input.take() {
                         if inp.decision.kind == ChoiceKind::MayAbility {
@@ -1191,6 +1222,16 @@ impl ResolveFrame {
                             if !willing {
                                 next += 1;
                             }
+                        } else if spec.share_land_type {
+                            // One at a time: done when they stop or have enough.
+                            let picks = picked_cards(&inp);
+                            let stop = picks.is_empty();
+                            partial.extend(picks);
+                            if stop || partial.len() >= spec.count as usize {
+                                chosen.push((order[next], core::mem::take(&mut partial)));
+                                next += 1;
+                            }
+                            willing = false;
                         } else {
                             chosen.push((order[next], picked_cards(&inp)));
                             next += 1;
@@ -1203,13 +1244,14 @@ impl ResolveFrame {
                             continue;
                         }
                         // Each player decides for themselves, before looking.
-                        if spec.optional && !willing {
+                        if spec.optional && !willing && partial.is_empty() {
                             self.work.push(Work::ChooseCards {
                                 spec,
                                 order,
                                 next,
                                 chosen,
                                 willing,
+                                partial,
                             });
                             return Flow::ask_one(
                                 Frame::Resolve(Box::new(self)),
@@ -1222,7 +1264,7 @@ impl ResolveFrame {
                         // Choosing among cards found or revealed before ("put one onto the
                         // battlefield and the other into your hand") is no new search.
                         let library = spec.from == CardZone::Library && !among_noted(&spec);
-                        if library {
+                        if library && partial.is_empty() {
                             // CR 701.23a: the player looks at every card in the library.
                             st.emit(Event::SearchedLibrary { player: p });
                         }
@@ -1230,6 +1272,14 @@ impl ResolveFrame {
                             .into_iter()
                             .filter(|&id| self.fits(st, id, &spec.cards))
                             .collect();
+                        if spec.share_land_type {
+                            // Forge: each further card shares a land type with each card
+                            // chosen before it.
+                            pool.retain(|c| {
+                                !partial.contains(c)
+                                    && partial.iter().all(|q| shares_land_type(st, *c, *q))
+                            });
+                        }
                         if library {
                             // Offered by name: the order of the library isn't part of
                             // what a search is for.
@@ -1237,14 +1287,22 @@ impl ResolveFrame {
                                 (&st.card_def(*a).name, *a).cmp(&(&st.card_def(*b).name, *b))
                             });
                         }
-                        let max = (spec.count as usize).min(pool.len());
+                        let left = (spec.count as usize).saturating_sub(partial.len());
+                        let mut max = left.min(pool.len());
+                        if spec.share_land_type {
+                            max = max.min(1);
+                        }
                         // CR 701.23b: cards with a stated quality needn't be found;
                         // 701.23d: a plain quantity must be (as many as possible).
                         let min = if spec.must { max } else { 0 };
                         if max == 0 || (min == max && max == pool.len()) {
                             pool.truncate(max);
-                            chosen.push((p, pool));
-                            next += 1;
+                            let done = max == 0 || !spec.share_land_type || left <= 1;
+                            partial.extend(pool);
+                            if done {
+                                chosen.push((p, core::mem::take(&mut partial)));
+                                next += 1;
+                            }
                             continue;
                         }
                         let kind = if library {
@@ -1262,6 +1320,7 @@ impl ResolveFrame {
                             next,
                             chosen,
                             willing: false,
+                            partial,
                         });
                         return Flow::ask(
                             Frame::Resolve(Box::new(self)),
@@ -2301,6 +2360,7 @@ impl ResolveFrame {
                 reveal,
                 shuffle,
                 optional,
+                share_land_type,
             } => {
                 // CR 608.2h: how many is worked out once, now.
                 let count = self.amount(st, k, &count);
@@ -2314,11 +2374,13 @@ impl ResolveFrame {
                         reveal,
                         shuffle,
                         optional,
+                        share_land_type,
                     }),
                     order: self.players_apnap(st, k, who),
                     next: 0,
                     chosen: Vec::new(),
                     willing: false,
+                    partial: Vec::new(),
                 });
                 Vec::new()
             }
@@ -2334,6 +2396,58 @@ impl ResolveFrame {
             }
             Effect::Proliferate => {
                 self.work.push(Work::Proliferate);
+                Vec::new()
+            }
+            // CR 701.24a.
+            Effect::Shuffle { who } => {
+                let players = self.players_apnap(st, k, who);
+                self.work.push(Work::Shuffle { players });
+                Vec::new()
+            }
+            Effect::DrawUpTo { who, amount } => {
+                let max = self.amount(st, k, &amount);
+                if let Some(player) = self.player(st, k, who) {
+                    self.work.push(Work::DrawUpTo { player, max });
+                }
+                Vec::new()
+            }
+            // CR 603.7: what it remembers is fixed now (603.7c).
+            Effect::DelayedTrigger {
+                ability,
+                window,
+                player,
+                amount,
+            } => {
+                let turn = st.turn.turn_number;
+                let facts = crate::triggers::EventFacts {
+                    player: player.and_then(|p| self.player(st, k, p)),
+                    amount: amount.map_or(0, |a| self.amount(st, k, &a)),
+                    moved: None,
+                };
+                // A "that player" who is gone: nothing for it to refer to.
+                if player.is_none() || facts.player.is_some() {
+                    let (from_turn, until_turn) = match window {
+                        card_model::DelayWindow::Next => (turn, None),
+                        card_model::DelayWindow::ThisTurn => (turn, Some(turn)),
+                        card_model::DelayWindow::NextTurn => (turn + 1, Some(turn + 1)),
+                    };
+                    let delayed = crate::effects::Delayed {
+                        id: 0,
+                        ability: card_model::AbilityId {
+                            card: self.card,
+                            index: ability,
+                            granted: true,
+                        },
+                        source: self.source,
+                        source_card: self.card,
+                        source_lki: self.source_chars(st),
+                        controller: self.controller,
+                        facts,
+                        from_turn,
+                        until_turn,
+                    };
+                    execute(st, GameAction::AddDelayed { delayed });
+                }
                 Vec::new()
             }
             Effect::UntapChosen { what, count } => {
@@ -2592,6 +2706,15 @@ impl ResolveFrame {
             None => Flow::done(),
         }
     }
+}
+
+/// CR 205.3i: do the two cards have a land type in common (a basic land type, or another
+/// subtype of a land)?
+fn shares_land_type(st: &GameState, a: ObjectId, b: ObjectId) -> bool {
+    let (ca, cb) = (chars(st, a), chars(st, b));
+    let land = |c: &Characteristics| c.card_types.contains(&CardType::Land);
+    ca.land_types.iter().any(|t| cb.land_types.contains(t))
+        || (land(&ca) && land(&cb) && ca.subtypes.iter().any(|t| cb.subtypes.contains(t)))
 }
 
 /// The cards picked in a `PickN` over cards.
