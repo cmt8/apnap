@@ -548,11 +548,7 @@ pub fn option_label(
             .and_then(|e| e.abilities.get(*index as usize))
             .map(|a| {
                 let def = cat.get(a.card);
-                format!(
-                    "{}: {}",
-                    def.name,
-                    ability_words(cat, def, cat.ability(*a))
-                )
+                format!("{}: {}", def.name, ability_words(cat, def, cat.ability(*a)))
             })
             .unwrap_or_else(|| harness::text::option_line(v, o)),
         // A card a rule lets them play from somewhere other than their hand: say where.
@@ -774,7 +770,11 @@ fn whereabouts(v: &PlayerView, id: ObjectId) -> String {
 
 /// A card's accessible name: everything the picture and its badges show, as text.
 /// An ability as rules text, with the tokens it creates described from the catalog.
-fn ability_words(cat: &CardCatalog, def: &card_model::CardDef, a: &card_model::AbilityDef) -> String {
+fn ability_words(
+    cat: &CardCatalog,
+    def: &card_model::CardDef,
+    a: &card_model::AbilityDef,
+) -> String {
     describe::ability_text_in(def, a, &|k| cat.find(k).map(|id| cat.get(id)))
 }
 

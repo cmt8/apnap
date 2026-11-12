@@ -305,7 +305,11 @@ fn main() -> ExitCode {
                                 .map_or(String::new(), |m| m.to_text()),
                             card_model::describe::type_line(face),
                             oracle.replace('\n', " / "),
-                            card_model::describe::rules_text(face).join(" / ")
+                            card_model::describe::rules_text_in(face, &|key| lib
+                                .tokens
+                                .get(key)
+                                .map(|c| &c.def))
+                            .join(" / ")
                         );
                     }
                 }

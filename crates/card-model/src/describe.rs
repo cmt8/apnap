@@ -82,10 +82,7 @@ fn types(ts: &[CardType], last: &str) -> String {
 
 /// "artifacts or enchantments": each type in the plural, not just the last.
 fn types_plural(ts: &[CardType], last: &str) -> String {
-    join(
-        ts.iter().map(|t| pluralize(card_type(*t))).collect(),
-        last,
-    )
+    join(ts.iter().map(|t| pluralize(card_type(*t))).collect(), last)
 }
 
 /// Marks the start and end of the text of a "target …" word, with the index of the
@@ -110,13 +107,11 @@ fn pluralize(s: &str) -> String {
     };
     let plural = match word {
         // The same in the plural.
-        "Plains" | "Aetherborn" | "Aurochs" | "Bison" | "Borg" | "Caribou" | "Djinn"
-        | "Efreet" | "Eldrazi" | "Fish" | "Hirogen" | "Jellyfish" | "Kavu" | "Kithkin"
-        | "Kor" | "Merfolk" | "Metathran" | "Moonfolk" | "Myr" | "Nephilim" | "Ocampa"
-        | "Sheep" | "Slith" | "Soltari" | "Starfish" | "Thalakos" | "Treefolk" | "Trill"
-        | "Vedalken" | "Vorta" | "Xindi" | "Zubera" | "Dauthi" | "Lammasu" | "Gorn" => {
-            word.to_string()
-        }
+        "Plains" | "Aetherborn" | "Aurochs" | "Bison" | "Borg" | "Caribou" | "Djinn" | "Efreet"
+        | "Eldrazi" | "Fish" | "Hirogen" | "Jellyfish" | "Kavu" | "Kithkin" | "Kor" | "Merfolk"
+        | "Metathran" | "Moonfolk" | "Myr" | "Nephilim" | "Ocampa" | "Sheep" | "Slith"
+        | "Soltari" | "Starfish" | "Thalakos" | "Treefolk" | "Trill" | "Vedalken" | "Vorta"
+        | "Xindi" | "Zubera" | "Dauthi" | "Lammasu" | "Gorn" => word.to_string(),
         "Elf" => "Elves".to_string(),
         "Dwarf" => "Dwarves".to_string(),
         "Wolf" => "Wolves".to_string(),
@@ -333,30 +328,42 @@ fn target_filter(f: &TargetFilter) -> String {
     }
 }
 
-/// "targets that are creatures", "targets that are artifacts or enchantments", "target
-/// players", "targets": what a group of targets of one "target" word may be. (The word
-/// "targets" itself stays: it says the objects are different ones, CR 115.3.)
-fn target_filter_plural(f: &TargetFilter) -> String {
-    match f {
-        TargetFilter::AnyTarget => "targets".to_string(),
-        TargetFilter::Creature => "targets that are creatures".to_string(),
+/// "target creatures", "other target artifacts or enchantments", "targets": what a group
+/// of targets of one "target" word may be. For "one to two targets" (the first must be
+/// chosen, the second may be) it is "targets that are creatures": the word "targets" says
+/// they are different ones (CR 115.3), which "target creatures" would not.
+fn target_filter_plural(f: &TargetFilter, plain: bool) -> String {
+    let target = |what: String| {
+        if plain {
+            format!("target {what}")
+        } else {
+            format!("targets that are {what}")
+        }
+    };
+    let text = match f {
+        TargetFilter::AnyTarget => return "targets".to_string(),
+        TargetFilter::Creature => target("creatures".to_string()),
         TargetFilter::Player => "target players".to_string(),
         TargetFilter::Opponent => "target opponents".to_string(),
-        TargetFilter::Spell => "targets that are spells".to_string(),
-        TargetFilter::SpellMatching(s) => format!("targets that are {} spells", spell_kind(s)),
+        TargetFilter::Spell => target("spells".to_string()),
+        TargetFilter::SpellMatching(s) => target(format!("{} spells", spell_kind(s))),
         TargetFilter::Permanent(selectors) => {
             let parts: Vec<String> = selectors.iter().map(|s| selector(s, true)).collect();
-            format!("targets that are {}", join(parts, "or"))
+            target(join(parts, "or"))
         }
-        TargetFilter::CardInGraveyard { cards, whose } => format!(
-            "targets that are {} from {}",
+        TargetFilter::CardInGraveyard { cards, whose } => target(format!(
+            "{} from {}",
             card_list(core::slice::from_ref(cards), true),
             match whose {
                 Who::Any => "a graveyard",
                 Who::You => "your graveyard",
                 Who::Opponent => "an opponent's graveyard",
             }
-        ),
+        )),
+    };
+    match text.strip_prefix("target other ") {
+        Some(rest) => format!("other target {rest}"),
+        None => text,
     }
 }
 
@@ -384,6 +391,7 @@ fn acting_player(e: &Effect) -> Option<PlayerRef> {
         | Effect::Surveil { who, .. }
         | Effect::Sacrifice { who, .. }
         | Effect::CreateToken { who, .. } => Some(*who),
+        Effect::Note(inner) => acting_player(inner),
         _ => None,
     }
 }
@@ -445,11 +453,15 @@ fn takes_an(s: &str) -> bool {
     match chars.next() {
         Some('a' | 'e' | 'i') => !(word.starts_with("eu") || word.starts_with("ew")),
         Some('o') => !(word.starts_with("one") || word.starts_with("once")),
-        Some('u') => !(word.starts_with("uni")
-            || word.starts_with("use")
-            || word.starts_with("usu")
-            || word.starts_with("uti")),
-        Some('h') => word.starts_with("hour") || word.starts_with("honor") || word.starts_with("heir"),
+        Some('u') => {
+            !(word.starts_with("uni")
+                || word.starts_with("use")
+                || word.starts_with("usu")
+                || word.starts_with("uti"))
+        }
+        Some('h') => {
+            word.starts_with("hour") || word.starts_with("honor") || word.starts_with("heir")
+        }
         Some('x') => chars.next().is_none_or(|c| !c.is_alphabetic()),
         Some('8') => true,
         Some('1') => word.starts_with("11") || word.starts_with("18"),
@@ -712,15 +724,18 @@ fn selector(s: &Selector, plural: bool) -> String {
         (true, true) if token => String::new(),
         (true, true) if plural => "permanents".to_string(),
         (true, true) => "permanent".to_string(),
-        (true, false) if plural && !token => join(
-            s.subtypes.iter().map(|t| pluralize(t)).collect(),
-            "or",
-        ),
+        (true, false) if plural && !token => {
+            join(s.subtypes.iter().map(|t| pluralize(t)).collect(), "or")
+        }
         (true, false) => s.subtypes.join(" or "),
         (false, true) if plural && !token => types_plural(&s.types, "or"),
         (false, true) => types(&s.types, "or"),
         (false, false) if plural && !token => {
-            format!("{} {}", s.subtypes.join(" or "), types_plural(&s.types, "or"))
+            format!(
+                "{} {}",
+                s.subtypes.join(" or "),
+                types_plural(&s.types, "or")
+            )
         }
         (false, false) => format!("{} {}", s.subtypes.join(" or "), types(&s.types, "or")),
     };
@@ -968,12 +983,23 @@ fn quote_granted(def: &CardDef, text: &str, top: bool) -> String {
     // quoted text of an ability it gives to others, those others.
     let typed;
     let text = if top {
-        typed = said
-            .replace("this permanent", &format!("this {}", this_word(def)))
-            .replace(
-                "This permanent",
-                &capitalize(&format!("this {}", this_word(def))),
-            );
+        let word = this_word(def);
+        let mut t = said
+            .replace("this permanent", &format!("this {word}"))
+            .replace("This permanent", &capitalize(&format!("this {word}")));
+        // Only a creature "dies" (CR 700.4); anything else is put into a graveyard.
+        if !matches!(word.as_str(), "creature" | "token" | "permanent" | "spell") {
+            t = t
+                .replace(
+                    &format!("this {word} enters or dies"),
+                    &format!("this {word} enters or is put into a graveyard from the battlefield"),
+                )
+                .replace(
+                    &format!("this {word} dies"),
+                    &format!("this {word} is put into a graveyard from the battlefield"),
+                );
+        }
+        typed = t;
         typed.as_str()
     } else {
         said.as_str()
@@ -1315,7 +1341,10 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                     // one instruction with its target word for all of them.
                     let each = format!(
                         "each of {n} {}",
-                        slot.map_or("targets".to_string(), target_filter_plural)
+                        slot.map_or("targets".to_string(), |f| target_filter_plural(
+                            f,
+                            g.min == 0 || g.min == g.count
+                        ))
                     );
                     match replace_first_target(&parts[0], &each) {
                         Some(text) => text,
@@ -1520,10 +1549,13 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 (false, true) => "look at",
                 (false, false) => "looks at",
             };
-            let top = if *count == Amount::Fixed(1) {
-                format!("the top card of {their} library")
-            } else {
-                format!("the top {n} cards of {their} library")
+            let top = match count {
+                Amount::Fixed(1) => format!("the top card of {their} library"),
+                Amount::Fixed(_) | Amount::X => format!("the top {n} cards of {their} library"),
+                Amount::TriggeringAmount => {
+                    format!("that many cards from the top of {their} library")
+                }
+                _ => format!("a number of cards from the top of {their} library equal to {n}"),
             };
             let noun = |plural: bool| card_list(cards, plural);
             let shown = if *reveal_taken && !*reveal {
@@ -1536,11 +1568,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 Take::Exactly(1) => (false, with_article(&noun(false)), "it"),
                 Take::Exactly(k) => (false, format!("{} {}", num(*k), noun(true)), "them"),
                 Take::UpTo(1) => (true, with_article(&noun(false)), "it"),
-                Take::UpTo(k) => (
-                    true,
-                    format!("up to {} {}", num(*k), noun(true)),
-                    "them",
-                ),
+                Take::UpTo(k) => (true, format!("up to {} {}", num(*k), noun(true)), "them"),
                 Take::All => (false, format!("all {}", noun(true)), "them"),
                 Take::Any => (true, format!("any number of {}", noun(true)), "them"),
             };
@@ -1549,12 +1577,12 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 (true, true) => format!("you may put {things} from among them {where_to}"),
                 (true, false) if you => format!("put {things} from among them {where_to}"),
                 (true, false) => format!("{who} puts {things} from among them {where_to}"),
-                (false, true) => format!(
-                    "you may reveal {things} from among them and put {pronoun} {where_to}"
-                ),
-                (false, false) => format!(
-                    "reveal {things} from among them and put {pronoun} {where_to}"
-                ),
+                (false, true) => {
+                    format!("you may reveal {things} from among them and put {pronoun} {where_to}")
+                }
+                (false, false) => {
+                    format!("reveal {things} from among them and put {pronoun} {where_to}")
+                }
             };
             format!(
                 "{}. Then {taken} and the rest {}{}",
@@ -1738,8 +1766,42 @@ fn card_list(cards: &[Selector], plural: bool) -> String {
     }
     // Selectors that differ only in an exact mana value are one: "creature card with
     // mana value 4, 5 or 6".
-    let mut groups: Vec<(Selector, Vec<u32>)> = Vec::new();
+    // And ones that differ only in their card types are one ("creature or land card"),
+    // or only in their colors ("white or blue card"): each list means "at least one of".
+    let mut merged: Vec<Selector> = Vec::new();
     for s in cards {
+        let no_types = |s: &Selector| Selector {
+            types: Vec::new(),
+            ..s.clone()
+        };
+        let no_colors = |s: &Selector| Selector {
+            colors: Vec::new(),
+            ..s.clone()
+        };
+        if let Some(m) = merged
+            .iter_mut()
+            .find(|m| !m.types.is_empty() && !s.types.is_empty() && no_types(m) == no_types(s))
+        {
+            for t in &s.types {
+                if !m.types.contains(t) {
+                    m.types.push(*t);
+                }
+            }
+        } else if let Some(m) = merged
+            .iter_mut()
+            .find(|m| !m.colors.is_empty() && !s.colors.is_empty() && no_colors(m) == no_colors(s))
+        {
+            for c in &s.colors {
+                if !m.colors.contains(c) {
+                    m.colors.push(*c);
+                }
+            }
+        } else {
+            merged.push(s.clone());
+        }
+    }
+    let mut groups: Vec<(Selector, Vec<u32>)> = Vec::new();
+    for s in &merged {
         match (s.mana_value_min, s.mana_value_max) {
             (Some(a), Some(b)) if a == b => {
                 let base = Selector {
@@ -1762,7 +1824,12 @@ fn card_list(cards: &[Selector], plural: bool) -> String {
             if s.other {
                 words.push(if plural { "other" } else { "another" }.to_string());
             }
-            words.extend(s.colors.iter().map(|c| color(*c).to_string()));
+            if !s.colors.is_empty() {
+                words.push(join(
+                    s.colors.iter().map(|c| color(*c).to_string()).collect(),
+                    "or",
+                ));
+            }
             if s.not_colors.len() == 5 {
                 words.push("colorless".to_string());
             } else {
@@ -2110,12 +2177,20 @@ fn obj_filter(f: &ObjFilter) -> String {
 /// "When this creature enters" (it happens once), "Whenever a creature enters".
 fn trigger(t: &Trigger) -> String {
     let text = trigger_event(t);
-    let once = matches!(
-        t,
-        Trigger::Enters(ObjFilter::This)
-            | Trigger::Dies(ObjFilter::This)
-            | Trigger::Leaves(ObjFilter::This)
-    );
+    // Entering, dying and leaving happen to the object once: "When this creature enters
+    // or dies".
+    fn once(t: &Trigger) -> bool {
+        match t {
+            Trigger::Any(v) => v.iter().all(once),
+            t => matches!(
+                t,
+                Trigger::Enters(ObjFilter::This)
+                    | Trigger::Dies(ObjFilter::This)
+                    | Trigger::Leaves(ObjFilter::This)
+            ),
+        }
+    }
+    let once = once(t);
     match text.strip_prefix("Whenever ") {
         Some(rest) if once => format!("When {rest}"),
         _ => text,
@@ -2326,9 +2401,11 @@ fn as_spells(cards: &str) -> String {
     cards
         .split(' ')
         .map(|w| match w {
-            "card" => "spell",
-            "cards" => "spells",
-            w => w,
+            "card" => "spell".to_string(),
+            "cards" => "spells".to_string(),
+            "card," => "spell,".to_string(),
+            "cards," => "spells,".to_string(),
+            w => w.to_string(),
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -2408,7 +2485,9 @@ fn counting_others(c: &Condition) -> Condition {
             && !s.other
     };
     match c {
-        Condition::ControlAtMost { what, at_most } if plain_lands(what) => {
+        Condition::ControlAtMost { what, at_most }
+            if plain_lands(what) && what.controller == Who::You =>
+        {
             Condition::ControlAtMost {
                 what: Selector {
                     other: true,
@@ -2417,13 +2496,17 @@ fn counting_others(c: &Condition) -> Condition {
                 at_most: *at_most,
             }
         }
-        Condition::Control { what, at_least } if plain_lands(what) => Condition::Control {
-            what: Selector {
-                other: true,
-                ..what.clone()
-            },
-            at_least: *at_least,
-        },
+        Condition::Control { what, at_least }
+            if plain_lands(what) && what.controller == Who::You =>
+        {
+            Condition::Control {
+                what: Selector {
+                    other: true,
+                    ..what.clone()
+                },
+                at_least: *at_least,
+            }
+        }
         c => c.clone(),
     }
 }
@@ -2541,9 +2624,7 @@ fn ability(a: &AbilityDef) -> String {
                 ManaProduce::Reflected { from, types } => format!(
                     "one mana of any {} that {} could produce",
                     if *types { "type" } else { "color" },
-                    {
-                        with_article(&selector(from, false))
-                    }
+                    { with_article(&selector(from, false)) }
                 ),
             },
             then.as_ref().map_or(String::new(), |e| {
@@ -2599,7 +2680,10 @@ fn ability(a: &AbilityDef) -> String {
                 .map_or(String::new(), |c| format!(", {}", condition(c)));
             let text = body(b);
             let mut lower = text.clone();
-            if let Some(first) = lower.chars().next() {
+            // ("X is its power": X stays a capital.)
+            if !text.starts_with("X ")
+                && let Some(first) = lower.chars().next()
+            {
                 let l: String = first.to_lowercase().collect();
                 lower.replace_range(..first.len_utf8(), &l);
             }
@@ -2974,7 +3058,12 @@ pub fn this_word(def: &CardDef) -> String {
     }
     let t = &def.card_types;
     let has = |x: CardType| t.contains(&x);
-    if has(CardType::Creature) {
+    // ("This permanent isn't a creature as long as …" must not say "this creature".)
+    let sometimes_not_creature = def.abilities.iter().any(|a| {
+        matches!(a, AbilityDef::Static { effects, .. }
+            if effects.iter().any(|e| matches!(e, ContinuousEffect::RemoveTypes(ts) if ts.contains(&CardType::Creature))))
+    });
+    if has(CardType::Creature) && !sometimes_not_creature {
         "creature".to_string()
     } else if (has(CardType::Instant) || has(CardType::Sorcery))
         && !t.iter().any(|x| {
@@ -3023,6 +3112,11 @@ fn expand_tokens(text: &str, tokens: TokenLookup<'_>, depth: u32) -> String {
     let mut out = String::new();
     let mut parts = text.split(TOKEN);
     while let Some(plain) = parts.next() {
+        // A quotation that ends a sentence ends it with its own full stop.
+        let plain = match plain.strip_prefix('.') {
+            Some(rest) if out.ends_with(".\"") => rest,
+            _ => plain,
+        };
         out.push_str(plain);
         let Some(marker) = parts.next() else { break };
         let (how, key) = marker.split_once('|').unwrap_or((marker, ""));
@@ -3030,15 +3124,13 @@ fn expand_tokens(text: &str, tokens: TokenLookup<'_>, depth: u32) -> String {
             Some(def) => token_phrase(def, tokens, depth),
             None => (format!("{key} "), String::new()),
         };
-        let desc = |plural: bool| {
-            format!("{before}{}{after}", if plural { "tokens" } else { "token" })
-        };
+        let desc =
+            |plural: bool| format!("{before}{}{after}", if plural { "tokens" } else { "token" });
         match how.split_once(':') {
             Some(("n", count)) => out.push_str(&format!("{count} {}", desc(true))),
-            Some((_, amount)) => out.push_str(&format!(
-                "a number of {} equal to {amount}",
-                desc(true)
-            )),
+            Some((_, amount)) => {
+                out.push_str(&format!("a number of {} equal to {amount}", desc(true)))
+            }
             None => out.push_str(&with_article(&desc(false))),
         }
     }
@@ -3048,7 +3140,13 @@ fn expand_tokens(text: &str, tokens: TokenLookup<'_>, depth: u32) -> String {
 /// A token as Oracle text names it, around the word "token": "1/1 white Spirit creature
 /// " + "token" + " with flying", or "Treasure " + "token" + "".
 fn token_phrase(def: &CardDef, tokens: TokenLookup<'_>, depth: u32) -> (String, String) {
-    let subtypes = def.creature_types.join(" ");
+    let subtypes: String = def
+        .land_types
+        .iter()
+        .map(|t| format!("{t:?}"))
+        .chain(def.creature_types.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" ");
     // Predefined artifact tokens (CR 111.10) are named by their type alone.
     const PREDEFINED: [&str; 9] = [
         "Treasure",
@@ -3063,6 +3161,7 @@ fn token_phrase(def: &CardDef, tokens: TokenLookup<'_>, depth: u32) -> (String, 
     ];
     if def.card_types == [CardType::Artifact]
         && def.creature_types.len() == 1
+        && def.land_types.is_empty()
         && PREDEFINED.contains(&subtypes.as_str())
     {
         return (format!("{subtypes} "), String::new());
@@ -3076,7 +3175,10 @@ fn token_phrase(def: &CardDef, tokens: TokenLookup<'_>, depth: u32) -> (String, 
     }
     match &def.colors {
         Some(cs) if !cs.is_empty() => {
-            before.push_str(&join(cs.iter().map(|c| color(*c).to_string()).collect(), "and"));
+            before.push_str(&join(
+                cs.iter().map(|c| color(*c).to_string()).collect(),
+                "and",
+            ));
             before.push(' ');
         }
         _ => before.push_str("colorless "),
@@ -3108,7 +3210,10 @@ fn token_phrase(def: &CardDef, tokens: TokenLookup<'_>, depth: u32) -> (String, 
     let none: TokenLookup<'_> = &no_tokens;
     let tokens = if depth > 4 { none } else { tokens };
     for a in &def.abilities {
-        with.push(format!("\"{}\"", render(def, &ability(a), tokens, depth + 1)));
+        with.push(format!(
+            "\"{}\"",
+            render(def, &ability(a), tokens, depth + 1)
+        ));
     }
     let mut after = String::new();
     if !subtypes.is_empty() && name != subtypes {
@@ -3166,7 +3271,24 @@ pub fn rules_text_in(def: &CardDef, tokens: TokenLookup<'_>) -> Vec<String> {
             crate::ManaType::from_color(t.produces()).symbol()
         ));
     }
-    lines.extend(def.abilities.iter().map(|a| render(def, &ability(a), tokens, 0)));
+    // What happens as the permanent enters first, as cards print it ("This land enters
+    // tapped."), then the other abilities in their order.
+    let enters = |a: &&AbilityDef| {
+        matches!(
+            a,
+            AbilityDef::Replacement {
+                replaces: Replaces::ThisEnters,
+                ..
+            }
+        )
+    };
+    lines.extend(
+        def.abilities
+            .iter()
+            .filter(enters)
+            .chain(def.abilities.iter().filter(|a| !enters(a)))
+            .map(|a| render(def, &ability(a), tokens, 0)),
+    );
     // What an attached permanent calls the thing it is attached to.
     let host = if def.creature_types.iter().any(|t| t == "Equipment") {
         Some("quipped creature")
@@ -3203,5 +3325,904 @@ pub fn type_line(def: &CardDef) -> String {
         left.join(" ")
     } else {
         format!("{} — {}", left.join(" "), right.join(" "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::boxed::Box;
+    use alloc::vec;
+
+    fn mode(effect: Effect) -> Mode {
+        Mode {
+            targets: Vec::new(),
+            effect,
+            groups: Vec::new(),
+        }
+    }
+
+    fn with_targets(targets: Vec<TargetFilter>, effect: Effect) -> Mode {
+        Mode {
+            targets,
+            effect,
+            groups: Vec::new(),
+        }
+    }
+
+    fn spell(m: Mode) -> CardDef {
+        CardDef {
+            name: "Test Spell".into(),
+            card_types: vec![CardType::Instant],
+            abilities: vec![AbilityDef::Spell(Body::Effect(m))],
+            ..CardDef::default()
+        }
+    }
+
+    fn text(def: &CardDef) -> String {
+        rules_text(def).join(" / ")
+    }
+
+    fn creature(types: &[&str]) -> Selector {
+        Selector {
+            types: vec![CardType::Creature],
+            subtypes: types.iter().map(|s| s.to_string()).collect(),
+            ..Selector::default()
+        }
+    }
+
+    #[test]
+    fn articles_follow_the_sound() {
+        for (word, expected) in [
+            ("artifact", "an artifact"),
+            ("enchantment", "an enchantment"),
+            ("Aura", "an Aura"),
+            ("Angel", "an Angel"),
+            ("Elf", "an Elf"),
+            ("Ox", "an Ox"),
+            ("creature", "a creature"),
+            ("Human", "a Human"),
+            ("Unicorn", "a Unicorn"),
+            ("untapped creature", "an untapped creature"),
+            ("8/8 green Beast", "an 8/8 green Beast"),
+            ("1/1 white Spirit", "a 1/1 white Spirit"),
+            ("X/X Construct", "an X/X Construct"),
+            ("another creature", "another creature"),
+        ] {
+            assert_eq!(with_article(word), expected);
+        }
+    }
+
+    #[test]
+    fn plurals_of_creature_types_and_lands() {
+        // CR 205.3m: the irregular ones.
+        for (one, many) in [
+            ("Elf", "Elves"),
+            ("Dwarf", "Dwarves"),
+            ("Wolf", "Wolves"),
+            ("Werewolf", "Werewolves"),
+            ("Mouse", "Mice"),
+            ("Fungus", "Fungi"),
+            ("Cyclops", "Cyclopes"),
+            ("Sphinx", "Sphinxes"),
+            ("Octopus", "Octopuses"),
+            ("Ally", "Allies"),
+            ("Harpy", "Harpies"),
+            ("Plains", "Plains"),
+            ("Eldrazi", "Eldrazi"),
+            ("Sheep", "Sheep"),
+            ("Fish", "Fish"),
+            ("Merfolk", "Merfolk"),
+            ("Treefolk", "Treefolk"),
+            ("Aurochs", "Aurochs"),
+            ("Djinn", "Djinn"),
+            ("Goblin", "Goblins"),
+            ("Time Lord", "Time Lords"),
+            ("artifact", "artifacts"),
+            ("Island", "Islands"),
+            ("Swamp", "Swamps"),
+        ] {
+            assert_eq!(pluralize(one), many);
+        }
+    }
+
+    #[test]
+    fn numbers_in_running_text_are_words() {
+        assert_eq!(num(1), "one");
+        assert_eq!(num(2), "two");
+        assert_eq!(num(7), "seven");
+        assert_eq!(num(10), "ten");
+        assert_eq!(num(11), "11");
+        let def = spell(mode(Effect::Draw {
+            who: PlayerRef::You,
+            amount: Amount::Fixed(7),
+        }));
+        assert_eq!(text(&def), "Draw seven cards.");
+        let def = spell(mode(Effect::Draw {
+            who: PlayerRef::You,
+            amount: Amount::Fixed(1),
+        }));
+        assert_eq!(text(&def), "Draw a card.");
+        // Life and damage keep their digits.
+        let def = spell(mode(Effect::GainLife {
+            who: PlayerRef::You,
+            amount: Amount::Fixed(3),
+        }));
+        assert_eq!(text(&def), "You gain 3 life.");
+    }
+
+    #[test]
+    fn counters_and_amounts_read_as_cards_do() {
+        let counters = |count| {
+            text(&spell(mode(Effect::PutCounters {
+                what: ObjRef::This,
+                kind: CounterKind::PlusOne,
+                count,
+            })))
+        };
+        assert_eq!(
+            counters(Amount::Fixed(1)),
+            "Put a +1/+1 counter on this spell."
+        );
+        assert_eq!(
+            counters(Amount::Fixed(2)),
+            "Put two +1/+1 counters on this spell."
+        );
+        assert_eq!(counters(Amount::X), "Put X +1/+1 counters on this spell.");
+        assert_eq!(
+            counters(Amount::SourcePower),
+            "Put a number of +1/+1 counters equal to its power on this spell."
+        );
+        // "that much", "life equal to": no "gain its power life".
+        let life = |amount| {
+            text(&spell(mode(Effect::GainLife {
+                who: PlayerRef::You,
+                amount,
+            })))
+        };
+        assert_eq!(life(Amount::TriggeringAmount), "You gain that much life.");
+        assert_eq!(
+            life(Amount::SourcePower),
+            "You gain life equal to its power."
+        );
+        let draw = |amount| {
+            text(&spell(mode(Effect::Draw {
+                who: PlayerRef::You,
+                amount,
+            })))
+        };
+        assert_eq!(draw(Amount::TriggeringAmount), "Draw that many cards.");
+        assert_eq!(
+            draw(Amount::SourcePower),
+            "Draw a number of cards equal to its power."
+        );
+        let mill = text(&spell(mode(Effect::Mill {
+            who: PlayerRef::EachOpponent,
+            amount: Amount::TriggeringAmount,
+        })));
+        assert_eq!(mill, "Each opponent mills that many cards.");
+        let lose = text(&spell(mode(Effect::LoseLife {
+            who: PlayerRef::You,
+            amount: Amount::NotedTotal(Measure::ManaValue),
+        })));
+        assert_eq!(
+            lose,
+            "You lose life equal to the total mana value of those cards."
+        );
+        // "X mana … where X is X" says it once.
+        let mana = text(&spell(mode(Effect::AddMana {
+            who: PlayerRef::You,
+            mana: crate::ManaType::Red,
+            amount: Amount::X,
+        })));
+        assert_eq!(mana, "Add X mana of type {R}.");
+    }
+
+    #[test]
+    fn selectors_use_the_right_plural() {
+        let both = Selector {
+            types: vec![CardType::Artifact, CardType::Enchantment],
+            ..Selector::default()
+        };
+        assert_eq!(selector(&both, true), "artifacts or enchantments");
+        assert_eq!(selector(&both, false), "artifact or enchantment");
+        assert_eq!(selector(&creature(&["Elf"]), true), "Elf creatures");
+        let elves = Selector {
+            subtypes: vec!["Elf".into(), "Dwarf".into()],
+            ..Selector::default()
+        };
+        assert_eq!(selector(&elves, true), "Elves or Dwarves");
+        let plains = Selector {
+            subtypes: vec!["Plains".into()],
+            ..Selector::default()
+        };
+        assert_eq!(selector(&plains, true), "Plains");
+        assert_eq!(selector(&plains, false), "Plains");
+        let tokens = Selector {
+            types: vec![CardType::Creature],
+            token: Some(true),
+            ..Selector::default()
+        };
+        assert_eq!(selector(&tokens, true), "creature tokens");
+        assert_eq!(selector(&tokens, false), "creature token");
+        let any_token = Selector {
+            token: Some(true),
+            ..Selector::default()
+        };
+        assert_eq!(selector(&any_token, true), "tokens");
+        let flying = Selector {
+            keywords: vec![Keyword::Defender],
+            ..creature(&[])
+        };
+        assert_eq!(selector(&flying, false), "creature with defender");
+    }
+
+    #[test]
+    fn each_other_creature_not_each_another() {
+        let def = CardDef {
+            name: "Test Lord".into(),
+            card_types: vec![CardType::Creature],
+            abilities: vec![AbilityDef::Replacement {
+                replaces: Replaces::OtherEnters(Selector {
+                    other: true,
+                    controller: Who::You,
+                    ..creature(&["Angel"])
+                }),
+                with: ReplaceWith::EntersWithCounters {
+                    kind: CounterKind::PlusOne,
+                    n: 1,
+                },
+            }],
+            ..CardDef::default()
+        };
+        assert_eq!(
+            text(&def),
+            "Each other Angel creature you control enters with an additional +1/+1 counter on it."
+        );
+    }
+
+    #[test]
+    fn card_lists_keep_every_bound() {
+        // Imperial Recruiter: "a creature card with power 2 or less".
+        let small = Selector {
+            types: vec![CardType::Creature],
+            power_max: Some(2),
+            ..Selector::default()
+        };
+        assert_eq!(
+            card_list(core::slice::from_ref(&small), false),
+            "creature card with power 2 or less"
+        );
+        let tough = Selector {
+            toughness_max: Some(2),
+            ..small.clone()
+        };
+        assert_eq!(
+            card_list(core::slice::from_ref(&tough), false),
+            "creature card with power 2 or less and toughness 2 or less"
+        );
+        let both = Selector {
+            power_min: Some(3),
+            toughness_min: Some(4),
+            ..Selector::default()
+        };
+        assert_eq!(
+            card_list(core::slice::from_ref(&both), true),
+            "cards with power 3 or greater and toughness 4 or greater"
+        );
+        // The same bounds on a permanent selector.
+        assert_eq!(
+            selector(&both, true),
+            "permanents with power 3 or greater and toughness 4 or greater"
+        );
+        assert_eq!(
+            selector(&tough, false),
+            "creature with power 2 or less and toughness 2 or less"
+        );
+    }
+
+    #[test]
+    fn card_lists_merge_what_differs_in_one_thing() {
+        let spell_with = |v: u32| Selector {
+            types: vec![CardType::Creature],
+            mana_value_min: Some(v),
+            mana_value_max: Some(v),
+            ..Selector::default()
+        };
+        assert_eq!(
+            card_list(&[spell_with(4), spell_with(5), spell_with(6)], false),
+            "creature card with mana value 4, 5 or 6"
+        );
+        let kind = |t| Selector {
+            types: vec![t],
+            ..Selector::default()
+        };
+        assert_eq!(
+            card_list(&[kind(CardType::Creature), kind(CardType::Land)], false),
+            "creature or land card"
+        );
+        let def = CardDef {
+            name: "Test Unsealing".into(),
+            card_types: vec![CardType::Enchantment],
+            abilities: vec![AbilityDef::Triggered {
+                when: Trigger::Cast {
+                    by: Who::You,
+                    types: Vec::new(),
+                    spells: vec![spell_with(4), spell_with(5), spell_with(6)],
+                },
+                intervening_if: None,
+                body: Body::Effect(mode(Effect::Draw {
+                    who: PlayerRef::You,
+                    amount: Amount::Fixed(1),
+                })),
+            }],
+            ..CardDef::default()
+        };
+        assert_eq!(
+            text(&def),
+            "Whenever you cast a creature spell with mana value 4, 5 or 6, draw a card."
+        );
+    }
+
+    fn search(to: CardDest, shuffle: bool, reveal: bool) -> CardDef {
+        spell(mode(Effect::ChooseCards {
+            who: PlayerRef::You,
+            from: CardZone::Library,
+            cards: Vec::new(),
+            count: Amount::Fixed(1),
+            must: false,
+            to,
+            reveal,
+            shuffle,
+            optional: false,
+        }))
+    }
+
+    #[test]
+    fn searching_to_the_top_shuffles_first() {
+        // CR 701.24b; the engine shuffles before it places the card.
+        assert_eq!(
+            text(&search(CardDest::LibraryTop, true, false)),
+            "Search your library for a card, then shuffle and put that card on top of your library."
+        );
+        assert_eq!(
+            text(&search(CardDest::LibraryTop, true, true)),
+            "Search your library for a card, reveal it, then shuffle and put that card on top of your library."
+        );
+        // To the hand, the shuffle comes after the card has left.
+        assert_eq!(
+            text(&search(CardDest::Hand, true, true)),
+            "Search your library for a card, reveal it, put it into your hand, then shuffle."
+        );
+        // A search that reveals cards it puts into the graveyard does reveal them.
+        assert_eq!(
+            text(&search(CardDest::Graveyard, true, true)),
+            "Search your library for a card, reveal it, put it into your graveyard, then shuffle."
+        );
+    }
+
+    #[test]
+    fn digging_names_what_it_does_with_the_card() {
+        let land = Selector {
+            types: vec![CardType::Land],
+            ..Selector::default()
+        };
+        let dig = |take, reveal_taken| {
+            text(&spell(mode(Effect::Dig {
+                who: PlayerRef::You,
+                count: Amount::Fixed(4),
+                reveal: true,
+                take,
+                cards: vec![land.clone()],
+                to: CardDest::Hand,
+                reveal_taken,
+                rest: CardDest::Graveyard,
+                rest_random: false,
+            })))
+        };
+        assert_eq!(
+            dig(Take::UpTo(1), false),
+            "Reveal the top four cards of your library. Then you may put a land card from among them into your hand and the rest into your graveyard."
+        );
+        assert_eq!(
+            dig(Take::Any, true),
+            "Reveal the top four cards of your library. Then you may put any number of land cards from among them into your hand and the rest into your graveyard."
+        );
+    }
+
+    #[test]
+    fn a_follow_up_on_the_same_target_says_that() {
+        let creature_target = vec![TargetFilter::Creature];
+        let m = with_targets(
+            creature_target.clone(),
+            Effect::Seq(vec![
+                Effect::PutCounters {
+                    what: ObjRef::Target(0),
+                    kind: CounterKind::PlusOne,
+                    count: Amount::Fixed(1),
+                },
+                Effect::Untap {
+                    what: ObjRef::Target(0),
+                },
+            ]),
+        );
+        assert_eq!(
+            text(&spell(m)),
+            "Put a +1/+1 counter on target creature. Then untap that creature."
+        );
+        // A player target too.
+        let m = with_targets(
+            vec![TargetFilter::Player],
+            Effect::Seq(vec![
+                Effect::Draw {
+                    who: PlayerRef::Target(0),
+                    amount: Amount::Fixed(2),
+                },
+                Effect::LoseLife {
+                    who: PlayerRef::Target(0),
+                    amount: Amount::Fixed(2),
+                },
+            ]),
+        );
+        assert_eq!(
+            text(&spell(m)),
+            "Target player draws two cards. Then that player loses 2 life."
+        );
+        // Two different targets that would be called the same stay "target creature".
+        let m = with_targets(
+            vec![TargetFilter::Creature, TargetFilter::Creature],
+            Effect::Seq(vec![
+                Effect::Untap {
+                    what: ObjRef::Target(0),
+                },
+                Effect::Tap {
+                    what: ObjRef::Target(1),
+                },
+                Effect::Untap {
+                    what: ObjRef::Target(0),
+                },
+            ]),
+        );
+        assert_eq!(
+            text(&spell(m)),
+            "Untap target creature. Then tap target creature. Then untap target creature."
+        );
+    }
+
+    #[test]
+    fn one_word_target_for_several_targets() {
+        let mut m = with_targets(
+            vec![TargetFilter::Creature, TargetFilter::Creature],
+            Effect::Together(vec![
+                Effect::Destroy {
+                    what: ObjRef::Target(0),
+                },
+                Effect::Destroy {
+                    what: ObjRef::Target(1),
+                },
+            ]),
+        );
+        m.groups = vec![crate::TargetGroup {
+            first: 0,
+            count: 2,
+            min: 0,
+        }];
+        assert_eq!(
+            text(&spell(m.clone())),
+            "Destroy each of up to two target creatures."
+        );
+        m.groups[0].min = 2;
+        assert_eq!(
+            text(&spell(m.clone())),
+            "Destroy each of two target creatures."
+        );
+        // "One to two" keeps the word "targets": they are different ones.
+        m.groups[0].min = 1;
+        assert_eq!(
+            text(&spell(m)),
+            "Destroy each of one to two targets that are creatures."
+        );
+    }
+
+    #[test]
+    fn a_choice_for_another_player_is_something_you_may_have_them_do() {
+        let m = with_targets(
+            vec![TargetFilter::Opponent],
+            Effect::May(Box::new(Effect::LoseLife {
+                who: PlayerRef::Target(0),
+                amount: Amount::Fixed(1),
+            })),
+        );
+        assert_eq!(text(&spell(m)), "You may have target opponent lose 1 life.");
+        let m = mode(Effect::May(Box::new(Effect::LoseLife {
+            who: PlayerRef::TriggeringController,
+            amount: Amount::Fixed(1),
+        })));
+        assert_eq!(text(&spell(m)), "You may have its controller lose 1 life.");
+        let m = with_targets(
+            vec![TargetFilter::Creature],
+            Effect::May(Box::new(Effect::Apply {
+                what: ObjRef::Target(0),
+                effects: vec![ContinuousEffect::ModifyPT(2, 0)],
+                until_end_of_turn: true,
+            })),
+        );
+        assert_eq!(
+            text(&spell(m)),
+            "You may have target creature get +2/+0 until end of turn."
+        );
+        // For yourself it is just "you may".
+        let m = mode(Effect::May(Box::new(Effect::Draw {
+            who: PlayerRef::You,
+            amount: Amount::Fixed(1),
+        })));
+        assert_eq!(text(&spell(m)), "You may draw a card.");
+    }
+
+    #[test]
+    fn modal_spells_bullet_each_mode() {
+        let draw = mode(Effect::Draw {
+            who: PlayerRef::You,
+            amount: Amount::Fixed(1),
+        });
+        let gain = mode(Effect::GainLife {
+            who: PlayerRef::You,
+            amount: Amount::Fixed(3),
+        });
+        let modal = |min, max| {
+            text(&CardDef {
+                name: "Test Charm".into(),
+                card_types: vec![CardType::Instant],
+                abilities: vec![AbilityDef::Spell(Body::Modal {
+                    min,
+                    max,
+                    modes: vec![draw.clone(), gain.clone()],
+                })],
+                ..CardDef::default()
+            })
+        };
+        assert_eq!(
+            modal(1, 1),
+            "Choose one — • Draw a card. • You gain 3 life."
+        );
+        assert_eq!(
+            modal(2, 2),
+            "Choose two — • Draw a card. • You gain 3 life."
+        );
+        assert_eq!(
+            modal(1, 2),
+            "Choose one or both — • Draw a card. • You gain 3 life."
+        );
+        assert_eq!(
+            modal(0, 2),
+            "Choose up to two — • Draw a card. • You gain 3 life."
+        );
+    }
+
+    fn token(name: &str, key: &str) -> CardDef {
+        CardDef {
+            name: name.into(),
+            key: Some(key.into()),
+            token: true,
+            ..CardDef::default()
+        }
+    }
+
+    #[test]
+    fn tokens_are_described_by_their_definition() {
+        let treasure = CardDef {
+            card_types: vec![CardType::Artifact],
+            creature_types: vec!["Treasure".into()],
+            ..token("Treasure Token", "c_a_treasure_sac")
+        };
+        let spawn = CardDef {
+            card_types: vec![CardType::Creature],
+            creature_types: vec!["Eldrazi".into(), "Spawn".into()],
+            power: Some(0),
+            toughness: Some(1),
+            colors: Some(Vec::new()),
+            abilities: vec![AbilityDef::Mana {
+                cost: Cost {
+                    sacrifice_self: true,
+                    ..Cost::default()
+                },
+                produce: ManaProduce::One(crate::ManaType::Colorless),
+                only_if: None,
+                spend: None,
+                then: None,
+            }],
+            ..token("Eldrazi Spawn Token", "c_0_1_eldrazi_spawn_sac")
+        };
+        let spirit = CardDef {
+            card_types: vec![CardType::Creature],
+            creature_types: vec!["Spirit".into()],
+            power: Some(1),
+            toughness: Some(1),
+            colors: Some(vec![Color::White]),
+            keywords: vec![Keyword::Flying],
+            ..token("Spirit Token", "w_1_1_spirit_flying")
+        };
+        let dryad = CardDef {
+            card_types: vec![CardType::Creature, CardType::Land],
+            land_types: vec![crate::BasicLandType::Forest],
+            creature_types: vec!["Dryad".into()],
+            power: Some(1),
+            toughness: Some(1),
+            colors: Some(vec![Color::Green]),
+            ..token("Forest Dryad Token", "g_1_1_forest_dryad")
+        };
+        let defs = [treasure, spawn, spirit, dryad];
+        let lookup = |key: &str| defs.iter().find(|d| d.key.as_deref() == Some(key));
+        let make = |key: &str, count| {
+            let def = spell(mode(Effect::CreateToken {
+                token: key.to_string(),
+                count,
+                who: PlayerRef::You,
+            }));
+            (text(&def), rules_text_in(&def, &lookup).join(" / "))
+        };
+        // Without definitions the key is all there is to say.
+        let (bare, _) = make("c_a_treasure_sac", Amount::Fixed(1));
+        assert_eq!(bare, "Create a c_a_treasure_sac token.");
+        assert_eq!(
+            make("c_a_treasure_sac", Amount::Fixed(1)).1,
+            "Create a Treasure token."
+        );
+        assert_eq!(
+            make("c_a_treasure_sac", Amount::Fixed(3)).1,
+            "Create three Treasure tokens."
+        );
+        assert_eq!(
+            make("c_0_1_eldrazi_spawn_sac", Amount::Fixed(1)).1,
+            "Create a 0/1 colorless Eldrazi Spawn creature token with \"Sacrifice this token: Add {C}.\""
+        );
+        assert_eq!(
+            make("w_1_1_spirit_flying", Amount::Fixed(2)).1,
+            "Create two 1/1 white Spirit creature tokens with flying."
+        );
+        assert_eq!(
+            make("w_1_1_spirit_flying", Amount::X).1,
+            "Create X 1/1 white Spirit creature tokens with flying."
+        );
+        assert_eq!(
+            make("w_1_1_spirit_flying", Amount::SourcePower).1,
+            "Create a number of 1/1 white Spirit creature tokens with flying equal to its power."
+        );
+        // Land types are part of the name.
+        assert_eq!(
+            make("g_1_1_forest_dryad", Amount::Fixed(1)).1,
+            "Create a 1/1 green Forest Dryad land creature token named Dryad."
+                .replace(" named Dryad", "")
+        );
+    }
+
+    #[test]
+    fn devoid_is_said() {
+        let def = CardDef {
+            name: "Test Eldrazi".into(),
+            mana_cost: crate::ManaCost::parse("{2}{U}").ok(),
+            card_types: vec![CardType::Creature],
+            colors: Some(Vec::new()),
+            keywords: vec![Keyword::Flying],
+            ..CardDef::default()
+        };
+        assert_eq!(rules_text(&def), ["Devoid", "Flying"]);
+        // A token with no colors is just colorless.
+        let spawn = CardDef {
+            colors: Some(Vec::new()),
+            token: true,
+            ..CardDef::default()
+        };
+        assert!(rules_text(&spawn).is_empty());
+    }
+
+    fn trigger_def(card_types: Vec<CardType>, creature_types: Vec<&str>, when: Trigger) -> CardDef {
+        CardDef {
+            name: "Test Card".into(),
+            card_types,
+            creature_types: creature_types.into_iter().map(String::from).collect(),
+            abilities: vec![AbilityDef::Triggered {
+                when,
+                intervening_if: None,
+                body: Body::Effect(mode(Effect::Draw {
+                    who: PlayerRef::You,
+                    amount: Amount::Fixed(1),
+                })),
+            }],
+            ..CardDef::default()
+        }
+    }
+
+    #[test]
+    fn when_for_its_own_entering_and_the_card_by_its_type() {
+        let c = |t, subtypes| trigger_def(t, subtypes, Trigger::Enters(ObjFilter::This));
+        assert_eq!(
+            text(&c(vec![CardType::Creature], vec![])),
+            "When this creature enters, draw a card."
+        );
+        assert_eq!(
+            text(&c(vec![CardType::Land], vec![])),
+            "When this land enters, draw a card."
+        );
+        assert_eq!(
+            text(&c(vec![CardType::Artifact], vec![])),
+            "When this artifact enters, draw a card."
+        );
+        assert_eq!(
+            text(&c(vec![CardType::Enchantment], vec!["Aura"])),
+            "When this Aura enters, draw a card."
+        );
+        assert_eq!(
+            text(&c(vec![CardType::Artifact], vec!["Equipment"])),
+            "When this Equipment enters, draw a card."
+        );
+        // Two permanent types and no creature: no single word.
+        assert_eq!(
+            text(&c(vec![CardType::Artifact, CardType::Land], vec![])),
+            "When this permanent enters, draw a card."
+        );
+        // Others entering are "whenever".
+        let other = trigger_def(
+            vec![CardType::Creature],
+            vec![],
+            Trigger::Enters(ObjFilter::Matching(creature(&[]))),
+        );
+        assert_eq!(text(&other), "Whenever a creature enters, draw a card.");
+        // Entering or dying: once each; entering or attacking: any number of times.
+        let both = trigger_def(
+            vec![CardType::Creature],
+            vec![],
+            Trigger::Any(vec![
+                Trigger::Enters(ObjFilter::This),
+                Trigger::Dies(ObjFilter::This),
+            ]),
+        );
+        assert_eq!(
+            text(&both),
+            "When this creature enters or dies, draw a card."
+        );
+        let attacks = trigger_def(
+            vec![CardType::Creature],
+            vec![],
+            Trigger::Any(vec![
+                Trigger::Enters(ObjFilter::This),
+                Trigger::Attacks(ObjFilter::This),
+            ]),
+        );
+        assert_eq!(
+            text(&attacks),
+            "Whenever this creature enters or attacks, draw a card."
+        );
+        // Only creatures "die".
+        let artifact = trigger_def(
+            vec![CardType::Artifact],
+            vec![],
+            Trigger::Dies(ObjFilter::This),
+        );
+        assert_eq!(
+            text(&artifact),
+            "When this artifact is put into a graveyard from the battlefield, draw a card."
+        );
+        // A spell is "this spell".
+        let m = mode(Effect::SacrificeThis);
+        assert_eq!(text(&spell(m)), "Sacrifice this spell.");
+    }
+
+    #[test]
+    fn the_second_card_each_turn() {
+        let def = trigger_def(
+            vec![CardType::Creature],
+            vec![],
+            Trigger::Draws {
+                who: Who::You,
+                nth: Some(2),
+            },
+        );
+        assert_eq!(
+            text(&def),
+            "Whenever you draw your second card each turn, draw a card."
+        );
+        let def = trigger_def(
+            vec![CardType::Creature],
+            vec![],
+            Trigger::Draws {
+                who: Who::Opponent,
+                nth: Some(3),
+            },
+        );
+        assert_eq!(
+            text(&def),
+            "Whenever an opponent draws their third card each turn, draw a card."
+        );
+    }
+
+    #[test]
+    fn a_land_that_enters_tapped_counts_the_other_lands() {
+        let lands = |n| Condition::ControlAtMost {
+            what: Selector {
+                types: vec![CardType::Land],
+                controller: Who::You,
+                ..Selector::default()
+            },
+            at_most: n,
+        };
+        let def = CardDef {
+            name: "Test Fastland".into(),
+            card_types: vec![CardType::Land],
+            abilities: vec![AbilityDef::Replacement {
+                replaces: Replaces::ThisEnters,
+                with: ReplaceWith::EntersTappedUnless(lands(2)),
+            }],
+            ..CardDef::default()
+        };
+        assert_eq!(
+            text(&def),
+            "This land enters tapped unless you control two or fewer other lands."
+        );
+        // Basic lands are not "other" lands: the battle lands do not say so.
+        let basics = Condition::Control {
+            what: Selector {
+                types: vec![CardType::Land],
+                supertypes: vec![crate::Supertype::Basic],
+                controller: Who::You,
+                ..Selector::default()
+            },
+            at_least: 2,
+        };
+        let def = CardDef {
+            abilities: vec![AbilityDef::Replacement {
+                replaces: Replaces::ThisEnters,
+                with: ReplaceWith::EntersTappedUnless(basics),
+            }],
+            ..def
+        };
+        assert_eq!(
+            text(&def),
+            "This land enters tapped unless you control two or more basic lands."
+        );
+    }
+
+    #[test]
+    fn what_a_land_does_as_it_enters_comes_first() {
+        let def = CardDef {
+            name: "Test Gate".into(),
+            card_types: vec![CardType::Land],
+            abilities: vec![
+                AbilityDef::Mana {
+                    cost: Cost {
+                        tap: true,
+                        ..Cost::default()
+                    },
+                    produce: ManaProduce::One(crate::ManaType::Green),
+                    only_if: None,
+                    spend: None,
+                    then: None,
+                },
+                AbilityDef::Replacement {
+                    replaces: Replaces::ThisEnters,
+                    with: ReplaceWith::EntersTapped,
+                },
+            ],
+            ..CardDef::default()
+        };
+        assert_eq!(
+            rules_text(&def),
+            ["This land enters tapped.", "{T}: Add {G}."]
+        );
+    }
+
+    #[test]
+    fn a_creature_that_sometimes_is_none_does_not_say_creature() {
+        let def = CardDef {
+            name: "Test God".into(),
+            card_types: vec![CardType::Enchantment, CardType::Creature],
+            abilities: vec![AbilityDef::Static {
+                affected: Affected::This,
+                effects: vec![ContinuousEffect::RemoveTypes(vec![CardType::Creature])],
+                only_if: None,
+            }],
+            ..CardDef::default()
+        };
+        assert_eq!(text(&def), "This enchantment isn't a creature.");
     }
 }
