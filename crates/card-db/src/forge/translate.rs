@@ -17,7 +17,7 @@ use card_model::{
     EachPlayerAction, Effect, Keyword, Layout, ManaCost, ManaProduce, ManaRestriction, ManaType,
     Measure, Mode, ObjFilter, ObjRef, PlayZone, PlayerRef, PlayerRule, ReplaceWith, Replaces,
     Selector, Signed, Supertype, Take, TargetFilter, TargetGroup, TargetRef, Timing, Trigger,
-    TriggerStep, Who,
+    TriggerCause, TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -5672,6 +5672,7 @@ impl<'a> Tx<'a> {
                     }
                 }
             }
+            "Panharmonicon" => self.panharmonicon(&rd),
             other => {
                 self.block(format!("static:{other}"));
                 None
@@ -5815,6 +5816,58 @@ impl<'a> Tx<'a> {
             cost,
             only_if,
         }))
+    }
+
+    /// `S:Mode$ Panharmonicon` (D-073, CR 603.2d): "if [an artifact or creature entering /
+    /// a creature dying / a creature attacking] causes a triggered ability of [a permanent
+    /// you control] to trigger, that ability triggers an additional time". `ValidCard$` is
+    /// the trigger's source; `ValidMode$` the kind of trigger event, with `ValidCause$` (and
+    /// `Origin$`/`Destination$` for zone changes) what caused it. Forge's `ValidZone$`
+    /// default, the battlefield, is the only zone compiled.
+    fn panharmonicon(&mut self, rd: &Rd<'a>) -> Option<AbilityDef> {
+        if self.in_effect || self.granting > 0 {
+            self.block("static:Panharmonicon elsewhere");
+            return None;
+        }
+        let sources = match rd.get("ValidCard") {
+            Some(f) => self.obj_filter(f),
+            None => {
+                self.block("static:Panharmonicon without ValidCard");
+                None
+            }
+        };
+        let mode = rd.get("ValidMode");
+        let cause = rd.get("ValidCause");
+        let (origin, dest) = (rd.get("Origin"), rd.get("Destination"));
+        let zone_change = matches!(mode, Some("ChangesZone,ChangesZoneAll" | "ChangesZone"));
+        let attack = matches!(
+            mode,
+            Some("Attacks,AttackersDeclared,AttackersDeclaredOneTarget" | "Attacks")
+        );
+        let cause = match (mode, cause, origin, dest) {
+            (None, None, None, None) => Some(None),
+            (Some(_), Some(c), None, Some("Battlefield")) if zone_change => {
+                self.selector(c).map(|s| Some(TriggerCause::Enters(s)))
+            }
+            (Some(_), Some(c), Some("Battlefield"), Some("Graveyard")) if zone_change => {
+                self.selector(c).map(|s| Some(TriggerCause::Dies(s)))
+            }
+            (Some(_), Some(c), None, None) if attack => {
+                self.selector(c).map(|s| Some(TriggerCause::Attacks(s)))
+            }
+            (Some(m), ..) => {
+                self.block(format!("static:Panharmonicon mode {}", shape(m)));
+                None
+            }
+            _ => {
+                self.block("static:Panharmonicon shape");
+                None
+            }
+        };
+        Some(AbilityDef::AdditionalTrigger {
+            sources: sources?,
+            cause: cause?,
+        })
     }
 
     /// Is this `Mode$ Continuous` line (also) a rule about players or about where cards may
@@ -6212,44 +6265,41 @@ impl<'a> Tx<'a> {
             if !zone {
                 self.block("repl:DamageDone zone");
             }
-            let by = match rd.get("ValidSource") {
-                None => Some(None),
-                Some(f) => self.obj_filter(f).map(Some),
-            };
-            let to = match rd.get("ValidTarget") {
-                None => Some(DamageTo::Anything),
-                Some("Player") => Some(DamageTo::Player(Who::Any)),
-                Some("You") => Some(DamageTo::Player(Who::You)),
-                Some("Opponent" | "Player.Opponent") => Some(DamageTo::Player(Who::Opponent)),
-                Some(f) => self.obj_filter(f).map(DamageTo::Permanent),
-            };
-            let combat = match rd.get("IsCombat") {
-                None => Some(None),
-                Some("True") => Some(Some(true)),
-                Some("False") => Some(Some(false)),
-                Some(_) => {
-                    self.block("param:repl DamageDone.IsCombat value");
-                    None
-                }
-            };
+            let replaces = self.damage_replaces(&rd);
             rd.finish(&mut self.blockers);
             if !zone {
                 return None;
             }
             return Some(AbilityDef::Replacement {
-                replaces: Replaces::Damage {
-                    by: by?,
-                    to: to?,
-                    combat: combat?,
-                },
+                replaces: replaces?,
                 with: ReplaceWith::Prevent,
             });
+        }
+        // "If a source you control would deal damage to …, it deals double that damage /
+        // that much damage plus 2 instead" (D-073).
+        if event == "DamageDone"
+            && rd.rec.get("PreventionEffect").is_none()
+            && rd.rec.get("DamageTarget").is_none()
+        {
+            return self.damage_scaled(&rd);
         }
         if event == "Moved" && rd.rec.get("Destination") == Some("Battlefield") {
             return self.moved_enters(&rd);
         }
         if event == "Moved" && rd.rec.get("Destination") == Some("Graveyard") {
             return self.moved_to_graveyard(&rd);
+        }
+        if event == "CreateToken" {
+            return self.replace_create_token(&rd);
+        }
+        if event == "AddCounter" {
+            return self.replace_add_counter(&rd);
+        }
+        if event == "Counter" {
+            return self.cant_be_countered(&rd);
+        }
+        if event == "GainLife" && rd.rec.get("Prevent").is_none() {
+            return self.replace_gain_life(&rd);
         }
         // Not compiled yet: named by the event alone, so that it ranks as one feature.
         for key in [
@@ -6263,6 +6313,482 @@ impl<'a> Tx<'a> {
         rd.finish(&mut self.blockers);
         self.block(format!("repl:{event}"));
         None
+    }
+
+    /// `ValidSource$`, `ValidTarget$` and `IsCombat$` of a `DamageDone` replacement.
+    fn damage_replaces(&mut self, rd: &Rd<'a>) -> Option<Replaces> {
+        let by = match rd.get("ValidSource") {
+            None => Some(None),
+            Some(f) => self.damage_source(f),
+        };
+        let to = match rd.get("ValidTarget") {
+            None => Some(DamageTo::Anything),
+            Some(f) => self.damage_recipient(f),
+        };
+        let combat = match rd.get("IsCombat") {
+            None => Some(None),
+            Some("True") => Some(Some(true)),
+            Some("False") => Some(Some(false)),
+            Some(_) => {
+                self.block("param:repl DamageDone.IsCombat value");
+                None
+            }
+        };
+        Some(Replaces::Damage {
+            by: by?,
+            to: to?,
+            combat: combat?,
+        })
+    }
+
+    /// What deals the damage: `Card,Emblem` is any source (`None`); `Card.YouCtrl,
+    /// Emblem.YouCtrl` a source you control. An emblem alternative is read only where it
+    /// mirrors a card alternative: this engine has no emblems (D-073).
+    fn damage_source(&mut self, f: &str) -> Option<Option<ObjFilter>> {
+        let alts: Vec<&str> = f.split(',').map(str::trim).collect();
+        let mut cards = Vec::new();
+        for a in &alts {
+            match a.strip_prefix("Emblem") {
+                Some(rest) => {
+                    if !alts.contains(&format!("Card{rest}").as_str()) {
+                        self.block(format!("repl:DamageDone source {}", shape(a)));
+                        return None;
+                    }
+                }
+                None => cards.push(*a),
+            }
+        }
+        match cards.as_slice() {
+            ["Card"] => Some(None),
+            _ => self.obj_filter(&cards.join(",")).map(Some),
+        }
+    }
+
+    /// Who or what is dealt the damage: players (`Player`, `You`, `Opponent`), permanents,
+    /// or a player and permanents (`Permanent,Player`; `Opponent,Permanent.OppCtrl`).
+    fn damage_recipient(&mut self, f: &str) -> Option<DamageTo> {
+        let mut player: Option<Who> = None;
+        let mut permanents = Vec::new();
+        for a in f.split(',').map(str::trim) {
+            let w = match a {
+                "Player" => Some(Who::Any),
+                "You" | "Player.You" => Some(Who::You),
+                "Opponent" | "Player.Opponent" => Some(Who::Opponent),
+                _ => None,
+            };
+            match (w, player) {
+                (Some(w), None) => player = Some(w),
+                (Some(_), Some(_)) => {
+                    self.block("repl:DamageDone two kinds of player");
+                    return None;
+                }
+                (None, _) => permanents.push(a),
+            }
+        }
+        match (player, permanents.as_slice()) {
+            (Some(w), []) => Some(DamageTo::Player(w)),
+            (Some(Who::Any), ["Permanent"]) => Some(DamageTo::Anything),
+            (None, _) => self
+                .obj_filter(&permanents.join(","))
+                .map(DamageTo::Permanent),
+            (Some(player), _) => self
+                .obj_filter(&permanents.join(","))
+                .map(|permanent| DamageTo::Either { player, permanent }),
+        }
+    }
+
+    /// `R:Event$ DamageDone | ReplaceWith$ X` with `SVar:X:DB$ ReplaceEffect | VarName$
+    /// DamageAmount | VarValue$ Y` and `Y = ReplaceCount$DamageAmount/<math>` (D-073):
+    /// "it deals double that damage / that much damage plus 2 instead".
+    fn damage_scaled(&mut self, rd: &Rd<'a>) -> Option<AbilityDef> {
+        let zone = self.replacement_zone(rd, "DamageDone");
+        let replaces = self.damage_replaces(rd);
+        rd.get("Secondary");
+        let with = rd.get("ReplaceWith").and_then(|n| self.sub(n));
+        rd.finish(&mut self.blockers);
+        let calc = with.and_then(|w| {
+            if w.head() != Some(("DB", "ReplaceEffect")) {
+                self.block(format!("repl:DamageDone:{}", w.head().map_or("?", |h| h.1)));
+                return None;
+            }
+            let rd = Rd::new(w, "repl DamageDone ReplaceEffect");
+            let name = rd.get("VarName");
+            let value = rd.get("VarValue");
+            rd.finish(&mut self.blockers);
+            match (name, value) {
+                (Some("DamageAmount"), Some(v)) => {
+                    match v.strip_prefix("ReplaceCount$DamageAmount/") {
+                        Some(math) => self.replace_math(math),
+                        None => self.replace_count(v, "DamageAmount"),
+                    }
+                }
+                _ => {
+                    self.block("repl:DamageDone:ReplaceEffect shape");
+                    None
+                }
+            }
+        });
+        if !zone {
+            return None;
+        }
+        Some(AbilityDef::Replacement {
+            replaces: replaces?,
+            with: ReplaceWith::Scale(calc?),
+        })
+    }
+
+    /// Where a replacement effect of this kind works: a permanent's from the battlefield,
+    /// an effect object's from the command zone (D-065). Anything else is a blocker.
+    fn replacement_zone(&mut self, rd: &Rd<'a>, what: &str) -> bool {
+        let ok = match rd.get("ActiveZones") {
+            Some("Battlefield") => !self.in_effect,
+            Some("Command") => self.in_effect,
+            _ => false,
+        };
+        if !ok {
+            self.block(format!("repl:{what} zone"));
+        }
+        ok
+    }
+
+    /// `ReplaceCount$<key>/<math>` (the SVar `name`): the event's number, changed —
+    /// "twice that many", "that many plus one" (D-073).
+    fn replace_count(&mut self, name: &str, key: &str) -> Option<Calc> {
+        let v = self.svar(name).unwrap_or("");
+        let Some(math) = v
+            .strip_prefix("ReplaceCount$")
+            .and_then(|r| r.strip_prefix(key))
+            .and_then(|r| r.strip_prefix('/'))
+        else {
+            self.block(format!("repl:amount {}", shape(v)));
+            return None;
+        };
+        self.replace_math(math)
+    }
+
+    /// Forge's `doXMath` operations that make a number of tokens, counters, damage or life
+    /// larger or smaller: `Twice`, `Thrice`, `Plus.N`, `Minus.N`, `HalfUp`, `HalfDown`.
+    fn replace_math(&mut self, math: &str) -> Option<Calc> {
+        let (op, n) = match math.split_once('.') {
+            Some((op, n)) => (op, n.parse::<u32>().ok()),
+            None => (math, None),
+        };
+        let calc = match (op, n) {
+            ("Twice", None) => Some(Calc::Times(2)),
+            ("Thrice", None) => Some(Calc::Times(3)),
+            ("Times", Some(n)) if n >= 2 => Some(Calc::Times(n)),
+            ("Plus", Some(n)) if n >= 1 => Some(Calc::Plus(n)),
+            ("Minus", Some(n)) if n >= 1 => Some(Calc::Minus(n)),
+            ("HalfUp", None) => Some(Calc::HalfUp),
+            ("HalfDown", None) => Some(Calc::HalfDown),
+            _ => None,
+        };
+        if calc.is_none() {
+            self.block(format!("repl:amount math {}", shape(math)));
+        }
+        calc
+    }
+
+    /// `R:Event$ GainLife | ValidPlayer$ You | ReplaceWith$ X` with `DB$ ReplaceEffect |
+    /// VarName$ LifeGained | VarValue$ Y`, `Y = ReplaceCount$LifeGained/<math>` (D-073):
+    /// "if you would gain life, you gain twice that much life / that much plus 1 instead".
+    fn replace_gain_life(&mut self, rd: &Rd<'a>) -> Option<AbilityDef> {
+        let zone = self.replacement_zone(rd, "GainLife");
+        let who = match rd.get("ValidPlayer") {
+            None | Some("Player") => Some(Who::Any),
+            Some("You") => Some(Who::You),
+            Some("Opponent" | "Player.Opponent") => Some(Who::Opponent),
+            Some(p) => {
+                self.block(format!("repl:GainLife.ValidPlayer {}", shape(p)));
+                None
+            }
+        };
+        // (A hint for Forge's AI.)
+        rd.get("AILogic");
+        let with = rd.get("ReplaceWith").and_then(|n| self.sub(n));
+        rd.finish(&mut self.blockers);
+        let calc = with.and_then(|w| {
+            if w.head() != Some(("DB", "ReplaceEffect")) {
+                self.block(format!("repl:GainLife:{}", w.head().map_or("?", |h| h.1)));
+                return None;
+            }
+            let rd = Rd::new(w, "repl GainLife ReplaceEffect");
+            let name = rd.get("VarName");
+            let value = rd.get("VarValue");
+            rd.finish(&mut self.blockers);
+            match (name, value) {
+                (Some("LifeGained"), Some(v)) => match v.strip_prefix("ReplaceCount$LifeGained/") {
+                    Some(math) => self.replace_math(math),
+                    None => self.replace_count(v, "LifeGained"),
+                },
+                _ => {
+                    self.block("repl:GainLife:ReplaceEffect shape");
+                    None
+                }
+            }
+        });
+        if !zone {
+            return None;
+        }
+        Some(AbilityDef::Replacement {
+            replaces: Replaces::GainLife(who?),
+            with: ReplaceWith::Scale(calc?),
+        })
+    }
+
+    /// `R:Event$ Counter | Layer$ CantHappen` (D-073): "this spell can't be countered"
+    /// (`ValidCard$ Card.Self | ValidSA$ Spell`, no zone: it works on the stack) and
+    /// "[creature] spells you control can't be countered" (`ActiveZones$ Battlefield` and
+    /// `ValidSA$ Spell.<filter>` or `ValidCard$ <filter> | ValidSA$ Spell`).
+    fn cant_be_countered(&mut self, rd: &Rd<'a>) -> Option<AbilityDef> {
+        let cant = rd.get("Layer") == Some("CantHappen");
+        let zone = rd.get("ActiveZones");
+        let card = rd.get("ValidCard");
+        let sa = rd.get("ValidSA");
+        rd.get("Secondary");
+        rd.finish(&mut self.blockers);
+        if !cant || self.in_effect {
+            self.block("repl:Counter:shape");
+            return None;
+        }
+        // `Spell.Creature+YouCtrl` → `Creature.YouCtrl`: a card type first is the head.
+        let spell_filter = |f: &str| -> Option<String> {
+            let mut alts = Vec::new();
+            for alt in f.split(',').map(str::trim) {
+                let props = match alt.split_once('.') {
+                    Some(("Spell", p)) => p,
+                    None if alt == "Spell" => "",
+                    _ => return None,
+                };
+                let props: Vec<&str> = props.split('+').filter(|p| !p.is_empty()).collect();
+                alts.push(match props.split_first() {
+                    None => "Card".to_string(),
+                    Some((first, rest)) if card_type(first).is_some() => {
+                        if rest.is_empty() {
+                            first.to_string()
+                        } else {
+                            format!("{first}.{}", rest.join("+"))
+                        }
+                    }
+                    Some(_) => format!("Card.{}", props.join("+")),
+                });
+            }
+            Some(alts.join(","))
+        };
+        match (zone, card, sa) {
+            (None, Some("Card.Self"), Some("Spell")) => {
+                Some(AbilityDef::CantBeCountered { spells: None })
+            }
+            (Some("Battlefield"), None, Some(f)) => match spell_filter(f) {
+                Some(f) => self
+                    .selector(&f)
+                    .map(|s| AbilityDef::CantBeCountered { spells: Some(s) }),
+                None => {
+                    self.block(format!("repl:Counter:ValidSA {}", shape(f)));
+                    None
+                }
+            },
+            (Some("Battlefield"), Some(f), Some("Spell")) if f != "Card.Self" => self
+                .selector(f)
+                .map(|s| AbilityDef::CantBeCountered { spells: Some(s) }),
+            _ => {
+                self.block("repl:Counter:shape");
+                None
+            }
+        }
+    }
+
+    /// `R:Event$ CreateToken` (D-073): "if an effect would create one or more [creature]
+    /// tokens under your control, it creates twice that many / those tokens plus a Food /
+    /// that many 4/4 Angels instead" — `DB$ ReplaceToken | Type$ Amount|AddToken|ReplaceToken`
+    /// (docs/forge/triggers-statics-replacements-keywords.md §3.3).
+    fn replace_create_token(&mut self, rd: &Rd<'a>) -> Option<AbilityDef> {
+        let zone = self.replacement_zone(rd, "CreateToken");
+        // `ValidPlayer$` is who creates them; in this engine that is who controls them
+        // (CR 111.2), which `ValidToken$`'s "YouCtrl" also says.
+        let mut token = match rd.get("ValidToken") {
+            None => Some(Selector::default()),
+            Some(f) => self.selector(f),
+        };
+        match rd.get("ValidPlayer") {
+            None => {}
+            Some("You") => {
+                if let Some(t) = &mut token {
+                    t.controller = Who::You;
+                }
+            }
+            Some(p) => {
+                self.block(format!("repl:CreateToken.ValidPlayer {}", shape(p)));
+                token = None;
+            }
+        }
+        let effect_only = match rd.get("EffectOnly") {
+            None => Some(false),
+            Some("True") => Some(true),
+            Some(_) => None,
+        };
+        let with = rd.get("ReplaceWith").and_then(|n| self.sub(n));
+        rd.finish(&mut self.blockers);
+        let with = with.and_then(|w| self.replace_token_with(w));
+        if !zone {
+            return None;
+        }
+        Some(AbilityDef::Replacement {
+            replaces: Replaces::Tokens {
+                token: token?,
+                effect_only: effect_only?,
+            },
+            with: with?,
+        })
+    }
+
+    /// `DB$ ReplaceToken | Type$ Amount [| Amount$ <math>]`, `Type$ AddToken | TokenScript$
+    /// <scripts> [| Amount$ N]`, `Type$ ReplaceToken | TokenScript$ <scripts>`.
+    fn replace_token_with(&mut self, rec: &'a Record) -> Option<ReplaceWith> {
+        if rec.head() != Some(("DB", "ReplaceToken")) {
+            self.block(format!(
+                "repl:CreateToken:{}",
+                rec.head().map_or("?", |h| h.1)
+            ));
+            return None;
+        }
+        let rd = Rd::new(rec, "repl ReplaceToken");
+        let kind = rd.get("Type");
+        let scripts = |tx: &mut Self, rd: &Rd<'a>| -> Option<Vec<String>> {
+            let Some(s) = rd.get("TokenScript") else {
+                tx.block("repl:CreateToken:no TokenScript");
+                return None;
+            };
+            let v: Vec<String> = s.split(',').map(|t| t.trim().to_string()).collect();
+            if v.iter().any(|t| t.is_empty() || t == "Chosen") {
+                tx.block("repl:CreateToken:chosen token");
+                return None;
+            }
+            tx.tokens.extend(v.iter().cloned());
+            Some(v)
+        };
+        let with = match kind {
+            Some("Amount") => {
+                let math = rd.get("Amount").unwrap_or("Twice");
+                self.replace_math(math).map(ReplaceWith::Scale)
+            }
+            Some("AddToken") => {
+                let n = match rd.get("Amount") {
+                    None => Some(None),
+                    Some(n) => match n.parse::<u32>() {
+                        Ok(n) if n > 0 => Some(Some(n)),
+                        _ => {
+                            self.block(format!("repl:CreateToken:AddToken amount {}", shape(n)));
+                            None
+                        }
+                    },
+                };
+                match (scripts(self, &rd), n) {
+                    (Some(tokens), Some(n)) => Some(ReplaceWith::AddTokens { tokens, n }),
+                    _ => None,
+                }
+            }
+            Some("ReplaceToken") => scripts(self, &rd).map(ReplaceWith::ReplaceTokens),
+            other => {
+                self.block(format!("repl:CreateToken:Type {}", other.unwrap_or("?")));
+                None
+            }
+        };
+        rd.finish(&mut self.blockers);
+        with
+    }
+
+    /// `R:Event$ AddCounter` (D-073): "if one or more [+1/+1] counters would be put on a
+    /// [creature you control], twice that many / that many plus one are put on it instead"
+    /// — `DB$ ReplaceCounter | Amount$ X` with `X = ReplaceCount$CounterNum/<math>`.
+    fn replace_add_counter(&mut self, rd: &Rd<'a>) -> Option<AbilityDef> {
+        let zone = self.replacement_zone(rd, "AddCounter");
+        if rd.get("ValidPlayer").is_some() {
+            self.block("repl:AddCounter:counters on players");
+        }
+        // `inZoneBattlefield`: on a permanent — one entering too, as Forge judges the
+        // permanent as it would exist there (CR 122.6). Every counter in this engine is on
+        // a permanent, so the property changes nothing.
+        let on = match rd.get("ValidCard") {
+            Some(f) => {
+                let alts: Vec<String> = f
+                    .split(',')
+                    .map(|a| {
+                        let (head, props) = a.trim().split_once('.').unwrap_or((a.trim(), ""));
+                        let props: Vec<&str> = props
+                            .split('+')
+                            .filter(|p| !p.is_empty() && *p != "inZoneBattlefield")
+                            .collect();
+                        if props.is_empty() {
+                            head.to_string()
+                        } else {
+                            format!("{head}.{}", props.join("+"))
+                        }
+                    })
+                    .collect();
+                self.selector(&alts.join(","))
+            }
+            None => {
+                self.block("repl:AddCounter:which");
+                None
+            }
+        };
+        let kind = match rd.get("ValidCounterType") {
+            None => Some(None),
+            Some(k) => self.counter_kind(Some(k)).map(Some),
+        };
+        let effect_only = match rd.get("EffectOnly") {
+            None => Some(false),
+            Some("True") => Some(true),
+            Some(_) => None,
+        };
+        let with = rd.get("ReplaceWith").and_then(|n| self.sub(n));
+        rd.finish(&mut self.blockers);
+        let calc = with.and_then(|w| self.replace_counter_with(w, kind.flatten()));
+        if !zone {
+            return None;
+        }
+        Some(AbilityDef::Replacement {
+            replaces: Replaces::Counters {
+                on: on?,
+                kind: kind?,
+                effect_only: effect_only?,
+            },
+            with: ReplaceWith::Scale(calc?),
+        })
+    }
+
+    /// `DB$ ReplaceCounter | Amount$ X [| ValidCounterType$ <the same kind>] [| ChooseCounter$
+    /// True]`. (`ChooseCounter`: when counters from several players' effects are put at
+    /// once, the affected player picks which the "plus one" is for; an event here comes
+    /// from one effect.)
+    fn replace_counter_with(&mut self, rec: &'a Record, kind: Option<CounterKind>) -> Option<Calc> {
+        if rec.head() != Some(("DB", "ReplaceCounter")) {
+            self.block(format!(
+                "repl:AddCounter:{}",
+                rec.head().map_or("?", |h| h.1)
+            ));
+            return None;
+        }
+        let rd = Rd::new(rec, "repl ReplaceCounter");
+        let same_kind = match rd.get("ValidCounterType") {
+            None => true,
+            Some(k) => self.counter_kind(Some(k)).is_some_and(|k| Some(k) == kind),
+        };
+        rd.get("ChooseCounter");
+        let amount = rd.get("Amount");
+        rd.finish(&mut self.blockers);
+        if !same_kind {
+            self.block("repl:AddCounter:counter type differs");
+            return None;
+        }
+        match amount {
+            Some(x) => self.replace_count(x, "CounterNum"),
+            None => {
+                self.block("repl:AddCounter:no amount");
+                None
+            }
+        }
     }
 
     /// `R:Event$ Moved | Destination$ Battlefield | ReplacementResult$ Updated` — how a
@@ -7607,6 +8133,17 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
         != under(&plain).contains("to the battlefield under your control")
     {
         missing.push("under your control");
+    }
+    // Rules a script may leave out where Forge handles them elsewhere (D-073): "this spell
+    // can't be countered", "… triggers an additional time".
+    for phrase in ["can't be countered", "an additional time"] {
+        if plain.contains(phrase) && !compiled.contains(phrase) {
+            missing.push(if phrase == "an additional time" {
+                "says an additional time"
+            } else {
+                "says can't be countered"
+            });
+        }
     }
     // "Is put into your graveyard from the battlefield" is about whose card it is; the
     // script may say whose creature it was.
