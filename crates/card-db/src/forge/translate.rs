@@ -7201,8 +7201,10 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
     // "Return it to the battlefield under your control" against "… under its owner's
     // control": some scripts give control where the card doesn't (or the other way).
     // ("Enters the battlefield under your control" is old wording for "you control".)
-    if compiled.contains("battlefield under your control")
-        != plain.contains("to the battlefield under your control")
+    // ("… onto the battlefield tapped under your control" counts too.)
+    let under = |t: &str| t.replace("battlefield tapped under", "battlefield under");
+    if under(&compiled).contains("battlefield under your control")
+        != under(&plain).contains("to the battlefield under your control")
     {
         missing.push("under your control");
     }

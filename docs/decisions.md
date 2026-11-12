@@ -1942,6 +1942,19 @@ Rules text: docs/rules-notes/608.2c-400.7j-those-cards.md.
   Letter of Acceptance, compiled on this branch alone, is blocked by D-066's `oracle:{T}`
   (it had lost its `{T}`). Two cards compile on neither parent and were read: Klothys, God
   of Destiny and Thassa, Deep-Dwelling.
+- Merged with main `bbca45d` (D-071, faces): 10,300 → 10,508 of 34,463 (30.5%). None of
+  main's cards stops compiling; one changes text (Miraculous Recovery). Nine faced cards
+  compile on neither parent (Blex's "Search for Blex", Bloomvine Regent's "Claim
+  Territory", Colossal Badger's "Dig Deep", Docent of Perfection, Dowsing Device, Hit //
+  Run, Ravenous Demon, Stormshriek Feral's "Flush Out", Vincent Valentine); all were read.
+  Vincent Valentine's Galian Beast ("return it to the battlefield tapped") had
+  `GainControl$` where the card returns it under its owner's control: the
+  `oracle:under your control` guard now reads "onto the battlefield tapped under your
+  control" as well, and blocks it (`under_your_control_after_tapped_is_read_back`).
+  "Those cards" are the same objects whichever face is up (transforming is no zone
+  change, CR 701.27c), and a noted card in a library or hand is read by its front face
+  (CR 712.8a): a search for a land card finds a pathway, not an instant whose back is a
+  land (`a_noted_double_faced_card_is_found_by_its_front_face`).
 - On `04ef403`: 9,305 → 9,491 of 34,463 scripts; precons 149 → 151 of 275 deck slots.
   Rebased onto D-067/D-068 (`3e37f8d`): 9,776 → 9,974 (28.9%). Of the 9,776 cards main
   compiled none stops compiling, and the engine text of one changes: Miraculous Recovery

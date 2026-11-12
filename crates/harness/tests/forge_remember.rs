@@ -1254,3 +1254,31 @@ fn a_noted_double_faced_card_is_found_by_its_front_face() {
     assert!(!s.st.object(path[0]).tapped, "found again and untapped");
     assert_eq!(life(&s, P0), before + 1, "one land card found");
 }
+
+// The `oracle:under your control` guard reads "onto the battlefield tapped under your
+// control" too: a script that gives control (`GainControl$ True`) where the card returns
+// it "to the battlefield tapped" (under its owner's control) doesn't compile; the same
+// script with the card's words "tapped under your control" does.
+#[test]
+fn under_your_control_after_tapped_is_read_back() {
+    let card = |oracle: &str| {
+        format!(
+            "Name:Test Revenant\nManaCost:2 B\nTypes:Creature Spirit\nPT:2/2\n\
+             T:Mode$ ChangesZone | Origin$ Battlefield | Destination$ Graveyard | ValidCard$ Card.Self | Execute$ TrigReturn | TriggerDescription$ Text.\n\
+             SVar:TrigReturn:DB$ ChangeZone | Defined$ TriggeredNewCardLKICopy | Origin$ Graveyard | Destination$ Battlefield | Tapped$ True | GainControl$ True\n\
+             Oracle:{oracle}"
+        )
+    };
+    assert_eq!(
+        forge_test_blockers(&card(
+            "When this creature dies, return it to the battlefield tapped."
+        )),
+        ["oracle:under your control"]
+    );
+    assert_eq!(
+        forge_test_blockers(&card(
+            "When this creature dies, return it to the battlefield tapped under your control."
+        )),
+        [] as [&str; 0]
+    );
+}
