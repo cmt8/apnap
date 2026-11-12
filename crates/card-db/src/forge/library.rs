@@ -29,7 +29,45 @@ pub struct Library {
 
 /// Where the compiled card disagrees with Scryfall's printed data for the same name. An
 /// independent check: Forge's script and Scryfall's record were written by different people.
+/// A card with several faces is checked face by face.
 pub fn printed_mismatch(def: &CardDef, card: &ScryfallCard) -> Vec<String> {
+    let layout = match def.layout {
+        card_model::Layout::Normal => None,
+        card_model::Layout::Modal => Some("modal_dfc"),
+        card_model::Layout::Transform => Some("transform"),
+        // Scryfall files omen cards under its adventure layout.
+        card_model::Layout::Adventure | card_model::Layout::Omen => Some("adventure"),
+        card_model::Layout::Split => Some("split"),
+    };
+    if layout.is_none() && card.card_faces.is_empty() {
+        return face_mismatch(def, card);
+    }
+    // A split card's own definition is its two halves combined; Scryfall has the halves.
+    let faces: Vec<&CardDef> = if def.layout == card_model::Layout::Split {
+        def.faces.iter().collect()
+    } else {
+        def.all_faces().collect()
+    };
+    if layout != Some(card.layout.as_str()) || card.card_faces.len() != faces.len() {
+        return vec!["printed:faces".to_string()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    if def.layout == card_model::Layout::Split && def.name != card.name {
+        out.push("printed:face name".to_string());
+    }
+    for (i, face) in faces.into_iter().enumerate() {
+        let printed = card.face(i).expect("as many faces");
+        if printed.name != face.name {
+            out.push("printed:face name".to_string());
+        }
+        out.extend(face_mismatch(face, &printed));
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn face_mismatch(def: &CardDef, card: &ScryfallCard) -> Vec<String> {
     let mut out = Vec::new();
     let cost = def
         .mana_cost
@@ -118,6 +156,9 @@ impl Library {
                 Ok(script) => match compile(&script, &lib.known) {
                     Ok(mut c) => {
                         c.def.token = true;
+                        for f in &mut c.def.faces {
+                            f.token = true;
+                        }
                         c.def.key = Some(stem.clone());
                         let problems = invalid(&c.def);
                         if problems.is_empty() {
@@ -140,7 +181,13 @@ impl Library {
                 lib.unreadable += 1;
                 continue;
             };
-            let name = script.faces[0].name.clone();
+            // A split card is called by both names (CR 709.4a), as Scryfall does.
+            let name = if script.alternate_mode.as_deref() == Some("Split") {
+                let names: Vec<&str> = script.faces.iter().map(|f| f.name.as_str()).collect();
+                names.join(" // ")
+            } else {
+                script.faces[0].name.clone()
+            };
             let result = compile(&script, &lib.known).and_then(|c| {
                 let mut blockers = invalid(&c.def);
                 if let Some(card) = scryfall.and_then(|d| d.get(&name)) {

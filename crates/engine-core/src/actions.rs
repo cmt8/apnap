@@ -34,6 +34,9 @@ pub enum GameAction {
         tapped: bool,
         /// Counters it enters with (CR 122.6).
         counters: Vec<(CounterKind, u32)>,
+        /// The face it is put onto the stack or battlefield with (CR 712.8–712.11); 0 for
+        /// the default: the front face, or from the stack the face that was up there.
+        face: u8,
         /// It enters as a copy (CR 707.5): these are its copiable values.
         copy: Option<Box<crate::copy::Copiable>>,
     },
@@ -41,9 +44,11 @@ pub enum GameAction {
     CreateToken {
         token: CardDefId,
         controller: PlayerId,
+        /// How it enters, as replacement effects modified it (CR 614.1c–d, 111.6).
+        tapped: bool,
+        counters: Vec<(CounterKind, u32)>,
         /// A token that's a copy (CR 707, 111.3): its copiable values.
         copy: Option<Box<crate::copy::Copiable>>,
-        tapped: bool,
     },
     /// CR 707.4: a permanent becomes a copy — these are its copiable values from now on.
     BecomeCopy {
@@ -146,6 +151,15 @@ pub enum GameAction {
     },
     Tap {
         object: ObjectId,
+    },
+    /// CR 701.27: a double-faced permanent turns over.
+    Transform {
+        object: ObjectId,
+    },
+    /// CR 716.3d: an Adventure spell is resolving: once exiled, `player` may cast it.
+    SendOnAdventure {
+        spell: ObjectId,
+        player: PlayerId,
     },
     Untap {
         object: ObjectId,
@@ -259,6 +273,12 @@ pub enum GameAction {
     RemoveFromCombat {
         object: ObjectId,
     },
+    /// CR 601.2b: the spell is being cast with this alternative cost (an ability of its
+    /// card).
+    SetCastAlt {
+        object: ObjectId,
+        ability: card_model::AbilityId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -280,14 +300,16 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             controller,
             tapped,
             counters,
+            face,
             copy,
         } => {
-            let new = perform_move(st, object, to, position, controller);
+            let new = perform_move(st, object, to, position, controller, face);
             if to == Zone::Battlefield {
                 let o = st.object_mut(new);
                 o.tapped = tapped;
                 for (kind, n) in counters {
-                    *o.counters.entry(kind).or_default() += n;
+                    let have = o.counters.entry(kind).or_default();
+                    *have = have.saturating_add(n);
                 }
                 // CR 707.5: it entered as a copy; it never was anything else here.
                 if let Some(values) = copy {
@@ -328,8 +350,9 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
         GameAction::CreateToken {
             token,
             controller,
-            copy,
             tapped,
+            counters,
+            copy,
         } => {
             let id = st.alloc_object_id();
             let timestamp = st.alloc_timestamp();
@@ -353,10 +376,19 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                     deathtouch_damage: false,
                     attached_to: None,
                     last_controller: controller,
+                    face: 0,
+                    transforms: 0,
+                    adventure: None,
+                    cast_with: None,
                     copy: copy.clone(),
                     spell_copy: false,
                 },
             );
+            let o = st.object_mut(id);
+            for (kind, n) in counters {
+                let have = o.counters.entry(kind).or_default();
+                *have = have.saturating_add(n);
+            }
             st.zones.battlefield.push(id);
             st.emit(Event::TokenCreated {
                 object: id,
@@ -373,7 +405,8 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
         }
         GameAction::PutCounters { object, kind, n } => {
             if n > 0 {
-                *st.object_mut(object).counters.entry(kind).or_default() += n;
+                let have = st.object_mut(object).counters.entry(kind).or_default();
+                *have = have.saturating_add(n);
                 st.emit(Event::CountersPut { object, kind, n });
             }
             ActionResult::Done
@@ -541,7 +574,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 st.emit(Event::DrewFromEmptyLibrary { player });
                 return ActionResult::Drew(None);
             };
-            let new = perform_move(st, top, Zone::Hand, LibraryPosition::Top, None);
+            let new = perform_move(st, top, Zone::Hand, LibraryPosition::Top, None, 0);
             st.player_mut(player).drawn_this_turn += 1;
             st.emit(Event::Drew { player, card: new });
             ActionResult::Drew(Some(new))
@@ -551,6 +584,22 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             st.rng.shuffle(&mut lib);
             st.zones.libraries[player.index()] = lib;
             st.emit(Event::Shuffled { player });
+            ActionResult::Done
+        }
+        GameAction::SendOnAdventure { spell, player } => {
+            st.object_mut(spell).adventure = Some(player);
+            ActionResult::Done
+        }
+        GameAction::Transform { object } => {
+            // CR 701.27a: turn it over; CR 613.7g: a new timestamp; CR 701.27c: the same
+            // object, with its counters, damage and attachments.
+            let timestamp = st.alloc_timestamp();
+            let o = st.object_mut(object);
+            o.face = if o.face == 0 { 1 } else { 0 };
+            o.transforms += 1;
+            o.timestamp = timestamp;
+            let face = o.face;
+            st.emit(Event::Transformed { object, face });
             ActionResult::Done
         }
         GameAction::Tap { object } => {
@@ -661,13 +710,14 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 && st.is_commander(source)
             {
                 let card = st.object(source).card_instance;
-                *st.player_mut(p).commander_damage.entry(card).or_default() += amount;
+                let tally = st.player_mut(p).commander_damage.entry(card).or_default();
+                *tally = tally.saturating_add(amount);
             }
             match target {
-                DamageTarget::Player(p) => change_life(st, p, -(amount as i32)),
+                DamageTarget::Player(p) => change_life(st, p, -life_amount(amount)),
                 DamageTarget::Object(o) => {
                     let obj = st.object_mut(o);
-                    obj.damage_marked += amount;
+                    obj.damage_marked = obj.damage_marked.saturating_add(amount);
                     obj.deathtouch_damage |= deathtouch;
                 }
             }
@@ -675,13 +725,13 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
         }
         GameAction::GainLife { player, amount } => {
             if amount > 0 {
-                change_life(st, player, amount as i32);
+                change_life(st, player, life_amount(amount));
             }
             ActionResult::Done
         }
         GameAction::LoseLife { player, amount } => {
             if amount > 0 {
-                change_life(st, player, -(amount as i32));
+                change_life(st, player, -life_amount(amount));
             }
             ActionResult::Done
         }
@@ -724,6 +774,15 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 targets: Vec::new(),
                 sacrificed_power: 0,
                 facts,
+                // Only a double-faced permanent can transform (CR 712.7).
+                source_transforms: st
+                    .objects
+                    .get(&source)
+                    .filter(|o| {
+                        o.zone == Zone::Battlefield && st.catalog.get(o.card).layout.double_faced()
+                    })
+                    .map(|o| o.transforms),
+                alt: None,
             });
             st.emit(Event::AbilityActivated {
                 player: controller,
@@ -746,6 +805,12 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             so.modes = modes;
             so.x = x;
             so.targets = targets;
+            ActionResult::Done
+        }
+        GameAction::SetCastAlt { object, ability } => {
+            if let Some(so) = st.stack.iter_mut().find(|s| s.id == object) {
+                so.alt = Some(ability);
+            }
             ActionResult::Done
         }
         GameAction::RemoveAbility { ability } => {
@@ -786,9 +851,15 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
     }
 }
 
+/// A damage or life amount as a change of a life total. Amounts saturate (doubled
+/// damage, D-073); a life total can't hold more than `i32::MAX`.
+fn life_amount(amount: u32) -> i32 {
+    i32::try_from(amount).unwrap_or(i32::MAX)
+}
+
 fn change_life(st: &mut GameState, p: PlayerId, delta: i32) {
     let ps = st.player_mut(p);
-    ps.life += delta;
+    ps.life = ps.life.saturating_add(delta);
     let life = ps.life;
     st.emit(Event::LifeChanged {
         player: p,
@@ -814,6 +885,34 @@ pub fn move_object(
             controller,
             tapped: false,
             counters: Vec::new(),
+            copy: None,
+            face: 0,
+        },
+    ) {
+        ActionResult::Moved(id) => id,
+        other => unreachable!("move returned {other:?}"),
+    }
+}
+
+/// `move_object`, putting the card onto the stack or battlefield with face `face` up
+/// (CR 712.8b: a modal double-faced card cast with its back face).
+pub fn move_object_face(
+    st: &mut GameState,
+    object: ObjectId,
+    to: Zone,
+    controller: Option<PlayerId>,
+    face: u8,
+) -> ObjectId {
+    match execute(
+        st,
+        GameAction::MoveZone {
+            object,
+            to,
+            position: LibraryPosition::Top,
+            controller,
+            tapped: false,
+            counters: Vec::new(),
+            face,
             copy: None,
         },
     ) {
@@ -859,8 +958,22 @@ fn perform_move(
     to: Zone,
     position: LibraryPosition,
     controller: Option<PlayerId>,
+    face: u8,
 ) -> ObjectId {
+    // CR 702.74a: a permanent spell's alternative cost is known to the permanent it becomes
+    // ("if its evoke cost was paid").
+    let cast_with = match to {
+        Zone::Battlefield => st.stack_object(id).and_then(|s| s.alt),
+        _ => None,
+    };
     let old = detach(st, id);
+    // CR 712.6a: off the stack and battlefield a card has only its front face up. CR
+    // 712.10: a resolving spell becomes a permanent with the face it had on the stack.
+    let face = match to {
+        Zone::Battlefield | Zone::Stack if face != 0 => face,
+        Zone::Battlefield if old.zone == Zone::Stack => old.face,
+        _ => 0,
+    };
     // CR 400.7 (2026-11-06): a new object with no memory of its previous existence.
     let new_id = st.alloc_object_id();
     let timestamp = st.alloc_timestamp();
@@ -886,6 +999,15 @@ fn perform_move(
         deathtouch_damage: false,
         attached_to: None,
         last_controller: controller,
+        face,
+        transforms: 0,
+        // CR 716.3d: what was sent on an Adventure may be cast while it stays exiled.
+        adventure: if old.zone == Zone::Stack && to == Zone::Exile {
+            old.adventure
+        } else {
+            None
+        },
+        cast_with,
         copy: if old.spell_copy && matches!(to, Zone::Battlefield | Zone::Stack) {
             old.copy.clone()
         } else {
@@ -907,6 +1029,8 @@ fn perform_move(
             targets: Vec::new(),
             sacrificed_power: 0,
             facts: Default::default(),
+            source_transforms: None,
+            alt: None,
         });
     } else {
         let list = st.zones.list_mut(to, old.owner);
@@ -967,8 +1091,13 @@ fn leave_game(st: &mut GameState, p: PlayerId) {
         .filter(|&id| crate::layers::controller_of(st, id) == p)
         .collect();
     for id in controlled {
-        perform_move(st, id, Zone::Exile, LibraryPosition::Top, None);
+        perform_move(st, id, Zone::Exile, LibraryPosition::Top, None, 0);
     }
+    // The layered view was worked out (by `controller_of`) before those moves, at this
+    // generation: it is stale now. (Found by the D-069 soak: a reanimated permanent of
+    // another player's, exiled as its controller left, was still in the view.) Dropping
+    // the derived cache leaves the serialized state — and its hash — as it was.
+    st.layer_cache.invalidate();
     // Their mana pool and life no longer matter; priority is handled by the priority frame.
     st.player_mut(p).mana_pool = Default::default();
     st.player_mut(p).restricted_mana.clear();

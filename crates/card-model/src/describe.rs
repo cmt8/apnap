@@ -171,7 +171,10 @@ fn amount(a: &Amount) -> String {
                 PlayerRef::ControllerOf(_) | PlayerRef::TriggeringController => "its controller",
                 PlayerRef::OwnerOf(_) => "its owner",
                 PlayerRef::You => "you",
-                PlayerRef::Each | PlayerRef::EachOpponent => "those players",
+                PlayerRef::Each
+                | PlayerRef::EachOpponent
+                | PlayerRef::NotedControllers
+                | PlayerRef::NotNotedControllers => "those players",
             };
             format!("the number of cards in {who}'s hand")
         }
@@ -181,6 +184,26 @@ fn amount(a: &Amount) -> String {
             Measure::ManaValue => "its mana value",
         }
         .into(),
+        Amount::Noted(cards) if cards.is_empty() => "the number of those cards".into(),
+        Amount::Noted(cards) => format!(
+            "the number of those cards that are {}",
+            join(
+                cards
+                    .iter()
+                    .map(|s| with_article(&card_list(core::slice::from_ref(s), false)))
+                    .collect(),
+                "or"
+            )
+        ),
+        Amount::NotedTotal(what) => format!(
+            "the total {} of those cards",
+            match what {
+                Measure::Power => "power",
+                Measure::Toughness => "toughness",
+                Measure::ManaValue => "mana value",
+            }
+        ),
+        Amount::LifeLostThisWay => "the life lost this way".into(),
     }
 }
 
@@ -217,6 +240,59 @@ fn target_filter_words(f: &TargetFilter) -> String {
     }
 }
 
+/// "an opponent or a permanent an opponent controls".
+fn damaged(to: &DamageTo) -> String {
+    match to {
+        DamageTo::Anything => "a permanent or player".to_string(),
+        DamageTo::Player(Who::Any) => "a player".to_string(),
+        DamageTo::Player(Who::You) => "you".to_string(),
+        DamageTo::Player(Who::Opponent) => "an opponent".to_string(),
+        DamageTo::Permanent(ObjFilter::Matching(s)) => with_article(&selector(s, false)),
+        DamageTo::Permanent(f) => obj_filter(f),
+        DamageTo::Either { player, permanent } => format!(
+            "{} or {}",
+            damaged(&DamageTo::Player(*player)),
+            damaged(&DamageTo::Permanent(permanent.clone()))
+        ),
+    }
+}
+
+/// "If an effect would create one or more creature tokens under your control".
+fn tokens_would(token: &Selector, effect_only: bool) -> String {
+    let kind = spell_kind(token);
+    let tokens = if kind.is_empty() {
+        "tokens".to_string()
+    } else {
+        format!("{kind} tokens")
+    };
+    let whose = match token.controller {
+        Who::Any => "",
+        Who::You => " under your control",
+        Who::Opponent => " under an opponent's control",
+    };
+    if effect_only {
+        format!("If an effect would create one or more {tokens}{whose}")
+    } else {
+        format!("If one or more {tokens} would be created{whose}")
+    }
+}
+
+/// "twice that many", "that many plus 1", "half that much, rounded down".
+fn scaled(c: Calc, v: &str) -> String {
+    match c {
+        Calc::Plus(n) => format!("{v} plus {n}"),
+        Calc::Minus(n) => format!("{v} minus {n}"),
+        Calc::From(n) => format!("{n} minus {v}"),
+        Calc::Times(2) => format!("twice {v}"),
+        Calc::Times(3) => format!("three times {v}"),
+        Calc::Times(n) => format!("{n} times {v}"),
+        Calc::HalfUp => format!("half {v}, rounded up,"),
+        Calc::HalfDown => format!("half {v}, rounded down,"),
+        Calc::AtMost(n) => format!("{v} (at most {n})"),
+        Calc::AtLeast(n) => format!("{v} (at least {n})"),
+    }
+}
+
 fn with_article(s: &str) -> String {
     let vowel = s.starts_with(['a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U']);
     if s.starts_with("another ") {
@@ -231,6 +307,12 @@ fn with_article(s: &str) -> String {
 /// "creature", "noncreature", "instant or sorcery", "blue Wizard".
 fn spell_kind(s: &Selector) -> String {
     let mut words: Vec<String> = Vec::new();
+    words.extend(
+        s.not_supertypes
+            .iter()
+            .map(|t| format!("non{}", format!("{t:?}").to_lowercase())),
+    );
+    words.extend(s.supertypes.iter().map(|t| format!("{t:?}").to_lowercase()));
     // Each list is "at least one of".
     if !s.colors.is_empty() {
         words.push(join(
@@ -282,6 +364,7 @@ fn obj(mode: &Mode, r: ObjRef) -> String {
         ObjRef::Triggering => "it".into(),
         ObjRef::ThisCard => "this card".into(),
         ObjRef::TriggeringCard => "that card".into(),
+        ObjRef::Noted => "those cards".into(),
         // `rules_text` says "equipped" for an Equipment.
         ObjRef::Host => "enchanted creature".into(),
     }
@@ -344,6 +427,8 @@ fn player(mode: &Mode, r: PlayerRef) -> String {
         PlayerRef::TriggeringPlayer => "that player".into(),
         PlayerRef::ControllerOf(_) => "its controller".into(),
         PlayerRef::OwnerOf(_) => "its owner".into(),
+        PlayerRef::NotedControllers => "their controllers".into(),
+        PlayerRef::NotNotedControllers => "each player who controlled none of those cards".into(),
     }
 }
 
@@ -418,6 +503,15 @@ fn selector(s: &Selector, plural: bool) -> String {
     if s.token == Some(true) {
         out.push_str(if plural { " tokens" } else { " token" });
     }
+    match s.has_adventure {
+        Some(true) => out.push_str(if plural {
+            " that have an Adventure"
+        } else {
+            " that has an Adventure"
+        }),
+        Some(false) => out.push_str(" without an Adventure"),
+        None => {}
+    }
     for k in &s.keywords {
         out.push_str(&format!(" with {}", keyword(*k)));
     }
@@ -439,6 +533,7 @@ fn selector(s: &Selector, plural: bool) -> String {
     if !s.names.is_empty() {
         out.push_str(&format!(" named {}", s.names.join(" or ")));
     }
+    out.push_str(noted(s.noted));
     match s.owner {
         Who::Any => {}
         Who::You => out.push_str(" you own"),
@@ -821,6 +916,27 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 amount(a)
             ),
         },
+        Effect::AddManaOf { who, of, amount: a } => {
+            let kind = if of.len() == 5 {
+                "any one color".to_string()
+            } else {
+                join(of.iter().map(|t| t.symbol().to_string()).collect(), "or")
+            };
+            let add = verb(&player(mode, *who), "add", "adds");
+            match a {
+                Amount::Fixed(1) if of.len() == 5 => format!("{add} one mana of any color"),
+                Amount::Fixed(1) => format!("{add} {kind}"),
+                Amount::Fixed(n) => format!("{add} {n} mana of {kind}"),
+                a => format!("{add} X mana of {kind}, where X is {}", amount(a)),
+            }
+        }
+        Effect::GainLife {
+            who,
+            amount: Amount::LifeLostThisWay,
+        } => format!(
+            "{} life equal to the life lost this way",
+            verb(&player(mode, *who), "gain", "gains"),
+        ),
         Effect::GainLife { who, amount: a } => {
             format!(
                 "{} {} life",
@@ -918,6 +1034,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
         ),
         Effect::SetX(a) => format!("X is {}", amount(a)),
         Effect::Tap { what } => format!("tap {}", obj(mode, *what)),
+        Effect::Transform { what } => format!("transform {}", obj(mode, *what)),
         Effect::Untap { what } => format!("untap {}", obj(mode, *what)),
         Effect::TapAll(s) => format!("tap all {}", selector(s, true)),
         Effect::UntapAll(s) => format!("untap all {}", selector(s, true)),
@@ -954,6 +1071,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             )
         }
         Effect::SacrificeThis => "sacrifice this permanent".to_string(),
+        Effect::ControllerSacrificesThis => "its controller sacrifices it".to_string(),
         Effect::AttachThis { to } => format!("attach this permanent to {}", obj(mode, *to)),
         Effect::May(inner) => {
             let text = effect(mode, inner);
@@ -969,6 +1087,10 @@ fn effect(mode: &Mode, e: &Effect) -> String {
         }
         Effect::IfDone { first, then } => {
             format!("{}. If you do, {}", effect(mode, first), effect(mode, then))
+        }
+        Effect::Proliferate => "proliferate".to_string(),
+        Effect::UntapChosen { what, count } => {
+            format!("untap up to {} {}", amount(count), selector(what, true))
         }
         // "Its controller may draw a card": the instruction in the decider's own words.
         Effect::PlayerMay { who, effect: inner } => {
@@ -1059,15 +1181,25 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                     if *reveal {
                         t.push_str(&format!(", reveal {it}"));
                     }
-                    t.push_str(&format!(", put {it} {}", dest(*to, their)));
+                    if *to != CardDest::Stay {
+                        t.push_str(&format!(", put {it} {}", dest(*to, their)));
+                    }
                     t
+                }
+                // Choosing among cards found before: no new search.
+                CardZone::Library
+                    if !cards.is_empty() && cards.iter().all(|c| c.noted == Some(true)) =>
+                {
+                    format!("{who} {} {what} {}", s("put"), dest(*to, their))
                 }
                 CardZone::Library => {
                     let mut t = format!("{who} {} {their} library for {what}", s("search"));
                     if *reveal {
                         t.push_str(&format!(", {} {it}", s("reveal")));
                     }
-                    t.push_str(&format!(", {} {it} {}", s("put"), dest(*to, their)));
+                    if *to != CardDest::Stay {
+                        t.push_str(&format!(", {} {it} {}", s("put"), dest(*to, their)));
+                    }
                     t
                 }
                 CardZone::Hand | CardZone::Graveyard => {
@@ -1220,7 +1352,14 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                     let text = if part.starts_with('{') {
                         format!("pay {part}")
                     } else {
-                        part.to_lowercase()
+                        // "Return two Forests …" → "return two Forests …".
+                        let mut chars = part.chars();
+                        chars
+                            .next()
+                            .into_iter()
+                            .flat_map(|c| c.to_lowercase())
+                            .chain(chars)
+                            .collect()
                     };
                     parts.push(match (third, text.split_once(' ')) {
                         (true, Some((v, rest))) => format!("{v}s {rest}"),
@@ -1253,13 +1392,31 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 format!("put this spell {}", dest(*to, "its owner's"))
             }
         }
-        Effect::PutInto { what, to, shuffle } => {
+        Effect::PutInto {
+            what,
+            to,
+            shuffle,
+            controller,
+        } => {
             if *shuffle {
                 format!("shuffle {} into its owner's library", obj(mode, *what))
             } else {
-                format!("put {} {}", obj(mode, *what), dest(*to, "its owner's"))
+                let under = match controller {
+                    None => String::new(),
+                    Some(PlayerRef::You) => " under your control".to_string(),
+                    Some(p) => format!(" under the control of {}", player(mode, *p)),
+                };
+                format!(
+                    "put {} {}{under}",
+                    obj(mode, *what),
+                    dest(*to, "its owner's")
+                )
             }
         }
+        // What the instruction does is what it says; the instructions after it say
+        // "those cards".
+        Effect::Note(inner) => effect(mode, inner),
+        Effect::If { test, then } => format!("{}, {}", condition(test), effect(mode, then)),
         Effect::MoveAll {
             from,
             whose,
@@ -1317,6 +1474,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 CardDest::LibraryBottom => {
                     format!("put {what} on the bottom of their owners' libraries")
                 }
+                CardDest::Stay => format!("leave {what} where they are"),
             };
             if *shuffle && *to != CardDest::LibraryTop {
                 out.push_str(", then those players shuffle");
@@ -1336,6 +1494,7 @@ fn dest(to: CardDest, whose: &str) -> String {
         CardDest::Exile => "into exile".to_string(),
         CardDest::LibraryTop => format!("on top of {whose} library"),
         CardDest::LibraryBottom => format!("on the bottom of {whose} library"),
+        CardDest::Stay => "where they are".to_string(),
     }
 }
 
@@ -1368,6 +1527,11 @@ fn card_list(cards: &[Selector], plural: bool) -> String {
             if !s.types.is_empty() {
                 words.push(types(&s.types, "or"));
             }
+            match s.token {
+                Some(true) => words.push("token".to_string()),
+                Some(false) => words.insert(0, "nontoken".to_string()),
+                None => {}
+            }
             words.push(noun.to_string());
             let mut out = words.join(" ");
             for k in &s.keywords {
@@ -1379,10 +1543,23 @@ fn card_list(cards: &[Selector], plural: bool) -> String {
             if let Some(t) = s.toughness_min {
                 out.push_str(&format!(" with toughness {t} or greater"));
             }
+            if let Some(p) = s.power_max {
+                out.push_str(&format!(" with power {p} or less"));
+            }
+            if let Some(t) = s.toughness_max {
+                out.push_str(&format!(" with toughness {t} or less"));
+            }
             out.push_str(&mana_value(s));
             if !s.names.is_empty() {
                 out.push_str(&format!(" named {}", s.names.join(" or ")));
             }
+            match s.has_adventure {
+                Some(true) if plural => out.push_str(" that have an Adventure"),
+                Some(true) => out.push_str(" that has an Adventure"),
+                Some(false) => out.push_str(" without an Adventure"),
+                None => {}
+            }
+            out.push_str(noted(s.noted));
             match s.controller {
                 Who::Any => {}
                 Who::You => out.push_str(" you own"),
@@ -1392,6 +1569,15 @@ fn card_list(cards: &[Selector], plural: bool) -> String {
         })
         .collect();
     join(parts, "or")
+}
+
+/// " among those cards" / " other than those cards" (empty if the selector doesn't ask).
+fn noted(n: Option<bool>) -> &'static str {
+    match n {
+        None => "",
+        Some(true) => " among those cards",
+        Some(false) => " other than those cards",
+    }
 }
 
 /// " with mana value 3 or less" (empty if the selector doesn't ask).
@@ -1456,6 +1642,31 @@ fn capitalize(s: &str) -> String {
 }
 
 fn cost(c: &Cost) -> String {
+    cost_parts(c).join(", ")
+}
+
+/// A card in a hand by what is asked of it: "a green card", "a nonland card", "an Island
+/// card".
+fn hand_card_noun(s: &Selector) -> String {
+    let mut words: Vec<String> = Vec::new();
+    for c in &s.not_colors {
+        words.push(format!("non{}", color(*c)));
+    }
+    if !s.colors.is_empty() {
+        words.push(join(
+            s.colors.iter().map(|c| color(*c).to_string()).collect(),
+            "or",
+        ));
+    }
+    for t in &s.not_types {
+        words.push(format!("non{}", card_type(*t)));
+    }
+    words.push(card_noun(s));
+    words.join(" ")
+}
+
+/// The parts of a cost, each as an instruction ("Sacrifice a creature", "Pay 2 life").
+fn cost_parts(c: &Cost) -> Vec<String> {
     let mut parts = Vec::new();
     if let Some(m) = &c.mana {
         parts.push(m.to_text());
@@ -1496,13 +1707,101 @@ fn cost(c: &Cost) -> String {
     if c.life > 0 {
         parts.push(format!("Pay {} life", c.life));
     }
+    if c.life_x {
+        parts.push("Pay X life".to_string());
+    }
     if c.discard_self {
         parts.push("Discard this card".to_string());
     }
     if c.exile_self {
         parts.push("Exile this card from your graveyard".to_string());
     }
-    parts.join(", ")
+    if let Some(e) = &c.exile_from_hand {
+        let what = join(e.what.iter().map(hand_card_noun).collect(), "or");
+        parts.push(if e.count == 1 {
+            format!("Exile {} from your hand", with_article(&what))
+        } else {
+            format!("Exile {} {what}s from your hand", number_word(e.count))
+        });
+    }
+    if let Some(r) = &c.return_to_hand {
+        let mut what: Vec<String> = Vec::new();
+        for s in &r.what {
+            let mut s = s.clone();
+            s.controller = Who::You;
+            what.push(selector(&s, r.count != 1));
+        }
+        let what = join(what, "or");
+        parts.push(if r.count == 1 {
+            format!("Return {} to its owner's hand", with_article(&what))
+        } else {
+            format!(
+                "Return {} {what} to their owner's hand",
+                number_word(r.count)
+            )
+        });
+    }
+    parts
+}
+
+/// A cost as words inside a sentence: "pay {U}", "exile a green card from your hand",
+/// "pay {1} and return a basic land you control to its owner's hand".
+fn cost_words(c: &Cost) -> String {
+    let mut parts = Vec::new();
+    if let Some(m) = &c.mana {
+        parts.push(format!("pay {}", m.to_text()));
+    }
+    let rest = Cost {
+        mana: None,
+        ..c.clone()
+    };
+    for p in cost_parts(&rest) {
+        let mut chars = p.chars();
+        let first: String = chars
+            .next()
+            .into_iter()
+            .flat_map(|c| c.to_lowercase())
+            .collect();
+        parts.push(first + chars.as_str());
+    }
+    join(parts, "and")
+}
+
+/// "Flashback {2}{R}", "Evoke—Exile a white card from your hand".
+fn keyword_cost(name: &str, c: &Cost) -> String {
+    let rest = Cost {
+        mana: None,
+        ..c.clone()
+    };
+    match (&c.mana, rest == Cost::default()) {
+        (Some(m), true) => format!("{name} {}", m.to_text()),
+        (None, true) => format!("{name} {{0}}"),
+        // "Flashback—{1}{G}, Pay 3 life", "Evoke—Exile a white card from your hand".
+        _ => format!("{name}\u{2014}{}", cost(c)),
+    }
+}
+
+fn alt_cost(a: &crate::AltCost) -> String {
+    match &a.kind {
+        crate::AltKind::Rather => {
+            let free = a.cost == Cost::default();
+            let text = if free {
+                "you may cast this spell without paying its mana cost".to_string()
+            } else {
+                format!(
+                    "you may {} rather than pay this spell's mana cost",
+                    cost_words(&a.cost)
+                )
+            };
+            match &a.only_if {
+                Some(c) => format!("{}, {text}.", capitalize(&condition(c))),
+                None => format!("{}.", capitalize(&text)),
+            }
+        }
+        crate::AltKind::Flashback => keyword_cost("Flashback", &a.cost),
+        crate::AltKind::Evoke => keyword_cost("Evoke", &a.cost),
+        crate::AltKind::Overload(_) => keyword_cost("Overload", &a.cost),
+    }
 }
 
 fn who_possessive(w: Who) -> &'static str {
@@ -1636,6 +1935,7 @@ fn trigger(t: &Trigger) -> String {
                 DamageTo::Player(Who::You) => " to you".to_string(),
                 DamageTo::Player(Who::Opponent) => " to an opponent".to_string(),
                 DamageTo::Permanent(f) => format!(" to {}", obj_filter(f)),
+                DamageTo::Either { .. } => format!(" to {}", damaged(to)),
             };
             match (by, per) {
                 // "Whenever this creature is dealt damage".
@@ -1647,6 +1947,9 @@ fn trigger(t: &Trigger) -> String {
                     }
                     DamageTo::Player(Who::Any) => format!("Whenever a player is dealt {kind}"),
                     DamageTo::Anything => format!("Whenever {kind} is dealt"),
+                    DamageTo::Either { .. } => {
+                        format!("Whenever {} is dealt {kind}", damaged(to))
+                    }
                 },
                 (Some(ObjFilter::Matching(s)), DamagePer::Recipient) => format!(
                     "Whenever one or more {} deal {kind}{whom}",
@@ -1778,6 +2081,9 @@ fn condition(c: &Condition) -> String {
                 Who::Any => format!("if there is {things} on the battlefield"),
             }
         }
+        Condition::ControlCommander { own: false } => "if you control a commander".to_string(),
+        Condition::ControlCommander { own: true } => "if you control your commander".to_string(),
+        Condition::CastFor(crate::AltKindName::Evoke) => "if its evoke cost was paid".to_string(),
     }
 }
 
@@ -1849,8 +2155,9 @@ fn ability(a: &AbilityDef) -> String {
             produce,
             only_if,
             spend,
+            then,
         } => format!(
-            "{}: Add {}.{}{}",
+            "{}: Add {}.{}{}{}",
             cost(c),
             match produce {
                 ManaProduce::One(t) => t.symbol().to_string(),
@@ -1867,7 +2174,50 @@ fn ability(a: &AbilityDef) -> String {
                         join(of.iter().map(|t| t.symbol().to_string()).collect(), "or")
                     ),
                 },
+                ManaProduce::Fixed(v) => v.iter().map(|t| t.symbol()).collect::<String>(),
+                ManaProduce::Combination { of, count } if of.len() == 5 =>
+                    format!("{} mana in any combination of colors", count),
+                ManaProduce::Combination { of, count } => format!(
+                    "{} mana in any combination of {}",
+                    count,
+                    join(
+                        of.iter().map(|t| t.symbol().to_string()).collect(),
+                        "and/or"
+                    )
+                ),
+                ManaProduce::Counted { of, amount: a } => match (of.as_slice(), a) {
+                    ([t], Amount::Count(s)) =>
+                        format!("{} for each {}", t.symbol(), selector(s, false)),
+                    ([t], a) => format!("an amount of {} equal to {}", t.symbol(), amount(a)),
+                    _ if of.len() == 5 =>
+                        format!("X mana of any one color, where X is {}", amount(a)),
+                    _ => format!(
+                        "X mana of one of {}, where X is {}",
+                        join(of.iter().map(|t| t.symbol().to_string()).collect(), "or"),
+                        amount(a)
+                    ),
+                },
+                ManaProduce::Reflected { from, types } => format!(
+                    "one mana of any {} that {} could produce",
+                    if *types { "type" } else { "color" },
+                    {
+                        let what = selector(from, false);
+                        let an = what.starts_with(['a', 'e', 'i', 'o', 'u']);
+                        format!("{} {what}", if an { "an" } else { "a" })
+                    }
+                ),
             },
+            then.as_ref().map_or(String::new(), |e| {
+                let text = effect(
+                    &Mode {
+                        targets: Vec::new(),
+                        groups: Vec::new(),
+                        effect: Effect::Seq(Vec::new()),
+                    },
+                    e,
+                );
+                format!(" {}.", capitalize(&text))
+            }),
             spend.as_ref().map_or(String::new(), |r| {
                 let mut uses: Vec<String> = Vec::new();
                 if !r.spells.is_empty() {
@@ -1883,6 +2233,14 @@ fn ability(a: &AbilityDef) -> String {
                             r.abilities.iter().map(|s| selector(s, true)).collect(),
                             "or"
                         )
+                    ));
+                }
+                if r.sources.iter().any(|s| *s == Selector::default()) {
+                    uses.push("activate an ability".to_string());
+                } else if !r.sources.is_empty() {
+                    uses.push(format!(
+                        "activate abilities of {} sources",
+                        join(r.sources.iter().map(spell_kind).collect(), "or")
                     ));
                 }
                 format!(" Spend this mana only to {}.", join(uses, "or"))
@@ -1944,6 +2302,7 @@ fn ability(a: &AbilityDef) -> String {
                 Some(false) => "noncombat damage",
                 None => "damage",
             };
+            let dealt_to = damaged(to);
             let to = match to {
                 DamageTo::Anything => String::new(),
                 DamageTo::Player(Who::Any) => " to players".to_string(),
@@ -1953,6 +2312,15 @@ fn ability(a: &AbilityDef) -> String {
                     format!(" to {}", selector(s, true))
                 }
                 DamageTo::Permanent(f) => format!(" to {}", obj_filter(f)),
+                DamageTo::Either { .. } => format!(" to {}", damaged(to)),
+            };
+            let source = match by {
+                None => "a source".to_string(),
+                Some(ObjFilter::Matching(s)) if s.types.is_empty() && s.subtypes.is_empty() => {
+                    with_article(&selector(s, false).replacen("permanent", "source", 1))
+                }
+                Some(ObjFilter::Matching(s)) => with_article(&selector(s, false)),
+                Some(f) => obj_filter(f),
             };
             let by = match by {
                 None => String::new(),
@@ -1963,6 +2331,20 @@ fn ability(a: &AbilityDef) -> String {
                 ReplaceWith::Prevent => {
                     format!("Prevent all {kind} that would be dealt{to}{by}.")
                 }
+                // "If a source you control would deal damage to an opponent, it deals
+                // double that damage to that player instead."
+                ReplaceWith::Scale(c) => format!(
+                    "If {source} would deal {kind} to {dealt_to}, it deals {} instead.",
+                    match c {
+                        Calc::Times(2) => "double that damage".to_string(),
+                        Calc::Times(3) => "triple that damage".to_string(),
+                        Calc::Plus(n) => format!("that much damage plus {n}"),
+                        Calc::Minus(n) => format!("that much damage minus {n}"),
+                        Calc::HalfDown => "half that damage, rounded down,".to_string(),
+                        Calc::HalfUp => "half that damage, rounded up,".to_string(),
+                        c => format!("{} damage", scaled(*c, "that much")),
+                    }
+                ),
                 other => format!("If {kind} would be dealt{to}{by}: {other:?}."),
             }
         }
@@ -1991,9 +2373,64 @@ fn ability(a: &AbilityDef) -> String {
                 }
                 // Written out by the arm above.
                 Replaces::Damage { .. } => "If damage would be dealt",
+                Replaces::GainLife(w) => match w {
+                    Who::You => "If you would gain life",
+                    Who::Opponent => "If an opponent would gain life",
+                    Who::Any => "If a player would gain life",
+                },
+                Replaces::Tokens { token, effect_only } => {
+                    others = tokens_would(token, *effect_only);
+                    others.as_str()
+                }
+                Replaces::Counters {
+                    on,
+                    kind,
+                    effect_only,
+                } => {
+                    let kind = kind.map_or(String::new(), |k| format!("{} ", counter(k)));
+                    let on = with_article(&selector(on, false));
+                    others = if *effect_only {
+                        format!("If an effect would put one or more {kind}counters on {on}")
+                    } else {
+                        format!("If one or more {kind}counters would be put on {on}")
+                    };
+                    others.as_str()
+                }
             };
             match with {
                 ReplaceWith::Twice => format!("{what}, it does so twice as many instead."),
+                // "If you would gain life, you gain twice that much life instead."
+                ReplaceWith::Scale(c) if matches!(replaces, Replaces::GainLife(_)) => {
+                    let gain = match replaces {
+                        Replaces::GainLife(Who::You) => "you gain",
+                        _ => "that player gains",
+                    };
+                    let much = match c {
+                        Calc::Plus(n) => format!("that much life plus {n}"),
+                        c => format!("{} life", scaled(*c, "that much")),
+                    };
+                    format!("{what}, {gain} {much} instead.")
+                }
+                ReplaceWith::Scale(c) => {
+                    let noun = match replaces {
+                        Replaces::Tokens { .. } => "of those tokens are created",
+                        Replaces::Counters { .. } => "of those counters are put on it",
+                        Replaces::GainLife(_) => "life is gained",
+                        _ => "happen",
+                    };
+                    format!("{what}, {} {noun} instead.", scaled(*c, "that many"))
+                }
+                ReplaceWith::AddTokens { tokens, n } => {
+                    let n = n.map_or("that many".to_string(), |n| n.to_string());
+                    format!(
+                        "{what}, those tokens plus {n} {} token(s) are created instead.",
+                        tokens.join(" and ")
+                    )
+                }
+                ReplaceWith::ReplaceTokens(tokens) => format!(
+                    "{what}, that many {} token(s) are created instead.",
+                    join(tokens.clone(), "and")
+                ),
                 ReplaceWith::Exile => format!("{what}, exile it instead."),
                 ReplaceWith::ShuffleIntoLibrary => {
                     format!("{what}, shuffle it into its owner's library instead.")
@@ -2050,6 +2487,58 @@ fn ability(a: &AbilityDef) -> String {
                 }
             }
         }
+        AbilityDef::CantBeCountered { spells: None } => "This spell can't be countered.".into(),
+        AbilityDef::CantBeCountered { spells: Some(s) } => {
+            // "Creature spells you control can't be countered."
+            let whose = match s.controller {
+                Who::Any => "",
+                Who::You => " you control",
+                Who::Opponent => " your opponents control",
+            };
+            let text = selector(
+                &Selector {
+                    controller: Who::Any,
+                    ..s.clone()
+                },
+                false,
+            );
+            let (kind, with) = match text.find(" with ") {
+                Some(i) => (&text[..i], &text[i..]),
+                None => (text.as_str(), ""),
+            };
+            let kind = kind.replace("permanent", "");
+            let kind = kind.trim();
+            let spells = if kind.is_empty() {
+                "Spells".to_string()
+            } else {
+                format!("{} spells", capitalize(kind))
+            };
+            format!("{spells}{with}{whose} can't be countered.")
+        }
+        AbilityDef::AdditionalTrigger { sources, cause } => {
+            let sources = match sources {
+                ObjFilter::Matching(s) => with_article(&selector(s, false)),
+                f => obj_filter(f),
+            };
+            let cause = cause.as_ref().map(|c| {
+                let (s, verb) = match c {
+                    crate::TriggerCause::Enters(s) => (s, "entering"),
+                    crate::TriggerCause::Dies(s) => (s, "dying"),
+                    crate::TriggerCause::Attacks(s) => (s, "attacking"),
+                };
+                format!("{} {verb}", with_article(&selector(s, false)))
+            });
+            match cause {
+                Some(c) => format!(
+                    "If {c} causes a triggered ability of {sources} to trigger, that ability \
+                     triggers an additional time."
+                ),
+                None => format!(
+                    "If a triggered ability of {sources} triggers, that ability triggers an \
+                     additional time."
+                ),
+            }
+        }
         AbilityDef::CostReduction { spells, amount: n } => {
             // "Colorless spells you cast with mana value 7 or greater cost {1} less".
             let text = selector(spells, false);
@@ -2100,6 +2589,7 @@ fn ability(a: &AbilityDef) -> String {
             }
             format!("As an additional cost to cast this spell, {text}.")
         }
+        AbilityDef::AlternativeCost(a) => alt_cost(a),
         AbilityDef::SelfCostReduction(a) => match a {
             Amount::Fixed(n) => format!("This spell costs {{{n}}} less to cast."),
             other => format!(

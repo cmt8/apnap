@@ -67,6 +67,10 @@ impl Scenario {
                 deathtouch_damage: false,
                 attached_to: None,
                 last_controller: owner,
+                face: 0,
+                transforms: 0,
+                adventure: None,
+                cast_with: None,
                 copy: None,
                 spell_copy: false,
             },
@@ -84,6 +88,8 @@ impl Scenario {
                 targets: Vec::new(),
                 sacrificed_power: 0,
                 facts: Default::default(),
+                source_transforms: None,
+                alt: None,
             });
         } else {
             self.st.zones.list_mut(zone, owner).push(id);

@@ -286,6 +286,12 @@ pub enum Event {
     RemovedFromCombat {
         object: ObjectId,
     },
+    /// CR 701.27a: the permanent turned over; `face` is the face now up. It is the same
+    /// object (CR 701.27c).
+    Transformed {
+        object: ObjectId,
+        face: u8,
+    },
     /// CR 707.4 / 707.5: `object` is now a copy of `card` (it became one, or entered or was
     /// created as one).
     BecameCopy {

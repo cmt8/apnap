@@ -25,6 +25,10 @@ use card_model::{
 };
 use serde::{Deserialize, Serialize};
 
+/// The source of a token's own "enters …" replacement effects (a token that's a copy has
+/// the copied text's, CR 707.5) while it is entering: it isn't an object yet (D-073).
+pub const ENTERING_TOKEN: ObjectId = ObjectId(u32::MAX);
+
 /// One exception of a copy effect (CR 707.9), with the card the copy effect is written on
 /// (an ability it adds is named by that card).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,26 +59,27 @@ impl Copiable {
 }
 
 /// The copiable values of `id` (CR 707.2, 707.3): those of the copy effect it is under, or
-/// what is printed on it.
+/// what is printed on the face that is up (CR 707.8: a double-faced permanent is copied as
+/// the face it shows; the catalog has an entry for each face, D-071).
 pub fn values(st: &GameState, id: ObjectId) -> Copiable {
-    of_object(st.object(id))
+    of_object(&st.catalog, st.object(id))
 }
 
 /// [`values`] of an object at hand.
-pub fn of_object(o: &GameObject) -> Copiable {
+pub fn of_object(catalog: &CardCatalog, o: &GameObject) -> Copiable {
     match &o.copy {
         Some(c) => (**c).clone(),
         None => Copiable {
-            card: o.card,
+            card: catalog.face(o.card, o.face),
             except: Vec::new(),
         },
     }
 }
 
-/// The card whose printed text `id` has: for a copy, the card it copies.
+/// The card (face) whose printed text `id` has: for a copy, the card it copies.
 pub fn text_card(st: &GameState, id: ObjectId) -> CardDefId {
     let o = st.object(id);
-    o.copy.as_ref().map_or(o.card, |c| c.card)
+    o.copy.as_ref().map_or_else(|| st.face_card(id), |c| c.card)
 }
 
 /// [`text_card`]'s definition.
@@ -83,11 +88,13 @@ pub fn text_def(st: &GameState, id: ObjectId) -> &CardDef {
 }
 
 /// The characteristics `id` starts the layer walk with (CR 613.1, 613.2a): its copiable
-/// values, before any other effect.
-pub fn base(st: &GameState, id: ObjectId, controller: PlayerId) -> Characteristics {
+/// values, before any other effect — for an object that is no copy, its face `face`.
+/// (A copy of the back face of a transforming card has no mana cost: mana value 0,
+/// CR 202.3b.)
+pub fn base(st: &GameState, id: ObjectId, face: u8, controller: PlayerId) -> Characteristics {
     let o = st.object(id);
     match &o.copy {
-        None => Characteristics::printed(o.card, st.card_def(id), controller),
+        None => Characteristics::of_face(st, id, face, controller),
         Some(c) => characteristics(&st.catalog, c, controller),
     }
 }
@@ -195,25 +202,6 @@ pub(crate) fn token_extras(st: &mut GameState, c: &crate::replacement::TokenCopy
             },
         );
     }
-}
-
-/// Does a permanent with these copiable values enter tapped by its own text ("this land
-/// enters tapped", CR 614.1c)? For a token copy, which isn't moved onto the battlefield:
-/// its own "enters" replacement effects that need no choice still apply as it is created
-/// (CR 707.5, 614.12).
-pub(crate) fn enters_tapped(catalog: &CardCatalog, v: &Copiable, controller: PlayerId) -> bool {
-    characteristics(catalog, v, controller)
-        .abilities
-        .iter()
-        .any(|a| {
-            matches!(
-                catalog.ability(*a),
-                AbilityDef::Replacement {
-                    replaces: card_model::Replaces::ThisEnters,
-                    with: card_model::ReplaceWith::EntersTapped,
-                }
-            )
-        })
 }
 
 /// Is `id` a card (CR 108.2)? Not a token (CR 111.6) nor a copy of a spell (CR 707.10).

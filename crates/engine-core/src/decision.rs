@@ -121,6 +121,16 @@ pub enum ChoiceKind {
         ability: AbilityId,
         tapped: bool,
     },
+    /// CR 601.2h: choose the cards to exile from your hand for a cost (PickN over `Card`).
+    ExileFromHand,
+    /// CR 601.2h: choose the permanents to return to their owner's hand for a cost.
+    ReturnToHand,
+    /// "Untap up to N lands": choose the permanents to untap (PickN over
+    /// `OptionDesc::Card`, tapped permanents only).
+    Untap,
+    /// CR 701.34a: proliferate — choose any number of the permanents that have a counter
+    /// (PickN over `OptionDesc::Card`).
+    Proliferate,
 }
 
 /// A structured description of one option. Frames read the chosen option back from the
@@ -208,6 +218,27 @@ pub enum OptionDesc {
     /// A recipient of divided damage.
     DamageRecipient {
         object: ObjectId,
+    },
+    /// Play face `face` (not the front) of a card as a land (CR 712.9: a modal
+    /// double-faced card's land face). `PlayLand` plays the front face.
+    PlayLandFace {
+        card: ObjectId,
+        face: u8,
+    },
+    /// Cast face `face` (not the front) of a card (CR 712.8b). `CastSpell` casts the front
+    /// face.
+    CastFace {
+        card: ObjectId,
+        face: u8,
+    },
+    /// Cast `card` with its alternative cost `ability` (CR 118.9, 601.2b): "without paying
+    /// its mana cost", flashback, evoke, overload. Offered right after `CastSpell` for the
+    /// same card, in printed order.
+    CastWith {
+        card: ObjectId,
+        /// The face being cast (0: the front, as for `CastSpell`; else as for `CastFace`).
+        face: u8,
+        ability: AbilityId,
     },
 }
 

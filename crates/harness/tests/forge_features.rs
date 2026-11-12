@@ -1699,8 +1699,9 @@ fn mana_abilities_with_a_choice_of_type_or_several_mana() {
     assert_eq!(mana_pool(&s, P0), 0);
 }
 
-// What isn't compiled: different mana from one activation ("{W}{U}"), and several mana "in
-// any combination".
+// Different mana from one activation ("{W}{U}"), several mana "in any combination", mana
+// abilities that cost mana or a sacrifice of something else: compiled since D-066 (their
+// meaning is tested in forge_mana.rs). Two sacrifices at once are not.
 #[test]
 fn mana_forms_not_compiled() {
     let rock = |mana: &str| {
@@ -1708,22 +1709,17 @@ fn mana_forms_not_compiled() {
             "Name:Test Prism Rock\nManaCost:2\nTypes:Artifact\nA:AB$ Mana | Cost$ T | {mana} | SpellDescription$ Text.\nOracle:Text."
         )
     };
+    for ok in [
+        rock("Produced$ W U"),
+        rock("Produced$ Combo W U | Amount$ 2"),
+        rock("Produced$ W").replace("Cost$ T", "Cost$ 1 T"),
+        rock("Produced$ W").replace("Cost$ T", "Cost$ T Sac<1/Creature>"),
+    ] {
+        assert_eq!(forge_test_blockers(&ok), [] as [&str; 0], "{ok}");
+    }
     assert_eq!(
-        forge_test_blockers(&rock("Produced$ W U")),
-        ["Mana:produced"]
-    );
-    assert_eq!(
-        forge_test_blockers(&rock("Produced$ Combo W U | Amount$ 2")),
-        ["Mana:produced"]
-    );
-    // A mana ability that costs mana, or a sacrifice of something else.
-    assert_eq!(
-        forge_test_blockers(&rock("Produced$ W").replace("Cost$ T", "Cost$ 1 T")),
-        ["Mana:cost"]
-    );
-    assert_eq!(
-        forge_test_blockers(&rock("Produced$ W").replace("Cost$ T", "Cost$ T Sac<1/Creature>")),
-        ["Mana:cost"]
+        forge_test_blockers(&rock("Produced$ W").replace("Cost$ T", "Cost$ T Sac<2/Creature>")),
+        ["Mana:cost sacrifice N"]
     );
 }
 
@@ -2513,7 +2509,7 @@ fn other_permanents_enter_with_counters_for_each() {
     // "As this enters, choose …" is the same keyword with another effect: not compiled.
     let banner = "Name:Test Banner\nManaCost:3\nTypes:Artifact\nK:ETBReplacement:Other:ChooseColor\n\
         SVar:ChooseColor:DB$ ChooseColor | Defined$ You | SpellDescription$ Text.\nOracle:Text.";
-    assert_eq!(forge_test_blockers(banner), ["kw:ETBReplacement"]);
+    assert_eq!(forge_test_blockers(banner), ["kw:ETBReplacement as this enters, choose (ChooseColor)"]);
 }
 
 // ---------------------------------------------------------------------------------------

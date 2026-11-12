@@ -20,7 +20,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use card_model::{
     AbilityDef, AbilityId, CardDefId, Condition, DamagePer, DamageTo, ObjFilter, Selector, Trigger,
-    TriggerStep, Who,
+    TriggerCause, TriggerStep, Who,
 };
 use serde::{Deserialize, Serialize};
 
@@ -99,7 +99,7 @@ pub(crate) fn snapshot(st: &GameState, id: ObjectId) -> Lki {
     let o = st.object(id);
     let (attacking, blocking) = crate::layers::combat_role(st, id);
     Lki {
-        card: o.card,
+        card: st.face_card(id),
         chars: chars(st, id),
         controller: crate::layers::controller_of(st, id),
         owner: o.owner,
@@ -167,6 +167,13 @@ pub(crate) fn condition_holds(
             crate::layers::count_amount(st, amount, source, controller),
             *n,
         ),
+        // CR 903.3d: a permanent on the battlefield that is a commander.
+        Some(Condition::ControlCommander { own }) => st.zones.battlefield.iter().any(|&id| {
+            st.is_commander(id)
+                && crate::layers::controller_of(st, id) == controller
+                && (!own || st.object(id).owner == controller)
+        }),
+        Some(Condition::CastFor(kind)) => crate::frames::altcost::cast_for(st, source, *kind),
     }
 }
 
@@ -205,7 +212,7 @@ fn battlefield_sources(st: &GameState) -> Vec<Source<'_>> {
         .iter()
         .map(|&id| Source {
             id,
-            card: st.object(id).card,
+            card: st.face_card(id),
             controller: crate::layers::controller_of(st, id),
             abilities: abilities(st, id),
             lki: None,
@@ -215,12 +222,150 @@ fn battlefield_sources(st: &GameState) -> Vec<Source<'_>> {
 }
 
 fn queue_matching(st: &mut GameState, found: Vec<PendingTrigger>, conds: Vec<Option<Condition>>) {
-    for (t, c) in found.into_iter().zip(conds) {
+    let causes = alloc::vec![Cause::Other; found.len()];
+    queue_caused(st, found, conds, causes, &BTreeMap::new());
+}
+
+/// What made a triggered ability trigger, as far as an effect that makes abilities trigger
+/// an additional time can ask (CR 603.2d, `AbilityDef::AdditionalTrigger`).
+#[derive(Clone, Debug)]
+pub(crate) enum Cause {
+    /// Anything else (a step beginning, a spell cast, damage, …).
+    Other,
+    /// This permanent entering the battlefield.
+    Entered(ObjectId),
+    /// This permanent (now gone, in the batch's last known information) dying.
+    Died(ObjectId),
+    /// These creatures being declared as attackers.
+    Attacked(Vec<ObjectId>),
+}
+
+/// Queue triggered abilities whose intervening "if" holds (CR 603.4), each as many times
+/// as it triggers (CR 603.2d): once, plus once for each effect that makes it trigger an
+/// additional time. `lki`: what left the battlefield in the batch, for causes and sources
+/// that look back in time (CR 603.10a).
+fn queue_caused(
+    st: &mut GameState,
+    found: Vec<PendingTrigger>,
+    conds: Vec<Option<Condition>>,
+    causes: Vec<Cause>,
+    lki: &BTreeMap<ObjectId, Lki>,
+) {
+    for ((t, c), cause) in found.into_iter().zip(conds).zip(causes) {
         // CR 603.4: the intervening "if" must be true when the trigger event occurs.
         if condition_holds(st, c.as_ref(), t.controller, t.source) {
+            let times = 1 + additional_times(st, &t, &cause, lki);
+            for _ in 1..times {
+                queue(st, t.clone());
+            }
             queue(st, t);
         }
     }
+}
+
+/// How many effects make `t` trigger an additional time (CR 603.2d): abilities of
+/// permanents on the battlefield — and, when what made it trigger is a permanent leaving
+/// (a look-back trigger, CR 603.10a), of those that left with it, as they last existed.
+fn additional_times(
+    st: &GameState,
+    t: &PendingTrigger,
+    cause: &Cause,
+    lki: &BTreeMap<ObjectId, Lki>,
+) -> usize {
+    // The trigger's source as it is (or last was) on the battlefield; a source elsewhere
+    // (a card cycled from the hand) is no permanent's.
+    let seen = |id: ObjectId| -> Option<(Characteristics, Facts)> {
+        if let Some(o) = st.objects.get(&id)
+            && o.zone == crate::zones::Zone::Battlefield
+        {
+            let c = chars(st, id);
+            let (attacking, blocking) = crate::layers::combat_role(st, id);
+            let facts = Facts {
+                id,
+                controller: c.controller,
+                owner: o.owner,
+                is_token: o.is_token,
+                tapped: o.tapped,
+                attacking,
+                blocking,
+            };
+            return Some((c, facts));
+        }
+        let l = lki.get(&id)?;
+        Some((
+            l.chars.clone(),
+            Facts {
+                id,
+                controller: l.controller,
+                owner: l.owner,
+                is_token: l.is_token,
+                tapped: l.tapped,
+                attacking: l.attacking,
+                blocking: l.blocking,
+            },
+        ))
+    };
+    let Some((source_chars, source_facts)) = seen(t.source) else {
+        return 0;
+    };
+    let looks_back = matches!(cause, Cause::Died(_));
+    let mut statics: Vec<(ObjectId, PlayerId, Option<ObjectId>, Vec<AbilityId>)> = st
+        .zones
+        .battlefield
+        .iter()
+        .map(|&id| {
+            (
+                id,
+                crate::layers::controller_of(st, id),
+                st.object(id).attached_to,
+                chars(st, id).abilities,
+            )
+        })
+        .collect();
+    if looks_back {
+        for (&id, l) in lki {
+            statics.push((id, l.controller, None, l.chars.abilities.clone()));
+        }
+    }
+    let mut n = 0;
+    for (id, controller, host, abilities) in statics {
+        for a in abilities {
+            let AbilityDef::AdditionalTrigger {
+                sources,
+                cause: wants,
+            } = st.catalog.ability(a)
+            else {
+                continue;
+            };
+            if !filter_hit(
+                sources,
+                t.source,
+                &source_chars,
+                source_facts,
+                id,
+                controller,
+                host,
+            ) {
+                continue;
+            }
+            let hit = |sel: &Selector, x: ObjectId| {
+                seen(x).is_some_and(|(c, f)| matches_parts(sel, &c, f, id, controller))
+            };
+            let caused = match (wants, cause) {
+                (None, _) => true,
+                (Some(TriggerCause::Enters(sel)), Cause::Entered(x)) => hit(sel, *x),
+                (Some(TriggerCause::Dies(sel)), Cause::Died(x)) => hit(sel, *x),
+                (Some(TriggerCause::Attacks(sel)), Cause::Attacked(xs)) => {
+                    xs.iter().any(|x| hit(sel, *x))
+                }
+                _ => false,
+            };
+            if caused {
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
 /// What "another" is other than, for an ability of `source`: the source itself — or, once
@@ -305,6 +450,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
     }
     let mut found = Vec::new();
     let mut conds = Vec::new();
+    let mut causes = Vec::new();
     if !entered.is_empty() {
         // CR 603.6a: every permanent on the battlefield, including the newcomers.
         for src in battlefield_sources(st) {
@@ -349,6 +495,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                                 facts: EventFacts::default(),
                             });
                             conds.push(intervening_if.clone());
+                            causes.push(Cause::Entered(e));
                         }
                     }
                 }
@@ -423,13 +570,19 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                                 },
                             });
                             conds.push(intervening_if.clone());
+                            // Leaving for a graveyard is dying (CR 700.4).
+                            causes.push(if died.contains(d) {
+                                Cause::Died(*d)
+                            } else {
+                                Cause::Other
+                            });
                         }
                     }
                 }
             }
         }
     }
-    queue_matching(st, found, conds);
+    queue_caused(st, found, conds, causes, lki);
 }
 
 /// CR 603.2b: "at the beginning of" triggers, when a step begins.
@@ -529,6 +682,7 @@ fn step_matches(ts: TriggerStep, step: Step) -> bool {
 pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
     let mut found = Vec::new();
     let mut conds = Vec::new();
+    let mut causes = Vec::new();
     for src in battlefield_sources(st) {
         for &(ability, a) in &src.abilities {
             let AbilityDef::Triggered {
@@ -590,12 +744,13 @@ pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
                             },
                         });
                         conds.push(intervening_if.clone());
+                        causes.push(Cause::Attacked(alloc::vec![attacker]));
                     }
                 }
             }
         }
     }
-    queue_matching(st, found, conds);
+    queue_caused(st, found, conds, causes, &BTreeMap::new());
     detect_player_attacks(st, attackers);
 }
 
@@ -607,6 +762,15 @@ type Hit = (Option<ObjectId>, EventFacts, Option<Characteristics>);
 /// trigger events: the occurrence's object ("it") and what else it carries.
 fn detect_with(
     st: &mut GameState,
+    hits: impl FnMut(&GameState, &Source<'_>, &Trigger) -> Vec<Hit>,
+) {
+    detect_with_cause(st, Cause::Other, hits);
+}
+
+/// [`detect_with`], for events that all have the same cause (CR 603.2d).
+fn detect_with_cause(
+    st: &mut GameState,
+    cause: Cause,
     mut hits: impl FnMut(&GameState, &Source<'_>, &Trigger) -> Vec<Hit>,
 ) {
     let mut found = Vec::new();
@@ -638,7 +802,8 @@ fn detect_with(
             }
         }
     }
-    queue_matching(st, found, conds);
+    let causes = alloc::vec![cause; found.len()];
+    queue_caused(st, found, conds, causes, &BTreeMap::new());
 }
 
 /// Things that happened to players in a batch: life gained and lost, cards drawn and
@@ -900,8 +1065,12 @@ fn detect_damage(st: &mut GameState, dealt: &[Dealt], lki: &BTreeMap<ObjectId, L
                             (DamageTo::Player(w), DamageTarget::Player(p)) => {
                                 who_matches(*w, p, src.controller)
                             }
-                            (DamageTo::Permanent(f), DamageTarget::Object(o)) => {
+                            (DamageTo::Permanent(f), DamageTarget::Object(o))
+                            | (DamageTo::Either { permanent: f, .. }, DamageTarget::Object(o)) => {
                                 object_hit(st, lki, f, o, &src)
+                            }
+                            (DamageTo::Either { player: w, .. }, DamageTarget::Player(p)) => {
+                                who_matches(*w, p, src.controller)
                             }
                             _ => false,
                         }
@@ -978,7 +1147,7 @@ fn detect_player_attacks(st: &mut GameState, attackers: &[ObjectId]) {
     }
     let active = st.turn.active;
     let none = BTreeMap::new();
-    detect_with(st, |st, src, t| {
+    detect_with_cause(st, Cause::Attacked(attackers.to_vec()), |st, src, t| {
         let Trigger::PlayerAttacks { by, with, at_least } = t else {
             return Vec::new();
         };
@@ -1013,7 +1182,7 @@ fn detect_cycled(st: &mut GameState, player: PlayerId, card: ObjectId) {
     if st.objects.contains_key(&card) {
         sources.push(Source {
             id: card,
-            card: st.object(card).card,
+            card: st.face_card(card),
             controller: player,
             abilities: abilities(st, card),
             lki: None,

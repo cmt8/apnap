@@ -159,6 +159,17 @@ impl ApplyFrame {
         while let Some(front) = self.queue.first() {
             let apps = applicable(st, front);
             match apps.as_slice() {
+                // CR 616.1g, 111.2: creating the tokens is modified first; then each token
+                // enters the battlefield, an event of its own that what modifies how
+                // permanents enter applies to (D-073).
+                [] if matches!(front.event, Proposed::CreateTokens { .. }) => {
+                    let p = self.queue.remove(0);
+                    let entering = token_entries(&p.event).into_iter().map(|event| Pending {
+                        event,
+                        applied: Vec::new(),
+                    });
+                    self.queue.splice(0..0, entering);
+                }
                 [] => {
                     let p = self.queue.remove(0);
                     self.ready.push(p.event);
@@ -203,13 +214,60 @@ impl ApplyFrame {
                 }
             }
         }
-        perform(st, core::mem::take(&mut self.ready));
+        let caused = perform(st, core::mem::take(&mut self.ready));
+        // Life that lifelink gains, where an effect would modify it (CR 120.4c, 119.10).
+        if !caused.is_empty() {
+            return Flow::then(Frame::Apply(ApplyFrame::new(st, caused)));
+        }
         Flow::done()
     }
 }
 
+/// The most tokens of one kind one event creates. Doublers make numbers grow without
+/// bound (CR 614.5 example: each applies once, but they multiply); counts saturate at
+/// `u32::MAX`, and no game can hold that many objects. A deliberate limit (D-073): far
+/// above any board a game is played to (the harness abandons a game at 1,000 permanents).
+pub const MAX_TOKENS_AT_ONCE: u32 = 10_000;
+
+/// One `TokenEnters` event for each token a fully modified `CreateTokens` event creates,
+/// kind by kind, in order (CR 111.2: each token enters the battlefield).
+fn token_entries(ev: &Proposed) -> Vec<Proposed> {
+    let Proposed::CreateTokens {
+        controller,
+        copy,
+        token: first,
+        ..
+    } = ev
+    else {
+        return Vec::new();
+    };
+    let controller = *controller;
+    crate::replacement::token_kinds(ev)
+        .into_iter()
+        .enumerate()
+        .flat_map(|(k, (token, count))| {
+            // The first kind are the copies, if the event makes copies (CR 707.2).
+            let copy = copy.clone().filter(|_| k == 0 && token == *first);
+            // A runaway doubling can't make more objects than a game can hold; the harness
+            // abandons such a game long before this (D-073).
+            (0..count.min(MAX_TOKENS_AT_ONCE)).map(move |_| Proposed::TokenEnters {
+                token,
+                controller,
+                tapped: copy.as_ref().is_some_and(|c| c.tapped),
+                counters: Vec::new(),
+                copy: copy.clone(),
+            })
+        })
+        .collect()
+}
+
 /// Perform fully modified events simultaneously, then detect triggers (CR 603.2g).
-pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
+/// Returns the events the performed ones cause that replacement effects would modify:
+/// life gained through lifelink when an effect modifies life gain (CR 120.4c: the damage's
+/// results are processed as modified by replacement effects). They happen next, as a batch
+/// of their own (D-073); without such an effect lifelink's life is gained here.
+pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) -> Vec<Proposed> {
+    let mut caused = Vec::new();
     // CR 704.8 / 603.10a: last known information for everything leaving the battlefield,
     // captured before any of the batch happens.
     let mut lki: BTreeMap<ObjectId, Lki> = BTreeMap::new();
@@ -274,6 +332,7 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
                 counters,
                 shuffle,
                 attach_to,
+                face,
                 copy,
             } => {
                 let Some(o) = st.objects.get(&object) else {
@@ -299,6 +358,7 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
                         controller,
                         tapped,
                         counters,
+                        face,
                         copy,
                     },
                 ) {
@@ -375,35 +435,49 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
                     && amount > 0
                     && let Some(player) = gainer
                 {
-                    execute(st, GameAction::GainLife { player, amount });
+                    let gain = Proposed::GainLife { player, amount };
+                    let modified = !crate::replacement::applicable(
+                        st,
+                        &Pending {
+                            event: gain.clone(),
+                            applied: Vec::new(),
+                        },
+                    )
+                    .is_empty();
+                    if modified {
+                        caused.push(gain);
+                    } else {
+                        execute(st, GameAction::GainLife { player, amount });
+                    }
                 }
             }
             Proposed::Draw { player } => {
                 execute(st, GameAction::Draw { player });
             }
-            Proposed::CreateTokens {
+            // (Made into `TokenEnters` events before it is ready.)
+            Proposed::CreateTokens { .. } => {}
+            Proposed::TokenEnters {
                 token,
-                count,
                 controller,
+                tapped,
+                counters,
                 copy,
             } => {
                 // CR 800.4b: no tokens for a player who has left the game.
                 if st.in_game(controller) {
-                    for _ in 0..count {
-                        let made = execute(
-                            st,
-                            GameAction::CreateToken {
-                                token,
-                                controller,
-                                copy: copy.as_ref().map(|c| alloc::boxed::Box::new(c.values.clone())),
-                                tapped: copy.as_ref().is_some_and(|c| {
-                                    c.tapped || crate::copy::enters_tapped(&st.catalog, &c.values, controller)
-                                }),
-                            },
-                        );
-                        if let (Some(c), crate::actions::ActionResult::Moved(id)) = (&copy, made) {
-                            crate::copy::token_extras(st, c, id);
-                        }
+                    let made = execute(
+                        st,
+                        GameAction::CreateToken {
+                            token,
+                            controller,
+                            tapped,
+                            counters,
+                            copy: copy.as_ref().map(|c| alloc::boxed::Box::new(c.values.clone())),
+                        },
+                    );
+                    // What the instruction says about each token copy it made.
+                    if let (Some(c), crate::actions::ActionResult::Moved(id)) = (&copy, made) {
+                        crate::copy::token_extras(st, c, id);
                     }
                 }
             }
@@ -458,4 +532,5 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
     if !st.is_over() {
         detect_events(st, &performed, &lki);
     }
+    caused
 }

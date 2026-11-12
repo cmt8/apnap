@@ -1574,6 +1574,764 @@ Rules text: docs/rules-notes/402-305-401.5-rules-about-players.md.
   that card this turn", effects that remember the cards they exiled); protection on
   players.
 
+## D-066 Mana abilities that cost more than {T}, make several mana, count, reflect, or do more; the payment planner (2026-11-10)
+Rules text: docs/rules-notes/605-mana-abilities-costs-and-yields.md. Tests:
+`crates/harness/tests/forge_mana.rs` (one file per feature area from now on).
+- **Vocabulary.** `ManaProduce` gained `Fixed(types)` ("{U}{B}", "{C}{C}{R}"),
+  `Combination { of, count }` ("two mana in any combination of …", each mana chosen),
+  `Counted { of, amount }` ("{B} for each Swamp you control", "X mana of any one color";
+  counted as it resolves) and `Reflected { from, types }` ("any color that a land an
+  opponent controls could produce", CR 106.7). `AbilityDef::Mana` gained `then`: what the
+  ability also does as it resolves (CR 605.3b) — damage to, life loss and life gain of its
+  controller only (the pain lands, Talismans, Ancient Tomb, The Great Henge). A mana
+  ability's `Cost` may now hold mana, life, "sacrifice this" and one chosen sacrifice,
+  with or without `{T}`; it must tap or sacrifice something, so nothing can be activated
+  for ever. `ManaSymbol::Hybrid` (`{R/W}`, CR 107.4e) exists for the costs of mana
+  abilities only (the filter lands); card-db refuses it anywhere else, and Scryfall
+  printed costs with hybrid are refused as before. `ManaRestriction.sources`: "spend this
+  mana only to activate abilities of artifact sources / an ability" — wherever the source
+  is; `abilities` (Forge's `+inZoneBattlefield`) now really means permanents (CR 109.2:
+  before, Dragon-restricted mana could pay a Dragon card's cycling from the hand).
+  `Effect::AddManaOf { who, of, amount }`: a spell or non-mana ability adding mana of a
+  type chosen as it resolves (Lotus Cobra's landfall, which is an ordinary trigger, CR
+  605.5a; "add one mana of any color" when something enters); several types from one
+  `DB$ Mana` ("R R R G G G") are a `Seq` of `AddMana`.
+- **Engine: `frames/mana.rs`.** `mana_ways` lists every mana ability a player could
+  activate now (`ManaWay`: tap, sacrifice-self, mana cost, life, chosen sacrifice and its
+  candidates, what it makes, restricted, depends on the battlefield). Plain "{T}: Add one
+  mana" abilities of a permanent are still merged into one way. A way that is nothing but
+  a tap (and maybe "sacrifice this") is still done in one step (`tap_for_mana`, same
+  events in the same order as before); anything else runs a `ManaFrame` (new
+  `Frame::Mana`, boxed): choose what to sacrifice → choose which floating mana pays its
+  own cost (hybrid colors first, then generic, asked only when it is a real choice) → pay
+  (tap, `PayMana`, sacrifices and life through `ApplyFrame`) → choose the type of each
+  further mana (`ChoiceKind::ChooseColor` over `OptionDesc::Mana`) → add the mana → its
+  `then` runs in a `ResolveFrame::mana_ability` (no stack object, no targets). The same
+  path serves priority (CR 605.3a) and paying (CR 601.2g), including payments while
+  something resolves (D-063).
+- **Payment feasibility (replaces D-021's / D-049's / D-052's matching).** `plan` decides
+  whether a cost can be paid: one bipartite matching between units of mana wanted (each
+  symbol of the cost — specific, hybrid, generic — and of the costs of the mana-costing
+  abilities chosen) and units of mana that could be had (the pool, each permanent's
+  merged free ways, what the chosen mana-costing or sacrificing abilities make). Around
+  it: which mana-costing/sacrificing abilities to use (and how often: an altar as many
+  times as there are creatures) is enumerated (at most 4,096 combinations), their
+  sacrifices are a second matching together with the cost's own sacrifice; Treasures that
+  the cost could also sacrifice are counted by kind as before (D-052); several mana of
+  one chosen type are tried with each type for the first four such sources (D-049).
+  **Conservative rules (D-019: never offer what can't be completed; under-estimating is
+  allowed):** a mana ability's mana cost is paid only from the pool or from abilities
+  that cost no mana (a chain of Signets each paying the next is not found); mana that
+  can only be spent in certain ways never pays a mana ability's cost; an altar doesn't
+  plan to sacrifice a Treasure, a permanent with a mana-costing ability, or (when
+  Treasures are among them) what the cost itself could sacrifice; when life paid plus all
+  self-damage of mana abilities would exceed the player's life, life-paying abilities
+  aren't planned with. The planner assumes the best order (tap a mana creature before
+  sacrificing it, count Cradle before sacrificing creatures); each option offered while
+  paying is checked on the state it leads to — for a plain tap by updating the planner's
+  snapshot, for anything that sacrifices, costs mana or life, or makes mana of open types
+  by playing it out on a copy of the game (`simulate`) and planning again from there.
+  Choices inside an activation (which creature, which floating mana, which type) are
+  filtered the same way.
+- **Deviation from the rules' procedure (not their outcome):** a mana-costing mana
+  ability is offered once its cost is in the pool; the player taps the land first rather
+  than in the middle of activating the Signet (CR 605.3a allows both).
+- **Compiler.** `AB$ Mana` / `AB$ ManaReflected` go through `Tx::mana_ability`:
+  `Produced$` letters with different types, `Combo` with `Amount$ n`, a counted
+  `Amount$` (`Count$Valid …` only, no tapped/untapped filter, no sacrifice in the cost),
+  `SubAbility$` of DealDamage/LoseLife/GainLife (no target), costs with mana, `PayLife`,
+  `Sac<1/…>`, and hybrid tokens (`RW`). Blocked with names: `Mana:sub Draw` (drawing
+  moves a card from a library: not a mana ability, CR 605.1a), `Mana:sub <api>`,
+  `Mana:sub with a target`, `Mana:cost` (a mana ability that neither taps nor sacrifices:
+  "{R}: Add {B}", "{1}{G}: Add one mana of any color"), `Mana:cost sacrifice N`,
+  `Mana:counted` (other counts), `Mana:counted with sacrifice`, `ManaReflected:Is`,
+  `ManaReflected:Produced`, `Mana:produced` (`Combo AnyDifferent`, `Chosen`, `Special …`,
+  counted `Combo`), and the parameters `TriggersWhenSpent`, `AddsNoCounter`,
+  `AddsCounters`, `AddsKeywords`, `PersistentMana`, `ActivationLimit`. Hybrid mana in
+  anything but a mana ability's cost stays `cost:RW` etc.
+- **New Oracle guard `oracle:{T}`:** the card says `{T}` more often than the compiled card
+  does. Found two scripts that leave it out: Lotus Ring's given ability (newly compiled
+  without it — would have been a repeatable Black Lotus) and Letter of Acceptance's
+  "{2}, {T}, Sacrifice: Draw a card" (compiled wrongly before this batch). Both blocked.
+- **Found by the soak (precon-4p, heuristic, 3 games in 40): a payment dead-ended.** Orb of
+  Dragonkind ({1},{T}: two mana in any combination, Dragon-only) paid Lathliss's ability:
+  after the Mountain paid the Orb's {1}, the copy-of-the-game check dropped the Orb's
+  second (still untyped, restricted) mana, so the Orb was no longer offered. Untyped mana
+  now keeps its restriction in the plan. Regression test
+  `restricted_mana_of_open_types_still_pays`.
+- **Found by the soak after merging D-070 (forge-4p, 2 games in 500):** an altar could
+  plan to sacrifice the source of the ability being paid for while mana restricted to
+  abilities of such sources was in the pool; once the source is gone that mana's use
+  depends on last known information the payment doesn't keep (the engine panicked, then
+  dead-ended). Mana abilities no longer sacrifice the source of what is being paid for
+  (conservative), and restricted mana for something that is gone isn't counted on.
+  Regression test `an_altar_doesnt_sacrifice_the_source_of_the_ability_being_paid_for`.
+- **AI and app.** The heuristic agent pays with the cheapest way first (free taps, then
+  Treasure, mana-for-mana, damage, life, sacrificing another permanent last), and when it
+  has a "sacrifice a creature: add mana" ability it doesn't cast what it couldn't pay for
+  without one. The app's auto-pay only taps for mana that costs nothing else; it labels a
+  mana ability that does more than tap for one mana with its text.
+- **Old cards unchanged:** with the new code, 60 games each of real-4p, cmd-4p, m2-4p
+  (random) and 40 of real-4p (heuristic) ended exactly as with the old build; all 15
+  golden event logs are unchanged. State hashes changed (the catalog serializes the new
+  `then` field); re-blessed.
+- 9,305 → 9,571 of 34,463 scripts (27.8%); real cards 9,225 → 9,489; precons 149 → 150
+  of 275 deck slots. The `api:Mana` family fell from 356 cards blocked by it alone (708
+  at all) to about 120. All 266 newly compiled cards were read against their Oracle text.
+- **Next for mana:** "two mana of different colors" (`Combo AnyDifferent`), counted
+  combinations (Axebane Guardian), mana-for-mana abilities without `{T}` (they need a
+  loop guard), triggered mana abilities ("whenever a land is tapped for mana"), mana
+  whose spending does something (`TriggersWhenSpent`, `AddsNoCounter`, `AddsCounters`:
+  Path of Ancestry, Cavern of Souls, Opal Palace — mana that remembers its source),
+  Bloom Tender (`EachColorAmong`), hybrid mana in spells.
+
+## D-071 Cards with more than one face: double-faced cards, adventurers, omens, split cards (2026-11-10)
+Rules text: docs/rules-notes/712-double-faced-cards.md (712, 202.3, 305.9, 903.4d–e),
+701.27-transform.md, 716-adventurers-721-omens-709-split.md. In this edition casting a
+face is CR 712.8, playing a land face 712.9, entering 712.10–712.11, "the same object"
+712.15; adventurers are 716 and omens 721.
+- **Vocabulary.** A `CardDef` is the card's front face (or, for a split card, its two
+  halves combined); `CardDef::faces` holds its other faces, each a whole face of its own
+  (name, cost, types, abilities, `granted`), and `CardDef::layout` says how they relate:
+  `Layout::{Normal, Modal, Transform, Adventure, Omen, Split}`. The new fields are skipped
+  when empty, so one-faced cards serialise as before.
+- **Catalog.** `CardCatalog::add` gives every other face an entry of its own right after
+  the card — face `n` of the card at `id` is `catalog.face(id, n)` = `id + n` — marked
+  `face_of` (never a card: `find` skips it, decks can't hold it, `new_game` refuses it). So
+  an ability written on a back face is named like any other,
+  `AbilityId { card: <the face's entry>, index, granted }`, and `catalog.ability`,
+  `layers::abilities`, triggers, replacement keys, mana sources and the views needed no
+  special case. The face definitions stay nested in the card too, so `describe`, the
+  validator and the Oracle guard work on a `CardDef` alone.
+- **Objects.** `GameObject::face` (0 = front) says which face is up. It is non-zero only on
+  the stack and the battlefield (CR 712.6a: anywhere else only the front face), which
+  `perform_move` guarantees: a moved card is front face up unless the move says otherwise
+  (`MoveZone::face`, `Proposed::Move::face`), except that a resolving spell becomes a
+  permanent with the face it had on the stack (CR 712.10). `GameState::face_card(id)` is the
+  entry of the face that is up and `card_def(id)` its definition; `layers::chars` starts from
+  it (CLAUDE.md invariant 3), and `layers::chars_as(st, id, face)` gives the characteristics
+  a card would have with another face up — what is evaluated before a face is cast or
+  played (CR 712.8c, 716.3a, 721.3a, 709.3a) and what a permanent about to enter is checked
+  against (CR 614.12: a land face's own "enters tapped").
+- **Mana value** is `Characteristics::mana_value()`; the back face of a transforming card
+  carries its front face's cost for it (`mana_value_from`, CR 202.3b / 712.6d).
+- **Casting and playing.** `OptionDesc::CastFace { card, face }` and
+  `OptionDesc::PlayLandFace { card, face }` (new variants at the end; `CastSpell` and
+  `PlayLand` stay the front face). `CastSource::Face` evaluates that face — its cost,
+  timing, targets, cost reductions and restricted mana (`Payee::SpellFace`) — and once
+  announced puts the card on the stack with that face up, after which the frame's source is
+  a plain `Card`. A land face uses the land drop. Which faces may be cast:
+  `cast::castable_faces` — either face of a modal card (CR 712.8b, 712.9; from a hand or
+  the command zone), the Adventure or Omen (not from exile, CR 716.3d), either half of a
+  split card (CR 709.3; the whole split card is never cast). A transforming card's back
+  face is never cast or played.
+- **Transform** (CR 701.27): `Effect::Transform { what }`, performed as
+  `GameAction::Transform`: the same object turns over (counters, damage, attachments stay;
+  it doesn't enter, so nothing triggers on entering), gets a new timestamp (CR 613.7g) and
+  emits `Event::Transformed`. Only a double-faced permanent transforms, never into an
+  instant or sorcery face (CR 701.27d–e). CR 701.27g: an ability of the permanent that
+  would transform it does nothing if the permanent transformed since the ability was put
+  on the stack (`GameObject::transforms`, recorded on the stack object as
+  `source_transforms` for double-faced sources only).
+- **Adventure** (CR 716.3d): a spell cast as an Adventure is exiled as it resolves (not
+  when countered) and marked `GameObject::adventure` = its controller, who may then cast
+  the card — or play it, if it is a land — from exile, but not as an Adventure again. The
+  mark moves with the card from the stack to exile only; it ends when the card leaves
+  exile. **Omen** (CR 721.3d): shuffled into its owner's library as it resolves.
+  "That has an Adventure" (CR 716.2a, Forge's `AdventureCard`) is
+  `Selector::has_adventure`, read from `Characteristics::has_adventure` — true for an
+  adventurer card whichever of its characteristics it uses now (Edgewall Innkeeper,
+  Frantic Firebolt, Mysterious Pathlighter).
+- **Split cards** (CR 709.4): the compiler makes the card's own definition the two halves
+  combined — both names ("Fire // Ice", which is also the card's name in the library and
+  decks, as at Scryfall), the combined mana cost (mana value and colors from it), every
+  type — and the halves faces 1 and 2. Only halves that are instants or sorceries with
+  nothing but their spell ability (and an additional cost) compile: an ability that works
+  from a hand would be the whole card's (`split:half with other abilities`); Rooms
+  (`split:Room`, CR 709.5), Fuse and Aftermath (`kw:Fuse`, `kw:Aftermath`) stay blocked.
+  Known limit: the combined card has one name string, so "a card named Fire" would not
+  match it (CR 709.4a); no compiled card names a split card's half.
+- **Commander.** Color identity counts every face (CR 903.4d–e); deck validation refuses a
+  face entry; the commander tax and identity are per card, and a modal commander may be
+  cast with either face from the command zone.
+- **Compiler.** `AlternateMode:` `Modal`, `DoubleFaced`, `Adventure`, `Omen`, `Split`
+  compile when every face compiles, each face as a card of its own (its own SVars, and its
+  own Oracle text for the Oracle guard; `unexplained:` and `invalid:` cover every face). A
+  blocker on any face blocks the card. `SetState | Mode$ Transform` with `Defined$ Self`
+  (Forge's default) is "transform this permanent"; other modes (`Flip`, turning face up or
+  down, specializing), a target, or another object stay blocked (`SetState:mode …`,
+  `SetState:target`, `SetState:not itself`). card-db checks that an Adventure/Omen card's
+  other face is an instant or sorcery with that spell type.
+- **Scryfall.** `ScryfallCard::card_faces`. `ScryfallData::get` also finds a card by its
+  front face's name (a real card wins over art cards that share face names);
+  `ScryfallData::face(name)` is one face as a card of its own, with its own picture for a
+  two-sided card (cached as `<id>-<n>.jpg`). The printed-data cross-check now runs for
+  cards with several faces, face by face, and compares the layout (`printed:faces`) — it
+  never ran for them before (they weren't found by name). Cards cached before the faces
+  were stored count as stale, so `fetch-cards` fetches them again. "Real cards per
+  Scryfall" counts a card compiled by its full or its front face's name.
+- **App and AI.** Option labels name the face ("cast Malakir Rebirth", "play Malakir
+  Mire"); the board, stack and card pickers draw the face that is up; the enlarged card
+  shows the other face of a double-faced card beside it (CR 712.4). The heuristic agent
+  plays a land face when it has no other land to play and fewer than five lands (or the
+  spell face can't be cast now), and judges a spell face as the spell it would be. Random
+  deck building (`forge-Np`) checks every face's cost against the deck's colors.
+- **Mis-rendering found by reading the sample:** `describe` of a trigger with several
+  events dropped the subject of the later ones ("Whenever this permanent enters or dies"
+  for Jerren's "enters or another nontoken Human you control dies"); the card was
+  compiled right. Fixed: a later event about another subject is written out.
+- Golden state hashes re-blessed: the stable hasher writes a tag for every skipped serde
+  field, so the new fields change every state hash. All 15 event-log hashes unchanged.
+- On its own (on D-065) this was 9,305 → 9,426 of 34,463 scripts (real cards per Scryfall
+  9,225 → 9,342). All newly compiled cards were read against both faces' Oracle text.
+- **With D-067 and D-068** (rebased onto them): 9,776 → 9,906 of 34,463 (real 9,691 →
+  9,817). No card that compiled on either side stops compiling. By layout: modal 32 of
+  101, transforming 19 of 399, adventurers 63 of 151, omens 5 of 16, split 6 of 128.
+  Nine cards compile only in the combination, all read on both faces: the MDFC lands
+  with "as this land enters, you may pay 3 life" (Fell the Profane, Witch Enchanter,
+  Boggart Trawler, Pinnacle Monk, Razorgrass Ambush), adventurers and a transforming
+  card whose other text needed those batches (Scalding Viper's "that player", Brightcap
+  Badger, Curious Homunculus), and
+  Ishgard, the Holy See (a land with an Adventure). A land face's own "as it enters"
+  choice and "enters tapped unless" are read from the entering face (CR 712.9, 614.12);
+  "its mana value" of a target (`TargetInfo`) uses `Characteristics::mana_value`, so a
+  transformed permanent has its front face's (CR 202.3b) and a spell cast as an Adventure
+  or a split half has that face's (CR 716.3b, 709.3b).
+- **With D-070 and D-066** (merged): 10,163 → 10,300 of 34,463 (real 10,076 → 10,209).
+  By layout: modal 33 of 101, transforming 22 of 399, adventurers 66 of 151, omens 5 of
+  16, split 6 of 128. Seven cards compile only in the combination, all read on both
+  faces: Growing Rites of Itlimoc, Storm the Vault, Mystic Skull (mana abilities that
+  count, cost mana, or are given), Sea Gate Restoration ("no maximum hand size" and the
+  pay-3-life land), Beanstalk Wurm and Beorn ("play an additional land"), Rosethorn
+  Acolyte (an Adventure that adds mana). Letter of Acceptance, which compiled on this
+  branch alone, is blocked by D-066's `oracle:{T}` guard, as on main. **A rule that lets
+  a player play or cast cards from another zone judges its cards by the face that would
+  be played or cast** (CR 601.3e, 712.8c, 712.9): "you may play lands from your
+  graveyard" lets a modal card be played as its land face, not cast as its spell face;
+  `players::may_play_face`, `targeting::card_matches_as`. A card sent on an Adventure is
+  one more such permission (only as itself, CR 716.3d). Restricted mana is judged by the
+  face being cast (`Payee::SpellFace`).
+- **What is left, by kind** (cards blocked by it alone): transforming cards — disturb
+  (`kw:Disturb`, 14), Sagas (`kw:Chapter`, 10), battles (`line:Defense`, 10), craft, and in
+  all 36 day/night werewolves (`kw:Daybound`), 32 old werewolf conditions ("if no spells
+  were cast last turn"), "enters transformed" (`param:ChangeZone.Transformed`),
+  `trig:Transformed`; split cards — Aftermath 13, Fuse 8, Rooms. Still blocked as
+  layouts: `Flip`, `Meld`, `Prepare`, `Specialize`, `Vengeance`.
+## D-069 "Those cards": Forge's remembered cards within one resolution; conditions on one instruction (2026-11-10)
+Rules text: docs/rules-notes/608.2c-400.7j-those-cards.md.
+- **Vocabulary.** `Effect::Note(instruction)`: the cards the instruction moved — as the
+  new objects they became (CR 400.7) — and the tokens it created are "those cards" for the
+  rest of the resolution (of a Dig, only the cards put in its first place).
+  `ObjRef::Noted` ("those cards", "that card", "it"), `Selector::noted` (`Some(true)`: one
+  of them, `Some(false)`: not one of them), `Amount::Noted(selectors)` ("for each creature
+  destroyed this way", "if it's a Spirit"), `Amount::NotedTotal(measure)` ("its mana
+  value", "that creature's power"). `CardDest::Stay`: a search that leaves what it found
+  where it is, for the instructions after it (Cultivate). `Effect::If { test, then }`: a
+  condition on one instruction (Forge's `Condition…$` on a link: a failed condition skips
+  only that link). `PutInto::controller` ("… under your control", Forge's
+  `GainControl$ True`). Named apart from D-065's `Affected::Remembered` /
+  `ObjFilter::Remembered`, which are what a *lasting effect* is about (an effect object's
+  memory, which outlives the resolution); this is resolution-local and never stored on a
+  card or effect.
+- **Engine** (`frames/resolve.rs`, self-contained; `apply.rs` untouched): the resolve
+  frame keeps `noted` (object, the zone this resolution last put it in, whether later
+  instructions can find it, its characteristics just before it moved), `noting`, and
+  `moving` (proposed zone changes, identified by card instance). Every `ApplyFrame` the
+  frame starts records the moves it proposes; when the frame resumes it looks at what
+  became of them: a card that moved is noted (if an instruction is being noted) or
+  followed (if it already was). **Findable** (CR 400.7j): still the same object, in the
+  zone this resolution put it in, and that zone is public — or it was found by a search
+  and stayed. A card a replacement effect sent elsewhere isn't found (Ghostly Flicker
+  doesn't return it from a hand) but is **counted** ("destroyed this way" counts a
+  creature exiled instead by a Rest-in-Peace effect, as Forge's `destroy()` does; an
+  indestructible one isn't destroyed and isn't noted). Amounts read a card as it is now if
+  it is on the battlefield, else as it was just before it moved (CR 608.2h: the sacrificed
+  creature's power is its last known power). Effects that take an `ObjRef` act on every
+  noted card at once (Exile, Destroy, ReturnToHand, PutInto, PutCounters, Tap/Untap,
+  Apply, damage). Each chosen mode starts with nothing noted (`Work::ForgetNoted`). A
+  choice among noted cards in a library is not a new search (no `SearchedLibrary`, the
+  library isn't shown).
+- **When Forge's memory compiles as resolution-local** (`Tx::local_memory`): the chain
+  (an ability and its `SubAbility$` links) has a `Remember…$` writer the compiler knows
+  (`RememberChanged`, `RememberTargets` on the root move, `RememberLKI`, `RememberDestroyed`,
+  `RememberSacrificed`, `RememberTokens`, `RememberMilled`, `RememberDiscarded`), its last
+  link is its only `Cleanup`, with `ClearRemembered$ True` and no condition. Only inside
+  such a chain (and not inside what an effect object carries) do `Defined$ Remembered`,
+  `IsRemembered` / `!IsRemembered`, `Remembered$…`, `RememberedLKI$…`,
+  `Count$RememberedSize` and `ConditionDefined$ Remembered` mean "those cards"; anywhere
+  else they stay the blockers they were. Since every writer of a compiled card forgets at
+  the end of its own chain, nothing else on the card can see the memory (Forge's memory
+  lives on the card). A writer whose chain doesn't forget at its end blocks the card
+  (`remember:not forgotten when the chain ends`), as do: a `Cleanup` that isn't last, a
+  reader before anything is remembered, remembering twice in one chain (`DestroyAll`
+  clears first in Forge), a search that puts found cards back in the library or never
+  shuffles them away, a Dig that leaves what it takes in the library, a move of "those
+  cards" from where they aren't (`Origin$`) or from a hand or library.
+- **`Defined$ Targeted` after the target moved** (CR 400.7: the target slot is a card
+  that is gone; Forge follows the card): the move is noted and the reference is
+  `ObjRef::Noted` if the target went to a public zone; otherwise blocked
+  (`defined:Targeted after it moved`). **Mis-compilation found, older than this batch:**
+  Miraculous Recovery ("return target creature card … to the battlefield. Put a +1/+1
+  counter on it") compiled before and put the counter on nothing. Grave Upheaval's haste
+  likewise (newly compilable through `GainControl$`).
+- **Conditions on links** (`ConditionPresent$`/`ConditionCompare$` on the battlefield,
+  `ConditionDefined$ Remembered`, `ConditionCheckSVar$`/`ConditionSVarCompare$`) are
+  compiled for every chain, not only remembering ones: "if you control a Wizard, draw a
+  card", "if X is 5 or more, destroy all other creatures".
+- **New Oracle guard** `oracle:under your control`: the compiled card puts something onto
+  the battlefield "under your control" exactly when the card returns or puts something "to
+  the battlefield under your control" ("enters the battlefield under your control" is old
+  wording for "you control" and doesn't count). It caught Photon, Lady of Light
+  (`GainControl$` where the card returns it under its owner's control) and blocks Meneldor
+  (harmless there: "a creature you own").
+- **Players of noted cards** (after D-068's `Tx::named_player`): `PlayerRef::NotedControllers`
+  (Forge `RememberedController`) and `PlayerRef::NotNotedControllers`
+  (`NonRememberedController`), each card's controller as it is now on the battlefield or
+  as it last was before it moved (CR 608.2h). Plaguecrafter: "each player who can't
+  [sacrifice] discards a card". card-db refuses them where one player is meant.
+- card-db refuses "those cards" anywhere but a resolving effect, a selector asking about
+  them except where the resolving effect filters with it, `Stay` outside a noted search,
+  a noted instruction that isn't a single one, noted cards as what an Equipment attaches
+  to or a lasting effect is about.
+- AI: an effect that returns noted cards to the battlefield is help (blink your own).
+- With D-067 (how a permanent enters): the moves the resolve frame proposes are looked at
+  when it resumes, after the whole Apply — including its "as this enters" choice and any
+  nested Apply for the price. A noted card entering through such a choice is found where
+  it entered; one a replacement put elsewhere instead (Mox Diamond's graveyard) is not.
+  Tests `a_noted_card_entering_with_a_choice_is_found`,
+  `a_noted_card_put_elsewhere_instead_is_not_found`. With D-068: "its power" of a moved
+  target still comes from `TargetInfo` (`Amount::OfTarget`); only object references
+  (`Defined$ Targeted` as the thing acted on) follow the moved card.
+- Save/load and clone of a game suspended in the middle of a noted resolution continue
+  identically (`a_noted_resolution_saves_loads_and_clones`).
+- **Engine bug found by the soak (older than this batch, newly reachable):** when a player
+  leaves the game (CR 800.4a), the permanents they control but don't own are exiled after
+  the layered view was worked out, without a new generation; the stale view still held
+  them and the next control check panicked ("no object"). It takes a permanent of another
+  player's under your control — reanimated with `GainControl$`. `actions::leave_game` now
+  drops the derived layer cache after those moves (the serialized state, and its hash, are
+  unchanged). Test `a_reanimated_permanent_is_exiled_when_its_controller_leaves`
+  (mutation-checked: it panics without the fix).
+- **With D-068's `Effect::IfDone` (merged 2026-11-11).** The two mean different things.
+  `IfDone { first, then }` is "[first]. If you do, [then]": `then` happens if `first`
+  changed anything at all (any event). `If { test, then }` is a condition counted as the
+  instruction is reached — here, from Forge's `ConditionDefined$ Remembered |
+  ConditionPresent$ … | ConditionCompare$ …`, how many of "those cards" (of a kind) there
+  are. One Forge shape reaches both: an optional trigger whose description says "If you
+  do" / "this way", whose chain notes cards and whose later link asks about them (Carrion
+  Imp, Geothermal Kami, Lagonna-Band Storyteller, Mardu Woe-Reaper). It compiles to
+  `IfDone { first: Note(…), then: If { noted …, … } }` — the two checks together, never one
+  without the other, so no card can reach that meaning two ways. They differ only where the
+  script's test is stricter than "something happened": "you may search … If you do, gain
+  2 life" with nothing found has searched and shuffled (IfDone holds) but noted nothing
+  (the script's `GE1` fails): no life, as the script says (test
+  `you_may_search_if_you_do_with_noted_cards`).
+- **With D-070 and D-066:** a rule about players whose source is exiled as its controller
+  leaves stops at once (`a_rule_about_players_ends_when_its_controller_leaves`); a noted
+  card later played from a graveyard under a "play lands from your graveyard" rule is a
+  new object and the memory is gone with the resolution
+  (`a_noted_card_played_later_is_no_longer_that_card`); counts of noted lands are of cards,
+  not of the mana they make (`counting_noted_lands_not_their_mana`); a noted creature
+  sacrificed to an altar's mana ability while paying "you may pay {2}. If you do, put two
+  +1/+1 counters on it" is a new object this resolution didn't move and gets nothing
+  (`a_noted_creature_sacrificed_for_mana_while_paying`).
+- State hashes changed (`Selector` gained a field: the catalog is part of the state); all
+  15 event logs unchanged. Re-blessed.
+- Merged with main `4f75185` (D-066, D-068 follow-ups, D-070): 10,163 → 10,363 of 34,463
+  (30.1%). None of main's cards stops compiling; one changes text (Miraculous Recovery).
+  Letter of Acceptance, compiled on this branch alone, is blocked by D-066's `oracle:{T}`
+  (it had lost its `{T}`). Two cards compile on neither parent and were read: Klothys, God
+  of Destiny and Thassa, Deep-Dwelling.
+- Merged with main `bbca45d` (D-071, faces): 10,300 → 10,508 of 34,463 (30.5%). None of
+  main's cards stops compiling; one changes text (Miraculous Recovery). Nine faced cards
+  compile on neither parent (Blex's "Search for Blex", Bloomvine Regent's "Claim
+  Territory", Colossal Badger's "Dig Deep", Docent of Perfection, Dowsing Device, Hit //
+  Run, Ravenous Demon, Stormshriek Feral's "Flush Out", Vincent Valentine); all were read.
+  Vincent Valentine's Galian Beast ("return it to the battlefield tapped") had
+  `GainControl$` where the card returns it under its owner's control: the
+  `oracle:under your control` guard now reads "onto the battlefield tapped under your
+  control" as well, and blocks it (`under_your_control_after_tapped_is_read_back`).
+  "Those cards" are the same objects whichever face is up (transforming is no zone
+  change, CR 701.27c), and a noted card in a library or hand is read by its front face
+  (CR 712.8a): a search for a land card finds a pathway, not an instant whose back is a
+  land (`a_noted_double_faced_card_is_found_by_its_front_face`).
+- On `04ef403`: 9,305 → 9,491 of 34,463 scripts; precons 149 → 151 of 275 deck slots.
+  Rebased onto D-067/D-068 (`3e37f8d`): 9,776 → 9,974 (28.9%). Of the 9,776 cards main
+  compiled none stops compiling, and the engine text of one changes: Miraculous Recovery
+  (the fix above). Of the cards named for this batch, Cultivate, Kodama's Reach, Fabled
+  Passage, Ghostly Flicker, Cloudshift, Essence Flux, Displacer Kitten, Teleportation
+  Circle, Flicker of Fate, Fumigate, Plaguecrafter, Bane of Progress, Dark Confidant,
+  Martial Coup, Disciple of Bolas and Reanimate compile. All 198 cards that compile only
+  in the combination were read against their Oracle text.
+- **Still blocked, deliberately:** memory that outlives the resolution (handed to an effect
+  object, `Effect:remembers Remembered…`: Professional Face-Breaker; linked abilities,
+  CR 607; delayed triggers), `ForgetChanged$` (Nissa's Pilgrimage), `RememberedOwner`,
+  Command Beacon (`ChangeZone:no-target` from the command zone, not memory), other
+  `Remember…$` writers (`RememberRevealed`, `RememberDrawn`, `RememberDamaged`, …).
+- **Next:** `ForgetChanged$`; `ChangeZoneAll` with `RememberChanged$` ("exile all …, then
+  return them"); `Effect:remembers Remembered` (an effect object about noted cards: "exile
+  the top card; you may play it this turn", 188 cards).
+
+## D-078 Comment lines in Forge scripts: ignored as Forge ignores them, but each text is reviewed (2026-11-12)
+
+Until now every `# …` line made its card uncompilable (`line:# TODO` was the single blocker
+of 6 of the 1,000 most played Commander cards, among them Demonic Tutor). Two things were
+established before changing that.
+
+- **Forge ignores them.** `forge-core/.../card/CardRules.java`, `Reader.readCard`:
+  `for (String line : script) { if (line.isEmpty() || line.charAt(0) == '#') { continue; } this.parseLine(line, this.faces[curFace]); }`.
+  The test is on the raw line's first character, so only a `#` in column 0 is a comment;
+  an indented `#` goes to `parseLine`, and a `#` inside a value is part of the value.
+  `parse.rs` follows that: a column-0 `#` line becomes `Face::comments` (text kept, lossless);
+  indented ones stay `unknown` lines (still blocked).
+- **Comments are where authors write that a script is wrong.** 135 distinct texts (210
+  lines, 198 cards). Most are about Forge's AI ("TODO: the AI will ..."), its internals ("X
+  Will get overwritten by Announce") or are section markers ("--- VARIANTS ---"). 16 say or
+  suggest that the script does not do what the card says ("Doesn't follow the strict wording
+  of the Oracle text currently", "TODO: need EnchantedLKI because it isn't enchanted
+  anymore if this is sacrificed", "This calculation isn't considering the remembered
+  player", a bare "TODO" ...).
+
+**Rule** (`crates/card-db/src/forge/comments.rs`, next to the other reviewed lists; kept in its
+own file so the 130 entries don't sit in `translate.rs`): a comment is compared after dropping
+the `#` and collapsing white space. It matches an entry exactly, or, if the entry ends in `*`,
+by prefix (long comments are listed by their first 60 characters: a typo fixed later in a
+sentence does not block the card, while a changed beginning does). In `HARMLESS` -> ignored.
+In `INCOMPLETE` -> `script:differs from the card` (the same blocker as `SCRIPT_DIFFERS`,
+raised by the comment instead of the card name, so a card gaining the same comment later is
+caught too; the entry holds the comment's own words as the reason). In neither ->
+`comment:unreviewed`. A Forge update that adds a comment therefore blocks that card until
+someone reads the comment and classifies it. Cards with an `INCOMPLETE` comment, 21 of
+them (`forge-coverage --why script:differs`): Dark Deal, Sycorax Commander, Hellfire, Cocoon,
+Frozen Solid, Liege of the Hollows, Quillmane Baku, The Madcap Jester, Transmute Artifact,
+Silent Gravestone, Helm of Obedience, Banish into Fable, Circus of the Sun, Elvish
+Impersonators, Robot Chicken, Bolshack Dragon, the three EDH Silver errata cards (1996
+World Champion, Celestine Cave Witch, Shichifukujin Dragon), plus the two found earlier by
+reading. None of them compiled before this change (every comment blocked); only Robot Chicken
+would compile now but for its comment, the others have further blockers, and the
+entries keep them blocked when those go away.
+
+**A hole this opened and closed.** `SVar:AFLifeLost:Number$0` + "# AFLifeLost will be set by
+LoseLife": Forge's effects write results into SVars named `AF…`; the script holds only the
+starting value. The compiler read `LifeAmount$ AFLifeLost` as the constant 0 ("Then X is
+0. Then you gain X life"), so Blood Tithe, Exsanguinate, Kokusho, Agent of Masks, Subversion
+-- and Scholar of Athreos, which already compiled this way -- would have gained no life.
+`expr` now blocks any name `AF` + capital letter (`expr:set by an effect AFLifeLost`);
+"life lost this way" is not built yet. Scholar of Athreos stops compiling (it was a wrong
+card).
+
+**Counts.** 10,300 -> 10,314 of 34,463 scripts (+15, -1). Top 100 by EDHREC 74 -> 75, top
+1,000 516 -> 522, top 5,000 1,571 -> 1,580. New: Demonic, Diabolic, Grim, Mystical and
+Personal Tutor, Imperial Seal, Natural Order, Aether Mutation, Aura Mutation, Consult the
+Necrosages, Culling the Weak, Embodiment of Spring, Kuro Pitlord, Sawtooth Loon, Utopia Vow --
+each read against its Oracle text. Most of the 57 `# TODO` cards stay blocked by something
+else (Proliferate, Flashback, copy effects ...).
+
+## D-072 Other ways to pay for a spell: alternative costs, flashback, evoke, overload, "pay X life" (2026-11-12)
+Rules text: docs/rules-notes/118.9-alternative-costs.md. Tests:
+`crates/harness/tests/forge_altcost.rs` (26).
+- **Vocabulary** (appended at the end of their enums/structs): `AbilityDef::AlternativeCost
+  (AltCost { kind, cost, only_if })`, `AltKind { Rather, Flashback, Evoke, Overload(Body) }`
+  — `Rather` is "you may [cost] rather than pay this spell's mana cost" / "… cast this spell
+  without paying its mana cost" (`cost.mana` none), `Overload` carries the spell's text with
+  "target" changed to "each" (CR 702.96c). `Cost::exile_from_hand` ("exile N [cards] from
+  your hand"), `Cost::return_to_hand` ("return N [permanents] you control to their owner's
+  hand"), `Cost::life_x` ("as an additional cost, pay X life"). `Condition::ControlCommander
+  { own }` ("if you control a commander" / "… your commander", CR 903.3d — also usable in
+  static abilities: the Lieutenants), `Condition::CastFor(AltKindName::Evoke)` ("if its evoke
+  cost was paid"), `Effect::ControllerSacrificesThis` (evoke's "its controller sacrifices
+  it", whoever controls it by then; `SacrificeThis` needs the ability's controller).
+- **Where it hooks into casting.** The choice of an alternative cost is its own priority
+  option, `OptionDesc::CastWith { card, face, ability }`, offered right after the
+  `CastSpell`/`CastFace` of the same card and face, one per alternative cost of that face in
+  printed order (invariant 5; CR 601.2b, 118.9a: one alternative cost per spell). It is only
+  offered when the cast can be completed with it (D-019): its zone (flashback: the owner's
+  graveyard, CR 702.34a; everything else: wherever the card may be cast — hand, command zone,
+  a `PlayFrom` rule), its condition (checked as casting begins), and the payability of the
+  resulting cost. `CastFrame::alt` remembers it; `cast::proposal_with` replaces the mana
+  cost with the alternative cost's and merges its other parts with the additional cost
+  (`Cost::with`, CR 118.9d) **before** payment: the payment code and the planner (D-066) see
+  an ordinary cost. Commander tax and cost reductions still apply (CR 903.8, 118.9d,
+  tested); with no mana cost there is no X to announce, so X is 0 (CR 107.3b, tested).
+  New logic is in `frames/altcost.rs`; `cast.rs` got two stages (`ChooseExile`,
+  `ChooseReturn`, after `ChooseDiscard`) and the paying of those parts in `finish`.
+- **What the spell remembers.** `StackObject::alt` (set by `GameAction::SetCastAlt` as the
+  spell is announced) and, for a permanent spell, `GameObject::cast_with` on the permanent
+  it becomes. Flashback (CR 702.34a) is a replacement effect in the pipeline: any move of
+  that spell off the stack except to exile goes to exile instead (resolving, countered,
+  bounced) — `replacement::applicable` names it by the flashback ability (`RepKey::Static`),
+  so it competes with other replacement effects like any other. Overload's text is read from
+  the stack object (`altcost::spell_body`, in the resolve frame). Evoke's sacrifice is an
+  ordinary triggered ability the compiler adds to the card, with `CastFor(Evoke)` as its
+  intervening "if" (CR 603.4) — it is lost with "loses all abilities", as the rules say.
+- **"Those cards" (D-069) was not needed:** nothing here acts on a card the same resolution
+  moved. Flashback's exile is a rule about the spell itself (a replacement, CR 702.34a), not
+  a remembered card. "Exile the top card … you may cast it without paying its mana cost"
+  (cascade, `Play` with `WithoutManaCost$`) is not built; when it is, it should name the
+  card with `ObjRef::Noted` and cast it with an alternative cost of no mana.
+- **Costs.** "Return an Island you control" may return a land tapped for mana for this same
+  cost (CR 601.2g–h, tested); the planner keeps enough permanents for it as for a sacrifice,
+  and card-db refuses a cost that both sacrifices and returns. Cards exiled from the hand
+  are never the card whose cost it is; a script of an ability activated from the hand that
+  doesn't say `Other` is blocked (`cost:ExileFromHand-maybe-itself`). "Pay X life": X is
+  announced at the X stage, at most the caster's life (CR 119.4); only a spell's own
+  `Cost$` may have it (`cost:PayLife-amount` elsewhere).
+- **Restricted mana** looks at the spell, not at which cost is paid (CR 106.6, tested: mana
+  for creature spells pays a creature's evoke cost and no instant's alternative cost).
+- **Faces (D-071):** an alternative cost belongs to the face being cast (CR 601.2b, 712.8c):
+  `altcost::alternatives(st, card, face)`, tested with an invented modal double-faced card.
+  No compiled real card has that shape (the one multi-face script with an alternative cost,
+  a transforming Saga, is blocked otherwise).
+- **Compiler.** `S:Mode$ AlternativeCost` with `ValidSA$ Spell.Self` (or `Spell` +
+  `ValidCard$ Card.Self`), `EffectZone$ All`, `ValidPlayer$ You`, `Cost$` (`0` = no mana),
+  `Condition$ PlayerTurn/NotPlayerTurn`, `IsPresent$` (incl. `Card.IsCommander+YouCtrl`,
+  `…+YouOwn`), `CheckSVar$`/`SVarCompare$`. `K:Flashback:<cost>`, `K:Evoke:<cost>`,
+  `K:Overload:<cost>` (printed last). Overload is compiled the way Forge builds it
+  (`CardFactoryUtil`): the spell's one instruction in its mass form, `ValidTgts$` becoming
+  `ValidCards$`/`ChangeType$` (`Destroy`→`DestroyAll`, `ChangeZone` from the battlefield→
+  `ChangeZoneAll`, `DealDamage`→`DamageAll`, `Tap`/`Untap`/`Pump`/`PutCounter`→`…All`).
+  Costs `ExileFromHand<N/filter>` (types, subtypes, colors), `Return<N/filter>`,
+  `PayLife<X>` in a spell's `Cost$`. Filter `YouDontCtrl` = `Who::Opponent`: in a game
+  without teams every other player is an opponent (CR 102.3); the text says "an opponent
+  controls". `Counter` with `Destination$ Graveyard` (Forge's default written out:
+  Force of Will, Force of Negation and other counterspells).
+- **The heuristic agent** takes a free alternative cost (+30 over the spell's score), a
+  cheaper mana one (+5), overload (+15), flashback (−2); evokes only a card it can't cast;
+  never an alternative cost that sacrifices, discards, exiles or returns cards (pitching for
+  nothing), nor one paying life below 10 + the life; for "pay X life" it pays at most a
+  third of its life. Exile-from-hand choices like discards, return choices like sacrifices.
+  The app labels `CastWith` with the face and the ability's text ("cast Fierce
+  Guardianship — If you control a commander, …") and titles the two new choices.
+- **Texts fixed on the way (no behaviour change):** "unless you sacrifice a mountain" →
+  "… a Mountain" (the unless-cost text lower-cased whole words; 11 cards), "creature card"
+  → "creature card with power 2 or less" (card filters in a library or graveyard dropped
+  `power_max`/`toughness_max` from the text; 3 cards, and the new Vesperlark).
+- **Golden hashes:** re-blessed; every event log unchanged, all state hashes moved — the
+  stable hasher writes a marker for each skipped field (`hash.rs` `skip_field`), so the new
+  skip-if-empty fields change state hashes without changing a game.
+- **Numbers:** on main `cda0566` 10,508 → 10,742 of 34,463 scripts; EDHREC tiers there,
+  main → D-072: top 100 78 → 83, top 300 191 → 199, top 1,000 527 → 539, top 2,000
+  869 → 887, top 5,000 1,605 → 1,646. Merged onto `ef30f04` (D-078): 10,524 → 10,758
+  (31.2%); top 100 79 → 84 of 95 (88.4%), top 300 201 (68.1%), top 1,000 534 → 546 of 992
+  (55.0%), top 2,000 895 (45.0%), top 5,000 1,657 (33.2%); no card compiles only in the
+  combination. Among them: Fierce Guardianship,
+  Deadly Rollick, Flawless Maneuver, Cyclonic Rift, Vandalblast, Toxic Deluge, Force of Will,
+  Force of Vigor, Flare of Denial, Daze, Mulldrifter, Shriekmaw, Solitude, Faithless Looting,
+  Dread Return, Deep Analysis, Think Twice, Strike It Rich, Mizzium Mortars, Electrickery,
+  Momentary Blink, Unburial Rites, Lingering Souls. All newly compiled cards were read
+  against their Oracle text; nothing that compiled before stopped compiling or changed
+  meaning.
+- **Still blocked, by name:** `api:ChangeTargets` (Deflecting Swat #74, Misdirection, Bolt
+  Bend; CR 115.7: targeting abilities on the stack is not modelled, and 115.7a/b/d differ —
+  next); `kw:Convoke`, `kw:Improvise`, `kw:Delve` (pay mana by tapping/exiling, after the
+  total cost is locked in — they belong in the planner, D-066); `kw:AlternateAdditionalCost`
+  (Demand Answers: one of two additional costs); `kw:Madness`, `kw:Foretell`, `kw:Escape`,
+  `kw:Miracle`; reductions (`param:static ReduceCost.*`, `param:*.ReduceCost`: the channel
+  lands Otawara, Boseiju); `static:AlternativeCost of other spells or abilities` (Dream Halls,
+  equip/cycling costs), `param:Continuous.MayPlayAltManaCost` (Bolas's Citadel),
+  `MayPlayWithoutManaCost` (Omniscience); `param:static AlternativeCost.CheckSecondSVar`,
+  `.Announce`, `.XAlternative`, `.ManaRestriction`; `kw:Flashback with parameters`, flashback
+  given to other cards (Snapcaster Mage, Past in Flames: `kw:Flashback`); overload of more
+  than one instruction or of a player target.
+- **Next here:** ChangeTargets (a target filter for spells *and abilities* on the stack;
+  115.7d as a re-pick of each target slot with "keep" offered, groups as one pick of a set of
+  the same size), then delve/convoke/improvise in the planner, then the channel lands'
+  `ReduceCost`.
+
+## D-075 The most played Commander cards no feature family covers, part 1 (2026-11-12)
+Rules text: docs/rules-notes/d075-commander-staples.md. Tests:
+`crates/harness/tests/forge_staples.rs`. Each feature is general (every card using it), in
+EDHREC order.
+- **"The life lost this way"** (CR 119.3, 608.2c): `Amount::LifeLostThisWay` (appended) —
+  what the players' life totals actually went down by in the "lose life" instruction just
+  before it (`Work::LifeLost` snapshots the totals; `ResolveFrame::life_lost`, serialized
+  only when set). Forge's `AFLifeLost`, compiled only right after a `LoseLife` in the same
+  chain (`expr:AFLifeLost not after a life loss` otherwise). D-078's guard on `AF…`
+  variables stays for every other use (its test now uses another `AF` name); D-075 adds
+  `SET_WHILE_RESOLVING`, the other variables Forge's code writes as it resolves
+  (`PreventedDamage`, `AffectedX` — counted per affected card in a static —, `Votes`,
+  die-roll results…): never read by their written value (`expr:set while resolving …`).
+  Scholar of Athreos, which D-078 found and blocked, compiles again, now right; with it
+  Exsanguinate, Gray Merchant of Asphodel, Kokusho, Blood Tithe, Agent of Masks,
+  Subversion, Debt to the Deathless.
+- **"In any order"** (CR 401.4): `Reorder$` on a `ChangeZone` to a library (Brainstorm,
+  Brainsurge, Brainstone, Riverwise Augur, Congregation at Dawn, Dwarven Recruiter, Scouting
+  Trek). The engine already has cards put on a library ordered by their owner; elsewhere
+  `param:ChangeZone.Reorder not to a library`.
+- **"Untap up to N lands"** (CR 701.26b): `Effect::UntapChosen { what, count }` and
+  `ChoiceKind::Untap` (both appended) — anyone's permanents matching (Forge's `UntapType$`
+  is not limited to yours), chosen as it resolves, not targets; only tapped ones are
+  offered. Chosen by another player: `param:Untap.UntapUpTo by another player`. Frantic
+  Search, Snap, Peregrine Drake, Palinchron, Great Whale, Treachery, Rewind, Unwind, Cloud
+  of Faeries, Pore Over the Pages. The heuristic agent untaps its own permanents; the app
+  titles the choice "Choose what to untap".
+- **Proliferate** (CR 701.34a): `Effect::Proliferate`, `ChoiceKind::Proliferate`
+  (appended): any number of permanents that have a counter, each gets one more of each
+  kind, all in one replaceable event. Players have no counters in this engine (every card
+  that gives poison, energy or experience is blocked), so only permanents are offered —
+  when player counters arrive, proliferate must offer players too. `Amount$ N` is N
+  proliferates in a row (a non-number is `param:Proliferate.Amount not a number`). 40
+  cards: Atraxa, Karn's Bastion, Evolution Sage, Flux Channeler, Inexorable Tide… The
+  heuristic agent picks its own permanents with +1/+1 counters and others' with -1/-1.
+- Golden hashes unchanged (state and event logs).
+- 9,891 → 9,968 of 34,463 scripts on base `0365ace`; merged with main `b2647ec` (D-072):
+  10,827 (main alone: 10,758; +69, none lost, no engine text changed — a card-by-card diff
+  of `forge-coverage --sample 1` against main's build). Top 100 by EDHREC rank 86 of 95
+  (main: 84), top 1,000 56.1% (main: 55.0%), top 5,000 33.9% (33.2%). Every newly compiled
+  card was read against its Oracle text.
+- With D-072: a flashback spell's "you gain life equal to the life lost this way" counts a
+  loss that takes an opponent below 0 in full (CR 119.3: an opponent at 1 life who loses 3
+  has lost 3 — the Gray Merchant ruling); a land returned to hand to pay an alternative
+  cost isn't offered to "untap up to N lands".
+- **Next (in the coordinator's order):** Path of Ancestry, Myriad Landscape, delayed
+  triggers (Arcane Denial, Mana Drain), pay X life, Ponder / Sensei's Divining Top
+  (`api:RearrangeTopOfLibrary`), Channel lands, Esper Sentinel, City of Brass (`trig:Taps`),
+  cumulative upkeep, variable charm counts, attack costs (Propaganda), Big Score, Mana
+  Vault, regeneration / "can't be regenerated" (CR 701.19).
+
+## D-073 Replacement effects that change how much; tokens enter the battlefield (2026-11-12)
+Rules text: docs/rules-notes/614-doublers-603.2d-additional-triggers.md (with
+614-616-replacement-prevention.md).
+- **Tokens.** `Replaces::Tokens { token, effect_only }`: "if [an effect would create] one
+  or more [creature] tokens [under your control]" — each kind of token of the event is
+  matched as it would be created (its definition's characteristics, CR 111.3; controlled
+  by its creator, 111.2). With `ReplaceWith::Scale(Calc)` ("twice that many"),
+  `AddTokens { tokens, n }` ("those tokens plus a Food" / "plus that many Squirrels") and
+  `ReplaceTokens(tokens)` ("that many 4/4 Angels instead", "instead create one of each").
+  Only the kinds the effect applies to are scaled or replaced. A replacement can make one
+  event create several kinds of token: `Proposed::CreateTokens.more` (serde default, not
+  serialized when empty) keeps them one event, so a later "plus an additional Food" adds
+  one Food (CR 614.5, 616.1f). `effect_only` only changes the text: every token in this
+  engine is created by an effect.
+- **Counters.** `Replaces::Counters { on, kind, effect_only }`: "if one or more [+1/+1]
+  counters would be put on [a creature you control]" with `ReplaceWith::Scale` ("twice
+  that many", "that many plus one", "minus one"); counters a permanent enters with count
+  (CR 122.6, 614.16), matched as it would exist on the battlefield. Counters on players
+  are blocked (`repl:AddCounter:counters on players`: the engine has none).
+- **Order (CR 616.1):** unchanged pipeline — each effect applies once per event (614.5)
+  and the affected player chooses among those that apply (`ChooseReplacement`), so "plus
+  one" then "twice" gives 4 and the other order 3. The heuristic AI orders them by what
+  they do: for what is good for it (its tokens, +1/+1 counters) add, then multiply, then
+  shrink; for what is bad (damage, -1/-1 counters) prevent, shrink, multiply, then add.
+- **Tokens enter the battlefield (a rules error on main, fixed here).** A created token
+  skipped every effect that modifies how a permanent enters ("each Dragon you control
+  enters with an additional +1/+1 counter", "creatures your opponents control enter
+  tapped"). Now a `CreateTokens` event, once its own replacement effects are applied,
+  becomes one `Proposed::TokenEnters { token, controller, tapped, counters }` per token
+  (CR 616.1g: entering is contained in creating, so doublers are chosen first); those are
+  modified like a card moved onto the battlefield (CR 111.6, 614.1c–d) — other
+  permanents' `OtherEnters` and `Counters`/`PutCountersOnYourPermanents` effects, and the
+  counters a token would enter with are doubled after an effect gives them (616.2). Each
+  token is its own event, so its controller orders effects per token. `GameAction::
+  CreateToken` carries `tapped` and `counters` (entering tapped is not becoming tapped).
+  A token definition can't carry its own "this enters …" replacement (card-db rejects it;
+  no Forge token script has one) — copy tokens of permanents that have one are the copy
+  branch's to handle.
+- **"As it would exist on the battlefield" (CR 614.12)** is now worked out on a copy of the
+  game in which the entering has happened (`replacement::as_it_would_exist`): the permanent
+  with the counters and tapped state the event has so far, its own static abilities and
+  every continuous effect that would apply ("creatures you control are Dragons"). Used for
+  tokens and for cards moved onto the battlefield (`OtherEnters`, `Counters`); before, a
+  moving card was judged by its printed characteristics.
+- **Numbers saturate:** `Calc` was already saturating; counts on objects, damage marked,
+  commander damage and life changes now saturate (`actions.rs`: `life_amount` caps a
+  damage/life amount at `i32::MAX`, `change_life` adds saturating; `layers.rs`: counters
+  to P/T saturate), and one event creates at most `MAX_TOKENS_AT_ONCE` = 10,000 tokens of
+  a kind (`frames/apply.rs`) — a deliberate limit far above any board a game is played to
+  (the harness abandons a game at 1,000 permanents).
+- **Triggering an additional time (CR 603.2d)** is not a replacement effect:
+  `AbilityDef::AdditionalTrigger { sources, cause }` with `TriggerCause::{Enters, Dies,
+  Attacks}` (Forge's `Mode$ Panharmonicon`). Counted where a trigger is queued
+  (`triggers::queue_caused`): each detector says what made the ability trigger
+  (`Cause::{Entered, Died, Attacked, Other}`); every such ability of a permanent on the
+  battlefield whose `sources` matches the trigger's source and whose cause matches adds one
+  instance — two effects give three instances, each put on the stack on its own (own
+  targets, own order). For a look-back trigger of a dying permanent, the effects of
+  permanents that left in the same batch count as they last existed (Teysa dying with the
+  others). Compiled: no `ValidMode` (any trigger of matching sources: Annie Joins Up,
+  Delney, Katara, Twinflame Travelers); `ChangesZone[,ChangesZoneAll]` + `ValidCause` +
+  `Destination$ Battlefield` (Panharmonicon, Yarok, Ancient Greenwarden, Naban) or `Origin$
+  Battlefield | Destination$ Graveyard` (Teysa); `Attacks[,AttackersDeclared…]` + `ValidCause`
+  (Isshin). Blocked: other modes (`static:Panharmonicon mode …`: life gained, damage,
+  cast, becomes target, turned face up, rooms), `ValidZone`, `ValidPlayer`, conditions.
+- **"Can't be countered" (CR 101.2, 614.17)** is not a replacement effect either:
+  `AbilityDef::CantBeCountered { spells }` — `None`: the spell's own ability (Forge's
+  `R:Event$ Counter | ValidCard$ Card.Self | ValidSA$ Spell | Layer$ CantHappen`); `Some`:
+  a permanent's "[creature] spells you control can't be countered" (`ValidSA$
+  Spell.<filter>` or `ValidCard$ <filter>`). `Effect::Counter` does nothing to such a
+  spell (`replacement::cant_be_countered`); the countering spell resolves and does the rest
+  of what it does. Blocked: `ValidCause` (only by some spells), abilities that can't be
+  countered (`repl:Counter:ValidSA …`), conditions (`CheckSVar`, `IsPresent`), effects
+  (`repl:Counter:shape`).
+- **Damage that is doubled or increased:** `Replaces::Damage { by, to, combat }` (D-065)
+  now also takes `ReplaceWith::Scale` — Forge's `DB$ ReplaceEffect | VarName$ DamageAmount |
+  VarValue$ ReplaceCount$DamageAmount/<math>` (Twice, Thrice, Plus.N, Minus.N, HalfDown):
+  Dictate of the Twin Gods, Furnace of Rath, Angrath's Marauders, Fiery Emancipation,
+  Twinflame Tyrant, Thor, Tomik, Calamity Bearer, Goldnight Castigator, Inquisitor's
+  Flail, Lashknife Barrier, Ghosts of the Innocent. Each damage event is one source to one
+  recipient, so doubling applies per recipient; combat damage is assigned (trample)
+  before; lifelink gains what is dealt; the damaged player (or the damaged permanent's
+  controller) orders several effects (CR 616.1). `DamageTo::Either { player, permanent }`
+  is "an opponent or a permanent an opponent controls" (also in triggers). Sources:
+  `Card,Emblem` is any source and `Card.X,Emblem.X` a source that is X — **an emblem
+  alternative is read only where it mirrors a card alternative**, because the engine has
+  no emblems (when emblems arrive, `Replaces::Damage.by` must include them). The same
+  reading of sources and recipients now serves "prevent all damage" too (four more
+  prevention cards compile: Blessed Sanctuary, Endure, Light of Sanction, Safe Passage).
+  Blocked: `RedSource` and other `…Source` properties (`filter:.RedSource`, Torbran),
+  prevention with a `ReplaceWith` (`PreventionEffect$`, shields that count), redirection
+  (`DamageTarget$`), `inZoneBattlefield` on a source (Gratuitous Violence).
+- **Life gain:** `Replaces::GainLife(Who)` + `Scale` (Rhox Faithmender, Boon Reflection,
+  The Wind Crystal, Angel of Vitality, Heron of Hope, Honor Troll, Knight of Dawn's Light,
+  Pest Rescuer). CR 120.4c: lifelink's gain is a result of the damage that replacement
+  effects modify — `apply::perform` returns it, when an effect would modify it, as a batch
+  of its own that runs right after the damage batch (before anything else; triggers of
+  both are put on the stack together); without such an effect it is gained with the
+  damage as before, so no game without one changes. A doubler with "whenever you gain
+  life, you gain 1 life" is a real loop.
+- **Oracle guards:** a card whose Oracle text says "can't be countered" or "an additional
+  time" and whose compiled text doesn't is blocked (`oracle:says can't be countered`,
+  `oracle:says an additional time`). No compiled card is caught by them now.
+- **Deliberately still blocked:** "you may" token replacements (`param:repl
+  CreateToken.Optional`: Flitwing, Jinnie Fay), tokens of a chosen permanent (`repl:
+  CreateToken:chosen token`), tokens under another player's control (`…Type
+  ReplaceController`), conditions on these effects (`…CheckSVar`, `…IsPresent`,
+  `…PlayerTurn`), counters on players (`repl:AddCounter:counters on players`: Winding
+  Constrictor), "if you would put counters" (`param:repl AddCounter.ValidSource`: Halving
+  Season), draw replacements (`repl:Draw`: one draw replaced by several, or by winning —
+  needs an event that becomes several; Alhammarret's Archive, Notion Thief, Laboratory
+  Maniac), mana replacements (`repl:ProduceMana`: for D-066's `frames/mana.rs`), "lose
+  life" replacements, prevention that counts or redirects (`PreventionEffect$`,
+  `DamageTarget$`). A token that is a copy (D-074) or a double-faced token is out of
+  scope here: its own "enters" effects would need the copy's characteristics.
+- **"Those cards" (D-069):** tokens are created by `GameAction::CreateToken` and reported
+  as `TokenCreated`; the moves an Apply performs don't include them, so Forge's
+  `RememberTokens$` stays blocked.
+- Golden hashes: unchanged (no golden setup has any of these effects; lifelink's gain only
+  moves to a batch of its own when an effect would modify it).
+- 10,524 → 10,610 of 34,463 scripts on main ef30f04 (86 cards, every one read against its
+  Oracle text, none lost); merged onto main 12504fd (D-072): 10,758 → 10,845. EDHREC tiers
+  on 12504fd → this branch: top 100 88.4% (84 of 95, unchanged), top 300 69.8%, top 1,000
+  55.0% → 57.2% (546 → 567), top 5,000 34.1%. Soaks: forge-4p 300 random-agent games and
+  200 heuristic games (one abandoned at 1,000 permanents: Horn of Gondor's Human Soldiers),
+  precon-4p 100 games, no failures.
+- **Merged onto main 3fc33f1 (D-075 part 1):** 10,827 → 10,914 scripts (87; no card lost,
+  no compiled text changed; Pearl Lake Ancient compiles only in the combination). Tiers
+  3fc33f1 → this branch: top 100 90.5% (unchanged), top 300 70.2% → 71.9%, top 1,000
+  56.1% → 58.3% (557 → 578), top 5,000 33.9% → 34.7%. Proliferate puts its counters as
+  `Proposed::PutCounters` through `Frame::Apply`, so counter doublers apply to it (tested);
+  "you gain life equal to the life lost this way" is doubled by a life-gain doubler, the
+  loss isn't (tested; effects on losing life aren't built).
+- **Order with flashback (D-072):** main's "exiled instead" for a flashback spell is about
+  a spell leaving the stack; the effects here are about tokens being created, a permanent
+  entering, counters, damage and life — never the same event, so they never compete under
+  CR 616.1. "Can't be countered" holds for a spell cast with flashback too (tested).
+- **Next:** draw replacements (an event that becomes several: "draw two instead",
+  "exile the top card instead", "you win instead"; "except the first one you draw in each
+  of your draw steps"); mana doubling in `frames/mana.rs` (Nyxbloom Ancient, Mana
+  Reflection); Torbran (`RedSource`); "you may" token replacements; Winding Constrictor
+  once players have counters.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…
