@@ -8248,6 +8248,17 @@ fn outright_and_quoted(text: &str) -> (String, String) {
 /// the card says outright is compared with what the compiled card says outright; what it
 /// gives to others in quotes, with the abilities the compiled card gives. (The quoted
 /// abilities of tokens it makes are not compared: tokens are compiled on their own.)
+///
+/// This function reads `card_model::describe::rules_text`, so it depends on how that
+/// text is worded. The phrases it relies on (pinned by `guard_phrases_are_still_written`
+/// below; a wording change in `describe.rs` that breaks one fails that test instead of
+/// silently changing which cards compile): the word "may" and the substring "up to"; the
+/// word "unless"; the word "damage"; the words "another", "other" and "targets" (a
+/// group of targets of one instruction, "each of one to two targets that are …");
+/// "{t}" in costs; "attach this <type> to target creature you control" (Equip);
+/// "its controller", "its owner", "that player", "target player", "target opponent",
+/// "each player", "each opponent", "their"; "it deals"; "battlefield under your
+/// control"; "you own" / "an opponent owns"; "can't be countered"; "an additional time".
 fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
     let (plain, quoted) = outright_and_quoted(oracle);
     let text = card_model::describe::rules_text(def).join(" / ");
@@ -8306,7 +8317,22 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
     // "Target creature you control" where the card says "target creature": some scripts
     // narrow a target to what Forge's AI should pick. (Equip is a keyword: its "target
     // creature you control" is reminder text.)
-    let aimed = compiled.replace("attach this permanent to target creature you control", "");
+    // ("attach this Equipment to …": the card's own type, whatever `describe` calls it.)
+    let mut aimed = compiled.clone();
+    while let Some(i) = aimed.find("attach this ") {
+        let rest = &aimed[i + "attach this ".len()..];
+        let tail = " to target creature you control";
+        match rest.find(tail) {
+            Some(j) if !rest[..j].contains([' ', '.', '/', ':']) => {
+                let end = i + "attach this ".len() + j + tail.len();
+                aimed.replace_range(i..end, "");
+            }
+            _ => {
+                // Not Equip: keep the rest of the text to be looked at.
+                aimed.replace_range(i..i + "attach this ".len(), "");
+            }
+        }
+    }
     let narrowed = aimed.split("target ").skip(1).any(|rest| {
         rest.split(['.', ':', '•', '/'])
             .next()
@@ -8574,5 +8600,215 @@ mod tests {
             mana_cost("1 WU").is_err(),
             "hybrid mana isn't supported yet"
         );
+    }
+
+    /// `oracle_words_missing` reads `describe::rules_text`. Each phrase it depends on is
+    /// rendered here from a small card, so a wording change in `describe.rs` fails this
+    /// test instead of silently changing which cards compile.
+    #[test]
+    fn guard_phrases_are_still_written() {
+        use card_model::{
+            AbilityDef, Amount, Body, CardDef, CardType, Cost, DamageBy, Effect, Mode, ObjFilter,
+            ObjRef, PlayerRef, Selector, TargetFilter, TargetGroup, TargetRef, Trigger, Who,
+        };
+        let spell =
+            |targets: Vec<TargetFilter>, effect: Effect, groups: Vec<TargetGroup>| CardDef {
+                name: "Test".into(),
+                card_types: vec![CardType::Instant],
+                abilities: vec![AbilityDef::Spell(Body::Effect(Mode {
+                    targets,
+                    effect,
+                    groups,
+                }))],
+                ..CardDef::default()
+            };
+        let text = |def: &CardDef| {
+            card_model::describe::rules_text(def)
+                .join(" / ")
+                .to_lowercase()
+        };
+        let has_word =
+            |t: &str, w: &str| t.split(|c: char| !c.is_ascii_alphabetic()).any(|x| x == w);
+        let draw = Effect::Draw {
+            who: PlayerRef::You,
+            amount: Amount::Fixed(1),
+        };
+        // "may"
+        let t = text(&spell(vec![], Effect::May(Box::new(draw.clone())), vec![]));
+        assert!(has_word(&t, "may"), "{t}");
+        // "damage", "it deals"
+        let t = text(&spell(
+            vec![TargetFilter::AnyTarget],
+            Effect::DealDamage {
+                to: TargetRef::Target(0),
+                amount: Amount::Fixed(2),
+                by: DamageBy::Triggering,
+            },
+            vec![],
+        ));
+        assert!(has_word(&t, "damage") && t.contains("it deals"), "{t}");
+        // "another" (a target that excludes the source)
+        let another = Selector {
+            types: vec![CardType::Creature],
+            other: true,
+            ..Selector::default()
+        };
+        let t = text(&spell(
+            vec![TargetFilter::Permanent(vec![another])],
+            Effect::Destroy {
+                what: ObjRef::Target(0),
+            },
+            vec![],
+        ));
+        assert!(has_word(&t, "another"), "{t}");
+        // "targets" (one word "target" for one to two targets)
+        let t = text(&spell(
+            vec![TargetFilter::Creature, TargetFilter::Creature],
+            Effect::Together(vec![
+                Effect::Destroy {
+                    what: ObjRef::Target(0),
+                },
+                Effect::Destroy {
+                    what: ObjRef::Target(1),
+                },
+            ]),
+            vec![TargetGroup {
+                first: 0,
+                count: 2,
+                min: 1,
+            }],
+        ));
+        assert!(has_word(&t, "targets"), "{t}");
+        // "that player", "its controller", "target player", "their"
+        for (who, phrase) in [
+            (PlayerRef::TriggeringPlayer, "that player"),
+            (PlayerRef::TriggeringController, "its controller"),
+            (PlayerRef::EachOpponent, "each opponent"),
+            (PlayerRef::Each, "each player"),
+        ] {
+            let t = text(&spell(
+                vec![],
+                Effect::Draw {
+                    who,
+                    amount: Amount::Fixed(1),
+                },
+                vec![],
+            ));
+            assert!(t.contains(phrase), "{t}");
+        }
+        let t = text(&spell(
+            vec![TargetFilter::Player],
+            Effect::Draw {
+                who: PlayerRef::Target(0),
+                amount: Amount::Fixed(1),
+            },
+            vec![],
+        ));
+        assert!(t.contains("target player"), "{t}");
+        // "{t}" in a cost
+        let tapper = CardDef {
+            name: "Test".into(),
+            card_types: vec![CardType::Artifact],
+            abilities: vec![AbilityDef::Activated {
+                cost: Cost {
+                    tap: true,
+                    ..Cost::default()
+                },
+                timing: card_model::Timing::Instant,
+                only_if: None,
+                body: Body::Effect(Mode {
+                    targets: vec![],
+                    effect: draw.clone(),
+                    groups: vec![],
+                }),
+                from: card_model::ActivationZone::Battlefield,
+                cycling: false,
+            }],
+            ..CardDef::default()
+        };
+        assert!(text(&tapper).to_lowercase().contains("{t}"));
+        // Equip: "attach this <type> to target creature you control" is not "narrowed".
+        let equipment = CardDef {
+            name: "Test".into(),
+            card_types: vec![CardType::Artifact],
+            creature_types: vec!["Equipment".into()],
+            abilities: vec![AbilityDef::Activated {
+                cost: Cost::default(),
+                timing: card_model::Timing::Sorcery,
+                only_if: None,
+                body: Body::Effect(Mode {
+                    targets: vec![TargetFilter::Permanent(vec![Selector {
+                        types: vec![CardType::Creature],
+                        controller: Who::You,
+                        ..Selector::default()
+                    }])],
+                    effect: Effect::AttachThis {
+                        to: ObjRef::Target(0),
+                    },
+                    groups: vec![],
+                }),
+                from: card_model::ActivationZone::Battlefield,
+                cycling: false,
+            }],
+            ..CardDef::default()
+        };
+        let t = text(&equipment);
+        assert!(
+            t.contains("attach this equipment to target creature you control"),
+            "{t}"
+        );
+        assert!(oracle_words_missing("equip {1}", &equipment).is_empty());
+        // ... but a narrowed target elsewhere still is.
+        let narrowed = spell(
+            vec![TargetFilter::Permanent(vec![Selector {
+                types: vec![CardType::Creature],
+                controller: Who::You,
+                ..Selector::default()
+            }])],
+            Effect::Destroy {
+                what: ObjRef::Target(0),
+            },
+            vec![],
+        );
+        assert_eq!(
+            oracle_words_missing("destroy target creature.", &narrowed),
+            ["target you control"]
+        );
+        // "you own": a creature put into your graveyard from the battlefield
+        let dies = CardDef {
+            name: "Test".into(),
+            card_types: vec![CardType::Enchantment],
+            abilities: vec![AbilityDef::Triggered {
+                when: Trigger::Dies(ObjFilter::Matching(Selector {
+                    types: vec![CardType::Creature],
+                    owner: Who::You,
+                    ..Selector::default()
+                })),
+                intervening_if: None,
+                body: Body::Effect(Mode {
+                    targets: vec![],
+                    effect: draw.clone(),
+                    groups: vec![],
+                }),
+            }],
+            ..CardDef::default()
+        };
+        assert!(text(&dies).contains("you own"), "{}", text(&dies));
+        // "can't be countered", "an additional time"
+        let t = text(&CardDef {
+            abilities: vec![AbilityDef::CantBeCountered { spells: None }],
+            ..CardDef::default()
+        });
+        assert!(t.contains("can't be countered"), "{t}");
+        let t = text(&CardDef {
+            abilities: vec![AbilityDef::AdditionalTrigger {
+                sources: ObjFilter::This,
+                cause: None,
+            }],
+            ..CardDef::default()
+        });
+        assert!(t.contains("an additional time"), "{t}");
+        // "unless" and "battlefield under your control" are pinned by the cards in
+        // forge_features.rs (Pay unless; return under your control).
     }
 }
