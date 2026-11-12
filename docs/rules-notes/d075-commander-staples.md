@@ -123,8 +123,8 @@ cost is `Cost$`. No rule involved.
 
 ## Look at the top N cards, put them back in any order; shuffle (401.4, 701.24a)
 
-> 701.24a To shuffle a library or a face-down pile of cards is to randomize the cards within
-> it so that no player knows their order.
+> 701.24a To shuffle a library or a face-down pile of cards, randomize the cards within it so
+> that no player knows their order.
 
 Forge's `RearrangeTopOfLibrary`: the effect's controller looks at the top N cards of a
 library and puts them back in an order they choose (Ponder, Sensei's Divining Top, Index);

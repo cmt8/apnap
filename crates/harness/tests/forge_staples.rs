@@ -708,8 +708,8 @@ fn a_cost_description_is_text_only() {
 // ---------------------------------------------------------------------------------------
 // Look at the top N cards and put them back in any order
 
-// CR 401.4 (2026-11-06) and CR 701.24a ("To shuffle a library … is to randomize the
-// cards within it"). Forge: `SP$ RearrangeTopOfLibrary | Defined$ You | NumCards$ 3 |
+// CR 401.4 (2026-11-06) and CR 701.24a ("To shuffle a library or a face-down pile of
+// cards, randomize the cards within it so that no player knows their order."). Forge: `SP$ RearrangeTopOfLibrary | Defined$ You | NumCards$ 3 |
 // MayShuffle$ True` ("look at the top three cards of your library, then put them back in
 // any order. You may shuffle."). The controller looks and orders, whoever's library it is.
 #[test]
