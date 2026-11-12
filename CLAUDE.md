@@ -156,9 +156,9 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-069): 10,508 of 34,463 scripts compile (30.5%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-069: 82% of
-the 100 most played Commander cards compile, 53% of the top 1,000, 32% of the top 5,000
+Status (D-078): 10,524 of 34,463 scripts compile (30.5%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-078: 83% of
+the 100 most played Commander cards compile, 54% of the top 1,000, 32% of the top 5,000
 (`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
 the rest. Feature tests live in `crates/harness/tests/forge_features.rs` and, one file per
 feature area since D-066, `forge_<area>.rs` next to it: invented cards written
@@ -169,7 +169,11 @@ yields nothing without a named blocker is `unexplained:*`; every compiled card g
 for words Forge scripts leave out or add (`oracle:*`: "may", "another target", a target
 narrowed to "you control", "unless"); and the `forge-Np` soak plays random decks of all of
 them. A script found by reading to differ from its card goes into `SCRIPT_DIFFERS` in
-`translate.rs` (`script:differs from the card`).
+`translate.rs` (`script:differs from the card`). A `#` line in a script is a comment, as in
+Forge, but only reviewed comment texts are ignored (`forge/comments.rs`, D-078: `HARMLESS`;
+`INCOMPLETE` ones block the card; anything else is `comment:unreviewed`). A variable Forge
+fills in at run time (`AFLifeLost`) is never read as its placeholder value
+(`expr:set by an effect …`).
 References written from Forge's sources: `docs/forge/script-format.md` (file format, costs,
 filters, `Defined$`, expressions), `effects.md` (every effect API), and
 `triggers-statics-replacements-keywords.md`. Read the relevant section before compiling a
