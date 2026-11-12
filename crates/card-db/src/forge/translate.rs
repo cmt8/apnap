@@ -2765,6 +2765,15 @@ impl<'a> Tx<'a> {
             self.block("param:ChangeZone.Tapped");
             return None;
         }
+        // `Reorder$`: the player who chose the cards puts them on their library "in any
+        // order" (Brainstorm). The engine always has them ordered by that player — the
+        // owner, CR 401.4 — so it only needs to be where they go to a library.
+        if rd.get("Reorder").is_some()
+            && !matches!(to, CardDest::LibraryTop | CardDest::LibraryBottom)
+        {
+            self.block("param:ChangeZone.Reorder not to a library");
+            return None;
+        }
         // Forge reveals what was found when a quality was asked for and the cards don't
         // go to the battlefield ("search for a creature card, reveal it, …").
         let restricted = filter.is_some_and(|f| f.trim() != "Card");

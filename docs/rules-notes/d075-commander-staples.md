@@ -21,3 +21,16 @@ effects, and not more than their life totals went down.
 | `life_lost_this_way_counts_a_replaced_loss_as_none` | 608.2c (a replacement modifies the action) |
 | `a_value_forge_sets_while_resolving_is_never_read_as_written` | compiler (invariant 15) |
 | `comments_that_were_read_are_ignored_others_block` | compiler (invariant 15) |
+
+## "In any order" (401.4)
+
+> 401.4. If an effect puts two or more cards in a specific position in a library at the
+> same time, the owner of those cards may arrange them in any order. That library’s owner
+> doesn’t reveal the order in which the cards go into the library.
+
+Forge's `Reorder$` lets the player who chose the cards order them; the engine always has
+them ordered by their owner — the same player for cards from their own hand or library.
+
+| Test | Rule |
+|---|---|
+| `cards_put_on_top_from_the_hand_are_ordered_by_their_owner` | 401.4 |

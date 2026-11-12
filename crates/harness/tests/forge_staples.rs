@@ -189,3 +189,58 @@ fn comments_that_were_read_are_ignored_others_block() {
     pick_cards(&mut s, &[island]);
     assert!(s.find(P0, Zone::Hand, "Island").is_some());
 }
+
+// ---------------------------------------------------------------------------------------
+// "In any order"
+
+// CR 401.4 (2026-11-06): "If an effect puts two or more cards in a specific position in a
+// library at the same time, the owner of those cards may arrange them in any order." Forge:
+// `Reorder$ True` on a `ChangeZone` from the hand to the library ("draw three cards, then
+// put two cards from your hand on top of your library in any order").
+#[test]
+fn cards_put_on_top_from_the_hand_are_ordered_by_their_owner() {
+    let storm = card(
+        "Test Mindstorm",
+        "U",
+        "Instant",
+        "A:SP$ Draw | NumCards$ 3 | SubAbility$ DBPut | SpellDescription$ Text.\n\
+         SVar:DBPut:DB$ ChangeZone | Origin$ Hand | Destination$ Library | ChangeNum$ 2 | Mandatory$ True | Reorder$ True",
+    );
+    let mut sc = scenario(&[&storm]);
+    sc.card(P0, Zone::Battlefield, "Island");
+    sc.card(P0, Zone::Hand, "Test Mindstorm");
+    let swamp = sc.card(P0, Zone::Hand, "Swamp");
+    let mountain = sc.card(P0, Zone::Hand, "Mountain");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Mindstorm").pay().pass_all();
+    assert_eq!(s.kind(), ChoiceKind::ChooseCards);
+    assert_eq!(s.st.zones.list(Zone::Hand, P0).len(), 5);
+    pick_cards(&mut s, &[swamp, mountain]);
+    // Now the order: the Mountain on top.
+    assert_eq!(s.who(), P0);
+    let order: Vec<usize> = [mountain, swamp]
+        .iter()
+        .map(|c| {
+            s.options()
+                .iter()
+                .position(|o| matches!(o, OptionDesc::Card { card } if card == c))
+                .unwrap()
+        })
+        .collect();
+    s.respond(Response::Order(order));
+    let library = s.st.zones.list(Zone::Library, P0);
+    let top: Vec<String> = library.iter().rev().take(2).map(|&c| s.name(c)).collect();
+    assert_eq!(top, ["Mountain", "Swamp"]);
+    assert_eq!(s.st.zones.list(Zone::Hand, P0).len(), 3);
+    // To anywhere but a library it means nothing the compiler knows.
+    let odd = card(
+        "Test Odd Storm",
+        "U",
+        "Instant",
+        "A:SP$ ChangeZone | Origin$ Hand | Destination$ Exile | ChangeNum$ 2 | Mandatory$ True | Reorder$ True | SpellDescription$ Text.",
+    );
+    assert_eq!(
+        forge_test_blockers(&odd),
+        ["param:ChangeZone.Reorder not to a library"]
+    );
+}
