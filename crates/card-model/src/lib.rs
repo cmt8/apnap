@@ -1298,6 +1298,10 @@ pub struct Cost {
     /// "Return N [permanents] you control to their owner's hand", chosen as the cost is paid.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub return_to_hand: Option<CostChoice>,
+    /// "Pay X life", X announced as the spell is cast (CR 107.3a): only in a spell's
+    /// additional cost (card-db), on top of `life`.
+    #[serde(skip_serializing_if = "core::ops::Not::not")]
+    pub life_x: bool,
 }
 
 impl Cost {
@@ -1322,6 +1326,7 @@ impl Cost {
             exile_self: self.exile_self || other.exile_self,
             exile_from_hand: one(&self.exile_from_hand, &other.exile_from_hand)?,
             return_to_hand: one(&self.return_to_hand, &other.return_to_hand)?,
+            life_x: self.life_x || other.life_x,
         })
     }
 }

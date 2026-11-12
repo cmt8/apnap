@@ -1244,6 +1244,21 @@ impl Agent for HeuristicAgent {
                 self.choose_modes(v, d, *min)
             }
             (ChoiceKind::ChooseTargets { slot }, _) => self.choose_targets(v, d, slot),
+            // "Pay X life" (an additional cost): never more than a third of its life.
+            (ChoiceKind::ChooseX, Primitive::PickNumber { max, .. })
+                if v.stack.last().is_some_and(|top| {
+                    top.ability.is_none()
+                        && self
+                            .catalog
+                            .get(top.card)
+                            .abilities
+                            .iter()
+                            .any(|a| matches!(a, AbilityDef::AdditionalCost(c) if c.life_x))
+                }) =>
+            {
+                let third = (Self::life(v, Self::me(v)).max(0) / 3) as u32;
+                Response::Number((*max).min(third))
+            }
             (ChoiceKind::ChooseX, Primitive::PickNumber { max, .. }) => Response::Number(*max),
             // Trample: as much as allowed to the player (lethal to blockers is required first).
             (ChoiceKind::AssignCombatDamage, Primitive::PickNumber { max, .. }) => {

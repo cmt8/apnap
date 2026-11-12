@@ -802,8 +802,17 @@ impl CastFrame {
         f
     }
 
-    /// The proposal's body/cost, read through the *current* source object.
+    /// The proposal's body/cost, read through the *current* source object; "pay X life"
+    /// with the X announced (CR 107.3a).
     fn proposal(&self, st: &GameState) -> Proposal {
+        let mut prop = self.proposal_as_written(st);
+        if prop.extra.life_x {
+            prop.extra.life += self.x;
+        }
+        prop
+    }
+
+    fn proposal_as_written(&self, st: &GameState) -> Proposal {
         match &self.source {
             CastSource::Card(_) => proposal_with(
                 st,
@@ -985,8 +994,10 @@ impl CastFrame {
                 }
                 CastStage::X => {
                     // CR 107.3a / 601.2b: announce X; bounded by what can be paid.
-                    let prop = self.proposal(st);
-                    if prop.cost.as_ref().is_some_and(|c| c.has_x()) {
+                    let mut prop = self.proposal(st);
+                    // CR 107.3a: an X in the mana cost, or in an additional cost ("pay X
+                    // life").
+                    if prop.cost.as_ref().is_some_and(|c| c.has_x()) || prop.extra.life_x {
                         if let Some(inp) = input.take() {
                             let Response::Number(x) = inp.response else {
                                 unreachable!()
@@ -999,14 +1010,25 @@ impl CastFrame {
                         } else {
                             let mut max = 0;
                             let payee = self.payee();
-                            while feasible(
-                                st,
-                                p,
-                                &self.source,
-                                &prop,
-                                payee,
-                                &total(&prop.cost, max + 1, self.tax, self.discount),
-                            ) {
+                            let life = prop.extra.life;
+                            loop {
+                                // CR 119.4: no more life than they have.
+                                if prop.extra.life_x {
+                                    prop.extra.life = life + max + 1;
+                                    if st.player(p).life < prop.extra.life as i32 {
+                                        break;
+                                    }
+                                }
+                                if !feasible(
+                                    st,
+                                    p,
+                                    &self.source,
+                                    &prop,
+                                    payee,
+                                    &total(&prop.cost, max + 1, self.tax, self.discount),
+                                ) {
+                                    break;
+                                }
                                 max += 1;
                             }
                             return self.ask(

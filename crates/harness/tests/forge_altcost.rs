@@ -804,6 +804,79 @@ fn the_heuristic_agent_takes_free_spells_and_keeps_its_cards() {
     assert!(matches!(s.decision().prim, Primitive::PickN { .. }));
 }
 
+// CR 107.3a: "If a spell … has … additional cost … with an … X in it, and the value of X
+// isn't defined by the text …, the controller … chooses and announces the value of X as
+// part of casting the spell." CR 119.4: no more life than they have. "As an additional
+// cost to cast this spell, pay X life. All creatures get -X/-X until end of turn."
+// Forge: `Cost$ 2 B PayLife<X>` with `SVar:X:Count$xPaid`.
+#[test]
+fn pay_x_life_as_an_additional_cost() {
+    let deluge = "Name:Test Deluge\nManaCost:2 B\nTypes:Sorcery\n\
+        A:SP$ PumpAll | Cost$ 2 B PayLife<X> | ValidCards$ Creature | NumAtt$ -X | NumDef$ -X | SpellDescription$ All creatures get -X/-X until end of turn.\n\
+        SVar:X:Count$xPaid\n\
+        Oracle:As an additional cost to cast this spell, pay X life.\\nAll creatures get -X/-X until end of turn.";
+    let ogre = "Name:Test Ogre\nManaCost:2 R\nTypes:Creature Ogre\nPT:3/3\nOracle:";
+    let mut sc = scenario(&[deluge, CUB, ogre]);
+    sc.card(P0, Zone::Hand, "Test Deluge");
+    sc.cards(P0, Zone::Battlefield, &["Swamp"; 3]);
+    sc.card(P1, Zone::Battlefield, "Test Cub");
+    sc.card(P1, Zone::Battlefield, "Test Ogre");
+    sc.life(P0, 4);
+    main_phase(&mut sc);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Deluge");
+    assert_eq!(s.kind(), ChoiceKind::ChooseX);
+    assert!(
+        matches!(s.decision().prim, Primitive::PickNumber { min: 0, max: 4 }),
+        "{:?}",
+        s.decision().prim
+    );
+    s.x(2).pay().pass_all();
+    assert_eq!(s.st.player(P0).life, 2);
+    assert!(in_zone(&s, P1, Zone::Graveyard, "Test Cub"));
+    let ogre = s.find(P1, Zone::Battlefield, "Test Ogre").unwrap();
+    assert_eq!(engine_core::layers::chars(&s.st, ogre).toughness, Some(1));
+    let cat = forge_test_catalog(&[deluge], &[]);
+    assert_eq!(
+        card_model::describe::rules_text(cat.get(cat.find("Test Deluge").unwrap()))[0],
+        "As an additional cost to cast this spell, pay X life."
+    );
+    // "Pay X life" anywhere but a spell's own cost is not compiled.
+    let blockers = forge_test_blockers(
+        "Name:Test Blocked\nManaCost:B\nTypes:Creature Imp\nPT:1/1\n\
+         A:AB$ Draw | Cost$ PayLife<X> | NumCards$ 1 | SpellDescription$ Text.\n\
+         SVar:X:Count$xPaid\nOracle:",
+    );
+    assert!(
+        blockers.iter().any(|b| b == "cost:PayLife-amount"),
+        "{blockers:?}"
+    );
+}
+
+// CR 118.8, 601.2h: "As an additional cost to cast this spell, return a land you control to
+// its owner's hand." Forge: `Cost$ U U Return<1/Land>`.
+#[test]
+fn return_a_land_as_an_additional_cost() {
+    let deprive = "Name:Test Deprive\nManaCost:U U\nTypes:Instant\n\
+        A:SP$ Draw | Cost$ U U Return<1/Land> | NumCards$ 1 | SpellDescription$ Draw a card.\n\
+        Oracle:As an additional cost to cast this spell, return a land you control to its owner's hand.\\nDraw a card.";
+    let mut sc = scenario(&[deprive]);
+    sc.card(P0, Zone::Hand, "Test Deprive");
+    sc.cards(P0, Zone::Battlefield, &["Island", "Island"]);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Deprive").pay();
+    assert_eq!(s.kind(), ChoiceKind::ReturnToHand);
+    assert_eq!(
+        s.options().len(),
+        2,
+        "either Island, tapped for mana or not"
+    );
+    s.respond(Response::Pick(vec![0]));
+    s.pass_all();
+    assert!(in_zone(&s, P0, Zone::Hand, "Island"));
+    assert_eq!(hand(&s, P0), 2, "the Island and the card drawn");
+}
+
 /// A land with the Island type, so that the test catalog knows the subtype.
 const ISLE: &str = "Name:Test Isle\nManaCost:no cost\nTypes:Land Island\nOracle:";
 

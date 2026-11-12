@@ -167,6 +167,8 @@ struct Tx<'a> {
     used_svars: BTreeSet<String>,
     tokens: BTreeSet<String>,
     has_x_cost: bool,
+    /// Reading a spell's own `Cost$` (its additional costs): "pay X life" is X announced.
+    spell_cost: bool,
     /// A characteristic-defining ability defines the card's (power, toughness).
     defines_pt: (bool, bool),
     /// Compiling the body of a triggered ability (where "X" is not the X being paid).
@@ -4389,6 +4391,15 @@ impl<'a> Tx<'a> {
                 }
                 ("PayLife", true) => match count {
                     Some(n) if cost.life == 0 && n > 0 => cost.life = n,
+                    // "As an additional cost to cast this spell, pay X life" (CR 107.3a):
+                    // X is announced, when the script says X is what was paid.
+                    None if args.first() == Some(&"X")
+                        && self.spell_cost
+                        && !cost.life_x
+                        && self.face.svars.get("X").is_some_and(|v| v == "Count$xPaid") =>
+                    {
+                        cost.life_x = true
+                    }
                     _ => {
                         self.block("cost:PayLife-amount");
                         return None;
@@ -4438,7 +4449,14 @@ impl<'a> Tx<'a> {
                     if !same {
                         // The whole cost is restated: the card's mana cost plus what is
                         // paid in addition ("as an additional cost to cast this spell, …").
-                        let mut cost = self.cost(text)?;
+                        self.spell_cost = true;
+                        let cost = self.cost(text);
+                        self.spell_cost = false;
+                        let mut cost = cost?;
+                        // "Pay X life": X is the X paid, for the spell's text too.
+                        if cost.life_x {
+                            self.has_x_cost = true;
+                        }
                         let mana = std::mem::take(&mut cost.mana);
                         let printed = mana_cost(printed).ok().flatten();
                         if mana != printed || cost.tap || cost.sacrifice_self {
@@ -6786,6 +6804,7 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
         used_svars: BTreeSet::new(),
         tokens: BTreeSet::new(),
         has_x_cost: false,
+        spell_cost: false,
         defines_pt: (false, false),
         in_trigger: false,
         from_zone: ActivationZone::Battlefield,

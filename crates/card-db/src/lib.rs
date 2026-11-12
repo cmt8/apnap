@@ -322,7 +322,11 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
     if kw.len() != c.keywords.len() {
         p.push("duplicate keyword".into());
     }
-    let card_has_x = c.mana_cost.as_ref().is_some_and(|m| m.has_x());
+    // X in the mana cost, or "pay X life" in the additional cost (CR 107.3a).
+    let card_has_x = c.mana_cost.as_ref().is_some_and(|m| m.has_x())
+        || c.abilities
+            .iter()
+            .any(|a| matches!(a, AbilityDef::AdditionalCost(x) if x.life_x));
     // "Has [quoted ability]" names an ability of the card's `granted` list.
     let text = format!("{:?}", (&c.abilities, &c.granted));
     for list in text.split("GrantAbilities([").skip(1) {
@@ -604,6 +608,9 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                     ));
                 }
                 let has_x = cost.mana.as_ref().is_some_and(|m| m.has_x());
+                if cost.life_x {
+                    p.push(at("\"pay X life\" is only a spell's additional cost".into()));
+                }
                 if *cost == Cost::default() {
                     p.push(at("activated ability with no cost".into()));
                 }
@@ -745,7 +752,13 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                         "an additional cost is a sacrifice, a discard or life, nothing else".into(),
                     ));
                 }
-                if cost.sacrifice.is_none() && cost.discard.is_none() && cost.life == 0 {
+                if cost.sacrifice.is_none()
+                    && cost.discard.is_none()
+                    && cost.life == 0
+                    && !cost.life_x
+                    && cost.exile_from_hand.is_none()
+                    && cost.return_to_hand.is_none()
+                {
                     p.push(at("an additional cost of nothing".into()));
                 }
                 if c.has_type(CardType::Land) {
@@ -758,7 +771,12 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                 // CR 118.9: paid rather than the mana cost; it doesn't name the card in a
                 // zone, and isn't `{T}` (D-072).
                 let cost = &alt.cost;
-                if cost.tap || cost.sacrifice_self || cost.discard_self || cost.exile_self {
+                if cost.tap
+                    || cost.sacrifice_self
+                    || cost.discard_self
+                    || cost.exile_self
+                    || cost.life_x
+                {
                     p.push(at(
                         "an alternative cost doesn't tap or move its own card".into()
                     ));

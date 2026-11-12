@@ -1502,6 +1502,9 @@ fn cost_parts(c: &Cost) -> Vec<String> {
     if c.life > 0 {
         parts.push(format!("Pay {} life", c.life));
     }
+    if c.life_x {
+        parts.push("Pay X life".to_string());
+    }
     if c.discard_self {
         parts.push("Discard this card".to_string());
     }
