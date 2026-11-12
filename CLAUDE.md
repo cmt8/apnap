@@ -106,6 +106,15 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
   destroy effect is `Effect::CantBeRegenerated` / `MoveCause::DestroyNoRegen`; as a rule
   that holds it is `AbilityDef::CantBeRegenerated`, read by `replacement::can_be_regenerated`.
   Tests: `forge_regen.rs`.
+- A copy (CR 707, D-074) carries `copy::Copiable { card, except }` in `GameObject::copy`;
+  `copy::base` is layer 1a and the one place `layers::chars_as` and the layer walk start
+  from — never `card_def` for a permanent that may be a copy. Entering as a copy is
+  `ReplaceWith::EntersAsCopy` (asked as `ChoiceKind::AsEnters`; the copied card's own
+  "enters" effects then apply); becoming one is `Effect::BecomeCopy` (for good only);
+  token copies are `Effect::CopyPermanent` through `CreateTokens`/`TokenEnters`, so
+  doublers double them. A token copy of a double-faced permanent is double-faced (707.8a).
+  Not built: copies of spells and abilities, "until end of turn" copies, Populate, Myriad.
+  Tests: `forge_copies.rs`.
 - The text of a compiled card (`card_model::describe`) is written like a printed card:
   number words, "this creature/land/Equipment", "Then" between instructions, a predefined
   token's reminder text on first mention. The Oracle guard (`oracle_words_missing`) reads
@@ -197,9 +206,9 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-079): 11,301 of 34,463 scripts compile (32.8%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-079: 93% of
-the 100 most played Commander cards compile, 61% of the top 1,000, 36% of the top 5,000
+Status (D-074): 11,353 of 34,463 scripts compile (32.9%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-074: 93% of
+the 100 most played Commander cards compile, 62% of the top 1,000, 37% of the top 5,000
 (`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
 the rest. Feature tests live in `crates/harness/tests/forge_features.rs` and, one file per
 feature area since D-066, `forge_<area>.rs` next to it: invented cards written

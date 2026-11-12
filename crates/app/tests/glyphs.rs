@@ -99,6 +99,7 @@ fn texts() -> Vec<String> {
         body: Body::Effect(mode(draw.clone())),
         from: card_model::ActivationZone::Hand,
         cycling: true,
+        reduce: None,
     };
     let cards = [
         // A modal card.

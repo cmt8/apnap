@@ -558,6 +558,12 @@ impl TrigCtx {
                 it: &["TriggeredBlocker"],
                 ..TrigCtx::NOTHING
             },
+            // Forge's `Taps`: `TriggeredCard` is the permanent that became tapped.
+            Trigger::BecomesTapped(f) => TrigCtx {
+                it: &["TriggeredCard"],
+                it_is_this: *f == ObjFilter::This,
+                ..TrigCtx::NOTHING
+            },
             // Forge's `AttackerBlocked` / `AttackerUnblocked`: `TriggeredDefendingPlayer` is
             // the player the attacker attacks.
             Trigger::BecomesBlocked(f) | Trigger::Unblocked(f) => TrigCtx {
@@ -880,6 +886,14 @@ impl<'a> Tx<'a> {
                 "!token" | "nonToken" => s.token = Some(false),
                 "token" => s.token = Some(true),
                 "Basic" => s.supertypes.push(Supertype::Basic),
+                // "With a basic land type" (Forge's `hasABasicLandType`): at least one of
+                // the five (CR 205.3i); a selector's subtypes are "any of these".
+                "hasABasicLandType" if s.subtypes.is_empty() => {
+                    s.subtypes = ["Plains", "Island", "Swamp", "Mountain", "Forest"]
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect();
+                }
                 "Legendary" => s.supertypes.push(Supertype::Legendary),
                 "Snow" => s.supertypes.push(Supertype::Snow),
                 // Colorless (CR 105.2c): none of the five colors.
@@ -1890,6 +1904,8 @@ impl<'a> Tx<'a> {
                 "PresentZone",
                 "SorcerySpeed",
                 "ActivationZone",
+                // Read by `ability`: "this ability costs {1} less to activate …".
+                "ReduceCost",
             ] {
                 rd.get(k);
             }
@@ -3333,7 +3349,25 @@ impl<'a> Tx<'a> {
                 },
             });
         };
-        let cost = self.cost(price)?;
+        // "Unless [they] pay {X}, where X is …" (CR 118.12, 107.3): the cost is {X}, with X
+        // worked out as this instruction is reached (the chain's X).
+        let cost = if price == "X" && self.face.svars.contains_key("X") {
+            match self.amount("X", chain) {
+                Some(Amount::X) => Cost {
+                    mana: Some(ManaCost {
+                        symbols: vec![card_model::ManaSymbol::X],
+                    }),
+                    ..Cost::default()
+                },
+                Some(_) => {
+                    self.block("unless:cost X of something else");
+                    return None;
+                }
+                None => return None,
+            }
+        } else {
+            self.cost(price)?
+        };
         if cost == Cost::default() || cost.discard_self || cost.exile_self {
             self.block("unless:cost");
             return None;
@@ -5249,6 +5283,27 @@ impl<'a> Tx<'a> {
                     }
                 };
                 self.from_zone = from.unwrap_or_default();
+                // "This ability costs {1} less to activate for each …" (Forge's
+                // CostAdjustment: `ReduceCost$` less generic mana; with `ReduceAmount$` it
+                // would be other mana, not compiled). Counted as the cost is determined.
+                let reduce = match (rec.get("ReduceCost"), rec.get("ReduceAmount")) {
+                    (None, _) => Some(None),
+                    (Some(_), Some(_)) => {
+                        self.block("param:activated.ReduceAmount");
+                        None
+                    }
+                    (Some(n), None) => match n.parse::<u32>() {
+                        Ok(n) => Some(Some(Amount::Fixed(n))),
+                        Err(_) => match self.expr(n) {
+                            Some(a) if a.stands_alone() => Some(Some(a)),
+                            Some(_) => {
+                                self.block("param:activated.ReduceCost not countable");
+                                None
+                            }
+                            None => None,
+                        },
+                    },
+                };
                 let body = self.body(rec, false, "AB");
                 self.from_zone = ActivationZone::Battlefield;
                 let (cost, from) = (cost?, from?);
@@ -5274,6 +5329,7 @@ impl<'a> Tx<'a> {
                     body: body?,
                     from,
                     cycling: false,
+                    reduce: reduce?,
                 })
             }
             _ => {
@@ -5362,10 +5418,27 @@ impl<'a> Tx<'a> {
                     types.clear();
                     spells.clear();
                 }
+                // "… their first noncreature spell each turn" (Forge's TriggerSpellCast:
+                // the spells matching `ValidCard$` the caster cast this turn, this one
+                // included, compared; only `EQ<n>` is compiled).
+                let nth = match rd.get("ActivatorThisTurnCast") {
+                    None => Some(None),
+                    Some(c) => match c.strip_prefix("EQ").and_then(|n| n.parse::<u32>().ok()) {
+                        Some(n) if n > 0 => Some(Some(n)),
+                        _ => {
+                            self.block(format!(
+                                "param:trig SpellCast.ActivatorThisTurnCast {}",
+                                shape(c)
+                            ));
+                            None
+                        }
+                    },
+                };
                 Some(Trigger::Cast {
                     by: by?,
                     types,
                     spells,
+                    nth: nth?,
                 })
             }
             "Attacks" => {
@@ -5518,6 +5591,13 @@ impl<'a> Tx<'a> {
                 })
             }
             // Blockers being declared (CR 509.1h).
+            // CR 603.2e, 701.26a: "whenever [a permanent] becomes tapped" (Forge's
+            // TriggerTaps: `ValidCard$`; `Attacker$`, `ValidCause$`, `FirstTime$` … are not
+            // read and block).
+            "Taps" => rd
+                .get("ValidCard")
+                .and_then(|f| self.obj_filter(f))
+                .map(Trigger::BecomesTapped),
             "Blocks" => {
                 let blocker = rd.get("ValidCard").and_then(|f| self.obj_filter(f));
                 match rd.get("ValidBlocked") {
@@ -5630,6 +5710,12 @@ impl<'a> Tx<'a> {
                 }
                 // An attacking creature is on the battlefield.
                 (Some("Attacks"), _) => rec.get("ValidCard") == Some("Card.Self"),
+                // Only a permanent becomes tapped; and the Aura or Equipment attached to it
+                // is on the battlefield too.
+                (Some("Taps"), _) => matches!(
+                    rec.get("ValidCard"),
+                    Some("Card.Self" | "Card.AttachedBy" | "Creature.AttachedBy")
+                ),
                 // "When you cycle this card": from wherever the card went.
                 (Some("Cycled"), _) => rec.get("ValidCard") == Some("Card.Self"),
                 // A creature that blocks or is blocked is on the battlefield.
@@ -7972,6 +8058,11 @@ fn ability_records(face: &Face) -> Vec<(String, Record)> {
 /// what differs; remove it when the pinned Forge commit has the script corrected.
 const SCRIPT_DIFFERS: &[(&str, &str)] = &[
     (
+        "Knight of the Mists",
+        "destroys target Knight *creature*; the card says \"target Knight\" (a Kindred Knight \
+         permanent that isn't a creature is a legal target, CR 308.2)",
+    ),
+    (
         "Swarmyard Massacre",
         "counts Insects, Rats, Spiders and Squirrels you control; the card counts *creatures* \
          you control of those types (a noncreature permanent of such a type must not count)",
@@ -8346,6 +8437,7 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
                 equips.push(AbilityDef::Activated {
                     from: ActivationZone::Battlefield,
                     cycling: false,
+                    reduce: None,
                     cost,
                     timing: Timing::Sorcery,
                     only_if: None,
@@ -8390,6 +8482,7 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
                                 not_types: vec![CardType::Creature],
                                 ..Selector::default()
                             }],
+                            nth: None,
                         },
                         intervening_if: None,
                         body: pump_one(ObjRef::This),
@@ -8555,6 +8648,7 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
                             }),
                             from: ActivationZone::Hand,
                             cycling: true,
+                            reduce: None,
                         },
                     ));
                 }
@@ -9330,6 +9424,7 @@ mod tests {
                 }),
                 from: card_model::ActivationZone::Battlefield,
                 cycling: false,
+                reduce: None,
             }],
             ..CardDef::default()
         };
@@ -9356,6 +9451,7 @@ mod tests {
                 }),
                 from: card_model::ActivationZone::Battlefield,
                 cycling: false,
+                reduce: None,
             }],
             ..CardDef::default()
         };

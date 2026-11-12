@@ -44,6 +44,10 @@ pub struct PlayerState {
     /// Cards drawn this turn ("whenever you draw your second card each turn").
     #[serde(default)]
     pub drawn_this_turn: u32,
+    /// The spells this player has cast this turn, each as it was when it became cast (CR
+    /// 601.2i): "their first noncreature spell each turn". Serialized only when not empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cast_this_turn: Vec<crate::triggers::Lki>,
 }
 
 /// CR 106.6: mana with a spending restriction — the `spend` of mana ability `ability`.

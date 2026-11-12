@@ -352,6 +352,23 @@ fn total(cost: &Option<ManaCost>, x: u32, tax: u32, discount: u32) -> ManaRequir
 /// permanents `p` controls ("Dragon spells you cast cost {1} less") and from the spell
 /// itself ("this spell costs {1} less for each creature on the battlefield").
 /// `face` is the face it is cast with (CR 712.8c).
+/// CR 602.2b, 601.2f, 118.7a: how much less generic mana an activated ability of `source`
+/// costs `p` by its own words ("this ability costs {1} less to activate for each legendary
+/// creature you control").
+pub(crate) fn ability_reduction(
+    st: &GameState,
+    p: PlayerId,
+    source: ObjectId,
+    ability: card_model::AbilityId,
+) -> u32 {
+    match st.catalog.ability(ability) {
+        AbilityDef::Activated {
+            reduce: Some(a), ..
+        } => crate::layers::count_amount(st, a, source, p),
+        _ => 0,
+    }
+}
+
 pub(crate) fn cost_reduction(st: &GameState, p: PlayerId, card: ObjectId, face: u8) -> u32 {
     let c = crate::layers::chars_as(st, card, face);
     let facts = crate::layers::Facts {
@@ -783,6 +800,7 @@ pub(crate) fn can_begin_with(
                 cost_reduction(st, p, card, face),
             )
         }
+        CastSource::Ability { source, ability } => (0, ability_reduction(st, p, *source, *ability)),
         _ => (0, 0),
     };
     let payee = payee_of(&source);
@@ -909,6 +927,11 @@ impl CastFrame {
                         if st.object(card).zone == Zone::Command {
                             self.from_command = Some(st.object(card).card_instance);
                         }
+                    }
+                    // CR 602.2b, 601.2f: "this ability costs {1} less to activate for each
+                    // …", counted now, as the total cost is determined.
+                    if let CastSource::Ability { source, ability } = self.source {
+                        self.discount = ability_reduction(st, p, source, ability);
                     }
                     let put = |st: &mut GameState, a: GameAction| match execute(st, a) {
                         crate::actions::ActionResult::Moved(id) => id,
@@ -1420,6 +1443,7 @@ impl CastFrame {
         if let CastSource::Card(_) = self.source {
             let spell = self.object.unwrap();
             st.emit(Event::SpellCast { player: p, spell });
+            execute(st, GameAction::NoteCast { player: p, spell });
             // CR 601.2i: "whenever ... casts" abilities trigger now.
             triggers::detect_cast(st, p, spell);
         }

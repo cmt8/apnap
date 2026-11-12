@@ -538,6 +538,11 @@ pub enum AbilityDef {
         /// the card to pay for it is "cycling" it (CR 702.29c).
         #[serde(default)]
         cycling: bool,
+        /// "This ability costs {1} less to activate for each …" (CR 602.2b, 601.2f,
+        /// 118.7a): this much less generic mana, counted for its controller as the cost is
+        /// determined. Serialized only when there is one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reduce: Option<Amount>,
     },
     /// A static ability: "[Selector] spells you cast cost {N} less to cast" (generic mana
     /// only, CR 118.7a). The selector is matched against the spell being cast.
@@ -854,6 +859,11 @@ pub enum Trigger {
         /// What the spell is on the stack is compared; who controls it is `by`.
         #[serde(default)]
         spells: Vec<Selector>,
+        /// "… casts their first noncreature spell each turn": only the `nth` spell of this
+        /// kind that player has cast this turn (each judged as it was cast). Serialized only
+        /// when set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nth: Option<u32>,
     },
     /// CR 508.1m: "Whenever [filter] attacks" — it is declared as an attacker.
     Attacks(ObjFilter),
@@ -915,6 +925,10 @@ pub enum Trigger {
         attacker: ObjFilter,
         blocker: ObjFilter,
     },
+    /// CR 603.2e, 701.26a: "Whenever [filter] becomes tapped" — an untapped permanent is
+    /// tapped, whatever taps it (a cost, an effect, attacking). Entering tapped isn't
+    /// becoming tapped. "It" is the permanent.
+    BecomesTapped(ObjFilter),
 }
 
 /// What a damage trigger's damage was dealt to.
