@@ -410,3 +410,42 @@ fn emblems_and_mana_loyalty_abilities_are_blocked() {
     );
     let _ = Target::Player(P0);
 }
+
+/// What the heuristic agent answers P0's pending decision with (it sees only P0's view).
+fn heuristic(s: &Script) -> OptionDesc {
+    use engine_core::Agent;
+    let mut brain = ai::HeuristicAgent::new(3, s.st.catalog.clone());
+    let d = s.decision().clone();
+    let r = brain.decide(&engine_core::player_view(&s.st, P0), &d);
+    match r {
+        Response::Pick(v) if v.len() == 1 => d.options[v[0]].clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+// D-086: the heuristic agent attacks an opposing planeswalker its attacker can kill when
+// hitting the player isn't better, and uses a loyalty ability on its turn.
+#[test]
+fn the_heuristic_agent_attacks_planeswalkers_and_uses_loyalty_abilities() {
+    let mut sc = scenario(&[WALKER, BRUISER]);
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Sage Walker");
+    let mine = sc.card(P0, Zone::Battlefield, "Test Sage Walker");
+    let ogre = sc.card(P0, Zone::Battlefield, "Test Walker Ogre");
+    sc.turn(P0, Step::PrecombatMain);
+    let st = with_loyalty(sc.build(), theirs, 3);
+    let mut s = Script::new(with_loyalty(st, mine, 3));
+    // Its own planeswalker: "+1" rather than nothing.
+    assert!(
+        matches!(heuristic(&s), OptionDesc::ActivateAbility { source, ability } if source == mine && ability.index == 1),
+        "{:?}",
+        heuristic(&s)
+    );
+    to_attack(&mut s, ogre);
+    assert_eq!(
+        heuristic(&s),
+        OptionDesc::AttackPlaneswalker {
+            attacker: ogre,
+            planeswalker: theirs
+        }
+    );
+}
