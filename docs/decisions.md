@@ -2878,6 +2878,71 @@ Rules text: docs/rules-notes/122-counters.md, docs/rules-notes/715-sagas.md (Sag
   (120.3c); attacking planeswalkers (506.3, 508.1b: the engine's creatures attack only
   players); the SBA at 0 loyalty (704.5i); "loyalty" as a number read by effects.
 
+## D-085 Copies of spells and abilities; storm; "whenever you cast or copy" (2026-11-12)
+Rules text: docs/rules-notes/707-spell-copies.md. Tests: `crates/harness/tests/forge_spell_copies.rs`.
+- **A copy** (CR 707.10): `GameAction::CopyStackObject` puts a new stack object on the stack
+  with everything decided for the original — modes, X, targets, the alternative cost, what was
+  paid by sacrifice — controlled (and, for a spell, owned) by the player who made it. A copy of
+  a spell is a `GameObject` with `spell_copy` (D-081's groundwork): the original's card and
+  face, its copiable values plus the copy effect's exceptions ("except that the copy is red",
+  "except it isn't legendary": `CopyExcept`, D-074), a new card instance (never a commander).
+  A copy of an ability has the original's source (707.10b). `Event::CopiedOnStack`; no
+  `SpellCast` — a copy isn't cast, so "whenever you cast" and `cast_this_turn` don't see it.
+  It ceases to exist off the stack (704.5e, already on main); a copy of a permanent spell
+  resolves into a token that wasn't "created" (111.13, 608.3f, already on main).
+- **What is copied** is read as it is on the stack, or as it last was there (CR 608.2h): a
+  spell countered in response to "copy that spell" or to its storm trigger is still copied.
+  `GameState::left_stack` keeps the stack objects that left while the stack wasn't empty
+  (serialized only when not empty); it is cleared when the stack empties.
+- **New targets** (707.10c): "you may choose new targets for the copy" is D-082's
+  `Work::ChangeTargets` (keep first, then every legal target), asked for each copy right after
+  it is made and before the next is made — so no copy can target a later one, and none
+  targets itself (115.5).
+- `Effect::CopySpell { what, count, new_targets, except }` (appended): `what` a target on
+  the stack, `ObjRef::Triggering` ("copy that spell" of a cast trigger, whose `subject` is
+  now the spell), or `ObjRef::This` (storm). `TargetFilter::AbilityOnStack { activated,
+  triggered, yours }` (appended): "target triggered ability you control"; `SpellMatching`
+  now also asks "you control". Forge: `CopySpellAbility` with `ValidTgts$`/`TargetType$`
+  (Spell; `Activated`/`Triggered`[`.YouCtrl`] with `ValidTgts$ Card,Emblem`), `Defined$
+  TriggeredSpellAbility` in a `SpellCast` trigger, `Amount$`, `MayChooseTarget$`, the copy
+  modifiers of `CopyPermanent` (`NonLegendary$`, `SetColor$`, `AddTypes$`).
+- **Storm** (CR 702.40a): `K:Storm` is a triggered ability `Trigger::CastThis` (appended:
+  "when you cast this spell", triggering from the spell on the stack at 601.2i) whose "that
+  much" is the number of spells every player cast this turn before it. **"Copy it for each
+  other instant and sorcery spell you've cast before it this turn"** (Thousand-Year Storm):
+  a "whenever you cast" trigger's "that much" is now the number of spells of its kind the
+  caster cast this turn before this one, fixed as it triggers; Forge's
+  `TriggerObjectsCurrentCastSpells$Valid <the trigger's types>.YouCtrl/Minus.1` (read in
+  MagicStack.add: the list includes this spell) compiles to it only when its types are the
+  trigger's own.
+- **"Whenever you cast or copy"** (magecraft, Forge's `SpellCastOrCopy`, run by
+  MagicStack.add for a copy with the copy's controller as the activator): `Trigger::Cast`
+  gets `copies` (serialized only when set); a copy of a spell triggers it for the player who
+  made it. 32 scripts use it; 9 of them now compile.
+- Text: "permanent card" / "permanent spell" (CR 110.4a–b) for "noninstant nonsorcery";
+  71 cards' text, no meaning. New Oracle guard `oracle:says new targets`: a script that lets
+  you choose new targets where the card doesn't (Reflections of Littjara) is not compiled;
+  pinned in `guard_phrases_are_still_written`.
+- **Newly compiled (57, all read against their Oracle text):** Reverberate, Twincast, Fork,
+  Dualcaster Mage, Flare of Duplication, Force of Rowan, Naru Meha, Nivix Guildmage,
+  Geistblast, Insidious Will, Strionic Resonator, Lithoform Engine, Mirrorpool, Drafna,
+  Double Major, Swarm Intelligence, Double Vision, Thousand-Year Storm, Mirari, Lucky Clover,
+  Chancellor of Tales, Gorion, Tawnos, Thurid, Virtue of Knowledge; storm: Grapeshot,
+  Flusterstorm, Brain Freeze, Empty the Warrens, Chatterstorm, Tendrils of Agony, Dragonstorm,
+  Stormscale Scion, Krosan Adaptation, Temporal Fissure, Hindering Touch and 12 more;
+  magecraft: Archmage Emeritus, Storm-Kiln Artist, Witherbloom Apprentice, Clever Lumimancer,
+  Eager First-Year, Karok Wrangler, Lorehold/Quandrix/Silverquill Apprentice. None lost but
+  Reflections of Littjara (the guard above; it compiled nowhere before either).
+- **Still blocked, by name:** `param:CopySpellAbility.<key>` for another player controlling
+  the copies (`Controller$`: Chain of Vapor), one copy per legal target
+  (`CopyForEachCanTarget$`: Radiate, Zada), `Optional$`, `SingleChoice$`, `DefinedTarget$`;
+  `CopySpellAbility:Defined <name>` for a copy of anything but a target or the cast spell
+  (`Parent`, `Self`, remembered); `CopySpellAbility:TargetType …` for kinds mixing spells and
+  abilities (Return the Favor). Not built: replicate, casualty, conspire, cascade, "cast a
+  copy" (707.12 — a cast, `api:Play`), copy replacement effects (Twinning Staff), "whenever
+  you activate" triggers (Rings of Brighthearth, Illusionist's Bracers).
+- Golden: see the commit.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

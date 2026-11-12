@@ -407,6 +407,19 @@ fn a_mana_value_bound_worked_out_as_it_resolves() {
             "Search your library for a creature card with mana value less than or equal to the number of lands you control, reveal it, put it into your hand, then shuffle."
         ]
     );
+    // "Permanent cards" (CR 110.4a), not "noninstant nonsorcery cards".
+    let wave = card(
+        "Test Wave",
+        "X G G G",
+        "Sorcery",
+        "A:SP$ Dig | DigNum$ X | Reveal$ True | ChangeNum$ Any | ChangeValid$ Permanent.cmcLEX | DestinationZone$ Battlefield | DestinationZone2$ Graveyard | SpellDescription$ Text.\nSVar:X:Count$xPaid",
+    );
+    let cat = forge_test_catalog(&[&wave], &[]);
+    let text = card_model::describe::rules_text(cat.get(cat.find("Test Wave").unwrap()));
+    assert!(
+        text[0].contains("any number of permanent cards with mana value X or less"),
+        "{text:?}"
+    );
     // Outside a search there is no resolution to work it out in: not compiled.
     let static_ = card(
         "Test Odd Anthem",
@@ -415,4 +428,106 @@ fn a_mana_value_bound_worked_out_as_it_resolves() {
         "S:Mode$ Continuous | Affected$ Creature.cmcLEX | AddPower$ 1 | Description$ Text.\nSVar:X:Count$Valid Land.YouCtrl",
     );
     assert!(!forge_test_blockers(&static_).is_empty());
+}
+
+// CR 303.4f (2026-11-06): "If an Aura is entering the battlefield under a player's control
+// by any means other than by resolving as an Aura spell, and the effect putting it onto the
+// battlefield doesn't specify the object or player the Aura will enchant, that player
+// chooses what it will enchant as the Aura enters the battlefield." CR 303.4g: "If an Aura
+// is entering the battlefield and there is no legal object or player for it to enchant,
+// the Aura remains in its current zone …". The cards of one mass return enter at once: an
+// Aura can't enchant a card entering with it. Forge: Replenish, Open the Vaults
+// (`ChangeZoneAll` to the battlefield); one Aura card returned (`ChangeZone` with a target
+// card in a graveyard).
+#[test]
+fn auras_returned_from_a_graveyard_enchant_what_their_controller_chooses() {
+    let halo = |name: &str| {
+        format!(
+            "Name:{name}\nManaCost:W\nTypes:Enchantment Aura\nK:Enchant:Creature\n\
+             Oracle:Text."
+        )
+    };
+    let (halo_a, halo_b) = (halo("Test Halo Alpha"), halo("Test Halo Beta"));
+    let rust = "Name:Test Rust Ward\nManaCost:W\nTypes:Enchantment Aura\nK:Enchant:Artifact\n\
+        Oracle:Text."
+        .to_string();
+    let cog = card("Test Spare Cog", "1", "Artifact", "");
+    let refill = card(
+        "Test Refill",
+        "3 W",
+        "Sorcery",
+        "A:SP$ ChangeZoneAll | ChangeType$ Enchantment.YouCtrl | Origin$ Graveyard | Destination$ Battlefield | SpellDescription$ Text.",
+    );
+    let vaults = card(
+        "Test Vault Opening",
+        "4 W",
+        "Sorcery",
+        "A:SP$ ChangeZoneAll | ChangeType$ Artifact.YouCtrl,Enchantment.YouCtrl | Origin$ Graveyard | Destination$ Battlefield | SpellDescription$ Text.",
+    );
+    let raise = card(
+        "Test Raise Ward",
+        "1 W",
+        "Sorcery",
+        "A:SP$ ChangeZone | Origin$ Graveyard | Destination$ Battlefield | ValidTgts$ Enchantment.YouCtrl | TgtPrompt$ Select target enchantment card in your graveyard | SpellDescription$ Text.",
+    );
+    let cub = card("Test Halo Cub", "1 G", "Creature Bear", "PT:2/2");
+    let mut sc = scenario(&[
+        &halo_a, &halo_b, &rust, &cog, &refill, &vaults, &raise, &cub,
+    ]);
+    sc.cards(P0, Zone::Battlefield, &["Plains"; 11]);
+    let mine = sc.card(P0, Zone::Battlefield, "Test Halo Cub");
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Halo Cub");
+    sc.cards(
+        P0,
+        Zone::Graveyard,
+        &[
+            "Test Halo Alpha",
+            "Test Halo Beta",
+            "Test Rust Ward",
+            "Test Spare Cog",
+        ],
+    );
+    sc.cards(
+        P0,
+        Zone::Hand,
+        &["Test Refill", "Test Vault Opening", "Test Raise Ward"],
+    );
+    let mut s = Script::new(sc.build());
+    s.cast("Test Refill").pay().pass_all();
+    // Each Aura: what it enchants, chosen (not targeted) by the player it enters under.
+    for host in [mine, theirs] {
+        assert_eq!(s.kind(), ChoiceKind::AuraHost);
+        assert_eq!(s.who(), P0);
+        assert_eq!(
+            s.options(),
+            [
+                OptionDesc::Card { card: mine },
+                OptionDesc::Card { card: theirs }
+            ]
+        );
+        s.pick("a creature", |_, o| *o == OptionDesc::Card { card: host });
+    }
+    let alpha = s.find(P0, Zone::Battlefield, "Test Halo Alpha").unwrap();
+    let beta = s.find(P0, Zone::Battlefield, "Test Halo Beta").unwrap();
+    assert_eq!(s.st.object(alpha).attached_to, Some(mine));
+    assert_eq!(s.st.object(beta).attached_to, Some(theirs));
+    // Nothing it could enchant: it stays in the graveyard (CR 303.4g).
+    assert!(s.find(P0, Zone::Graveyard, "Test Rust Ward").is_some());
+    // An artifact returned with it doesn't count: they enter at the same time.
+    s.cast("Test Vault Opening").pay().pass_all();
+    let spare = s
+        .find(P0, Zone::Battlefield, "Test Spare Cog")
+        .expect("the artifact entered");
+    let ward = s
+        .find(P0, Zone::Graveyard, "Test Rust Ward")
+        .expect("no artifact was on the battlefield as they entered");
+    // One Aura card returned: now it has something to enchant (the only choice is made
+    // without asking).
+    s.cast("Test Raise Ward");
+    s.target_object(ward).pay();
+    s.pass_all();
+    let ward = s
+        .find(P0, Zone::Battlefield, "Test Rust Ward")
+        .expect("returned");
+    assert_eq!(s.st.object(ward).attached_to, Some(spare));
 }

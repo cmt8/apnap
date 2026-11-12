@@ -642,6 +642,13 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                         !needs_player || matches!(to, card_model::DamageTo::Player(_))
                     }
                     Trigger::GainsLife(_) | Trigger::LosesLife(_) => true,
+                    // Who cast it; the spells of its kind cast before it this turn.
+                    Trigger::Cast {
+                        copies: false,
+                        nth: None,
+                        ..
+                    }
+                    | Trigger::CastThis => true,
                     // Who drew or discarded, who cast the spell, whose step it is.
                     Trigger::Draws { .. }
                     | Trigger::Discards(_)
@@ -1741,6 +1748,26 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
                 "ChangeTargets needs a target on the stack, got {other:?}"
             )),
         },
+        // CR 707.10: a spell or ability on the stack — a target, "that spell" of a cast
+        // trigger, or the spell itself (storm).
+        Effect::CopySpell { what, count: a, .. } => {
+            amount(a, p);
+            match what {
+                ObjRef::Target(i) => match slot(&TargetRef::Target(*i)) {
+                    Some(
+                        TargetFilter::Spell
+                        | TargetFilter::SpellMatching(_)
+                        | TargetFilter::OnStack { .. }
+                        | TargetFilter::AbilityOnStack { .. },
+                    ) => {}
+                    other => p(format!(
+                        "CopySpell needs a target on the stack, got {other:?}"
+                    )),
+                },
+                ObjRef::Triggering | ObjRef::This => {}
+                other => p(format!("CopySpell of {other:?}")),
+            }
+        }
         Effect::DamageEachPlayer { amount: a } => amount(a, p),
         Effect::Destroy { what } | Effect::ReturnToHand { what } | Effect::Apply { what, .. } => {
             obj(what, p)

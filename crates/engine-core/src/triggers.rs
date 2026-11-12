@@ -1364,8 +1364,19 @@ fn detect_cycled(st: &mut GameState, player: PlayerId, card: ObjectId) {
     queue_matching(st, found, conds);
 }
 
-/// "Whenever [a player] casts a spell" triggers (at CR 601.2i).
+/// "Whenever [a player] casts a spell" triggers (at CR 601.2i), and the spell's own "when
+/// you cast this spell" (storm, CR 702.40a).
 pub(crate) fn detect_cast(st: &mut GameState, caster: PlayerId, spell: ObjectId) {
+    detect_spell(st, caster, spell, false);
+}
+
+/// "Whenever you cast or copy [a spell]": `player` put `copy`, a copy of a spell, on the
+/// stack (CR 707.10; a copy isn't cast, so nothing else triggers).
+pub(crate) fn detect_copy(st: &mut GameState, player: PlayerId, copy: ObjectId) {
+    detect_spell(st, player, copy, true);
+}
+
+fn detect_spell(st: &mut GameState, caster: PlayerId, spell: ObjectId, copied: bool) {
     let spell_chars = chars(st, spell);
     let mut found = Vec::new();
     let mut conds = Vec::new();
@@ -1380,66 +1391,122 @@ pub(crate) fn detect_cast(st: &mut GameState, caster: PlayerId, spell: ObjectId)
                 continue;
             };
             for t in when.events() {
-                if let Trigger::Cast {
+                let Trigger::Cast {
                     by,
                     types,
                     spells,
                     nth,
+                    copies,
                 } = t
-                    && who_matches(*by, caster, src.controller)
-                    && ((types.is_empty() && spells.is_empty())
+                else {
+                    continue;
+                };
+                if (copied && !*copies)
+                    || !who_matches(*by, caster, src.controller)
+                    || !((types.is_empty() && spells.is_empty())
                         || types.iter().any(|t| spell_chars.is(*t))
                         || spells.iter().any(|s| {
                             // "A creature spell of the chosen type" (CR 607.2d).
                             let s = crate::chosen::bind(s, &src.chosen);
                             crate::targeting::card_matches(st, spell, &s)
                         }))
-                    // "Their first noncreature spell each turn": this one is the nth of its
-                    // kind they cast this turn, each judged as it was cast.
-                    && nth.is_none_or(|n| {
-                        let kind = |l: &Lki| {
-                            (types.is_empty() && spells.is_empty())
-                                || types.iter().any(|t| l.chars.is(*t))
-                                || spells.iter().any(|s| {
-                                    let s = crate::chosen::bind(s, &src.chosen);
-                                    crate::layers::matches_parts(
-                                        &s,
-                                        &l.chars,
-                                        Facts {
-                                            id: spell,
-                                            controller: l.controller,
-                                            owner: l.owner,
-                                            is_token: l.is_token,
-                                            tapped: false,
-                                            attacking: false,
-                                            blocking: false,
-                                        },
-                                        src.id,
-                                        src.controller,
-                                    )
-                                })
-                        };
-                        st.player(caster).cast_this_turn.iter().filter(|l| kind(l)).count()
-                            == n as usize
-                    })
                 {
-                    found.push(PendingTrigger {
-                        remembered: Vec::new(),
-                        controller: src.controller,
-                        source: src.id,
-                        source_card: src.card,
-                        ability,
-                        source_lki: None,
-                        subject: None,
-                        subject_lki: None,
-                        // "That player": who cast it.
-                        facts: EventFacts {
-                            player: Some(caster),
-                            ..EventFacts::default()
-                        },
-                    });
-                    conds.push(intervening_if.clone());
+                    continue;
                 }
+                // The spells of this kind the caster cast this turn, this one included, each
+                // judged as it was cast (a copy was never cast: none).
+                let kind = |l: &Lki| {
+                    (types.is_empty() && spells.is_empty())
+                        || types.iter().any(|t| l.chars.is(*t))
+                        || spells.iter().any(|s| {
+                            let s = crate::chosen::bind(s, &src.chosen);
+                            crate::layers::matches_parts(
+                                &s,
+                                &l.chars,
+                                Facts {
+                                    id: spell,
+                                    controller: l.controller,
+                                    owner: l.owner,
+                                    is_token: l.is_token,
+                                    tapped: false,
+                                    attacking: false,
+                                    blocking: false,
+                                },
+                                src.id,
+                                src.controller,
+                            )
+                        })
+                };
+                let cast = if copied {
+                    0
+                } else {
+                    st.player(caster)
+                        .cast_this_turn
+                        .iter()
+                        .filter(|l| kind(l))
+                        .count()
+                };
+                // "Their first noncreature spell each turn": this one is the nth of its
+                // kind they cast this turn.
+                if nth.is_some_and(|n| copied || cast != n as usize) {
+                    continue;
+                }
+                found.push(PendingTrigger {
+                    remembered: Vec::new(),
+                    controller: src.controller,
+                    source: src.id,
+                    source_card: src.card,
+                    ability,
+                    source_lki: None,
+                    // "That spell", "copy it".
+                    subject: Some(spell),
+                    subject_lki: None,
+                    // "That player": who cast it. "That much": the other spells of this
+                    // kind they cast before it this turn ("copy it for each …").
+                    facts: EventFacts {
+                        player: Some(caster),
+                        amount: cast.saturating_sub(1) as u32,
+                        ..EventFacts::default()
+                    },
+                });
+                conds.push(intervening_if.clone());
+            }
+        }
+    }
+    // CR 702.40a: "when you cast this spell" — from the spell on the stack. "That much":
+    // the spells every player cast this turn before it.
+    if !copied {
+        let before = st
+            .players
+            .iter()
+            .map(|p| p.cast_this_turn.len())
+            .sum::<usize>()
+            .saturating_sub(1) as u32;
+        let card = st.face_card(spell);
+        for (ability, a) in abilities(st, spell) {
+            if let AbilityDef::Triggered {
+                when,
+                intervening_if,
+                ..
+            } = a
+                && when.events().iter().any(|t| matches!(t, Trigger::CastThis))
+            {
+                found.push(PendingTrigger {
+                    remembered: Vec::new(),
+                    controller: caster,
+                    source: spell,
+                    source_card: card,
+                    ability,
+                    source_lki: None,
+                    subject: Some(spell),
+                    subject_lki: None,
+                    facts: EventFacts {
+                        player: Some(caster),
+                        amount: before,
+                        ..EventFacts::default()
+                    },
+                });
+                conds.push(intervening_if.clone());
             }
         }
     }

@@ -306,6 +306,15 @@ pub enum GameAction {
         player: PlayerId,
         chosen: card_model::Chosen,
     },
+    /// CR 707.10: put a copy of the spell or ability `original` on the stack under
+    /// `controller`'s control, with everything decided for it; `except` are exceptions of
+    /// the copy effect written on card `written_on` (CR 707.9). Returns the copy's id.
+    CopyStackObject {
+        original: ObjectId,
+        controller: PlayerId,
+        except: Vec<card_model::CopyExcept>,
+        written_on: card_model::CardDefId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -918,10 +927,20 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             ActionResult::Done
         }
         GameAction::RemoveAbility { ability } => {
+            if let Some(so) = st.stack.iter().find(|s| s.id == ability).cloned() {
+                st.left_stack.push((so, None));
+            }
             st.stack.retain(|s| s.id != ability);
+            forget_left_stack(st);
             st.emit(Event::AbilityRemoved { ability });
             ActionResult::Done
         }
+        GameAction::CopyStackObject {
+            original,
+            controller,
+            except,
+            written_on,
+        } => copy_stack_object(st, original, controller, &except, written_on),
         GameAction::LeaveGame { player } => {
             leave_game(st, player);
             ActionResult::Done
@@ -1025,6 +1044,92 @@ pub fn move_object_face(
     }
 }
 
+/// Nothing on an empty stack can refer to what left it (CR 608.2h).
+fn forget_left_stack(st: &mut GameState) {
+    if st.stack.is_empty() {
+        st.left_stack.clear();
+    }
+}
+
+/// CR 707.10: put a copy of the spell or ability `original` on the stack under
+/// `controller`'s control — of what it is there, or of what it last was (CR 608.2h).
+fn copy_stack_object(
+    st: &mut GameState,
+    original: ObjectId,
+    controller: PlayerId,
+    except: &[card_model::CopyExcept],
+    written_on: card_model::CardDefId,
+) -> ActionResult {
+    let found = match st.stack.iter().find(|s| s.id == original) {
+        Some(so) => Some((so.clone(), st.objects.get(&original).cloned())),
+        None => st
+            .left_stack
+            .iter()
+            .rev()
+            .find(|(so, _)| so.id == original)
+            .cloned(),
+    };
+    let Some((so, obj)) = found else {
+        return ActionResult::Done;
+    };
+    let id = st.alloc_object_id();
+    if let (StackKind::Spell, Some(o)) = (&so.kind, obj) {
+        // CR 707.10: a spell, with no card; owned and controlled by the player who put it
+        // on the stack. Its copiable values are the original's (CR 707.2), with the
+        // exceptions of the effect that copied it (CR 707.9).
+        let timestamp = st.alloc_timestamp();
+        let card_instance = crate::ids::CardInstanceId(st.next_card_instance);
+        st.next_card_instance += 1;
+        let copy = if except.is_empty() {
+            o.copy.clone()
+        } else {
+            Some(Box::new(
+                crate::copy::of_object(&st.catalog, &o).with(written_on, except),
+            ))
+        };
+        st.objects.insert(
+            id,
+            GameObject {
+                id,
+                card_instance,
+                card: o.card,
+                owner: controller,
+                controller,
+                zone: Zone::Stack,
+                timestamp,
+                tapped: false,
+                damage_marked: 0,
+                summoning_sick: false,
+                counters: Default::default(),
+                is_token: false,
+                deathtouch_damage: false,
+                attached_to: None,
+                last_controller: controller,
+                face: o.face,
+                transforms: 0,
+                adventure: None,
+                cast_with: o.cast_with,
+                chosen: Vec::new(),
+                copy,
+                spell_copy: true,
+            },
+        );
+    }
+    st.stack.push(StackObject {
+        id,
+        controller,
+        remembered: Vec::new(),
+        ..so
+    });
+    st.generation += 1;
+    st.emit(Event::CopiedOnStack {
+        copy: id,
+        original,
+        controller,
+    });
+    ActionResult::Moved(id)
+}
+
 /// Take `id` out of its zone (list, stack, combat). Returns the removed object.
 fn detach(st: &mut GameState, id: ObjectId) -> GameObject {
     let old = st
@@ -1033,8 +1138,12 @@ fn detach(st: &mut GameState, id: ObjectId) -> GameObject {
         .unwrap_or_else(|| panic!("move of missing object {id:?}"));
     if old.zone == Zone::Stack {
         let before = st.stack.len();
+        if let Some(so) = st.stack.iter().find(|s| s.id == id).cloned() {
+            st.left_stack.push((so, Some(old.clone())));
+        }
         st.stack.retain(|s| s.id != id);
         debug_assert_eq!(st.stack.len() + 1, before, "{id:?} not on the stack");
+        forget_left_stack(st);
     } else {
         let list = st.zones.list_mut(old.zone, old.owner);
         let pos = list
