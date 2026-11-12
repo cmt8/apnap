@@ -910,6 +910,13 @@ pub enum Replaces {
         to: DamageTo,
         combat: Option<bool>,
     },
+    /// "If [a creature an opponent controls] would die" (CR 700.4): a permanent matching
+    /// the selector — relative to this ability's source and controller, as the permanent
+    /// last existed on the battlefield — would be put into a graveyard from the battlefield.
+    Dies(Selector),
+    /// "If this card would be put into a graveyard from anywhere" (CR 113.6b: it functions
+    /// in every zone).
+    ThisToGraveyard,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -932,6 +939,35 @@ pub enum ReplaceWith {
     EntersWithCounted { kind: CounterKind, amount: Amount },
     /// "Prevent that damage" (CR 615.1a): all of it.
     Prevent,
+    /// "[This permanent] enters tapped unless [condition]" (CR 614.1d). The condition is
+    /// judged as the event is modified — on the battlefield as it is before the permanent
+    /// enters, so it never counts itself nor anything entering with it — for the player
+    /// it will enter under the control of (CR 109.5).
+    EntersTappedUnless(Condition),
+    /// "As this permanent enters, you may [do something]. If you don't, it enters tapped."
+    /// (CR 614.12a: chosen as the event is modified, by the player it will enter under the
+    /// control of; nothing uses the stack.)
+    EntersTappedUnlessYou(AsEnters),
+    /// "If this permanent would enter, you may [do something] instead. If you do, put it
+    /// onto the battlefield. If you don't, put it into its owner's graveyard." (CR 614.1a,
+    /// 614.12a: chosen as the event is modified, by the player it would enter under the
+    /// control of.)
+    EntersOnlyIfYou(AsEnters),
+    /// "… reveal it and shuffle it into its owner's library instead" (CR 701.20a).
+    RevealShuffleIntoLibrary,
+}
+
+/// What a player may do as a permanent enters (CR 614.12a) so that it enters untapped.
+// Built once when the catalog loads, then only read (as `AbilityDef`).
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AsEnters {
+    /// "pay N life" (CR 119.4: only a player with at least N life can).
+    PayLife(u32),
+    /// "reveal a [selector] card from your hand" (CR 701.20; the card stays there).
+    Reveal(Selector),
+    /// "discard a [selector] card" (CR 701.9).
+    Discard(Selector),
 }
 
 /// An amount with a sign: "+X" or "-X".
@@ -1381,6 +1417,10 @@ pub enum Effect {
         /// of that library, it is shuffled first (CR 701.24b).
         #[serde(default)]
         shuffle: bool,
+        /// Each of the players "may search": each decides for themselves, before looking,
+        /// whether to (and one who doesn't, doesn't shuffle either).
+        #[serde(default)]
+        optional: bool,
     },
     /// CR 701.22: scry N.
     Scry {
@@ -1488,6 +1528,14 @@ pub enum Effect {
         /// Ends when its source leaves the battlefield ("for as long as …").
         while_source: bool,
     },
+    /// "[Who] may [effect]": a player other than the controller decides as this resolves
+    /// ("that creature's controller may draw a card"). `who` is one player; a player who
+    /// has left the game decides nothing, and nothing happens. (With `who` = you this is
+    /// [`Effect::May`], which is what the compiler writes then.)
+    PlayerMay {
+        who: PlayerRef,
+        effect: Box<Effect>,
+    },
     /// A spell or a non-mana ability adds `amount` mana of ONE type its controller chooses
     /// from `of` as it resolves (CR 106.4, 605.5a): "add one mana of any color" (Lotus
     /// Cobra's landfall, which is not a mana ability), "add three mana of any one color".
@@ -1562,6 +1610,10 @@ pub enum DamageBy {
     This,
     /// The object whose event triggered the ability ("it deals damage …").
     Triggering,
+    /// The spell or permanent chosen for target slot `n` ("target creature deals damage
+    /// to itself equal to its power"): as it is, or as it last existed (CR 608.2h). No
+    /// damage if the target was illegal as resolution began (CR 608.2b).
+    Target(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1602,8 +1654,13 @@ pub enum PlayerRef {
     /// damage).
     TriggeringPlayer,
     /// "Its controller": the controller of the spell or permanent chosen for target slot
-    /// `n` ("counter target spell unless its controller pays {3}").
+    /// `n` ("counter target spell unless its controller pays {3}"): as it is now, or as
+    /// it last existed where it was targeted if it has left (CR 608.2h). Nobody, if the
+    /// target was illegal as the spell or ability began to resolve (CR 608.2b).
     ControllerOf(u8),
+    /// "Its owner": the owner of the spell or permanent chosen for target slot `n`
+    /// (CR 108.3) — not its controller, if someone else controls it.
+    OwnerOf(u8),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1661,6 +1718,27 @@ pub enum Amount {
     LifeTotal,
     /// "That much", "that many": the amount of the triggering event (the damage dealt).
     TriggeringAmount,
+    /// The number of players in the game who are `who` relative to you ("the number of
+    /// opponents you have", CR 102.2–3; players who have left the game don't count).
+    Players(Who),
+    /// The highest or lowest life total among the players in the game who are `who`
+    /// relative to you (0 if it is negative, or if there are no such players).
+    LifeAmong {
+        players: Who,
+        highest: bool,
+    },
+    /// "Its power", "its toughness", "its mana value" of the spell or permanent chosen for
+    /// target slot `slot`: as it is now, or as it last existed where it was targeted if it
+    /// has left (CR 608.2h) — "exile target creature; its controller gains life equal to
+    /// its power". 0 if the target was illegal as resolution began (CR 608.2b).
+    OfTarget {
+        slot: u8,
+        what: Measure,
+    },
+    /// The number of cards in the hand of one player other than you: "that player's
+    /// hand", "target player's hand" (as the effect is applied, CR 608.2h). 0 for a
+    /// player who has left the game.
+    HandOf(PlayerRef),
 }
 
 impl Amount {
@@ -1677,7 +1755,9 @@ impl Amount {
             | Amount::Devotion(_)
             | Amount::Greatest { .. }
             | Amount::HandSize
-            | Amount::LifeTotal => true,
+            | Amount::LifeTotal
+            | Amount::Players(_)
+            | Amount::LifeAmong { .. } => true,
             Amount::Calc(base, _) => base.stands_alone(),
             Amount::IfAtLeast { test, .. } => test.stands_alone(),
             Amount::X
@@ -1686,7 +1766,9 @@ impl Amount {
             | Amount::TriggeringPower
             | Amount::TriggeringToughness
             | Amount::TriggeringAmount
-            | Amount::SacrificedPower => false,
+            | Amount::SacrificedPower
+            | Amount::OfTarget { .. }
+            | Amount::HandOf(_) => false,
         }
     }
 
@@ -1699,6 +1781,8 @@ impl Amount {
             Amount::Fixed(_)
             | Amount::HandSize
             | Amount::LifeTotal
+            | Amount::Players(_)
+            | Amount::LifeAmong { .. }
             | Amount::Domain
             | Amount::Devotion(_) => true,
             Amount::Count(s) => !s.looks_at_pt(),

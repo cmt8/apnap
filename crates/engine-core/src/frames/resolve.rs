@@ -54,6 +54,9 @@ pub enum Work {
         order: Vec<PlayerId>,
         next: usize,
         chosen: Vec<(PlayerId, Vec<ObjectId>)>,
+        /// The player choosing now has said they will ("may search": `spec.optional`).
+        #[serde(default)]
+        willing: bool,
     },
     /// CR 701.24: these players shuffle their libraries.
     Shuffle { players: Vec<PlayerId> },
@@ -101,6 +104,13 @@ pub enum Work {
         paid: Box<Effect>,
         unpaid: Box<Effect>,
     },
+    /// "[That player] may [effect]": `player`, not the controller, decides (CR 608.2d:
+    /// the player the instruction names makes its choices).
+    PlayerMay {
+        k: usize,
+        player: PlayerId,
+        effect: Box<Effect>,
+    },
     /// CR 106.4: `player` adds `count` mana of one type they choose from `of`.
     AddManaOf {
         player: PlayerId,
@@ -119,6 +129,9 @@ pub struct ChooseSpec {
     pub to: CardDest,
     pub reveal: bool,
     pub shuffle: bool,
+    /// Each player decides whether to (`Effect::ChooseCards::optional`).
+    #[serde(default)]
+    pub optional: bool,
 }
 
 /// The fixed part of a [`Work::Dig`].
@@ -140,6 +153,68 @@ pub enum PlayerChoice {
     Discard,
     /// CR 701.21: permanents they control that match, to sacrifice.
     Sacrifice(Box<card_model::Selector>),
+}
+
+/// A target of the resolving spell or ability as it is now, or as it last existed where
+/// it was targeted (CR 608.2h).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetInfo {
+    pub object: ObjectId,
+    /// It is a spell on the stack (else a permanent).
+    pub spell: bool,
+    pub controller: PlayerId,
+    pub owner: PlayerId,
+    pub power: Option<i32>,
+    pub toughness: Option<i32>,
+    /// CR 202.3e: on the stack, X counts as the number chosen for it.
+    pub mana_value: u32,
+    /// What its damage does (CR 702.2b, 702.15b).
+    pub deathtouch: bool,
+    pub lifelink: bool,
+}
+
+impl TargetInfo {
+    /// The object as it is now, if it is still where it was targeted (CR 400.7: anywhere
+    /// else it would be a new object).
+    fn now(st: &GameState, object: ObjectId) -> Option<TargetInfo> {
+        let o = st.objects.get(&object)?;
+        let c = chars(st, object);
+        let printed = c.mana_cost.as_ref().map_or(0, |m| m.mana_value());
+        match o.zone {
+            Zone::Stack => {
+                let s = st.stack_object(object)?;
+                let xs = c.mana_cost.as_ref().map_or(0, |m| {
+                    m.symbols
+                        .iter()
+                        .filter(|y| **y == card_model::ManaSymbol::X)
+                        .count() as u32
+                });
+                Some(TargetInfo {
+                    object,
+                    spell: true,
+                    controller: s.controller,
+                    owner: o.owner,
+                    power: c.power,
+                    toughness: c.toughness,
+                    mana_value: printed + xs * s.x,
+                    deathtouch: c.has(Keyword::Deathtouch),
+                    lifelink: c.has(Keyword::Lifelink),
+                })
+            }
+            Zone::Battlefield => Some(TargetInfo {
+                object,
+                spell: false,
+                controller: c.controller,
+                owner: o.owner,
+                power: c.power,
+                toughness: c.toughness,
+                mana_value: printed,
+                deathtouch: c.has(Keyword::Deathtouch),
+                lifelink: c.has(Keyword::Lifelink),
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,10 +246,12 @@ pub struct ResolveFrame {
     /// owner then shuffles ("exile this spell", "shuffle it into its owner's library").
     #[serde(default)]
     pub spell_to: Option<(card_model::CardDest, bool)>,
-    /// Who controlled each target that was legal as resolution began (`[k][slot]`): "its
-    /// controller" still means that player once the target is gone (CR 608.2h).
+    /// What is known about each target that was legal as resolution began (`[k][slot]`):
+    /// kept up to date while it is where it was targeted, so that once it is gone it is
+    /// what it last was there (CR 608.2h) — "its controller", "its power". A target that
+    /// was illegal tells nothing (CR 608.2b).
     #[serde(default)]
-    pub target_controllers: Vec<Vec<Option<PlayerId>>>,
+    pub target_info: Vec<Vec<Option<TargetInfo>>>,
     /// The card the resolving text is written on: the spell's, or the ability's (which
     /// is another card's than its source's when the ability was given to the source).
     pub card: card_model::CardDefId,
@@ -196,7 +273,7 @@ impl ResolveFrame {
             sacrificed_power: 0,
             facts: Default::default(),
             spell_to: None,
-            target_controllers: Vec::new(),
+            target_info: Vec::new(),
             card: card_model::CardDefId(0),
         }
     }
@@ -219,7 +296,7 @@ impl ResolveFrame {
         f.source_lki = source_lki;
         f.targets = vec![Vec::new()];
         f.filters = vec![Vec::new()];
-        f.target_controllers = vec![Vec::new()];
+        f.target_info = vec![Vec::new()];
         f.work = vec![Work::Eval {
             k: 0,
             effect: Box::new(effect),
@@ -293,17 +370,40 @@ impl ResolveFrame {
                 .filter(|p| st.in_game(*p))
                 .into_iter()
                 .collect(),
-            // The controller of the targeted spell or permanent, as resolution began —
-            // even if the target is gone by now (CR 608.2h).
+            // The controller or owner of the targeted spell or permanent — as it last
+            // existed, if it is gone by now (CR 608.2h). A player who has left the game
+            // is no one an effect can apply to.
             PlayerRef::ControllerOf(i) => self
-                .target_controllers
-                .get(k)
-                .and_then(|c| c.get(i as usize))
-                .copied()
-                .flatten()
+                .target_known(k, i)
+                .map(|t| t.controller)
                 .filter(|p| st.in_game(*p))
                 .into_iter()
                 .collect(),
+            PlayerRef::OwnerOf(i) => self
+                .target_known(k, i)
+                .map(|t| t.owner)
+                .filter(|p| st.in_game(*p))
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// What is known about target slot `i` of the `k`-th mode (nothing if it was illegal
+    /// as resolution began, CR 608.2b).
+    fn target_known(&self, k: usize, i: u8) -> Option<&TargetInfo> {
+        self.target_info.get(k)?.get(i as usize)?.as_ref()
+    }
+
+    /// CR 608.2h: bring what is known about each target up to date while it is still the
+    /// object that was targeted, where it was targeted. Done before every step of the
+    /// resolution, so that a target that has just left is known as it last existed.
+    fn note_targets(&mut self, st: &GameState) {
+        for known in self.target_info.iter_mut().flatten().flatten() {
+            if let Some(now) = TargetInfo::now(st, known.object)
+                && now.spell == known.spell
+            {
+                *known = now;
+            }
         }
     }
 
@@ -376,7 +476,7 @@ impl ResolveFrame {
         }
     }
 
-    fn amount(&self, st: &GameState, a: &Amount) -> u32 {
+    fn amount(&self, st: &GameState, k: usize, a: &Amount) -> u32 {
         match a {
             Amount::TriggeringPower => self
                 .subject_chars(st)
@@ -392,15 +492,26 @@ impl ResolveFrame {
             Amount::X => self.x,
             Amount::SacrificedPower => self.sacrificed_power,
             Amount::TriggeringAmount => self.facts.amount,
+            // CR 608.2h: counted as the effect is applied.
+            Amount::HandOf(who) => self
+                .player(st, k, *who)
+                .map_or(0, |p| st.zones.hands[p.index()].len() as u32),
+            Amount::OfTarget { slot, what } => {
+                self.target_known(k, *slot).map_or(0, |t| match what {
+                    card_model::Measure::Power => t.power.unwrap_or(0).max(0) as u32,
+                    card_model::Measure::Toughness => t.toughness.unwrap_or(0).max(0) as u32,
+                    card_model::Measure::ManaValue => t.mana_value,
+                })
+            }
             // Arithmetic and tests on amounts that may themselves need this resolution.
-            Amount::Calc(base, op) => op.apply(self.amount(st, base)),
+            Amount::Calc(base, op) => op.apply(self.amount(st, k, base)),
             Amount::IfAtLeast {
                 test,
                 at_least,
                 then,
                 otherwise,
             } => {
-                if self.amount(st, test) >= *at_least {
+                if self.amount(st, k, test) >= *at_least {
                     *then
                 } else {
                     *otherwise
@@ -418,7 +529,11 @@ impl ResolveFrame {
             | Amount::Devotion(_)
             | Amount::Greatest { .. }
             | Amount::HandSize
-            | Amount::LifeTotal => crate::layers::count_amount(st, a, self.source, self.controller),
+            | Amount::LifeTotal
+            | Amount::Players(_)
+            | Amount::LifeAmong { .. } => {
+                crate::layers::count_amount(st, a, self.source, self.controller)
+            }
             Amount::SourcePower => self
                 .source_chars(st)
                 .and_then(|c| c.power)
@@ -428,13 +543,18 @@ impl ResolveFrame {
     }
 
     /// CR 608.2h: amounts in a one-shot continuous effect are worked out once, as it begins.
-    fn fix_amounts(&self, st: &GameState, effects: Vec<ContinuousEffect>) -> Vec<ContinuousEffect> {
+    fn fix_amounts(
+        &self,
+        st: &GameState,
+        k: usize,
+        effects: Vec<ContinuousEffect>,
+    ) -> Vec<ContinuousEffect> {
         effects
             .into_iter()
             .map(|e| match e {
                 ContinuousEffect::ModifyPTBy { power, toughness } => {
                     let value = |s: &card_model::Signed| {
-                        let n = self.amount(st, &s.amount) as i32;
+                        let n = self.amount(st, k, &s.amount) as i32;
                         if s.negative { -n } else { n }
                     };
                     ContinuousEffect::ModifyPT(value(&power), value(&toughness))
@@ -445,7 +565,8 @@ impl ResolveFrame {
     }
 
     fn damage(&self, st: &GameState, target: DamageTarget, amount: u32) -> Proposed {
-        self.damage_by(st, DamageBy::This, target, amount)
+        self.damage_by(st, 0, DamageBy::This, target, amount)
+            .expect("this spell or ability's source can deal damage")
     }
 
     /// CR 608.2h: "If an ability states that an object does something, it's the object as
@@ -453,22 +574,35 @@ impl ResolveFrame {
     fn damage_by(
         &self,
         st: &GameState,
+        k: usize,
         by: DamageBy,
         target: DamageTarget,
         amount: u32,
-    ) -> Proposed {
+    ) -> Option<Proposed> {
+        // A target that was illegal as resolution began deals nothing (CR 608.2b).
+        if let DamageBy::Target(i) = by {
+            let t = self.target_known(k, i)?;
+            return Some(Proposed::Damage {
+                source: t.object,
+                deathtouch: t.deathtouch,
+                lifelink: t.lifelink,
+                target,
+                amount,
+                combat: false,
+            });
+        }
         let (source, c) = match (by, self.subject) {
             (DamageBy::Triggering, Some(subject)) => (subject, self.subject_chars(st)),
             _ => (self.source, self.source_chars(st)),
         };
-        Proposed::Damage {
+        Some(Proposed::Damage {
             source,
             deathtouch: c.as_ref().is_some_and(|c| c.has(Keyword::Deathtouch)),
             lifelink: c.as_ref().is_some_and(|c| c.has(Keyword::Lifelink)),
             target,
             amount,
             combat: false,
-        }
+        })
     }
 
     pub(crate) fn run(mut self, st: &mut GameState, mut input: Option<Input>) -> Flow {
@@ -478,6 +612,7 @@ impl ResolveFrame {
             return flow;
         }
         while let Some(item) = self.work.pop() {
+            self.note_targets(st);
             match item {
                 Work::Eval { k, effect } => {
                     let events = self.eval(st, k, *effect);
@@ -528,6 +663,24 @@ impl ResolveFrame {
                             ]);
                         }
                         self.work.push(Work::Eval { k, effect: unpaid });
+                    }
+                },
+                Work::PlayerMay { k, player, effect } => match input.take() {
+                    None if st.in_game(player) => {
+                        self.work.push(Work::PlayerMay { k, player, effect });
+                        return Flow::ask_one(
+                            Frame::Resolve(Box::new(self)),
+                            player,
+                            ChoiceKind::MayAbility,
+                            vec![OptionDesc::Accept, OptionDesc::Decline],
+                        );
+                    }
+                    // CR 800.4a: a player who has left the game decides nothing.
+                    None => {}
+                    Some(inp) => {
+                        if matches!(inp.picked_one(), Some(OptionDesc::Accept)) {
+                            self.work.push(Work::Eval { k, effect });
+                        }
                     }
                 },
                 Work::AddManaOf { player, of, count } => {
@@ -644,16 +797,43 @@ impl ResolveFrame {
                     order,
                     mut next,
                     mut chosen,
+                    mut willing,
                 } => {
                     if let Some(inp) = input.take() {
-                        chosen.push((order[next], picked_cards(&inp)));
-                        next += 1;
+                        if inp.decision.kind == ChoiceKind::MayAbility {
+                            // "May search": one who won't, doesn't (nor shuffles).
+                            willing = matches!(inp.picked_one(), Some(OptionDesc::Accept));
+                            if !willing {
+                                next += 1;
+                            }
+                        } else {
+                            chosen.push((order[next], picked_cards(&inp)));
+                            next += 1;
+                            willing = false;
+                        }
                     }
                     while let Some(&p) = order.get(next) {
                         if !st.in_game(p) {
                             next += 1;
                             continue;
                         }
+                        // Each player decides for themselves, before looking.
+                        if spec.optional && !willing {
+                            self.work.push(Work::ChooseCards {
+                                spec,
+                                order,
+                                next,
+                                chosen,
+                                willing,
+                            });
+                            return Flow::ask_one(
+                                Frame::Resolve(Box::new(self)),
+                                p,
+                                ChoiceKind::MayAbility,
+                                vec![OptionDesc::Accept, OptionDesc::Decline],
+                            );
+                        }
+                        willing = false;
                         let library = spec.from == CardZone::Library;
                         if library {
                             // CR 701.23a: the player looks at every card in the library.
@@ -696,6 +876,7 @@ impl ResolveFrame {
                             order,
                             next,
                             chosen,
+                            willing: false,
                         });
                         return Flow::ask(
                             Frame::Resolve(Box::new(self)),
@@ -1123,12 +1304,20 @@ impl ResolveFrame {
     /// being searched, the cards a scry or a "look at the top N cards" shows.
     pub fn shown(&self, st: &GameState) -> Vec<ObjectId> {
         match self.work.last() {
+            // Only while searching: not while deciding whether to (CR 701.23a).
             Some(Work::ChooseCards {
                 spec, order, next, ..
-            }) if spec.from == CardZone::Library => order
-                .get(*next)
-                .map(|p| st.zones.libraries[p.index()].clone())
-                .unwrap_or_default(),
+            }) if spec.from == CardZone::Library
+                && st
+                    .pending
+                    .as_ref()
+                    .is_some_and(|d| d.kind == ChoiceKind::SearchLibrary) =>
+            {
+                order
+                    .get(*next)
+                    .map(|p| st.zones.libraries[p.index()].clone())
+                    .unwrap_or_default()
+            }
             Some(Work::Scry { looking, .. } | Work::Dig { looking, .. }) => looking.clone(),
             _ => Vec::new(),
         }
@@ -1238,18 +1427,12 @@ impl ResolveFrame {
             st.emit(Event::Fizzled { object: top.id });
             return Some(self.leave_stack(st, MoveCause::Fizzled));
         }
-        self.target_controllers = (0..self.targets.len())
+        // What each legal target is now: "its controller", "its power" (CR 608.2h).
+        self.target_info = (0..self.targets.len())
             .map(|k| {
                 (0..self.targets[k].len())
                     .map(|i| match self.target(st, k, TargetRef::Target(i as u8)) {
-                        Some(Target::Object(o)) => {
-                            st.stack_object(o).map(|s| s.controller).or_else(|| {
-                                st.objects
-                                    .get(&o)
-                                    .filter(|x| x.zone == Zone::Battlefield)
-                                    .map(|_| chars(st, o).controller)
-                            })
-                        }
+                        Some(Target::Object(o)) => TargetInfo::now(st, o),
                         _ => None,
                     })
                     .collect()
@@ -1280,55 +1463,55 @@ impl ResolveFrame {
             // One event: what each instruction would do, all at once.
             Effect::Together(v) => v.into_iter().flat_map(|e| self.eval(st, k, e)).collect(),
             Effect::DealDamage { to, amount, by } => {
-                let amount = self.amount(st, &amount);
+                let amount = self.amount(st, k, &amount);
                 // Several recipients ("to each opponent") are dealt damage at once.
                 self.recipients(st, k, to)
                     .into_iter()
-                    .map(|t| {
+                    .filter_map(|t| {
                         let t = match t {
                             Target::Player(p) => DamageTarget::Player(p),
                             Target::Object(o) => DamageTarget::Object(o),
                         };
-                        self.damage_by(st, by, t, amount)
+                        self.damage_by(st, k, by, t, amount)
                     })
                     .collect()
             }
             Effect::DamageEachPlayer { amount } => {
-                let amount = self.amount(st, &amount);
+                let amount = self.amount(st, k, &amount);
                 st.apnap_order()
                     .into_iter()
                     .map(|p| self.damage(st, DamageTarget::Player(p), amount))
                     .collect()
             }
             Effect::Draw { who, amount } => {
-                let n = self.amount(st, &amount);
+                let n = self.amount(st, k, &amount);
                 self.players(st, k, who)
                     .into_iter()
                     .flat_map(|player| (0..n).map(move |_| Proposed::Draw { player }))
                     .collect()
             }
             Effect::GainLife { who, amount } => {
-                let amount = self.amount(st, &amount);
+                let amount = self.amount(st, k, &amount);
                 self.players(st, k, who)
                     .into_iter()
                     .map(|player| Proposed::GainLife { player, amount })
                     .collect()
             }
             Effect::LoseLife { who, amount } => {
-                let amount = self.amount(st, &amount);
+                let amount = self.amount(st, k, &amount);
                 self.players(st, k, who)
                     .into_iter()
                     .map(|player| Proposed::LoseLife { player, amount })
                     .collect()
             }
             Effect::SetX(amount) => {
-                self.x = self.amount(st, &amount);
+                self.x = self.amount(st, k, &amount);
                 Vec::new()
             }
             // CR 106.4: the mana goes to the player's pool. (Not a mana ability: this is
             // a spell or an ability on the stack, CR 605.5.)
             Effect::AddMana { who, mana, amount } => {
-                let amount = self.amount(st, &amount);
+                let amount = self.amount(st, k, &amount);
                 for player in self.players(st, k, who) {
                     for _ in 0..amount {
                         execute(st, GameAction::AddMana { player, mana });
@@ -1337,7 +1520,7 @@ impl ResolveFrame {
                 Vec::new()
             }
             Effect::AddManaOf { who, of, amount } => {
-                let count = self.amount(st, &amount);
+                let count = self.amount(st, k, &amount);
                 if count > 0 {
                     // Each player chooses as their mana is added (last pushed = first).
                     for player in self.players_apnap(st, k, who).into_iter().rev() {
@@ -1372,7 +1555,7 @@ impl ResolveFrame {
                     .collect()
             }
             Effect::DamageEach { each, amount } => {
-                let amount = self.amount(st, &amount);
+                let amount = self.amount(st, k, &amount);
                 crate::layers::matching(st, &each, self.source, self.controller)
                     .into_iter()
                     .map(|o| self.damage(st, DamageTarget::Object(o), amount))
@@ -1391,7 +1574,7 @@ impl ResolveFrame {
                 .collect(),
             Effect::Mill { who, amount } => {
                 // CR 701.17a: the top N cards (the library's last entries), all at once.
-                let n = self.amount(st, &amount) as usize;
+                let n = self.amount(st, k, &amount) as usize;
                 self.players(st, k, who)
                     .into_iter()
                     .flat_map(|p| {
@@ -1413,7 +1596,7 @@ impl ResolveFrame {
             } => {
                 // CR 611.2c: the affected set is locked in now.
                 let affected = crate::layers::matching(st, &affected, self.source, self.controller);
-                let effects = self.fix_amounts(st, effects);
+                let effects = self.fix_amounts(st, k, effects);
                 if !affected.is_empty() {
                     execute(
                         st,
@@ -1452,17 +1635,20 @@ impl ResolveFrame {
             },
             Effect::CreateToken { token, count, who } => {
                 let token = st.catalog.find(&token).expect("validated by card-db");
-                match self.player(st, k, who) {
-                    Some(controller) => vec![Proposed::CreateTokens {
+                let count = self.amount(st, k, &count);
+                // CR 111.2: each player who creates tokens owns and controls them; "each
+                // player creates …" is one event (APNAP order, CR 101.4).
+                self.players_apnap(st, k, who)
+                    .into_iter()
+                    .map(|controller| Proposed::CreateTokens {
                         token,
-                        count: self.amount(st, &count),
+                        count,
                         controller,
-                    }],
-                    None => Vec::new(),
-                }
+                    })
+                    .collect()
             }
             Effect::PutCountersAll { what, kind, count } => {
-                let count = self.amount(st, &count);
+                let count = self.amount(st, k, &count);
                 crate::layers::matching(st, &what, self.source, self.controller)
                     .into_iter()
                     .map(|object| Proposed::PutCounters {
@@ -1476,7 +1662,7 @@ impl ResolveFrame {
                 Some(object) => vec![Proposed::PutCounters {
                     object,
                     kind,
-                    count: self.amount(st, &count),
+                    count: self.amount(st, k, &count),
                 }],
                 None => Vec::new(),
             },
@@ -1517,7 +1703,7 @@ impl ResolveFrame {
                 until_end_of_turn,
             } => {
                 // CR 611.2c: the affected set is locked in now.
-                let effects = self.fix_amounts(st, effects);
+                let effects = self.fix_amounts(st, k, effects);
                 if let Some(o) = self.obj(st, k, what) {
                     execute(
                         st,
@@ -1599,7 +1785,7 @@ impl ResolveFrame {
                 Vec::new()
             }
             Effect::Discard { who, amount } => {
-                let n = self.amount(st, &amount);
+                let n = self.amount(st, k, &amount);
                 self.work.push(Work::EachPlayerChoose {
                     choice: PlayerChoice::Discard,
                     n,
@@ -1616,7 +1802,7 @@ impl ResolveFrame {
                 .map(|card| Proposed::moving(card, Zone::Graveyard, MoveCause::Discard))
                 .collect(),
             Effect::Sacrifice { who, what, amount } => {
-                let n = self.amount(st, &amount);
+                let n = self.amount(st, k, &amount);
                 self.work.push(Work::EachPlayerChoose {
                     choice: PlayerChoice::Sacrifice(Box::new(what)),
                     n,
@@ -1684,9 +1870,10 @@ impl ResolveFrame {
                 to,
                 reveal,
                 shuffle,
+                optional,
             } => {
                 // CR 608.2h: how many is worked out once, now.
-                let count = self.amount(st, &count);
+                let count = self.amount(st, k, &count);
                 self.work.push(Work::ChooseCards {
                     spec: Box::new(ChooseSpec {
                         from,
@@ -1696,11 +1883,19 @@ impl ResolveFrame {
                         to,
                         reveal,
                         shuffle,
+                        optional,
                     }),
                     order: self.players_apnap(st, k, who),
                     next: 0,
                     chosen: Vec::new(),
+                    willing: false,
                 });
+                Vec::new()
+            }
+            Effect::PlayerMay { who, effect } => {
+                if let Some(player) = self.player(st, k, who) {
+                    self.work.push(Work::PlayerMay { k, player, effect });
+                }
                 Vec::new()
             }
             Effect::Scry { who, amount } => {
@@ -1722,7 +1917,7 @@ impl ResolveFrame {
                 rest,
                 rest_random,
             } => {
-                let n = self.amount(st, &count);
+                let n = self.amount(st, k, &count);
                 let spec = DigSpec {
                     reveal,
                     take,
@@ -1822,7 +2017,7 @@ impl ResolveFrame {
 
     /// CR 701.22 / 701.25: the players scry (or surveil) N.
     fn scry(&mut self, st: &GameState, k: usize, who: PlayerRef, amount: &Amount, surveil: bool) {
-        let n = self.amount(st, amount);
+        let n = self.amount(st, k, amount);
         // CR 701.22b / 701.25c: scry 0 and surveil 0 aren't events.
         if n > 0 {
             self.work.push(Work::Scry {

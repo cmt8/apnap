@@ -624,6 +624,66 @@ fn a_hybrid_cost_on_a_mana_ability() {
     assert_eq!(forge_test_blockers(spell), ["cost:RW"]);
 }
 
+// CR 118.12a, 605.3a: another player paying "unless that player pays {N}" during a
+// resolution (D-068) can use any mana ability: a Signet whose {1} a land pays, or a pain
+// land's {C}. The heuristic agent is asked only when the planner says it can pay; it pays,
+// and with the mana that costs it nothing else.
+#[test]
+fn an_opponent_pays_unless_with_any_mana_ability() {
+    let tithe = |n: u32| {
+        format!(
+            "Name:Test Tithe\nManaCost:2 U\nTypes:Enchantment\n\
+             T:Mode$ SpellCast | ValidCard$ Card | ValidActivatingPlayer$ Opponent | TriggerZones$ Battlefield | Execute$ TrigDraw | TriggerDescription$ Text.\n\
+             SVar:TrigDraw:DB$ Draw | Defined$ You | UnlessCost$ {n} | UnlessPayer$ TriggeredActivator | NumCards$ 1\n\
+             Oracle:Text."
+        )
+    };
+    let signet = "Name:Test Signet\nManaCost:2\nTypes:Artifact\n\
+        A:AB$ Mana | Cost$ 1 T | Produced$ U B | SpellDescription$ Add {U}{B}.\n\
+        Oracle:{1}, {T}: Add {U}{B}.";
+    let reef = "Name:Test Reef\nManaCost:no cost\nTypes:Land\n\
+        A:AB$ Mana | Cost$ T | Produced$ C | SpellDescription$ Add {C}.\n\
+        A:AB$ Mana | Cost$ T | Produced$ Combo U R | SubAbility$ DBPain | SpellDescription$ Add {U} or {R}. CARDNAME deals 1 damage to you.\n\
+        SVar:DBPain:DB$ DealDamage | NumDmg$ 1 | Defined$ You\n\
+        Oracle:{T}: Add {C}.\\n{T}: Add {U} or {R}. Test Reef deals 1 damage to you.";
+    let play = |n: u32, theirs: &[&str]| {
+        let tithe = tithe(n);
+        let mut sc = scenario(&[&tithe, signet, reef, BEAR]);
+        sc.card(P0, Zone::Battlefield, "Test Tithe");
+        sc.card(P1, Zone::Battlefield, "Forest");
+        sc.cards(P1, Zone::Battlefield, theirs);
+        sc.card(P1, Zone::Hand, "Test Cub");
+        sc.turn(P1, engine_core::turn::Step::PrecombatMain);
+        let mut s = Script::new(sc.build());
+        s.cast("Test Cub").tap("Forest", ManaType::Green);
+        let mut ai = HeuristicAgent::new(1, s.st.catalog.clone());
+        let mut asked = false;
+        for _ in 0..200 {
+            let Some(d) = s.next.clone() else { break };
+            if d.kind == ChoiceKind::Priority && s.st.stack.is_empty() {
+                break;
+            }
+            if d.player == P1 && d.kind != ChoiceKind::Priority {
+                asked |= d.kind == ChoiceKind::PayUnlessCost;
+                let r = ai.decide(&engine_core::player_view(&s.st, P1), &d);
+                s.respond(r);
+            } else if d.kind == ChoiceKind::Priority {
+                s.pass();
+            } else {
+                s.respond(Response::Pick(vec![0]));
+            }
+        }
+        let hand = s.st.zones.list(Zone::Hand, P0).len();
+        (asked, hand, life(&s, P1))
+    };
+    // {2}: the second Forest pays the Signet's {1}, the Signet makes {U}{B}.
+    assert_eq!(play(2, &["Forest", "Test Signet"]), (true, 0, 40));
+    // Without the Signet one Forest can't pay {2}: not asked, P0 draws.
+    assert_eq!(play(2, &["Forest"]), (false, 1, 40));
+    // {1} from a pain land: its {C}, no damage.
+    assert_eq!(play(1, &["Test Reef"]), (true, 0, 40));
+}
+
 // What stays blocked (D-066), each with its name.
 #[test]
 fn mana_abilities_that_stay_blocked() {

@@ -436,7 +436,11 @@ pub(crate) fn detect_step(st: &mut GameState, step: Step) {
                         source_lki: None,
                         subject: None,
                         subject_lki: None,
-                        facts: EventFacts::default(),
+                        // "That player": the player whose step it is.
+                        facts: EventFacts {
+                            player: Some(active),
+                            ..EventFacts::default()
+                        },
                     });
                     conds.push(intervening_if.clone());
                 }
@@ -490,6 +494,13 @@ pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
                         src.controller,
                         src.host,
                     ) {
+                        // "Defending player" (CR 506.2): the player it attacks.
+                        let defender = st.combat.as_ref().and_then(|c| {
+                            c.attackers
+                                .iter()
+                                .find(|a| a.attacker == attacker)
+                                .map(|a| a.defender)
+                        });
                         found.push(PendingTrigger {
                             controller: src.controller,
                             source: src.id,
@@ -498,7 +509,10 @@ pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
                             source_lki: None,
                             subject: Some(attacker),
                             subject_lki: None,
-                            facts: EventFacts::default(),
+                            facts: EventFacts {
+                                player: defender,
+                                ..EventFacts::default()
+                            },
                         });
                         conds.push(intervening_if.clone());
                     }
@@ -676,10 +690,26 @@ pub(crate) fn detect_blocks(st: &mut GameState, pairs: &[(ObjectId, ObjectId)]) 
                 .map(|id| (Some(id), EventFacts::default(), None))
                 .collect::<Vec<_>>()
         };
+        // "Defending player" (CR 506.2): the player an attacker attacks.
+        let defending = |hits: Vec<Hit>| -> Vec<Hit> {
+            hits.into_iter()
+                .map(|(it, mut facts, lki)| {
+                    facts.player = it.and_then(|a| {
+                        st.combat.as_ref().and_then(|c| {
+                            c.attackers
+                                .iter()
+                                .find(|x| x.attacker == a)
+                                .map(|x| x.defender)
+                        })
+                    });
+                    (it, facts, lki)
+                })
+                .collect()
+        };
         match t {
             Trigger::Blocks(f) => each(&mut pairs.iter().map(|(b, _)| *b), f),
-            Trigger::BecomesBlocked(f) => each(&mut pairs.iter().map(|(_, a)| *a), f),
-            Trigger::Unblocked(f) => each(&mut unblocked.iter().copied(), f),
+            Trigger::BecomesBlocked(f) => defending(each(&mut pairs.iter().map(|(_, a)| *a), f)),
+            Trigger::Unblocked(f) => defending(each(&mut unblocked.iter().copied(), f)),
             Trigger::BlockedBy { attacker, blocker } => pairs
                 .iter()
                 .filter(|(b, a)| hit(blocker, *b) && hit(attacker, *a))
@@ -986,7 +1016,11 @@ pub(crate) fn detect_cast(st: &mut GameState, caster: PlayerId, spell: ObjectId)
                         source_lki: None,
                         subject: None,
                         subject_lki: None,
-                        facts: EventFacts::default(),
+                        // "That player": who cast it.
+                        facts: EventFacts {
+                            player: Some(caster),
+                            ..EventFacts::default()
+                        },
                     });
                     conds.push(intervening_if.clone());
                 }

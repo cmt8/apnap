@@ -112,6 +112,15 @@ pub enum ChoiceKind {
     OrderBottom,
     /// CR 303.4f: choose what an Aura that is being put onto the battlefield enchants.
     AuraHost,
+    /// CR 614.12a: "as this enters, you may [pay 2 life / reveal a card]. If you don't, it
+    /// enters tapped" — `ability` of `object` (the card that is entering). Options:
+    /// `Accept` (pay) or the `Card`s that may be revealed, then `Decline`. `tapped`: it
+    /// enters tapped anyway (another effect, or the instruction that puts it there).
+    AsEnters {
+        object: ObjectId,
+        ability: AbilityId,
+        tapped: bool,
+    },
 }
 
 /// A structured description of one option. Frames read the chosen option back from the

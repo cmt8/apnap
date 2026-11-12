@@ -275,6 +275,38 @@ impl Session {
             .map(|s| Some(s.controller) == self.human)
     }
 
+    /// How the session ranks a way to pay mana for the player (lower first), or `None`
+    /// if it must not choose it for them: a plain tap first; then mana that costs mana (a
+    /// Signet) or a token that sacrifices itself (Treasure); never life, damage to the
+    /// player, a chosen sacrifice, or a nontoken permanent sacrificing itself (D-066).
+    /// Which floating mana pays a mana ability's own cost is chosen for them.
+    fn auto_pay_price(&self, o: &OptionDesc) -> Option<u32> {
+        match o {
+            OptionDesc::Mana { .. } => Some(0),
+            OptionDesc::TapForMana { ability: None, .. } => Some(0),
+            OptionDesc::TapForMana {
+                source,
+                ability: Some(a),
+                ..
+            } => match self.st.catalog.ability(*a) {
+                card_model::AbilityDef::Mana { cost, then, .. } => {
+                    let token = self.st.objects.get(source).is_some_and(|x| x.is_token);
+                    if cost.life > 0
+                        || then.is_some()
+                        || cost.sacrifice.is_some()
+                        || (cost.sacrifice_self && !token)
+                    {
+                        None
+                    } else {
+                        Some(u32::from(cost.mana.is_some()) + 2 * u32::from(cost.sacrifice_self))
+                    }
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// The response the session gives on the human's behalf, if the decision is trivial
     /// under the current stops.
     pub fn auto_response(&self, d: &PendingDecision) -> Option<Response> {
@@ -292,32 +324,29 @@ impl Session {
                 return Some(Response::Number(*min));
             }
             (Primitive::PickN { min, max }, kind) => {
+                // Mana is paid for the player only in the cheapest way there is (D-054,
+                // D-066): never with life, damage to themselves, or by sacrificing a
+                // permanent that isn't a token — even when that is the only way left.
+                if kind == ChoiceKind::PayMana {
+                    if !self.stops.auto_pay {
+                        // The only way left is taken, unless it costs more than mana.
+                        let only =
+                            n == 1 && *min == 1 && self.auto_pay_price(&d.options[0]).is_some();
+                        return only.then(|| Response::Pick(vec![0]));
+                    }
+                    return d
+                        .options
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, o)| self.auto_pay_price(o).map(|p| (p, i)))
+                        .min()
+                        .map(|(_, i)| Response::Pick(vec![i]));
+                }
                 if *min == n && *max == n {
                     return Some(Response::Pick((0..n).collect()));
                 }
                 if n == 1 && *min == 1 {
                     return Some(Response::Pick(vec![0]));
-                }
-                if kind == ChoiceKind::PayMana && self.stops.auto_pay {
-                    // Mana that costs nothing but a tap is paid with automatically; life,
-                    // damage, mana or a sacrifice for mana is the player's choice (D-066).
-                    let free = |o: &OptionDesc| match o {
-                        OptionDesc::TapForMana { ability: None, .. } => true,
-                        OptionDesc::TapForMana {
-                            ability: Some(a), ..
-                        } => matches!(
-                            self.st.catalog.ability(*a),
-                            card_model::AbilityDef::Mana { cost, then: None, .. }
-                                if cost.mana.is_none()
-                                    && cost.life == 0
-                                    && cost.sacrifice.is_none()
-                                    && !cost.sacrifice_self
-                        ),
-                        _ => false,
-                    };
-                    if let Some(i) = d.options.iter().position(free) {
-                        return Some(Response::Pick(vec![i]));
-                    }
                 }
             }
             (Primitive::Allocate { total, per_max, .. }, ChoiceKind::PayMana)
