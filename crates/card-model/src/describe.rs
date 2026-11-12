@@ -838,6 +838,9 @@ fn effect(mode: &Mode, e: &Effect) -> String {
         Effect::IfDone { first, then } => {
             format!("{}. If you do, {}", effect(mode, first), effect(mode, then))
         }
+        Effect::UntapChosen { what, count } => {
+            format!("untap up to {} {}", amount(count), selector(what, true))
+        }
         // "Its controller may draw a card": the instruction in the decider's own words.
         Effect::PlayerMay { who, effect: inner } => {
             let who = player(mode, *who);

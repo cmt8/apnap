@@ -1712,6 +1712,29 @@ impl<'a> Tx<'a> {
                 };
                 Effect::Destroy { what: what? }
             }
+            // "Untap up to N lands" (docs/forge/effects.md, Untap): the activator chooses
+            // among every permanent on the battlefield that fits `UntapType$` (whoever
+            // controls it) as it resolves. Forge offers untapped ones too, which can't be
+            // untapped (CR 701.26b): the engine offers only tapped ones.
+            "Untap" if rd.rec.get("UntapUpTo").is_some() => {
+                rd.get("UntapUpTo");
+                if !matches!(rd.get("Defined"), None | Some("You")) {
+                    self.block("param:Untap.UntapUpTo by another player");
+                    return None;
+                }
+                let what = match rd.get("UntapType") {
+                    Some(f) => self.selector(f),
+                    None => {
+                        self.block("param:Untap.UntapUpTo without UntapType");
+                        None
+                    }
+                };
+                let count = rd.get("Amount").and_then(|n| self.amount(n, chain));
+                Effect::UntapChosen {
+                    what: what?,
+                    count: count?,
+                }
+            }
             "Tap" | "Untap" => {
                 // `ETB$`: "enters tapped/untapped", which is a replacement, not this effect.
                 if rd.rec.get("ETB").is_some() {

@@ -244,3 +244,66 @@ fn cards_put_on_top_from_the_hand_are_ordered_by_their_owner() {
         ["param:ChangeZone.Reorder not to a library"]
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Untap up to N
+
+// CR 701.26b (2026-11-06): "To untap a permanent, rotate it back to the upright position
+// from a sideways position. Only tapped permanents can be untapped." Forge: `DB$ Untap |
+// UntapUpTo$ True | UntapType$ Land | Amount$ 2` — "untap up to two lands", any lands,
+// chosen as it resolves (not targets).
+#[test]
+fn untap_up_to_n_lands_chooses_among_tapped_lands_of_anyone() {
+    let snap = card(
+        "Test Unsnap",
+        "1 U",
+        "Instant",
+        "A:SP$ Untap | UntapUpTo$ True | UntapType$ Land | Amount$ 2 | SpellDescription$ Text.",
+    );
+    let mut sc = scenario(&[&snap]);
+    let islands = sc.cards(P0, Zone::Battlefield, &["Island", "Island", "Island"]);
+    let untapped = sc.card(P0, Zone::Battlefield, "Forest");
+    let theirs = sc.card(P1, Zone::Battlefield, "Swamp");
+    sc.tapped(islands[2]);
+    sc.tapped(theirs);
+    sc.card(P0, Zone::Hand, "Test Unsnap");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Unsnap").pay().pass_all();
+    assert_eq!(s.kind(), ChoiceKind::Untap);
+    assert_eq!(s.who(), P0);
+    // The two Islands tapped to pay, the one tapped before, and the opponent's Swamp:
+    // not the untapped Forest.
+    let offered: Vec<ObjectId> = s
+        .options()
+        .iter()
+        .filter_map(|o| match o {
+            OptionDesc::Card { card } => Some(*card),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(offered.len(), 4);
+    assert!(offered.contains(&theirs) && !offered.contains(&untapped));
+    assert!(matches!(
+        s.decision().prim,
+        Primitive::PickN { min: 0, max: 2 }
+    ));
+    pick_cards(&mut s, &[islands[0], theirs]);
+    assert!(!s.st.object(islands[0]).tapped);
+    assert!(!s.st.object(theirs).tapped);
+    assert!(s.st.object(islands[1]).tapped);
+    let text = card_model::describe::rules_text(
+        s.st.card_def(s.find(P0, Zone::Graveyard, "Test Unsnap").unwrap()),
+    );
+    assert_eq!(text, ["Untap up to 2 lands."]);
+    // Chosen by another player: not compiled.
+    let theirs = card(
+        "Test Odd Unsnap",
+        "1 U",
+        "Instant",
+        "A:SP$ Untap | UntapUpTo$ True | UntapType$ Land | Amount$ 2 | Defined$ Player.Opponent | SpellDescription$ Text.",
+    );
+    assert_eq!(
+        forge_test_blockers(&theirs),
+        ["param:Untap.UntapUpTo by another player"]
+    );
+}

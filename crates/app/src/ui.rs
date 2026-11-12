@@ -384,6 +384,7 @@ pub fn prompt(kind: ChoiceKind) -> &'static str {
         ChoiceKind::OrderBottom => "Order the cards for the bottom (the last one is bottom-most)",
         ChoiceKind::AuraHost => "Choose what the Aura enchants",
         ChoiceKind::AsEnters { .. } => "As it enters",
+        ChoiceKind::Untap => "Choose what to untap",
     }
 }
 

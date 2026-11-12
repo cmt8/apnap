@@ -121,6 +121,9 @@ pub enum ChoiceKind {
         ability: AbilityId,
         tapped: bool,
     },
+    /// "Untap up to N lands": choose the permanents to untap (PickN over
+    /// `OptionDesc::Card`, tapped permanents only).
+    Untap,
 }
 
 /// A structured description of one option. Frames read the chosen option back from the

@@ -34,3 +34,16 @@ them ordered by their owner — the same player for cards from their own hand or
 | Test | Rule |
 |---|---|
 | `cards_put_on_top_from_the_hand_are_ordered_by_their_owner` | 401.4 |
+
+## Untap up to N (701.26b)
+
+> 701.26b To untap a permanent, rotate it back to the upright position from a sideways
+> position. Only tapped permanents can be untapped.
+
+"Untap up to two lands" (Snap, Frantic Search, Peregrine Drake): any lands, chosen as the
+spell or ability resolves — not targets. Only tapped ones are offered (choosing an untapped
+one would do nothing).
+
+| Test | Rule |
+|---|---|
+| `untap_up_to_n_lands_chooses_among_tapped_lands_of_anyone` | 701.26b |

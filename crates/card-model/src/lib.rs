@@ -1527,6 +1527,13 @@ pub enum Effect {
         first: Box<Effect>,
         then: Box<Effect>,
     },
+    /// "Untap up to N lands": the controller chooses up to `count` tapped permanents
+    /// matching `what` (anyone's, unless the selector says whose) as this resolves and
+    /// untaps them (CR 701.26b). Not targets.
+    UntapChosen {
+        what: Selector,
+        count: Amount,
+    },
 }
 
 /// A zone an effect takes cards out of as it resolves.

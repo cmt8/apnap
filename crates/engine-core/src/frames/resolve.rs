@@ -123,6 +123,12 @@ pub enum Work {
     /// ("the life lost this way") is how far each of these players' life totals went
     /// down from what it was before it (`before`), negative changes counting as none.
     LifeLost { before: Vec<(PlayerId, i32)> },
+    /// "Untap up to `n` [permanents]": the controller chooses among the tapped ones that
+    /// match, then they are untapped.
+    UntapChosen {
+        what: Box<card_model::Selector>,
+        n: u32,
+    },
 }
 
 /// The fixed part of a [`Work::ChooseCards`] (amounts already worked out, CR 608.2h).
@@ -664,6 +670,38 @@ impl ResolveFrame {
                 Work::IfDone { k, then, since } => {
                     if st.event_count > since {
                         self.work.push(Work::Eval { k, effect: then });
+                    }
+                }
+                Work::UntapChosen { what, n } => {
+                    if let Some(inp) = input.take() {
+                        for object in picked_cards(&inp) {
+                            if st.objects.get(&object).is_some_and(|o| o.tapped) {
+                                execute(st, GameAction::Untap { object });
+                            }
+                        }
+                        continue;
+                    }
+                    // CR 701.26b: only a tapped permanent can be untapped.
+                    let pool: Vec<ObjectId> =
+                        crate::layers::matching(st, &what, self.source, self.controller)
+                            .into_iter()
+                            .filter(|&o| st.object(o).tapped)
+                            .collect();
+                    let max = (n as usize).min(pool.len());
+                    if max > 0 && st.in_game(self.controller) {
+                        let controller = self.controller;
+                        let options = pool
+                            .into_iter()
+                            .map(|card| OptionDesc::Card { card })
+                            .collect();
+                        self.work.push(Work::UntapChosen { what, n });
+                        return Flow::ask(
+                            Frame::Resolve(Box::new(self)),
+                            controller,
+                            ChoiceKind::Untap,
+                            Primitive::PickN { min: 0, max },
+                            options,
+                        );
                     }
                 }
                 Work::LifeLost { before } => {
@@ -1873,6 +1911,14 @@ impl ResolveFrame {
                     since: st.event_count,
                 });
                 self.work.push(Work::Eval { k, effect: first });
+                Vec::new()
+            }
+            Effect::UntapChosen { what, count } => {
+                let n = self.amount(st, k, &count);
+                self.work.push(Work::UntapChosen {
+                    what: Box::new(what),
+                    n,
+                });
                 Vec::new()
             }
             Effect::PlayerMay { who, effect } => {
