@@ -104,6 +104,12 @@ impl Script {
                 format!("cast {} for its alternative cost", self.name(*card))
             }
             OptionDesc::PlayLand { card } => format!("play {}", self.name(*card)),
+            OptionDesc::CastFace { card, face } => {
+                format!("cast {}", self.face_name(*card, *face))
+            }
+            OptionDesc::PlayLandFace { card, face } => {
+                format!("play {}", self.face_name(*card, *face))
+            }
             OptionDesc::ActivateAbility { source, .. } => {
                 format!("activate {}", self.name(*source))
             }
@@ -146,6 +152,30 @@ impl Script {
         )
     }
 
+    /// The name of face `face` of the card `id` (CR 712.6: each face has its own).
+    pub fn face_name(&self, id: ObjectId, face: u8) -> String {
+        let card = self.st.object(id).card;
+        self.st
+            .catalog
+            .get(self.st.catalog.face(card, face))
+            .name
+            .clone()
+    }
+
+    /// Cast the face named `name` of a card that isn't its front face (CR 712.8b).
+    pub fn cast_face(&mut self, name: &str) -> &mut Self {
+        self.pick(&format!("cast {name}"), |s, o| {
+            matches!(o, OptionDesc::CastFace { card, face } if s.face_name(*card, *face) == name)
+        })
+    }
+
+    /// Play the land face named `name` of a card that isn't its front face (CR 712.9).
+    pub fn play_face(&mut self, name: &str) -> &mut Self {
+        self.pick(&format!("play {name}"), |s, o| {
+            matches!(o, OptionDesc::PlayLandFace { card, face } if s.face_name(*card, *face) == name)
+        })
+    }
+
     pub fn can_cast(&self, name: &str) -> bool {
         self.has(|s, o| matches!(o, OptionDesc::CastSpell { card } if s.name(*card) == name))
     }
@@ -154,12 +184,12 @@ impl Script {
     pub fn cast_with(&mut self, name: &str) -> &mut Self {
         self.pick(
             &format!("cast {name} for its alternative cost"),
-            |s, o| matches!(o, OptionDesc::CastWith { card, .. } if s.name(*card) == name),
+            |s, o| matches!(o, OptionDesc::CastWith { card, face, .. } if s.face_name(*card, *face) == name),
         )
     }
 
     pub fn can_cast_with(&self, name: &str) -> bool {
-        self.has(|s, o| matches!(o, OptionDesc::CastWith { card, .. } if s.name(*card) == name))
+        self.has(|s, o| matches!(o, OptionDesc::CastWith { card, face, .. } if s.face_name(*card, *face) == name))
     }
 
     pub fn activate(&mut self, name: &str) -> &mut Self {

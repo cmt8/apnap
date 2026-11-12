@@ -226,6 +226,10 @@ fn event_line(st: &Narrator, e: &Event, viewer: Option<PlayerId>) -> Option<Stri
             let names: Vec<String> = cards.iter().map(|c| st.name(*c)).collect();
             format!("  {} looks at {}", p(*player), names.join(", "))
         }
+        Event::Transformed { object, face } => {
+            let side = if *face == 0 { "front" } else { "back" };
+            format!("  {} transforms ({side} face up)", st.name(*object))
+        }
         Event::PlayerLost { player, reason } => format!("{} LOSES ({reason:?})", p(*player)),
         Event::GameOver { winner } => match winner {
             Some(w) => format!("== game over: {} wins ==", p(*w)),
@@ -347,8 +351,19 @@ pub fn option_line(v: &PlayerView, o: &OptionDesc) -> String {
         OptionDesc::Pass => "pass".into(),
         OptionDesc::PlayLand { card } => format!("play {}", view_name(v, *card)),
         OptionDesc::CastSpell { card } => format!("cast {}", view_name(v, *card)),
-        OptionDesc::CastWith { card, ability } => format!(
-            "cast {} for its alternative cost (ability {})",
+        // The view names the face that is up; the option is about another one.
+        OptionDesc::PlayLandFace { card, face } => {
+            format!("play {} with face {face} up", view_name(v, *card))
+        }
+        OptionDesc::CastFace { card, face } => {
+            format!("cast {} with face {face} up", view_name(v, *card))
+        }
+        OptionDesc::CastWith {
+            card,
+            face,
+            ability,
+        } => format!(
+            "cast {} (face {face}) for its alternative cost (ability {})",
             view_name(v, *card),
             ability.index
         ),

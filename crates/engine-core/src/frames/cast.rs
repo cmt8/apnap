@@ -7,13 +7,14 @@
 //! possible (legal modes, payable X, targets that exist, mana abilities that keep the cost
 //! payable). So any shape-valid response leads to a completed cast.
 
+use super::mana::{PayGoal, goal_feasible, pay_options};
 use super::{ApplyFrame, Flow, Frame, Input};
 use crate::actions::{GameAction, execute, move_object};
 use crate::decision::{ChoiceKind, OptionDesc, Primitive, Response};
 use crate::events::Event;
 use crate::ids::{ObjectId, PlayerId};
 use crate::layers::{abilities, chars, controller_of};
-use crate::mana::{ManaMask, ManaPool, ManaRequirement, ManaType, mask_of, types_in};
+use crate::mana::{ManaMask, ManaPool, ManaRequirement, ManaType};
 use crate::replacement::{MoveCause, Proposed};
 use crate::stack::Target;
 use crate::state::GameState;
@@ -42,6 +43,30 @@ pub enum CastSource {
     /// stack. `source` is the object the resolving ability is on ("sacrifice another
     /// creature" is relative to it; `{T}` and "sacrifice this" are it).
     Payment { source: ObjectId, cost: Box<Cost> },
+    /// Cast this card with face `face` up (CR 712.8b: the back face of a modal
+    /// double-faced card). Only that face is evaluated (CR 712.8c). Once the card is on the
+    /// stack the frame's source is `Card`: the spell has that face up.
+    Face { card: ObjectId, face: u8 },
+}
+
+impl CastSource {
+    /// The card being cast, if a spell is.
+    fn spell(&self) -> Option<ObjectId> {
+        match self {
+            CastSource::Card(card) | CastSource::Face { card, .. } => Some(*card),
+            _ => None,
+        }
+    }
+}
+
+/// The card a spell source casts and the face it has up, or will have up on the stack
+/// (CR 712.8): a `Card` is cast with the face it shows (its front face in a hand).
+fn spell_face(st: &GameState, source: &CastSource) -> (ObjectId, u8) {
+    match source {
+        CastSource::Face { card, face } => (*card, *face),
+        CastSource::Card(card) => (*card, st.object(*card).face),
+        other => unreachable!("not a spell: {other:?}"),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,7 +159,7 @@ struct Proposal {
 }
 
 /// What `p` could sacrifice to pay `choice` for a cost whose source is `source`.
-fn sacrifice_candidates(
+pub(crate) fn sacrifice_candidates(
     st: &GameState,
     p: PlayerId,
     choice: &card_model::CostChoice,
@@ -181,7 +206,7 @@ fn discard_candidates(
 /// The object a cost's "another" is relative to, and that pays `{T}`/"sacrifice this".
 fn cost_source(source: &CastSource) -> ObjectId {
     match source {
-        CastSource::Card(card) => *card,
+        CastSource::Card(card) | CastSource::Face { card, .. } => *card,
         CastSource::Ability { source, .. } => *source,
         CastSource::Trigger(t) => t.source,
         CastSource::Payment { source, .. } => *source,
@@ -194,7 +219,7 @@ fn cost_source(source: &CastSource) -> ObjectId {
 /// creature card" is not the dying creature's own card).
 fn ability_source(st: &GameState, source: &CastSource) -> Option<ObjectId> {
     match source {
-        CastSource::Card(_) => None,
+        CastSource::Card(_) | CastSource::Face { .. } => None,
         CastSource::Ability { source, .. } | CastSource::Payment { source, .. } => Some(*source),
         CastSource::Trigger(t) => Some(crate::triggers::this_card(
             st,
@@ -208,10 +233,7 @@ fn ability_source(st: &GameState, source: &CastSource) -> Option<ObjectId> {
 /// CR 601.2h / 119.4: can `p` pay the non-mana parts of the cost at all?
 fn extra_payable(st: &GameState, p: PlayerId, source: &CastSource, prop: &Proposal) -> bool {
     let this = cost_source(source);
-    let card = match source {
-        CastSource::Card(card) => Some(*card),
-        _ => None,
-    };
+    let card = source.spell();
     // The card that is itself discarded for the cost can't also be the chosen discard.
     let card = card.or(prop.extra.discard_self.then_some(this));
     prop.extra.sacrifice.as_ref().is_none_or(|ch| {
@@ -243,31 +265,35 @@ fn proposal_with(st: &GameState, source: &CastSource, alt: Option<AbilityId>) ->
 
 fn proposal(st: &GameState, source: &CastSource) -> Proposal {
     match source {
-        CastSource::Card(card) => Proposal {
-            // CR 303.4a: an Aura spell targets what its enchant ability allows.
-            body: st.card_def(*card).spell_ability().cloned().or_else(|| {
-                st.card_def(*card).enchant().map(|f| {
-                    Body::Effect(card_model::Mode {
-                        targets: vec![f],
-                        groups: Vec::new(),
-                        effect: card_model::Effect::Seq(Vec::new()),
+        CastSource::Card(_) | CastSource::Face { .. } => {
+            let (card, face) = spell_face(st, source);
+            // CR 712.8c: only the face that will be up on the stack is evaluated.
+            let def = st.catalog.get(st.catalog.face(st.object(card).card, face));
+            Proposal {
+                // CR 303.4a: an Aura spell targets what its enchant ability allows.
+                body: def.spell_ability().cloned().or_else(|| {
+                    def.enchant().map(|f| {
+                        Body::Effect(card_model::Mode {
+                            targets: vec![f],
+                            groups: Vec::new(),
+                            effect: card_model::Effect::Seq(Vec::new()),
+                        })
                     })
-                })
-            }),
-            cost: chars(st, *card).mana_cost,
-            tap: None,
-            sacrifice: None,
-            // "As an additional cost to cast this spell, …"
-            extra: st
-                .card_def(*card)
-                .abilities
-                .iter()
-                .find_map(|a| match a {
-                    AbilityDef::AdditionalCost(c) => Some(c.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default(),
-        },
+                }),
+                cost: crate::layers::chars_as(st, card, face).mana_cost,
+                tap: None,
+                sacrifice: None,
+                // "As an additional cost to cast this spell, …"
+                extra: def
+                    .abilities
+                    .iter()
+                    .find_map(|a| match a {
+                        AbilityDef::AdditionalCost(c) => Some(c.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default(),
+            }
+        }
         CastSource::Ability { source, ability } => match st.catalog.ability(*ability) {
             AbilityDef::Activated { cost, body, .. } => Proposal {
                 body: Some(body.clone()),
@@ -325,8 +351,9 @@ fn total(cost: &Option<ManaCost>, x: u32, tax: u32, discount: u32) -> ManaRequir
 /// CR 601.2f: the generic mana cost reductions take off `card` as `p` casts it — from
 /// permanents `p` controls ("Dragon spells you cast cost {1} less") and from the spell
 /// itself ("this spell costs {1} less for each creature on the battlefield").
-pub(crate) fn cost_reduction(st: &GameState, p: PlayerId, card: ObjectId) -> u32 {
-    let c = chars(st, card);
+/// `face` is the face it is cast with (CR 712.8c).
+pub(crate) fn cost_reduction(st: &GameState, p: PlayerId, card: ObjectId, face: u8) -> u32 {
+    let c = crate::layers::chars_as(st, card, face);
     let facts = crate::layers::Facts {
         id: card,
         controller: p,
@@ -350,7 +377,8 @@ pub(crate) fn cost_reduction(st: &GameState, p: PlayerId, card: ObjectId) -> u32
             }
         }
     }
-    for a in &st.card_def(card).abilities {
+    let def = st.catalog.get(st.catalog.face(st.object(card).card, face));
+    for a in &def.abilities {
         if let AbilityDef::SelfCostReduction(amount) = a {
             total += crate::layers::count_amount(st, amount, card, p);
         }
@@ -366,8 +394,8 @@ pub(crate) fn can_tap_for_ability(st: &GameState, id: ObjectId) -> bool {
 }
 
 /// What mana is being spent on (CR 106.6: some mana can only be spent in certain ways).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Payee {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Payee {
     /// A spell: the card being cast (in hand before it is announced, then on the stack).
     Spell(ObjectId),
     /// An activated ability of this permanent.
@@ -375,11 +403,14 @@ pub(crate) enum Payee {
     /// A cost paid while something resolves (CR 118.12): neither casting a spell nor
     /// activating an ability, so mana restricted to those can't pay it.
     Cost,
+    /// A spell about to be cast with this face up (CR 712.8c): the card in its zone.
+    SpellFace(ObjectId, u8),
 }
 
 fn payee_of(source: &CastSource) -> Option<Payee> {
     match source {
         CastSource::Card(card) => Some(Payee::Spell(*card)),
+        CastSource::Face { card, face } => Some(Payee::SpellFace(*card, *face)),
         CastSource::Ability { source, .. } => Some(Payee::Ability(*source)),
         CastSource::Trigger(_) => None,
         CastSource::Payment { .. } => Some(Payee::Cost),
@@ -387,10 +418,26 @@ fn payee_of(source: &CastSource) -> Option<Payee> {
 }
 
 /// CR 106.6: may mana restricted by `r` pay for `payee`, as `p` spends it?
-fn may_spend(st: &GameState, p: PlayerId, r: &card_model::ManaRestriction, payee: Payee) -> bool {
+pub(crate) fn may_spend(
+    st: &GameState,
+    p: PlayerId,
+    r: &card_model::ManaRestriction,
+    payee: Payee,
+) -> bool {
+    // What the mana would pay for is gone (a mana ability sacrificed the source of the
+    // ability being paid for): restricted mana isn't counted on (D-066, conservative).
+    if let Payee::Spell(id) | Payee::Ability(id) | Payee::SpellFace(id, _) = payee
+        && !st.objects.contains_key(&id)
+    {
+        return false;
+    }
     match payee {
-        Payee::Spell(card) => {
-            let c = chars(st, card);
+        Payee::Spell(_) | Payee::SpellFace(..) => {
+            let (card, c) = match payee {
+                Payee::SpellFace(card, face) => (card, crate::layers::chars_as(st, card, face)),
+                Payee::Spell(card) => (card, chars(st, card)),
+                _ => unreachable!(),
+            };
             let facts = crate::layers::Facts {
                 id: card,
                 controller: p,
@@ -406,9 +453,13 @@ fn may_spend(st: &GameState, p: PlayerId, r: &card_model::ManaRestriction, payee
         }
         Payee::Ability(source) => {
             let c = chars(st, source);
-            r.abilities
-                .iter()
-                .any(|s| crate::layers::matches(st, s, &c, st.object(source), source, p))
+            let fits = |s: &card_model::Selector| {
+                crate::layers::matches(st, s, &c, st.object(source), source, p)
+            };
+            // "Abilities of Dragons": of Dragon permanents (CR 109.2); "of Dragon
+            // sources": wherever the source is.
+            (st.object(source).zone == Zone::Battlefield && r.abilities.iter().any(fits))
+                || r.sources.iter().any(fits)
         }
         Payee::Cost => false,
     }
@@ -443,7 +494,7 @@ pub(crate) fn usable_pool(st: &GameState, p: PlayerId, payee: Option<Payee>) -> 
 
 /// CR 903.4: the colors of mana "in your commander's color identity", as a mask. Empty
 /// without a commander (CR 903.4f: the ability then adds nothing).
-fn identity_mask(st: &GameState, p: PlayerId) -> ManaMask {
+pub(crate) fn identity_mask(st: &GameState, p: PlayerId) -> ManaMask {
     let mut mask = 0;
     for (owner, instance) in &st.commanders {
         if *owner != p {
@@ -459,268 +510,28 @@ fn identity_mask(st: &GameState, p: PlayerId) -> ManaMask {
     mask
 }
 
-/// One way to tap a permanent for mana now (CR 605, 106.12): one activation adds `count`
-/// mana, all of one type chosen from `mask`. Entries with the same `id` are different
-/// mana abilities of one permanent: tapping it for one excludes the others. A permanent's
-/// plain abilities ("{T}: Add one mana", including what its land types give it) are merged
-/// into one entry; `ability` names the printed ability of any other entry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ManaSource {
-    pub id: ObjectId,
-    pub mask: ManaMask,
-    pub count: u32,
-    /// "{T}, Sacrifice this: Add …" (Treasure, CR 111.10a).
-    pub sacrifice: bool,
-    pub ability: Option<AbilityId>,
-}
-
-/// The mana abilities `p` can activate now, in battlefield order. With a `payee`, sources
-/// whose mana couldn't be spent on it (CR 106.6) are left out.
-pub(crate) fn mana_sources(
-    st: &GameState,
-    p: PlayerId,
-    exclude: Option<ObjectId>,
-    payee: Option<Payee>,
-) -> Vec<ManaSource> {
-    let mut out = Vec::new();
-    let mut identity: Option<ManaMask> = None;
-    for &id in &st.zones.battlefield {
-        // Every mana ability's cost includes {T} (card-db checks it).
-        if Some(id) == exclude || controller_of(st, id) != p || !can_tap_for_ability(st, id) {
-            continue;
-        }
-        let c = chars(st, id);
-        let start = out.len();
-        let mut plain: ManaMask = 0;
-        if c.is(CardType::Land) && !c.land_abilities_lost {
-            // CR 305.6: each basic land type grants "{T}: Add [mana]".
-            for t in &c.land_types {
-                plain |= 1 << ManaType::from_color(t.produces()).index();
-            }
-        }
-        for (index, a) in abilities(st, id) {
-            let AbilityDef::Mana {
-                cost,
-                produce,
-                only_if,
-                spend,
-            } = a
-            else {
-                continue;
-            };
-            // "Activate only if …" (CR 602.5b).
-            if !triggers::condition_holds(st, only_if.as_ref(), p, id) {
-                continue;
-            }
-            if let (Some(r), Some(payee)) = (spend, payee)
-                && !may_spend(st, p, r, payee)
-            {
-                continue;
-            }
-            let mask = match produce {
-                card_model::ManaProduce::CommanderIdentity => {
-                    *identity.get_or_insert_with(|| identity_mask(st, p))
-                }
-                other => mask_of(&other.options()),
-            };
-            if mask == 0 {
-                continue;
-            }
-            if produce.count() == 1 && !cost.sacrifice_self && spend.is_none() {
-                plain |= mask;
-            } else {
-                out.push(ManaSource {
-                    id,
-                    mask,
-                    count: produce.count(),
-                    sacrifice: cost.sacrifice_self,
-                    ability: Some(index),
-                });
-            }
-        }
-        if plain != 0 {
-            out.insert(
-                start,
-                ManaSource {
-                    id,
-                    mask: plain,
-                    count: 1,
-                    sacrifice: false,
-                    ability: None,
-                },
-            );
-        }
-    }
-    out
-}
-
-/// Can `req` be paid from `pool` plus `sources` (CR 601.2g–h)? Exact: a source that makes
-/// several mana of one *chosen* type is tried with each choice, and so is each way to tap
-/// a permanent that has several. (Mana beyond the cost is allowed: it stays in the pool.)
-pub(crate) fn payable(req: &ManaRequirement, pool: &ManaPool, sources: &[ManaSource]) -> bool {
-    // How many multi-mana sources with a real choice are tried exhaustively (5 types each).
-    const BRANCHING: usize = 4;
-    fn go(
-        req: &ManaRequirement,
-        pool: &ManaPool,
-        sources: &[ManaSource],
-        masks: &mut Vec<ManaMask>,
-        branches: usize,
-    ) -> bool {
-        let Some(first) = sources.first() else {
-            return req.feasible(pool, masks);
-        };
-        // The ways to tap one permanent exclude each other.
-        let run = sources.iter().take_while(|s| s.id == first.id).count();
-        let (ways, rest) = sources.split_at(run);
-        ways.iter()
-            .any(|way| tap(req, pool, way, rest, masks, branches))
-    }
-    fn tap(
-        req: &ManaRequirement,
-        pool: &ManaPool,
-        way: &ManaSource,
-        rest: &[ManaSource],
-        masks: &mut Vec<ManaMask>,
-        branches: usize,
-    ) -> bool {
-        let single = way.mask.count_ones() == 1;
-        if way.count == 1 || single || branches == 0 {
-            // One unit per mana when the type is fixed; a choice beyond the branching
-            // budget counts as a single mana (never more than it can really give).
-            let n = if way.count == 1 || single {
-                way.count
-            } else {
-                1
-            };
-            for _ in 0..n {
-                masks.push(way.mask);
-            }
-            let ok = go(req, pool, rest, masks, branches);
-            masks.truncate(masks.len() - n as usize);
-            return ok;
-        }
-        for t in types_in(way.mask) {
-            for _ in 0..way.count {
-                masks.push(1 << t.index());
-            }
-            let ok = go(req, pool, rest, masks, branches - 1);
-            masks.truncate(masks.len() - way.count as usize);
-            if ok {
-                return true;
-            }
-        }
-        false
-    }
-    go(req, pool, sources, &mut Vec::new(), BRANCHING)
-}
-
-/// CR 601.2g–h: a permanent sacrificed for mana (Treasure) can't also be sacrificed to pay
-/// the cost itself. Of the mana sources `ids` — those that sacrifice themselves and could
-/// be chosen for the cost's "sacrifice N" — at most `max` may be used, so that N remain.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SacLimit {
-    pub ids: Vec<ObjectId>,
-    pub max: usize,
-}
-
-/// [`payable`], using at most `limit.max` of the sources in `limit.ids`.
-pub(crate) fn payable_within(
-    req: &ManaRequirement,
-    pool: &ManaPool,
-    sources: &[ManaSource],
-    limit: Option<&SacLimit>,
-) -> bool {
-    let limited = |s: &ManaSource| s.sacrifice && limit.is_some_and(|l| l.ids.contains(&s.id));
-    let max = limit.map_or(0, |l| l.max);
-    if sources.iter().filter(|s| limited(s)).count() <= max {
-        return payable(req, pool, sources);
-    }
-    // Which `max` of them to use: sources that make the same mana are interchangeable, so
-    // only how many of each kind matters.
-    let mut kinds: Vec<(ManaMask, u32)> = Vec::new();
-    for s in sources.iter().filter(|s| limited(s)) {
-        if !kinds.contains(&(s.mask, s.count)) {
-            kinds.push((s.mask, s.count));
-        }
-    }
-    fn choose(
-        req: &ManaRequirement,
-        pool: &ManaPool,
-        sources: &[ManaSource],
-        limited: &dyn Fn(&ManaSource) -> bool,
-        kinds: &[(ManaMask, u32)],
-        take: &mut Vec<usize>,
-        left: usize,
-    ) -> bool {
-        if take.len() == kinds.len() {
-            let mut used = alloc::vec![0usize; kinds.len()];
-            let kept: Vec<ManaSource> = sources
-                .iter()
-                .filter(|s| {
-                    if !limited(s) {
-                        return true;
-                    }
-                    let k = kinds
-                        .iter()
-                        .position(|k| *k == (s.mask, s.count))
-                        .expect("a kind");
-                    used[k] += 1;
-                    used[k] <= take[k]
-                })
-                .copied()
-                .collect();
-            return payable(req, pool, &kept);
-        }
-        let k = kinds[take.len()];
-        let have = sources
-            .iter()
-            .filter(|s| limited(s) && (s.mask, s.count) == k)
-            .count();
-        for n in (0..=have.min(left)).rev() {
-            take.push(n);
-            let ok = choose(req, pool, sources, limited, kinds, take, left - n);
-            take.pop();
-            if ok {
-                return true;
-            }
-        }
-        false
-    }
-    choose(req, pool, sources, &limited, &kinds, &mut Vec::new(), max)
-}
-
-/// The mana sources `p` can use to pay for `source`, and the limit the cost's own
-/// sacrifice puts on them.
-fn sources_for(
-    st: &GameState,
-    p: PlayerId,
+/// What paying for `source` asks (CR 601.2f–h), for the planner (`frames::mana`).
+fn goal(
     source: &CastSource,
     prop: &Proposal,
     payee: Option<Payee>,
-) -> (Vec<ManaSource>, Option<SacLimit>) {
-    let mut sources = mana_sources(st, p, prop.tap, payee);
-    // "Sacrifice this" in the cost being paid: it can't be sacrificed for mana as well.
-    sources.retain(|s| !(s.sacrifice && Some(s.id) == prop.sacrifice));
-    // A permanent chosen to be returned to the hand can't have been sacrificed for mana
-    // either (card-db refuses a cost that both sacrifices and returns).
-    let chosen = prop
-        .extra
-        .sacrifice
-        .as_ref()
-        .or(prop.extra.return_to_hand.as_ref());
-    let limit = chosen.map(|ch| {
-        let candidates = sacrifice_candidates(st, p, ch, cost_source(source), prop.sacrifice);
-        SacLimit {
-            ids: sources
-                .iter()
-                .filter(|s| s.sacrifice && candidates.contains(&s.id))
-                .map(|s| s.id)
-                .collect(),
-            max: candidates.len().saturating_sub(ch.count as usize),
-        }
-    });
-    (sources, limit)
+    req: &ManaRequirement,
+) -> PayGoal {
+    PayGoal {
+        req: *req,
+        payee,
+        tap: prop.tap,
+        sacrifice: prop.sacrifice,
+        // A permanent chosen to be returned to the hand can't have been sacrificed for mana
+        // either (card-db refuses a cost that both sacrifices and returns).
+        sac: prop
+            .extra
+            .sacrifice
+            .clone()
+            .or_else(|| prop.extra.return_to_hand.clone()),
+        sac_source: cost_source(source),
+        life: prop.extra.life,
+    }
 }
 
 /// Can `p` pay the mana `req` for `source` (with what is in their pool and the mana
@@ -733,8 +544,7 @@ fn feasible(
     payee: Option<Payee>,
     req: &ManaRequirement,
 ) -> bool {
-    let (sources, limit) = sources_for(st, p, source, prop, payee);
-    payable_within(req, &usable_pool(st, p, payee), &sources, limit.as_ref())
+    goal_feasible(st, p, &goal(source, prop, payee, req))
 }
 
 /// CR 118.3: can `p` pay `cost` right now — for an ability of `source` that is resolving?
@@ -806,6 +616,22 @@ pub(crate) fn sorcery_timing(st: &GameState, p: PlayerId) -> bool {
     st.turn.active == p && st.turn.step.is_main_phase() && st.stack.is_empty()
 }
 
+/// The other faces (not the front) a card may be cast or played with: those of a modal
+/// double-faced card (CR 712.8b, 712.9).
+pub(crate) fn castable_faces(st: &GameState, card: ObjectId) -> Vec<u8> {
+    let def = st.catalog.get(st.object(card).card);
+    match def.layout {
+        // CR 712.8b; CR 709.3: a split card is cast as one of its halves.
+        card_model::Layout::Modal | card_model::Layout::Split => {
+            (1..=def.faces.len() as u8).collect()
+        }
+        // CR 716.3, 721.3: as an Adventure or an Omen. (Not from exile after an Adventure,
+        // CR 716.3d: `players::may_play_face` lets that card be played only as itself.)
+        card_model::Layout::Adventure | card_model::Layout::Omen => alloc::vec![1],
+        _ => Vec::new(),
+    }
+}
+
 /// Whether `p` may begin casting/activating `source` now and could complete it (D-019).
 pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool {
     can_begin_with(st, p, source, None)
@@ -819,18 +645,30 @@ pub(crate) fn can_begin_with(
     alt: Option<AbilityId>,
 ) -> bool {
     match &source {
-        CastSource::Card(card) => {
-            let o = st.object(*card);
+        CastSource::Card(_) | CastSource::Face { .. } => {
+            let (card, face) = spell_face(st, &source);
+            let o = st.object(card);
             // From your hand, or your commander from the command zone (CR 903.8), or from
-            // where a rule lets you (CR 601.3: "you may cast … from your graveyard").
-            let mut from_ok = o.owner == p
-                && (o.zone == Zone::Hand
-                    || (o.zone == Zone::Command && st.is_commander(*card))
-                    || crate::players::may_play_from(st, p, *card));
+            // where a rule lets you (CR 601.3: "you may cast … from your graveyard") — the
+            // rule judged by the face being cast (CR 712.8c) — or a card you sent on an
+            // Adventure (CR 716.3d).
+            let mut from_ok = (o.owner == p && o.zone == Zone::Command && st.is_commander(card))
+                || crate::players::may_play_face(st, p, card, face);
+            // CR 601.2b, 118.9: an alternative cost of the face being cast; flashback is
+            // its own permission to cast from the graveyard (CR 702.34a).
             if let Some(alt) = alt {
-                from_ok = super::altcost::may_begin(st, p, *card, alt, from_ok);
+                from_ok = super::altcost::may_begin(st, p, card, alt, from_ok);
             }
-            let c = chars(st, *card);
+            // CR 712.8b: another face only of a modal double-faced card (or a half of a
+            // split card, which is never cast whole: CR 709.3).
+            if face != 0 && !castable_faces(st, card).contains(&face) {
+                return false;
+            }
+            if face == 0 && st.catalog.get(o.card).layout.cast_by_faces_only() {
+                return false;
+            }
+            // CR 712.8c: only the face it would have up on the stack is evaluated.
+            let c = crate::layers::chars_as(st, card, face);
             if !from_ok || c.is(CardType::Land) {
                 return false;
             }
@@ -894,7 +732,13 @@ pub(crate) fn can_begin_with(
         return false;
     }
     let (tax, discount) = match &source {
-        CastSource::Card(card) => (commander_tax(st, p, *card), cost_reduction(st, p, *card)),
+        CastSource::Card(_) | CastSource::Face { .. } => {
+            let (card, face) = spell_face(st, &source);
+            (
+                commander_tax(st, p, card),
+                cost_reduction(st, p, card, face),
+            )
+        }
         _ => (0, 0),
     };
     let payee = payee_of(&source);
@@ -931,11 +775,12 @@ impl CastFrame {
         }
     }
 
-    /// Cast `card` with its alternative cost `alt` (one `can_begin_with` allows).
-    pub(crate) fn with_alt(player: PlayerId, card: ObjectId, alt: AbilityId) -> Self {
+    /// Cast a card (`Card` or `Face`) with the alternative cost `alt` of the face being
+    /// cast (one `can_begin_with` allows).
+    pub(crate) fn with_alt(player: PlayerId, source: CastSource, alt: AbilityId) -> Self {
         CastFrame {
             alt: Some(alt),
-            ..CastFrame::new(player, CastSource::Card(card))
+            ..CastFrame::new(player, source)
         }
     }
 
@@ -1003,12 +848,13 @@ impl CastFrame {
         loop {
             match self.stage {
                 CastStage::Announce => {
-                    if let CastSource::Card(card) = &self.source {
+                    if let Some(card) = self.source.spell() {
+                        let (_, face) = spell_face(st, &self.source);
                         // CR 903.8 / 601.2f: commander tax, determined before the card moves.
-                        self.tax = commander_tax(st, p, *card);
-                        self.discount = cost_reduction(st, p, *card);
-                        if st.object(*card).zone == Zone::Command {
-                            self.from_command = Some(st.object(*card).card_instance);
+                        self.tax = commander_tax(st, p, card);
+                        self.discount = cost_reduction(st, p, card, face);
+                        if st.object(card).zone == Zone::Command {
+                            self.from_command = Some(st.object(card).card_instance);
                         }
                     }
                     let put = |st: &mut GameState, a: GameAction| match execute(st, a) {
@@ -1020,9 +866,21 @@ impl CastFrame {
                         CastSource::Card(card) => {
                             move_object(st, *card, Zone::Stack, LibraryPosition::Top, Some(p))
                         }
+                        // CR 712.8b: put onto the stack with the chosen face up.
+                        CastSource::Face { card, face } => {
+                            let spell = crate::actions::move_object_face(
+                                st,
+                                *card,
+                                Zone::Stack,
+                                Some(p),
+                                *face,
+                            );
+                            self.source = CastSource::Card(*card);
+                            spell
+                        }
                         // CR 602.2a: the ability is created on the stack.
                         CastSource::Ability { source, ability } => {
-                            let source_card = st.object(*source).card;
+                            let source_card = st.face_card(*source);
                             // CR 602.2a: a card whose ability is activated from a hidden
                             // zone is revealed.
                             if st.object(*source).zone == Zone::Hand {
@@ -1327,9 +1185,9 @@ impl CastFrame {
                             (choice, pool, ChoiceKind::ExileFromHand)
                         } else {
                             let choice = prop.extra.return_to_hand.clone();
-                            let pool = choice.as_ref().map(|ch| {
-                                sacrifice_candidates(st, p, ch, this, prop.sacrifice)
-                            });
+                            let pool = choice
+                                .as_ref()
+                                .map(|ch| sacrifice_candidates(st, p, ch, this, prop.sacrifice));
                             (choice, pool, ChoiceKind::ReturnToHand)
                         };
                         if let (Some(choice), Some(pool)) = (choice, pool) {
@@ -1363,13 +1221,18 @@ impl CastFrame {
                         else {
                             unreachable!()
                         };
-                        let cost = tap_for_mana(st, p, source, mana, ability, payee);
-                        if !cost.is_empty() {
-                            // CR 605.3b: the mana ability resolves at once; its own cost
-                            // (the sacrifice) is paid now, and this frame carries on after.
-                            let apply = Frame::Apply(ApplyFrame::new(st, cost));
-                            return Flow::Continue(vec![Frame::Cast(self), apply]);
-                        }
+                        // CR 605.3b: the mana ability resolves at once (its own costs and
+                        // choices first, D-066); this frame carries on after.
+                        let g = goal(&self.source, &prop, payee, &req);
+                        return super::mana::activate(
+                            st,
+                            p,
+                            Frame::Cast(self),
+                            source,
+                            mana,
+                            ability,
+                            Some(g),
+                        );
                     }
                     let pool = usable_pool(st, p, payee);
                     if req.payable_from(&pool) {
@@ -1403,49 +1266,15 @@ impl CastFrame {
                             }
                         }
                     }
-                    let (sources, limit) = sources_for(st, p, &self.source, &prop, payee);
-                    let mut options = Vec::new();
-                    for src in &sources {
-                        let rest: Vec<ManaSource> =
-                            sources.iter().filter(|s| s.id != src.id).copied().collect();
-                        // Sacrificing this one for mana leaves one fewer for the cost.
-                        let limit = match &limit {
-                            Some(l) if src.sacrifice && l.ids.contains(&src.id) => {
-                                if l.max == 0 {
-                                    continue;
-                                }
-                                Some(SacLimit {
-                                    ids: l.ids.iter().copied().filter(|i| *i != src.id).collect(),
-                                    max: l.max - 1,
-                                })
-                            }
-                            other => other.clone(),
-                        };
-                        for mana in types_in(src.mask) {
-                            let option = OptionDesc::TapForMana {
-                                source: src.id,
-                                mana,
-                                ability: src.ability,
-                            };
-                            if options.contains(&option) {
-                                continue;
-                            }
-                            let mut pl = pool;
-                            pl.add(mana, src.count);
-                            if payable_within(&req, &pl, &rest, limit.as_ref()) {
-                                options.push(option);
-                            }
-                        }
-                    }
+                    let options = pay_options(st, p, &goal(&self.source, &prop, payee, &req));
                     assert!(
                         !options.is_empty(),
                         "payment dead-ended (D-019 violated): {p:?} paying {req:?} for {:?} \
-                         ({}); pool {pool:?}; {} mana sources",
+                         ({}); pool {pool:?}",
                         self.source,
                         st.objects
                             .get(&cost_source(&self.source))
                             .map_or("gone", |o| st.catalog.get(o.card).name.as_str()),
-                        sources.len(),
                     );
                     return self.ask(
                         ChoiceKind::PayMana,
@@ -1602,53 +1431,5 @@ impl CastFrame {
         } else {
             Flow::then(Frame::Apply(ApplyFrame::new(st, events)))
         }
-    }
-}
-
-/// CR 605.3b: activate a mana ability of `source` for `mana` — `ability`, or one of its
-/// plain ones. It resolves immediately, adding as many mana of the chosen type as the
-/// ability makes. Returns the rest of its cost — "sacrifice this" — for the caller to
-/// apply (a replaceable event).
-pub(crate) fn tap_for_mana(
-    st: &mut GameState,
-    p: PlayerId,
-    source: ObjectId,
-    mana: ManaType,
-    ability: Option<AbilityId>,
-    payee: Option<Payee>,
-) -> Vec<Proposed> {
-    let way = mana_sources(st, p, None, payee)
-        .into_iter()
-        .find(|s| s.id == source && s.ability == ability && s.mask & (1 << mana.index()) != 0)
-        .expect("an offered mana ability");
-    // CR 106.6: mana with a spending restriction is kept apart.
-    let restricted = way.ability.filter(|a| {
-        matches!(
-            st.catalog.ability(*a),
-            AbilityDef::Mana { spend: Some(_), .. }
-        )
-    });
-    execute(st, GameAction::Tap { object: source });
-    for _ in 0..way.count {
-        execute(
-            st,
-            match restricted {
-                Some(ability) => GameAction::AddRestrictedMana {
-                    player: p,
-                    mana,
-                    ability,
-                },
-                None => GameAction::AddMana { player: p, mana },
-            },
-        );
-    }
-    if way.sacrifice {
-        vec![Proposed::moving(
-            source,
-            Zone::Graveyard,
-            MoveCause::Sacrifice,
-        )]
-    } else {
-        Vec::new()
     }
 }

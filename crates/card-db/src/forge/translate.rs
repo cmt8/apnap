@@ -12,12 +12,12 @@
 use super::parse::{Face, Record, Script};
 use card_model::{
     AbilityDef, ActivationZone, Affected, AltCost, AltKind, AltKindName, Amount, AsEnters,
-    BasicLandType, Body, Calc, CardDef,
-    CardDest, CardType, CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost,
-    CostChoice, CounterKind, DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword,
-    ManaCost, ManaProduce, ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef, PlayZone,
-    PlayerRef, PlayerRule, ReplaceWith, Replaces, Selector, Signed, Supertype, Take, TargetFilter,
-    TargetGroup, TargetRef, Timing, Trigger, TriggerStep, Who,
+    BasicLandType, Body, Calc, CardDef, CardDest, CardType, CardZone, Cmp, Color, CombatRule,
+    Condition, ContinuousEffect, Cost, CostChoice, CounterKind, DamageBy, DamagePer, DamageTo,
+    EachPlayerAction, Effect, Keyword, Layout, ManaCost, ManaProduce, ManaRestriction, ManaType,
+    Measure, Mode, ObjFilter, ObjRef, PlayZone, PlayerRef, PlayerRule, ReplaceWith, Replaces,
+    Selector, Signed, Supertype, Take, TargetFilter, TargetGroup, TargetRef, Timing, Trigger,
+    TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -745,6 +745,8 @@ impl<'a> Tx<'a> {
                 // the battlefield see `owned`.
                 "YouOwn" => s.owner = Who::You,
                 "OppOwn" => s.owner = Who::Opponent,
+                // CR 716.2a: "that has an Adventure".
+                "AdventureCard" => s.has_adventure = Some(true),
                 "!token" | "nonToken" => s.token = Some(false),
                 "token" => s.token = Some(true),
                 "Basic" => s.supertypes.push(Supertype::Basic),
@@ -1672,26 +1674,87 @@ impl<'a> Tx<'a> {
                     }
                 }
             }
-            // A spell or a non-mana ability that adds mana: one type, any amount.
+            // A spell or a non-mana ability that adds mana (CR 605.5): exactly that mana
+            // ("R R R G G G": each type `Amount$` times), or `Amount$` mana of one type the
+            // player chooses ("Any": any color; "Combo R G" once: {R} or {G}).
             "Mana" => {
-                let mana = match rd.get("Produced") {
-                    Some("W") => Some(ManaType::White),
-                    Some("U") => Some(ManaType::Blue),
-                    Some("B") => Some(ManaType::Black),
-                    Some("R") => Some(ManaType::Red),
-                    Some("G") => Some(ManaType::Green),
-                    Some("C") => Some(ManaType::Colorless),
-                    _ => {
-                        self.block("Mana:produced");
-                        None
-                    }
+                let letter = |w: &str| match w {
+                    "W" => Some(ManaType::White),
+                    "U" => Some(ManaType::Blue),
+                    "B" => Some(ManaType::Black),
+                    "R" => Some(ManaType::Red),
+                    "G" => Some(ManaType::Green),
+                    "C" => Some(ManaType::Colorless),
+                    _ => None,
                 };
+                let words: Vec<&str> = rd
+                    .get("Produced")
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .collect();
+                let amount_text = rd.get("Amount").unwrap_or("1");
                 let who = self.player(&rd, chain, triggered);
-                let amount = self.amount(rd.get("Amount").unwrap_or("1"), chain);
-                Effect::AddMana {
-                    who: who?,
-                    mana: mana?,
-                    amount: amount?,
+                let amount = self.amount(amount_text, chain);
+                let (who, amount) = (who?, amount?);
+                let colors: Vec<ManaType> =
+                    Color::ALL.into_iter().map(ManaType::from_color).collect();
+                match words.as_slice() {
+                    ["Any"] => Effect::AddManaOf {
+                        who,
+                        of: colors,
+                        amount,
+                    },
+                    ["Combo", rest @ ..] if amount == Amount::Fixed(1) && !rest.is_empty() => {
+                        let of: Option<Vec<ManaType>> = match rest {
+                            ["Any"] => Some(colors),
+                            _ => rest.iter().map(|w| letter(w)).collect(),
+                        };
+                        match of {
+                            Some(mut of) if of.len() > 1 => {
+                                of.dedup();
+                                Effect::AddManaOf { who, of, amount }
+                            }
+                            _ => {
+                                self.block("Mana:produced");
+                                return None;
+                            }
+                        }
+                    }
+                    [_, ..] => match words.iter().map(|w| letter(w)).collect::<Option<Vec<_>>>() {
+                        Some(all) => {
+                            // Each type once, as many times as it is listed.
+                            let mut parts: Vec<Effect> = Vec::new();
+                            for t in ManaType::ALL {
+                                let n = all.iter().filter(|x| **x == t).count() as u32;
+                                if n == 0 {
+                                    continue;
+                                }
+                                let amount = match (&amount, n) {
+                                    (a, 1) => a.clone(),
+                                    (Amount::Fixed(k), n) => Amount::Fixed(k * n),
+                                    (a, n) => Amount::Calc(Box::new(a.clone()), Calc::Times(n)),
+                                };
+                                parts.push(Effect::AddMana {
+                                    who,
+                                    mana: t,
+                                    amount,
+                                });
+                            }
+                            if parts.len() == 1 {
+                                parts.remove(0)
+                            } else {
+                                Effect::Seq(parts)
+                            }
+                        }
+                        None => {
+                            self.block("Mana:produced");
+                            return None;
+                        }
+                    },
+                    [] => {
+                        self.block("Mana:produced");
+                        return None;
+                    }
                 }
             }
             "Destroy" => {
@@ -1714,6 +1777,29 @@ impl<'a> Tx<'a> {
                 match api {
                     "Tap" => Effect::Tap { what: what? },
                     _ => Effect::Untap { what: what? },
+                }
+            }
+            // CR 701.27a: "transform this permanent" (docs/forge/effects.md: SetState). Forge
+            // reads `Defined$` (default: the card itself) and `Mode$`; the other modes
+            // (flip, turning face up or down, specializing) aren't transforming.
+            "SetState" => {
+                if rd.get("Mode") != Some("Transform") {
+                    self.block(format!(
+                        "SetState:mode {}",
+                        rd.rec.get("Mode").unwrap_or("none")
+                    ));
+                    return None;
+                }
+                if rd.rec.get("ValidTgts").is_some() {
+                    self.block("SetState:target");
+                    return None;
+                }
+                match self.object(&rd, chain, triggered)? {
+                    ObjRef::This => Effect::Transform { what: ObjRef::This },
+                    _ => {
+                        self.block("SetState:not itself");
+                        return None;
+                    }
                 }
             }
             "TapAll" | "UntapAll" => {
@@ -3373,6 +3459,9 @@ impl<'a> Tx<'a> {
             match (kind, on_battlefield) {
                 ("Spell", false) => out.spells.push(self.selector(&filter)?),
                 ("Activated", true) => out.abilities.push(self.selector(&filter)?),
+                // Without `inZoneBattlefield`: an ability of such a source anywhere (a
+                // card's cycling from the hand too).
+                ("Activated", false) => out.sources.push(self.selector(&filter)?),
                 _ => {
                     self.block(format!("Mana:RestrictValid {kind}"));
                     return None;
@@ -3382,7 +3471,222 @@ impl<'a> Tx<'a> {
         Some(out)
     }
 
+    /// `AB$ Mana` / `AB$ ManaReflected`: a mana ability (CR 605.1a; D-049, D-052, D-066).
+    fn mana_ability(&mut self, rec: &'a Record, api: &str) -> Option<AbilityDef> {
+        let rd = Rd::new(rec, api);
+        let cost = rd.get("Cost").and_then(|c| self.cost_of(c, true));
+        let letter = |w: &&str| match *w {
+            "W" => Some(ManaType::White),
+            "U" => Some(ManaType::Blue),
+            "B" => Some(ManaType::Black),
+            "R" => Some(ManaType::Red),
+            "G" => Some(ManaType::Green),
+            "C" => Some(ManaType::Colorless),
+            _ => None,
+        };
+        let colors =
+            || -> Vec<ManaType> { Color::ALL.into_iter().map(ManaType::from_color).collect() };
+        let produce = if api == "ManaReflected" {
+            // "Add one mana of any color/type that a [Valid] could produce" (CR 106.7).
+            let types = match rd.get("ColorOrType") {
+                Some("Color") => Some(false),
+                Some("Type") => Some(true),
+                other => {
+                    self.block(format!(
+                        "ManaReflected:ColorOrType {}",
+                        other.unwrap_or("?")
+                    ));
+                    None
+                }
+            };
+            let property = rd.get("ReflectProperty");
+            if property != Some("Produce") {
+                self.block(format!("ManaReflected:{}", property.unwrap_or("?")));
+            }
+            let from = match rd.get("Valid") {
+                Some(v) if !v.starts_with("Defined.") => self.selector(v),
+                other => {
+                    self.block(format!("ManaReflected:Valid {}", other.unwrap_or("?")));
+                    None
+                }
+            };
+            if rd.get("Amount").is_some_and(|a| a != "1") {
+                self.block("ManaReflected:Amount");
+                return None;
+            }
+            match (types, from, property) {
+                (Some(types), Some(from), Some("Produce")) => {
+                    Some(ManaProduce::Reflected { from, types })
+                }
+                _ => return None,
+            }
+        } else {
+            // `Amount$`: how many times the whole of `Produced$` is made — a number, or a
+            // variable counted as the ability resolves.
+            let (times, counted) = match rd.get("Amount") {
+                None => (Some(1), None),
+                Some(n) => match n.parse::<u32>() {
+                    Ok(n) => (Some(n).filter(|n| *n > 0), None),
+                    Err(_) => match self.expr(n) {
+                        // "For each [permanent you control]" (D-066).
+                        Some(Amount::Count(sel)) if sel.tapped.is_none() => {
+                            (None, Some(Amount::Count(sel)))
+                        }
+                        Some(_) => {
+                            self.block("Mana:counted");
+                            return None;
+                        }
+                        None => return None,
+                    },
+                },
+            };
+            let words: Vec<&str> = rd
+                .get("Produced")
+                .unwrap_or("")
+                .split_whitespace()
+                .collect();
+            match (times, counted) {
+                (_, Some(amount)) => match words.as_slice() {
+                    // "Add X mana of any one color", "Add {B} for each Swamp you control".
+                    ["Any"] => Some(ManaProduce::Counted {
+                        of: colors(),
+                        amount,
+                    }),
+                    [one] => letter(one).map(|t| ManaProduce::Counted {
+                        of: vec![t],
+                        amount,
+                    }),
+                    _ => None,
+                },
+                (Some(n), None) => match words.as_slice() {
+                    // One colour of the player's choice, `n` mana of it.
+                    ["Any"] if n == 1 => Some(ManaProduce::AnyColor),
+                    ["Any"] => Some(ManaProduce::Times {
+                        of: colors(),
+                        count: n,
+                    }),
+                    // "Add {W} or {U}"; with `Amount$ n`, `n` mana each of any listed
+                    // colour ("in any combination").
+                    ["Combo", "Any"] if n == 1 => Some(ManaProduce::AnyColor),
+                    ["Combo", "Any"] => Some(ManaProduce::Combination {
+                        of: colors(),
+                        count: n,
+                    }),
+                    ["Combo", "ColorIdentity"] if n == 1 => Some(ManaProduce::CommanderIdentity),
+                    ["Combo", of @ ..] if !of.is_empty() => {
+                        match of.iter().map(letter).collect::<Option<Vec<ManaType>>>() {
+                            None => None,
+                            Some(mut of) => {
+                                of.dedup();
+                                match (of.as_slice(), n) {
+                                    ([one], 1) => Some(ManaProduce::One(*one)),
+                                    ([one], n) => Some(ManaProduce::Times {
+                                        of: vec![*one],
+                                        count: n,
+                                    }),
+                                    (_, 1) => Some(ManaProduce::OneOf(of)),
+                                    (_, n) => Some(ManaProduce::Combination { of, count: n }),
+                                }
+                            }
+                        }
+                    }
+                    // Fixed mana: "C C", "G" with `Amount$ 3`, "U B", "C C R".
+                    [_, ..] => match words.iter().map(letter).collect::<Option<Vec<ManaType>>>() {
+                        None => None,
+                        Some(all) => {
+                            let all: Vec<ManaType> =
+                                (0..n).flat_map(|_| all.iter().copied()).collect();
+                            match all.as_slice() {
+                                [one] => Some(ManaProduce::One(*one)),
+                                [first, ..] if all.iter().all(|t| t == first) => {
+                                    Some(ManaProduce::Times {
+                                        of: vec![*first],
+                                        count: all.len() as u32,
+                                    })
+                                }
+                                _ => Some(ManaProduce::Fixed(all)),
+                            }
+                        }
+                    },
+                    [] => None,
+                },
+                (None, None) => None,
+            }
+        };
+        // "Activate only if you control …".
+        let only_if = self.condition(&rd);
+        // "Spend this mana only to cast … spells / activate abilities of …".
+        let spend = match rd.get("RestrictValid") {
+            None => Some(None),
+            Some(text) => self.mana_restriction(text).map(Some),
+        };
+        // What else it does (CR 605.3b): "This land deals 1 damage to you."
+        let then = match rd.get("SubAbility") {
+            None => Some(None),
+            Some(name) => self.mana_side_effect(name).map(Some),
+        };
+        rd.finish(&mut self.blockers);
+        let Some(produce) = produce else {
+            self.block("Mana:produced");
+            return None;
+        };
+        let (cost, only_if, spend, then) = (cost?, only_if?, spend?, then?);
+        // D-066: `{T}` or a sacrifice, maybe mana and life; one permanent sacrificed.
+        let uses_up = cost.tap || cost.sacrifice_self || cost.sacrifice.is_some();
+        let other = cost.discard.is_some() || cost.discard_self || cost.exile_self;
+        if !uses_up || other || cost.mana.as_ref().is_some_and(|m| m.has_x()) {
+            self.block("Mana:cost");
+            return None;
+        }
+        if cost.sacrifice.as_ref().is_some_and(|ch| ch.count != 1) {
+            self.block("Mana:cost sacrifice N");
+            return None;
+        }
+        if matches!(produce, ManaProduce::Counted { .. })
+            && (cost.sacrifice_self || cost.sacrifice.is_some())
+        {
+            self.block("Mana:counted with sacrifice");
+            return None;
+        }
+        Some(AbilityDef::Mana {
+            cost,
+            produce,
+            only_if,
+            spend,
+            then,
+        })
+    }
+
+    /// The `SubAbility$` of a mana ability: what it also does as it resolves. CR 605.1a /
+    /// 605.5a: with a target, or moving a card to or from a library, it would not be a
+    /// mana ability; only damage to, life loss and life gain of its controller are
+    /// modelled (D-066).
+    fn mana_side_effect(&mut self, name: &str) -> Option<Effect> {
+        let rec = self.sub(name)?;
+        let api = rec.head().map(|h| h.1).unwrap_or("?");
+        if !matches!(api, "DealDamage" | "LoseLife" | "GainLife") {
+            self.block(format!("Mana:sub {api}"));
+            return None;
+        }
+        let mode = self.mode(rec, false, "DB")?;
+        if !mode.targets.is_empty() {
+            self.block("Mana:sub with a target");
+            return None;
+        }
+        if !crate::mana_side_effect(&mode.effect) {
+            self.block(format!("Mana:sub {api} form"));
+            return None;
+        }
+        Some(mode.effect)
+    }
+
     fn cost(&mut self, text: &str) -> Option<Cost> {
+        self.cost_of(text, false)
+    }
+
+    /// A cost; `hybrid`: two-color hybrid mana (`RW` = `{R/W}`) is understood (D-066: only
+    /// mana abilities can pay it so far).
+    fn cost_of(&mut self, text: &str, hybrid: bool) -> Option<Cost> {
         let mut cost = Cost::default();
         let mut mana = String::new();
         for tok in cost_tokens(text) {
@@ -3523,6 +3827,15 @@ impl<'a> Tx<'a> {
                 {
                     mana.push_str(&format!("{{{tok}}}"))
                 }
+                // CR 107.4e: `RW` is `{R/W}`.
+                (_, false)
+                    if hybrid
+                        && tok.len() == 2
+                        && tok.chars().all(|c| "WUBRG".contains(c))
+                        && tok.as_bytes()[0] != tok.as_bytes()[1] =>
+                {
+                    mana.push_str(&format!("{{{}/{}}}", &tok[..1], &tok[1..]))
+                }
                 _ => {
                     self.block(format!("cost:{kind}"));
                     return None;
@@ -3567,95 +3880,7 @@ impl<'a> Tx<'a> {
                 self.in_spell = false;
                 body.map(AbilityDef::Spell)
             }
-            "AB" if api == "Mana" => {
-                let rd = Rd::new(rec, "Mana");
-                let cost = rd.get("Cost").and_then(|c| self.cost(c));
-                let letter = |w: &&str| match *w {
-                    "W" => Some(ManaType::White),
-                    "U" => Some(ManaType::Blue),
-                    "B" => Some(ManaType::Black),
-                    "R" => Some(ManaType::Red),
-                    "G" => Some(ManaType::Green),
-                    "C" => Some(ManaType::Colorless),
-                    _ => None,
-                };
-                let colors = || -> Vec<ManaType> {
-                    Color::ALL.into_iter().map(ManaType::from_color).collect()
-                };
-                // `Amount$`: how many times the whole of `Produced$` is made.
-                let times = match rd.get("Amount") {
-                    None => Some(1),
-                    Some(n) => n.parse::<u32>().ok().filter(|n| *n > 0),
-                };
-                let words: Vec<&str> = rd
-                    .get("Produced")
-                    .unwrap_or("")
-                    .split_whitespace()
-                    .collect();
-                let produce = times.and_then(|n| match words.as_slice() {
-                    // One colour of the player's choice, `n` mana of it.
-                    ["Any"] if n == 1 => Some(ManaProduce::AnyColor),
-                    ["Any"] => Some(ManaProduce::Times {
-                        of: colors(),
-                        count: n,
-                    }),
-                    // "Add {W} or {U}": each mana any of the listed colours. More than
-                    // one such mana ("in any combination") is not modelled.
-                    ["Combo", "Any"] if n == 1 => Some(ManaProduce::AnyColor),
-                    ["Combo", "ColorIdentity"] if n == 1 => Some(ManaProduce::CommanderIdentity),
-                    ["Combo", of @ ..] if n == 1 && !of.is_empty() => {
-                        let mut of: Vec<ManaType> = of.iter().map(letter).collect::<Option<_>>()?;
-                        of.dedup();
-                        match of.as_slice() {
-                            [one] => Some(ManaProduce::One(*one)),
-                            _ => Some(ManaProduce::OneOf(of)),
-                        }
-                    }
-                    // Fixed mana: "C C", "G" with `Amount$ 3`. Only one type at a time.
-                    [first, ..] => {
-                        let all: Vec<ManaType> = words.iter().map(letter).collect::<Option<_>>()?;
-                        let t = letter(first)?;
-                        if all.iter().any(|x| *x != t) {
-                            return None;
-                        }
-                        match all.len() as u32 * n {
-                            1 => Some(ManaProduce::One(t)),
-                            count => Some(ManaProduce::Times { of: vec![t], count }),
-                        }
-                    }
-                    [] => None,
-                });
-                // "Activate only if you control …".
-                let only_if = self.condition(&rd);
-                // "Spend this mana only to cast … spells / activate abilities of …".
-                let spend = match rd.get("RestrictValid") {
-                    None => Some(None),
-                    Some(text) => self.mana_restriction(text).map(Some),
-                };
-                rd.finish(&mut self.blockers);
-                let Some(produce) = produce else {
-                    self.block("Mana:produced");
-                    return None;
-                };
-                let (cost, only_if, spend) = (cost?, only_if?, spend?);
-                // `{T}`, or `{T}` and "sacrifice this" (Treasure). Mana abilities that cost
-                // mana or anything chosen are not modelled.
-                let plain = Cost {
-                    tap: true,
-                    sacrifice_self: cost.sacrifice_self,
-                    ..Cost::default()
-                };
-                if cost != plain {
-                    self.block("Mana:cost");
-                    return None;
-                }
-                Some(AbilityDef::Mana {
-                    cost,
-                    produce,
-                    only_if,
-                    spend,
-                })
-            }
+            "AB" if api == "Mana" || api == "ManaReflected" => self.mana_ability(rec, api),
             "AB" => {
                 let rd = Rd::new(rec, "activated");
                 let cost = rd.get("Cost").and_then(|c| self.cost(c));
@@ -4796,7 +5021,11 @@ impl<'a> Tx<'a> {
     /// mana cost" (no mana at all).
     fn alt_cost_of(&mut self, text: &str) -> Option<Cost> {
         let mut cost = self.cost(text)?;
-        if cost.mana.as_ref().is_some_and(|m| m.mana_value() == 0 && !m.has_x()) {
+        if cost
+            .mana
+            .as_ref()
+            .is_some_and(|m| m.mana_value() == 0 && !m.has_x())
+        {
             cost.mana = None;
         }
         if cost.tap || cost.sacrifice_self || cost.discard_self || cost.exile_self {
@@ -5849,17 +6078,134 @@ const SCRIPT_DIFFERS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Compile a script. `Err` lists every blocker found (not just the first).
+/// Compile a script. `Err` lists every blocker found (not just the first), on every face.
 pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
-    let mut early = Blockers::new();
-    if script.faces.len() != 1 || script.alternate_mode.is_some() {
-        early.insert(format!(
+    // How the faces relate (docs/forge/script-format.md §1.2). Only the layouts the engine
+    // has rules for compile; each face is then compiled as a card of its own.
+    let layout = match (script.alternate_mode.as_deref(), script.faces.len()) {
+        (None, 1) => Some(Layout::Normal),
+        (Some("Modal"), 2) => Some(Layout::Modal),
+        (Some("DoubleFaced"), 2) => Some(Layout::Transform),
+        (Some("Adventure"), 2) => Some(Layout::Adventure),
+        (Some("Omen"), 2) => Some(Layout::Omen),
+        (Some("Split"), 2) => Some(Layout::Split),
+        _ => None,
+    };
+    let Some(layout) = layout else {
+        return Err(Blockers::from([format!(
             "layout:{}",
             script.alternate_mode.as_deref().unwrap_or("multi-face")
-        ));
-        return Err(early);
+        )]));
+    };
+    let mut blockers = Blockers::new();
+    let mut tokens = BTreeSet::new();
+    let mut faces = Vec::new();
+    for face in &script.faces {
+        match compile_face(face, known) {
+            Ok(c) => {
+                tokens.extend(c.tokens);
+                faces.push(c.def);
+            }
+            Err(b) => blockers.extend(b),
+        }
     }
-    let face = &script.faces[0];
+    if !blockers.is_empty() {
+        return Err(blockers);
+    }
+    if layout == Layout::Split {
+        return split_card(faces).map(|def| Compiled { def, tokens });
+    }
+    let mut def = faces.remove(0);
+    def.layout = layout;
+    def.faces = faces;
+    Ok(Compiled { def, tokens })
+}
+
+/// A split card (CR 709): the two halves, and the card they make combined (CR 709.4) —
+/// what it is everywhere but on the stack. Only halves that are instants or sorceries with
+/// nothing but their spell ability (and an additional cost to cast it): an ability that
+/// works from a hand or graveyard would be the whole card's, and a Room's halves are
+/// permanents with rules of their own (CR 709.5).
+fn split_card(halves: Vec<CardDef>) -> Result<CardDef, Blockers> {
+    let mut blockers = Blockers::new();
+    for h in &halves {
+        if h.creature_types.iter().any(|t| t == "Room") {
+            blockers.insert("split:Room".to_string());
+        } else if !h
+            .card_types
+            .iter()
+            .all(|t| matches!(t, CardType::Instant | CardType::Sorcery))
+        {
+            blockers.insert("split:permanent half".to_string());
+        }
+        if !h.keywords.is_empty()
+            || !h.granted.is_empty()
+            || h.abilities
+                .iter()
+                .any(|a| !matches!(a, AbilityDef::Spell(_) | AbilityDef::AdditionalCost(_)))
+        {
+            blockers.insert("split:half with other abilities".to_string());
+        }
+    }
+    if !blockers.is_empty() {
+        return Err(blockers);
+    }
+    let union = |f: &dyn Fn(&CardDef) -> Vec<String>| {
+        let mut out: Vec<String> = Vec::new();
+        for h in &halves {
+            for x in f(h) {
+                if !out.contains(&x) {
+                    out.push(x);
+                }
+            }
+        }
+        out
+    };
+    let mut card_types: Vec<CardType> = Vec::new();
+    let mut supertypes: Vec<Supertype> = Vec::new();
+    for h in &halves {
+        for t in &h.card_types {
+            if !card_types.contains(t) {
+                card_types.push(*t);
+            }
+        }
+        for t in &h.supertypes {
+            if !supertypes.contains(t) {
+                supertypes.push(*t);
+            }
+        }
+    }
+    // CR 709.4b: the combined mana cost; the colors come from it (or from the halves'
+    // color indicators).
+    let mana_cost = ManaCost {
+        symbols: halves
+            .iter()
+            .flat_map(|h| h.mana_cost.iter().flat_map(|m| m.symbols.clone()))
+            .collect(),
+    };
+    let colors = halves.iter().any(|h| h.colors.is_some()).then(|| {
+        let mut c: Vec<Color> = halves.iter().flat_map(|h| h.printed_colors()).collect();
+        c.sort();
+        c.dedup();
+        c
+    });
+    Ok(CardDef {
+        // CR 709.4a: both names.
+        name: union(&|h| vec![h.name.clone()]).join(" // "),
+        mana_cost: Some(mana_cost),
+        supertypes,
+        card_types,
+        creature_types: union(&|h| h.creature_types.clone()),
+        colors,
+        layout: Layout::Split,
+        faces: halves,
+        ..CardDef::default()
+    })
+}
+
+/// Compile one face of a script as a card of its own.
+fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
+    let early = Blockers::new();
     let parsed = ability_records(face);
     let mut tx = Tx {
         face,
@@ -6480,6 +6826,15 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
     if !def.granted.is_empty() {
         compare(&quoted, &compiled_quoted);
     }
+    // "{T}" in a cost: a script can leave it out (Lotus Ring's given "{T}, Sacrifice this
+    // creature: …" is scripted as "Sacrifice this"), and a mana ability without it can be
+    // activated again and again (D-066).
+    let taps = |t: &str| t.matches("{t}").count();
+    if taps(&plain) > taps(&compiled)
+        || (!def.granted.is_empty() && taps(&quoted) > taps(&compiled_quoted))
+    {
+        missing.push("{T}");
+    }
     // "Target creature you control" where the card says "target creature": some scripts
     // narrow a target to what Forge's AI should pick. (Equip is a keyword: its "target
     // creature you control" is reminder text.)
@@ -6682,9 +7037,9 @@ mod tests {
             "{b:?}"
         );
         let b = blockers(
-            "Name:A\nTypes:Creature Elf\nAlternateMode:DoubleFaced\nALTERNATE\nName:B\nTypes:Creature Elf",
+            "Name:A\nTypes:Creature Elf\nAlternateMode:Flip\nALTERNATE\nName:B\nTypes:Creature Elf",
         );
-        assert!(b.contains("layout:DoubleFaced"), "{b:?}");
+        assert!(b.contains("layout:Flip"), "{b:?}");
         // An ability variable nothing refers to.
         let b = blockers(&format!(
             "{base}A:SP$ Draw | NumCards$ 2\nSVar:DBExtra:DB$ GainLife | LifeAmount$ 3"

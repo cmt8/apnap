@@ -82,7 +82,7 @@ pub(crate) fn snapshot(st: &GameState, id: ObjectId) -> Lki {
     let o = st.object(id);
     let (attacking, blocking) = crate::layers::combat_role(st, id);
     Lki {
-        card: o.card,
+        card: st.face_card(id),
         chars: chars(st, id),
         controller: crate::layers::controller_of(st, id),
         owner: o.owner,
@@ -195,7 +195,7 @@ fn battlefield_sources(st: &GameState) -> Vec<Source<'_>> {
         .iter()
         .map(|&id| Source {
             id,
-            card: st.object(id).card,
+            card: st.face_card(id),
             controller: crate::layers::controller_of(st, id),
             abilities: abilities(st, id),
             lki: None,
@@ -962,7 +962,7 @@ fn detect_cycled(st: &mut GameState, player: PlayerId, card: ObjectId) {
     if st.objects.contains_key(&card) {
         sources.push(Source {
             id: card,
-            card: st.object(card).card,
+            card: st.face_card(card),
             controller: player,
             abilities: abilities(st, card),
             lki: None,

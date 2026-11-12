@@ -15,10 +15,13 @@ use crate::zones::Zone;
 use alloc::vec::Vec;
 use card_model::{AbilityDef, AbilityId, AltCost, AltKind, AltKindName, Body, Cost, ManaCost};
 
-/// The card's own alternative costs, in printed order (CLAUDE.md invariant 5).
-pub(crate) fn alternatives(st: &GameState, card: ObjectId) -> Vec<AbilityId> {
-    let def = st.object(card).card;
-    st.card_def(card)
+/// The alternative costs of face `face` of the card (0: its front face), in printed order
+/// (CLAUDE.md invariant 5). An alternative cost belongs to the face being cast (CR 601.2b,
+/// 712.8c).
+pub(crate) fn alternatives(st: &GameState, card: ObjectId, face: u8) -> Vec<AbilityId> {
+    let def = st.catalog.face(st.object(card).card, face);
+    st.catalog
+        .get(def)
         .abilities
         .iter()
         .enumerate()

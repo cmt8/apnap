@@ -10,9 +10,10 @@
 
 pub(crate) mod altcost;
 mod apply;
-mod cast;
+pub(crate) mod cast;
 mod check;
 mod combat;
+mod mana;
 mod priority;
 mod put_triggers;
 mod resolve;
@@ -25,6 +26,7 @@ pub use put_triggers::PutTriggersFrame;
 
 pub use cast::{CastFrame, CastSource, CastStage};
 pub use combat::{CombatDamageFrame, DeclareAttackersFrame, DeclareBlockersFrame};
+pub use mana::{ManaFrame, ManaStage, PayGoal};
 pub use priority::PriorityFrame;
 pub use resolve::{ResolveFrame, Work};
 pub use setup::{MulliganFrame, MulliganStage, SetupFrame};
@@ -66,6 +68,8 @@ pub enum Frame {
     StateCheck(StateCheckFrame),
     /// CR 603.3: put waiting triggered abilities on the stack.
     PutTriggers(PutTriggersFrame),
+    /// CR 605.3: activating a mana ability that needs more than a tap (D-066).
+    Mana(Box<ManaFrame>),
 }
 
 /// The validated answer to the decision a frame suspended on.
@@ -171,6 +175,7 @@ impl Frame {
             Frame::Apply(f) => f.run(st, input),
             Frame::StateCheck(f) => f.run(st, input),
             Frame::PutTriggers(f) => f.run(st, input),
+            Frame::Mana(f) => (*f).run(st, input),
         }
     }
 }

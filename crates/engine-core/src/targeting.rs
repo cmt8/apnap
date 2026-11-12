@@ -123,7 +123,14 @@ pub fn describes(
 /// power and toughness… Whose card it is isn't asked here (`controller` and `other` are
 /// the caller's business).
 pub fn card_matches(st: &GameState, id: ObjectId, sel: &card_model::Selector) -> bool {
-    let c = chars(st, id);
+    card_matches_as(st, id, st.object(id).face, sel)
+}
+
+/// [`card_matches`] for the card with face `face` up: what a rule that lets a player play
+/// or cast "a land card" / "creature spells" from a zone looks at for the face they would
+/// play or cast (CR 601.3e, 712.8c, 712.9).
+pub fn card_matches_as(st: &GameState, id: ObjectId, face: u8, sel: &card_model::Selector) -> bool {
+    let c = crate::layers::chars_as(st, id, face);
     let o = st.object(id);
     let what = card_model::Selector {
         controller: card_model::Who::Any,

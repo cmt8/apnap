@@ -119,6 +119,12 @@ pub enum Work {
         then: Box<Effect>,
         since: u64,
     },
+    /// CR 106.4: `player` adds `count` mana of one type they choose from `of`.
+    AddManaOf {
+        player: PlayerId,
+        of: Vec<crate::mana::ManaType>,
+        count: u32,
+    },
 }
 
 /// The fixed part of a [`Work::ChooseCards`] (amounts already worked out, CR 608.2h).
@@ -181,7 +187,8 @@ impl TargetInfo {
     fn now(st: &GameState, object: ObjectId) -> Option<TargetInfo> {
         let o = st.objects.get(&object)?;
         let c = chars(st, object);
-        let printed = c.mana_cost.as_ref().map_or(0, |m| m.mana_value());
+        // CR 202.3b: a transformed back face has its front face's mana value.
+        let printed = c.mana_value();
         match o.zone {
             Zone::Stack => {
                 let s = st.stack_object(object)?;
@@ -278,6 +285,32 @@ impl ResolveFrame {
             target_info: Vec::new(),
             card: card_model::CardDefId(0),
         }
+    }
+
+    /// The rest of what a mana ability does as it resolves (CR 605.3b): no stack object,
+    /// no targets (CR 605.5a). `object` is the source itself, which is not on the stack,
+    /// so resolving ends without anything leaving the stack.
+    pub(crate) fn mana_ability(
+        controller: PlayerId,
+        source: ObjectId,
+        card: card_model::CardDefId,
+        effect: Effect,
+        source_lki: Option<Characteristics>,
+    ) -> Self {
+        let mut f = ResolveFrame::new();
+        f.object = Some(source);
+        f.controller = controller;
+        f.source = source;
+        f.card = card;
+        f.source_lki = source_lki;
+        f.targets = vec![Vec::new()];
+        f.filters = vec![Vec::new()];
+        f.target_info = vec![Vec::new()];
+        f.work = vec![Work::Eval {
+            k: 0,
+            effect: Box::new(effect),
+        }];
+        f
     }
 
     /// Everything `r` stands for right now: objects and players.
@@ -421,6 +454,17 @@ impl ResolveFrame {
                     .is_some_and(|o| o.zone == Zone::Battlefield)
             }),
         }
+    }
+
+    /// CR 701.27g: an ability of a permanent that would transform it (the source) does
+    /// nothing if the permanent has transformed since the ability was put on the stack.
+    fn transformed_since(&self, st: &GameState, object: ObjectId) -> bool {
+        object == self.source
+            && self
+                .object
+                .and_then(|id| st.stack_object(id))
+                .and_then(|so| so.source_transforms)
+                .is_some_and(|n| n != st.object(object).transforms)
     }
 
     /// For an ability: the object it is on ("another target …" is other than it).
@@ -670,6 +714,32 @@ impl ResolveFrame {
                         }
                     }
                 },
+                Work::AddManaOf { player, of, count } => {
+                    let mana = match input.take() {
+                        Some(inp) => match inp.picked_one() {
+                            Some(OptionDesc::Mana { mana }) => Some(*mana),
+                            other => unreachable!("{other:?}"),
+                        },
+                        None if of.len() == 1 => Some(of[0]),
+                        None if st.in_game(player) => {
+                            let options =
+                                of.iter().map(|&mana| OptionDesc::Mana { mana }).collect();
+                            self.work.push(Work::AddManaOf { player, of, count });
+                            return Flow::ask_one(
+                                Frame::Resolve(Box::new(self)),
+                                player,
+                                ChoiceKind::ChooseColor,
+                                options,
+                            );
+                        }
+                        None => None,
+                    };
+                    if let Some(mana) = mana {
+                        for _ in 0..count {
+                            execute(st, GameAction::AddMana { player, mana });
+                        }
+                    }
+                }
                 Work::May { k, effect } => match input.take() {
                     None if st.in_game(self.controller) => {
                         let controller = self.controller;
@@ -1293,7 +1363,7 @@ impl ResolveFrame {
         self.sacrificed_power = top.sacrificed_power;
         self.facts = top.facts;
         self.card = match &top.kind {
-            StackKind::Spell => st.object(top.id).card,
+            StackKind::Spell => st.face_card(top.id),
             StackKind::Ability { ability, .. } => ability.card,
         };
         self.targets = top.targets.clone();
@@ -1475,6 +1545,20 @@ impl ResolveFrame {
                 for player in self.players(st, k, who) {
                     for _ in 0..amount {
                         execute(st, GameAction::AddMana { player, mana });
+                    }
+                }
+                Vec::new()
+            }
+            Effect::AddManaOf { who, of, amount } => {
+                let count = self.amount(st, k, &amount);
+                if count > 0 {
+                    // Each player chooses as their mana is added (last pushed = first).
+                    for player in self.players_apnap(st, k, who).into_iter().rev() {
+                        self.work.push(Work::AddManaOf {
+                            player,
+                            of: of.clone(),
+                            count,
+                        });
                     }
                 }
                 Vec::new()
@@ -1698,6 +1782,15 @@ impl ResolveFrame {
                 Vec::new()
             }
             // CR 701.26: only an untapped permanent can be tapped, only a tapped one untapped.
+            Effect::Transform { what } => {
+                if let Some(object) = self.obj(st, k, what)
+                    && can_transform(st, object)
+                    && !self.transformed_since(st, object)
+                {
+                    execute(st, GameAction::Transform { object });
+                }
+                Vec::new()
+            }
             Effect::Tap { what } => {
                 if let Some(object) = self.obj(st, k, what)
                     && !st.object(object).tapped
@@ -2003,6 +2096,25 @@ impl ResolveFrame {
         match st.stack_object(id).map(|s| s.kind.clone()) {
             Some(StackKind::Spell) => {
                 let mut mv = Proposed::moving(id, Zone::Graveyard, cause);
+                // CR 716.3d / 721.3d: an Adventure is exiled, an Omen shuffled into its
+                // owner's library, instead of going to the graveyard as it resolves.
+                let o = st.object(id);
+                let layout = st.catalog.get(o.card).layout;
+                if cause == MoveCause::Resolve
+                    && o.face != 0
+                    && self.spell_to.is_none()
+                    && let Proposed::Move { to, shuffle, .. } = &mut mv
+                {
+                    match layout {
+                        card_model::Layout::Adventure => {
+                            *to = Zone::Exile;
+                            let player = st.stack_object(id).expect("on the stack").controller;
+                            execute(st, GameAction::SendOnAdventure { spell: id, player });
+                        }
+                        card_model::Layout::Omen => (*to, *shuffle) = (Zone::Library, true),
+                        _ => {}
+                    }
+                }
                 // CR 608.2n: a spell that resolved goes to its owner's graveyard, unless
                 // its own effect says where it goes.
                 if cause == MoveCause::Resolve
@@ -2170,4 +2282,18 @@ fn each_player_options(
                 .collect(),
         ),
     }
+}
+
+/// CR 701.27d–e, 712.7: only a permanent represented by a double-faced card can transform,
+/// and not into an instant or sorcery face.
+fn can_transform(st: &GameState, object: ObjectId) -> bool {
+    let o = st.object(object);
+    let card = st.catalog.get(o.card);
+    if o.zone != Zone::Battlefield || !card.layout.double_faced() || card.faces.is_empty() {
+        return false;
+    }
+    let other = st
+        .catalog
+        .get(st.catalog.face(o.card, if o.face == 0 { 1 } else { 0 }));
+    !other.has_type(card_model::CardType::Instant) && !other.has_type(card_model::CardType::Sorcery)
 }

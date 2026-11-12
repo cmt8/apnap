@@ -13,8 +13,8 @@ pub mod scryfall;
 
 use card_model::{
     AbilityDef, ActivationZone, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript,
-    CardType, Condition, Cost, Effect, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces, Supertype,
-    TargetFilter, TargetRef, Trigger, Who,
+    CardType, Condition, Cost, Effect, Layout, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces,
+    Supertype, TargetFilter, TargetRef, Trigger, Who,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -191,14 +191,76 @@ fn token_names(def: &CardDef) -> Vec<String> {
 pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
     let c = &script.card;
     let mut p = Vec::new();
-    if c.name.trim().is_empty() {
-        p.push("empty name".into());
-    }
     if strictness == Strictness::Strict && !script.verified {
         p.push("unverified card in strict mode (CLAUDE.md invariant 8)".into());
     }
     if script.verified && script.tests.is_empty() {
         p.push("verified cards must name at least one test (spec §10.2)".into());
+    }
+    p.extend(validate_face(c, None));
+    // A card with several faces: each face is checked as a card of its own (CR 712.6).
+    match (c.layout, c.faces.len()) {
+        (Layout::Normal, 0)
+        | (Layout::Modal | Layout::Transform | Layout::Adventure | Layout::Omen, 1)
+        | (Layout::Split, 2) => {}
+        (layout, n) => p.push(format!("a {layout:?} card with {n} other face(s)")),
+    }
+    if c.face_of.is_some() {
+        p.push("face_of is set by the catalog, never written".into());
+    }
+    // CR 709: the halves of a split card are instants or sorceries (a Room's halves,
+    // with their unlocking rules, aren't compiled), and the card is the two combined.
+    if c.layout == Layout::Split {
+        let halves = c.faces.iter().all(|f| {
+            f.card_types
+                .iter()
+                .all(|t| matches!(t, CardType::Instant | CardType::Sorcery))
+        });
+        if !halves || !c.abilities.is_empty() || !c.keywords.is_empty() || !c.granted.is_empty() {
+            p.push("a split card is two instant or sorcery halves combined".into());
+        }
+    }
+    // CR 716.2, 721.2: the alternative characteristics are an instant or sorcery with
+    // that spell type, and the card itself a permanent card.
+    if c.layout.alternative_spell() {
+        let kind = if c.layout == Layout::Adventure {
+            "Adventure"
+        } else {
+            "Omen"
+        };
+        let ok = c.faces.first().is_some_and(|f| {
+            (f.has_type(CardType::Instant) || f.has_type(CardType::Sorcery))
+                && f.creature_types.iter().any(|t| t == kind)
+        });
+        if !ok || c.has_type(CardType::Instant) || c.has_type(CardType::Sorcery) {
+            p.push(format!(
+                "an {kind} card is a permanent card with an {kind} spell"
+            ));
+        }
+    }
+    for (i, f) in c.faces.iter().enumerate() {
+        if !f.faces.is_empty() || f.layout != Layout::Normal || f.face_of.is_some() {
+            p.push(format!(
+                "face {}: a face has no faces or layout of its own",
+                i + 1
+            ));
+        }
+        if f.token != c.token {
+            p.push(format!("face {}: a token face of a card", i + 1));
+        }
+        for m in validate_face(f, Some(c.layout)) {
+            p.push(format!("face {} ({}): {m}", i + 1, f.name));
+        }
+    }
+    p
+}
+
+/// The checks of one face of a card; `back` is the layout of the card when it is a back
+/// face.
+fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
+    let mut p: Vec<String> = Vec::new();
+    if c.name.trim().is_empty() {
+        p.push("empty name".into());
     }
     let creature = c.has_type(CardType::Creature);
     if creature != (c.power.is_some() && c.toughness.is_some()) {
@@ -208,8 +270,22 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
     if land && c.mana_cost.is_some() {
         p.push("lands have no mana cost (they are played, not cast)".into());
     }
-    if !land && !c.token && c.mana_cost.is_none() {
+    // CR 712.2: the back face of a nonmodal double-faced card has no mana cost (it isn't
+    // cast with it up); every other face that isn't a land has one.
+    let transformed = back == Some(Layout::Transform);
+    if !land && !c.token && c.mana_cost.is_none() && !transformed {
         p.push("non-land, non-token cards need a mana cost".into());
+    }
+    if transformed && c.mana_cost.is_some() {
+        p.push("the back face of a transforming card has no mana cost".into());
+    }
+    // CR 107.4e: spells can't be paid for with hybrid mana yet (D-066).
+    if c.mana_cost.as_ref().is_some_and(|m| {
+        m.symbols
+            .iter()
+            .any(|s| matches!(s, card_model::ManaSymbol::Hybrid(..)))
+    }) {
+        p.push("a hybrid mana cost (D-066: not paid for yet)".into());
     }
     if !c.land_types.is_empty() && !land {
         p.push("basic land types on a non-land".into());
@@ -220,7 +296,9 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
         .iter()
         .filter(|a| matches!(a, AbilityDef::Spell(_)))
         .count();
-    if instant_or_sorcery && spells != 1 {
+    // A split card as a whole (CR 709.4) has no text of its own: its halves' spell
+    // abilities are theirs.
+    if instant_or_sorcery && spells != 1 && c.layout != Layout::Split {
         p.push("an instant or sorcery needs exactly one Spell ability".into());
     }
     if !instant_or_sorcery && spells != 0 {
@@ -348,6 +426,12 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 p.push(at("not an ability another object can be given".into()));
                 continue;
             }
+        }
+        // CR 107.4e: hybrid mana is paid only in the costs of mana abilities so far (D-066).
+        if !matches!(a, AbilityDef::Mana { .. }) && format!("{a:?}").contains("Hybrid") {
+            p.push(at(
+                "hybrid mana outside a mana ability's cost (D-066)".into()
+            ));
         }
         // "The sacrificed creature's power" needs a sacrifice chosen as its cost is paid.
         if format!("{a:?}").contains("SacrificedPower") {
@@ -494,28 +578,63 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 cost,
                 produce,
                 spend,
+                then,
                 ..
             } => {
-                // `{T}`, optionally with "sacrifice this" (D-052). A mana ability that
-                // costs mana, or anything chosen, is not modelled.
-                let allowed = Cost {
-                    tap: true,
-                    sacrifice_self: cost.sacrifice_self,
-                    ..Cost::default()
-                };
-                if *cost != allowed {
+                // D-066: `{T}` or a sacrifice (so that every activation uses something
+                // up), and maybe mana, life, "sacrifice a [permanent]". Nothing from a
+                // hand or graveyard, no X, no discards.
+                if !(cost.tap || cost.sacrifice_self || cost.sacrifice.is_some()) {
                     p.push(at(
-                        "a mana ability must cost {T}, or {T} and sacrificing itself (D-052)"
-                            .into(),
+                        "a mana ability must tap or sacrifice something (D-066)".into()
                     ));
                 }
+                if cost.discard.is_some()
+                    || cost.discard_self
+                    || cost.exile_self
+                    || cost.mana.as_ref().is_some_and(|m| m.has_x())
+                {
+                    p.push(at("a mana ability cost that isn't modelled (D-066)".into()));
+                }
+                if cost.sacrifice.as_ref().is_some_and(|ch| ch.count != 1) {
+                    p.push(at(
+                        "a mana ability that sacrifices more than one permanent (D-066)".into(),
+                    ));
+                }
+                check_cost(cost, &mut |m| p.push(at(m)));
                 if produce.count() == 0 || produce.options().is_empty() {
                     p.push(at("a mana ability that adds nothing".into()));
                 }
-                if spend
-                    .as_ref()
-                    .is_some_and(|r| r.spells.is_empty() && r.abilities.is_empty())
+                match produce {
+                    card_model::ManaProduce::Fixed(v) if v.len() < 2 => {
+                        p.push(at("fixed mana of one symbol is `One`".into()))
+                    }
+                    // Counted as it resolves: tapping must not change the count, and
+                    // nothing it sacrifices may (the planner counts before, D-066).
+                    card_model::ManaProduce::Counted { amount, .. } => {
+                        let plain = match amount {
+                            Amount::Count(s) => s.tapped.is_none(),
+                            _ => false,
+                        };
+                        if !plain || cost.sacrifice_self || cost.sacrifice.is_some() {
+                            p.push(at("counted mana must count permanents, with no sacrifice in the cost (D-066)".into()));
+                        }
+                    }
+                    _ => {}
+                }
+                // CR 605.3b: the rest of a mana ability happens as it resolves. Only what
+                // can't make the mana abilities used to pay a cost change is allowed
+                // (D-066): damage to, life loss and life gain of its controller.
+                if let Some(e) = then
+                    && !mana_side_effect(e)
                 {
+                    p.push(at(format!(
+                        "a mana ability may only also deal damage to, or change the life of, its controller (D-066): {e:?}"
+                    )));
+                }
+                if spend.as_ref().is_some_and(|r| {
+                    r.spells.is_empty() && r.abilities.is_empty() && r.sources.is_empty()
+                }) {
                     p.push(at("mana that can be spent on nothing".into()));
                 }
             }
@@ -604,7 +723,9 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 // zone, and isn't `{T}` (D-072).
                 let cost = &alt.cost;
                 if cost.tap || cost.sacrifice_self || cost.discard_self || cost.exile_self {
-                    p.push(at("an alternative cost doesn't tap or move its own card".into()));
+                    p.push(at(
+                        "an alternative cost doesn't tap or move its own card".into()
+                    ));
                 }
                 if c.has_type(CardType::Land) {
                     p.push(at("lands aren't cast: no alternative cost".into()));
@@ -620,14 +741,16 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                     Some(all) => {
                         check_cost(&all, &mut |m| p.push(at(m)));
                         if all.discard.is_some() && all.exile_from_hand.is_some() {
-                            p.push(at("a cost that both discards and exiles from the hand".into()));
+                            p.push(at(
+                                "a cost that both discards and exiles from the hand".into()
+                            ));
                         }
                     }
                 }
                 match &alt.kind {
-                    AltKind::Flashback | AltKind::Overload(_) if !instant_or_sorcery => {
-                        p.push(at("flashback and overload are on instants and sorceries".into()))
-                    }
+                    AltKind::Flashback | AltKind::Overload(_) if !instant_or_sorcery => p.push(at(
+                        "flashback and overload are on instants and sorceries".into(),
+                    )),
                     AltKind::Evoke if instant_or_sorcery => {
                         p.push(at("evoke is on permanent cards".into()))
                     }
@@ -838,6 +961,28 @@ fn check_body(body: &Body, has_x: bool, p: &mut dyn FnMut(String)) {
 }
 
 /// The chosen parts of a cost.
+/// What a mana ability may do besides adding mana (D-066).
+pub(crate) fn mana_side_effect(e: &Effect) -> bool {
+    use card_model::{DamageBy, PlayerRef};
+    match e {
+        Effect::Seq(v) => !v.is_empty() && v.iter().all(mana_side_effect),
+        Effect::DealDamage {
+            to: TargetRef::Players(PlayerRef::You),
+            amount: Amount::Fixed(_),
+            by: DamageBy::This,
+        }
+        | Effect::LoseLife {
+            who: PlayerRef::You,
+            amount: Amount::Fixed(_),
+        }
+        | Effect::GainLife {
+            who: PlayerRef::You,
+            amount: Amount::Fixed(_),
+        } => true,
+        _ => false,
+    }
+}
+
 fn check_cost(cost: &Cost, p: &mut dyn FnMut(String)) {
     // CR 601.2g–h: a permanent sacrificed for mana is gone; the engine keeps enough for one
     // choice of permanents, not for two (D-072).
@@ -1127,7 +1272,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             }
             amount(a, p);
         }
-        Effect::Tap { what } | Effect::Untap { what } => obj(what, p),
+        Effect::Tap { what } | Effect::Untap { what } | Effect::Transform { what } => obj(what, p),
         Effect::TapAll(s) | Effect::UntapAll(s) => selector(s, p),
         Effect::Discard { who, amount: a } => {
             player(who, p);
@@ -1174,6 +1319,13 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         | Effect::LoseLife { who, amount: a } => {
             player(who, p);
             amount(a, p);
+        }
+        Effect::AddManaOf { who, of, amount: a } => {
+            player(who, p);
+            amount(a, p);
+            if of.len() < 2 {
+                p("AddManaOf with no choice is AddMana".into());
+            }
         }
         Effect::Counter { what } => match slot(what) {
             Some(TargetFilter::Spell | TargetFilter::SpellMatching(_)) => {}
@@ -1288,6 +1440,9 @@ pub fn validate_commander_deck(catalog: &CardCatalog, deck: &Deck) -> Vec<String
         let d = catalog.get(id);
         if d.token {
             p.push(format!("{} is a token definition", d.name));
+        }
+        if d.face_of.is_some() {
+            p.push(format!("{} is a face of another card, not a card", d.name));
         }
         if !d.supertypes.contains(&Supertype::Basic) && !seen.insert(id) {
             p.push(format!("more than one {} (CR 903.5b)", d.name));
