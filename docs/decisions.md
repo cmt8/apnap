@@ -2315,6 +2315,13 @@ Rules text: docs/rules-notes/614-doublers-603.2d-additional-triggers.md (with
   55.0% → 57.2% (546 → 567), top 5,000 34.1%. Soaks: forge-4p 300 random-agent games and
   200 heuristic games (one abandoned at 1,000 permanents: Horn of Gondor's Human Soldiers),
   precon-4p 100 games, no failures.
+- **Merged onto main 3fc33f1 (D-075 part 1):** 10,827 → 10,914 scripts (87; no card lost,
+  no compiled text changed; Pearl Lake Ancient compiles only in the combination). Tiers
+  3fc33f1 → this branch: top 100 90.5% (unchanged), top 300 70.2% → 71.9%, top 1,000
+  56.1% → 58.3% (557 → 578), top 5,000 33.9% → 34.7%. Proliferate puts its counters as
+  `Proposed::PutCounters` through `Frame::Apply`, so counter doublers apply to it (tested);
+  "you gain life equal to the life lost this way" is doubled by a life-gain doubler, the
+  loss isn't (tested; effects on losing life aren't built).
 - **Order with flashback (D-072):** main's "exiled instead" for a flashback spell is about
   a spell leaving the stack; the effects here are about tokens being created, a permanent
   entering, counters, damage and life — never the same event, so they never compete under
