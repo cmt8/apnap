@@ -110,9 +110,32 @@ enum Alt {
     Sel(Selector),
 }
 
+/// Where a move of "those cards" takes them (Forge's zone name), if `e` is one.
+fn noted_moved(e: &Effect) -> Option<&'static str> {
+    match e {
+        Effect::PutInto {
+            what: ObjRef::Noted,
+            ..
+        }
+        | Effect::Exile {
+            what: ObjRef::Noted,
+        }
+        | Effect::ReturnToHand {
+            what: ObjRef::Noted,
+        }
+        | Effect::Destroy {
+            what: ObjRef::Noted,
+        } => noted_zone(e),
+        _ => None,
+    }
+}
+
 /// The targets and effects of one mode, as they are collected along a sub-ability chain.
 #[derive(Default)]
 struct Chain {
+    /// Where the cards the chain has noted so far are (Forge's zone name), once it has
+    /// noted any (D-069).
+    noted_at: Option<&'static str>,
     targets: Vec<TargetFilter>,
     effects: Vec<Effect>,
     /// "…where X is [amount]": the script variable that `Amount::X` stands for.
@@ -123,6 +146,14 @@ struct Chain {
     x_at: usize,
     /// Some link said `Defined$ Targeted` — in Forge, every target of the whole chain.
     refers_to_targets: std::cell::Cell<bool>,
+    /// A link moved a target to another zone: the target is no longer that object
+    /// (CR 400.7), and Forge's `Defined$ Targeted` (which follows the card) means
+    /// something the engine's target slot doesn't.
+    /// (Its place in `effects`, and the zone it went to.) A later reference to it is the
+    /// card where that link put it — found because that link is noted (CR 400.7j).
+    target_moved: Option<(usize, &'static str)>,
+    /// A later link referred to the moved target: note the link that moved it.
+    note_moved_target: std::cell::Cell<bool>,
     /// "Two target creatures", "up to two target creatures": slots that are one "target".
     groups: Vec<TargetGroup>,
     /// The group the record being compiled has just made: (first slot, slots).
@@ -184,6 +215,62 @@ struct Tx<'a> {
     /// The line just compiled means nothing for the rules (only hints for Forge's AI): no
     /// ability, and nothing blocked.
     nothing: bool,
+    /// Compiling a chain whose "remembered" cards are its own (D-069): it remembers, and
+    /// its last link forgets. Only there do `Remembered`, `IsRemembered`, `Remembered$…`
+    /// mean "those cards".
+    memory: bool,
+}
+
+/// The parameters with which a link of a chain remembers cards on the card (Forge's
+/// `Remember…$`) that the compiler knows. Any other (`RememberRevealed$`, …) is not read
+/// and blocks the card.
+const REMEMBER: [&str; 8] = [
+    "RememberChanged",
+    "RememberTargets",
+    "RememberLKI",
+    "RememberDestroyed",
+    "RememberSacrificed",
+    "RememberTokens",
+    "RememberMilled",
+    "RememberDiscarded",
+];
+
+/// Where "those cards" an instruction noted are, by Forge's zone names.
+fn noted_zone(e: &Effect) -> Option<&'static str> {
+    let dest = |d: &CardDest| match d {
+        CardDest::Hand => "Hand",
+        CardDest::Battlefield { .. } => "Battlefield",
+        CardDest::Graveyard => "Graveyard",
+        CardDest::Exile => "Exile",
+        CardDest::LibraryTop | CardDest::LibraryBottom | CardDest::Stay => "Library",
+    };
+    Some(match e {
+        Effect::Exile { .. } => "Exile",
+        Effect::ReturnToHand { .. } => "Hand",
+        Effect::ReturnToBattlefield { .. } | Effect::CreateToken { .. } => "Battlefield",
+        Effect::PutInto { to, .. } | Effect::ChooseCards { to, .. } | Effect::Dig { to, .. } => {
+            dest(to)
+        }
+        Effect::Destroy { .. }
+        | Effect::DestroyAll(_)
+        | Effect::Sacrifice { .. }
+        | Effect::SacrificeThis
+        | Effect::EachPlayer(EachPlayerAction::SacrificeCreature(_))
+        | Effect::EachPlayer(EachPlayerAction::Discard(_))
+        | Effect::Discard { .. }
+        | Effect::DiscardHand { .. }
+        | Effect::Mill { .. } => "Graveyard",
+        Effect::Together(v) => {
+            let zones: Vec<_> = v.iter().map(noted_zone).collect();
+            return zones
+                .first()
+                .copied()
+                .flatten()
+                .filter(|z| zones.iter().all(|x| *x == Some(*z)));
+        }
+        Effect::May(inner) => return noted_zone(inner),
+        _ => return None,
+    })
 }
 
 /// The kinds of ability a script gives to other objects.
@@ -760,6 +847,10 @@ impl<'a> Tx<'a> {
                 }
                 "tapped" => s.tapped = Some(true),
                 "untapped" => s.tapped = Some(false),
+                // "Those cards" of the chain being compiled (D-069) — not the memory of an
+                // effect object, which `in_effect` reads.
+                "IsRemembered" if self.memory && !self.in_effect => s.noted = Some(true),
+                "!IsRemembered" if self.memory && !self.in_effect => s.noted = Some(false),
                 "attacking" => s.attacking = Some(true),
                 "blocking" => s.blocking = Some(true),
                 _ => {
@@ -998,6 +1089,8 @@ impl<'a> Tx<'a> {
             | Amount::SacrificedPower
             | Amount::OfTarget { .. }
             | Amount::HandOf(_) => Some(a),
+            // About what an earlier instruction did: counted as this one is applied.
+            Amount::Noted(_) | Amount::NotedTotal(_) => Some(a),
             // Read off the battlefield: worked out once for the whole resolution (CR
             // 608.2h), as "X".
             _ => match &chain.x {
@@ -1149,6 +1242,42 @@ impl<'a> Tx<'a> {
                 _ => {}
             }
         }
+        // About "those cards" (D-069): how many; their total mana value, power, toughness
+        // (each as it is now, or as it last was before it moved: CR 608.2h, which is what
+        // `Remembered…` and `RememberedLKI…` come to here); how many are of a kind.
+        if self.memory && !self.in_effect {
+            let total = |m| Some(Amount::NotedTotal(m));
+            match v {
+                "Remembered$Amount" | "Count$RememberedSize" => {
+                    return Some(Amount::Noted(Vec::new()));
+                }
+                "Remembered$CardManaCost" | "RememberedLKI$CardManaCost" => {
+                    return total(Measure::ManaValue);
+                }
+                "Remembered$CardPower" | "RememberedLKI$CardPower" => return total(Measure::Power),
+                "Remembered$CardToughness" | "RememberedLKI$CardToughness" => {
+                    return total(Measure::Toughness);
+                }
+                _ => {}
+            }
+            if let Some(filter) = v.strip_prefix("Remembered$Valid ") {
+                if filter.contains('$') {
+                    self.block(format!("expr:{}", shape(whole)));
+                    return None;
+                }
+                let cards = self.card_alts(filter, true)?;
+                // Whose: the owner of a card, the controller of a permanent — those cards
+                // can be either.
+                if cards
+                    .iter()
+                    .any(|s| s.controller != Who::Any || s.owner != Who::Any)
+                {
+                    self.block("expr:Remembered$Valid whose");
+                    return None;
+                }
+                return Some(Amount::Noted(cards));
+            }
+        }
         match v {
             // "That much damage", "that many", "that much life".
             v if self.trig.amount == Some(v) => return Some(Amount::TriggeringAmount),
@@ -1282,6 +1411,21 @@ impl<'a> Tx<'a> {
     fn named_player(&mut self, name: &str, chain: &Chain, triggered: bool) -> Option<PlayerRef> {
         match name {
             "You" => Some(PlayerRef::You),
+            // Who controls "those cards" (D-069), or who controls none of them: "each
+            // player who can't [sacrifice] discards a card".
+            "RememberedController" | "NonRememberedController"
+                if self.memory && !self.in_effect =>
+            {
+                if chain.noted_at.is_none() {
+                    self.block("remember:read before anything is remembered");
+                    return None;
+                }
+                Some(if name == "RememberedController" {
+                    PlayerRef::NotedControllers
+                } else {
+                    PlayerRef::NotNotedControllers
+                })
+            }
             // "Its controller" / "its owner": of the chain's one target (CR 608.2h). Forge
             // finds no controller for a player or a card in a graveyard, so those are not
             // compiled.
@@ -1393,6 +1537,10 @@ impl<'a> Tx<'a> {
                     self.block("defined:Targeted-without-target");
                     None
                 }
+                _ if chain.target_moved.is_some() => {
+                    rd.get("Defined");
+                    self.moved_target(chain).map(TargetRef::Object)
+                }
                 n => {
                     rd.get("Defined");
                     chain.refers_to_targets.set(true);
@@ -1400,6 +1548,25 @@ impl<'a> Tx<'a> {
                 }
             },
             _ => self.object(rd, chain, triggered).map(TargetRef::Object),
+        }
+    }
+
+    /// `Defined$ Targeted` after a link moved the target: Forge follows the card. That is
+    /// the card the link put into a public zone, which the rest of the effect can find
+    /// (CR 400.7j) — "return target creature card to the battlefield; put a +1/+1 counter
+    /// on it".
+    fn moved_target(&mut self, chain: &Chain) -> Option<ObjRef> {
+        match chain.target_moved {
+            Some((_, "Battlefield" | "Graveyard" | "Exile"))
+                if chain.noted_at.is_none() && chain.targets.len() == 1 =>
+            {
+                chain.note_moved_target.set(true);
+                Some(ObjRef::Noted)
+            }
+            _ => {
+                self.block("defined:Targeted after it moved");
+                None
+            }
         }
     }
 
@@ -1416,10 +1583,19 @@ impl<'a> Tx<'a> {
                     _ => Some(ObjRef::Triggering),
                 }
             }
+            Some("Targeted") if chain.target_moved.is_some() => self.moved_target(chain),
             Some("Targeted") if !chain.targets.is_empty() => {
                 chain.refers_to_targets.set(true);
                 Some(ObjRef::Target(chain.targets.len() as u8 - 1))
             }
+            // "Those cards", "that card", "it" (D-069): once the chain has noted some.
+            Some("Remembered") if self.memory && !self.in_effect => match chain.noted_at {
+                Some(_) => Some(ObjRef::Noted),
+                None => {
+                    self.block("remember:read before anything is remembered");
+                    None
+                }
+            },
             Some(other) => {
                 self.block(format!("defined:card {other}"));
                 None
@@ -1486,6 +1662,10 @@ impl<'a> Tx<'a> {
                         self.block("filter:Self-as-target");
                         return None;
                     };
+                    if sels.iter().any(|s| s.noted.is_some()) {
+                        self.block("filter:IsRemembered-as-target");
+                        return None;
+                    }
                     TargetFilter::Permanent(merge_bare(sels))
                 }
             }
@@ -1560,6 +1740,11 @@ impl<'a> Tx<'a> {
             rd.get("UnlessSwitched").is_some(),
         );
         let targets_before = chain.targets.len();
+        // "If …" on this link alone (docs/forge/script-format.md §2.6): a failed condition
+        // skips only this link.
+        let condition = self.link_condition(&rd)?;
+        // The first link is the one whose targets `RememberTargets$` remembers.
+        let root = chain.effects.is_empty() && targets_before == 0;
         if rec.head().map(|h| h.0) == Some("AB") {
             // Read by `ability`: when and whether the ability can be activated.
             for k in [
@@ -2086,41 +2271,95 @@ impl<'a> Tx<'a> {
                     {
                         ObjRef::ThisCard
                     }
+                    // "Return those cards …" (D-069).
+                    None if self.memory
+                        && !self.in_effect
+                        && rd.rec.get("Defined") == Some("Remembered") =>
+                    {
+                        self.object(&rd, chain, triggered)?
+                    }
                     None => {
                         self.block("ChangeZone:no-target");
                         return None;
                     }
                 };
-                match (origin, dest) {
-                    ("Battlefield" | "Graveyard", Some("Exile")) => Effect::Exile { what },
-                    ("Battlefield" | "Graveyard", Some("Hand")) => Effect::ReturnToHand { what },
-                    ("Graveyard", Some("Battlefield")) if rd.rec.get("Tapped").is_none() => {
-                        Effect::ReturnToBattlefield { what }
-                    }
-                    ("Graveyard", Some("Battlefield")) if rd.get("Tapped") == Some("True") => {
-                        Effect::PutInto {
-                            what,
-                            to: CardDest::Battlefield { tapped: true },
-                            shuffle: false,
-                        }
-                    }
-                    // "Put target creature on top of its owner's library", "shuffle it
-                    // into its owner's library".
-                    ("Battlefield" | "Graveyard", Some("Library")) => {
-                        let to = self.library_position(&rd)?;
-                        let shuffle = match rd.get("Shuffle") {
-                            None => false,
-                            Some("True") => true,
-                            Some(_) => {
-                                self.block("param:ChangeZone.Shuffle");
-                                return None;
-                            }
-                        };
-                        Effect::PutInto { what, to, shuffle }
-                    }
-                    (o, d) => {
-                        self.block(format!("ChangeZone:{o}->{}", d.unwrap_or("?")));
+                // "… under your control" (Forge's `GainControl$ True`).
+                let controller = match rd.get("GainControl") {
+                    None => None,
+                    Some("True") if dest == Some("Battlefield") => Some(PlayerRef::You),
+                    Some(_) => {
+                        self.block("param:ChangeZone.GainControl");
                         return None;
+                    }
+                };
+                // `ChangeNum$ 1` says nothing about one target.
+                if rd.rec.get("ChangeNum").is_some()
+                    && (rd.get("ChangeNum") != Some("1") || !matches!(what, ObjRef::Target(_)))
+                {
+                    self.block("param:ChangeZone.ChangeNum");
+                    return None;
+                }
+                let noted = match what {
+                    ObjRef::Noted => Some(self.move_noted(&rd, chain, dest, controller)?),
+                    _ => None,
+                };
+                if matches!(what, ObjRef::Target(_)) {
+                    let to = match dest {
+                        Some("Battlefield") => "Battlefield",
+                        Some("Graveyard") => "Graveyard",
+                        Some("Exile") => "Exile",
+                        _ => "Hidden",
+                    };
+                    chain.target_moved = Some((chain.effects.len(), to));
+                }
+                if let Some(noted) = noted {
+                    noted
+                } else {
+                    match (origin, dest) {
+                        ("Battlefield" | "Graveyard", Some("Exile")) => Effect::Exile { what },
+                        ("Battlefield" | "Graveyard", Some("Hand")) => {
+                            Effect::ReturnToHand { what }
+                        }
+                        ("Graveyard", Some("Battlefield"))
+                            if rd.rec.get("Tapped").is_none() && controller.is_none() =>
+                        {
+                            Effect::ReturnToBattlefield { what }
+                        }
+                        ("Graveyard", Some("Battlefield"))
+                            if matches!(rd.rec.get("Tapped"), None | Some("True")) =>
+                        {
+                            Effect::PutInto {
+                                what,
+                                to: CardDest::Battlefield {
+                                    tapped: rd.get("Tapped").is_some(),
+                                },
+                                shuffle: false,
+                                controller,
+                            }
+                        }
+                        // "Put target creature on top of its owner's library", "shuffle it
+                        // into its owner's library".
+                        ("Battlefield" | "Graveyard", Some("Library")) => {
+                            let to = self.library_position(&rd)?;
+                            let shuffle = match rd.get("Shuffle") {
+                                None => false,
+                                Some("True") => true,
+                                Some(_) => {
+                                    self.block("param:ChangeZone.Shuffle");
+                                    return None;
+                                }
+                            };
+                            Effect::PutInto {
+                                what,
+                                to,
+                                shuffle,
+                                controller: None,
+                            }
+                        }
+                        (o, d) => {
+                            self.block(format!("ChangeZone:{o}->{}", d.unwrap_or("?")));
+                            return None;
+                        }
                     }
                 }
             }
@@ -2642,10 +2881,34 @@ impl<'a> Tx<'a> {
                     }
                 }
             }
+            // "Forget them" as the chain's last link (`ClearRemembered$ True`): the end of
+            // the resolution forgets anyway (D-069).
+            "Cleanup" if self.memory => {
+                rd.get("ClearRemembered");
+                Effect::Seq(Vec::new())
+            }
             other => {
                 self.block(format!("api:{other}"));
                 return None;
             }
+        };
+        // What this link remembers (D-069): only in a chain that forgets at its end.
+        let remembers = self.memory && {
+            let keys: &[&str] = match api {
+                "ChangeZone" if root && chain.targets.len() > targets_before => {
+                    &["RememberChanged", "RememberLKI", "RememberTargets"]
+                }
+                "ChangeZone" => &["RememberChanged", "RememberLKI"],
+                "Dig" => &["RememberChanged"],
+                "DestroyAll" => &["RememberDestroyed"],
+                "Sacrifice" => &["RememberSacrificed"],
+                "Token" => &["RememberTokens"],
+                "Mill" => &["RememberMilled"],
+                "Discard" => &["RememberDiscarded"],
+                _ => &[],
+            };
+            // (Forge tests these for presence.)
+            keys.iter().filter(|k| rd.get(k).is_some()).count() > 0
         };
         rd.finish(&mut self.blockers);
         // One "target" word with several targets: the instruction is done to each of
@@ -2680,8 +2943,23 @@ impl<'a> Tx<'a> {
             }
             _ => out,
         };
+        let out = if remembers {
+            self.note(out, api, chain)?
+        } else {
+            // A move of "those cards" takes them where it puts them.
+            if let Some(at) = noted_moved(&out) {
+                chain.noted_at = Some(at);
+            }
+            out
+        };
         let (Some(price), payer, switched) = unless else {
-            return Some(out);
+            return Some(match condition {
+                None => out,
+                Some(test) => Effect::If {
+                    test,
+                    then: Box::new(out),
+                },
+            });
         };
         let cost = self.cost(price)?;
         if cost == Cost::default() || cost.discard_self || cost.exile_self {
@@ -2720,7 +2998,7 @@ impl<'a> Tx<'a> {
             return None;
         }
         let nothing = Box::new(Effect::Seq(Vec::new()));
-        Some(if switched {
+        let out = if switched {
             // "[They] may pay …. If they do, [this]."
             Effect::Pay {
                 who,
@@ -2734,6 +3012,217 @@ impl<'a> Tx<'a> {
                 cost,
                 paid: nothing,
                 unpaid: Box::new(out),
+            }
+        };
+        Some(match condition {
+            None => out,
+            Some(test) => Effect::If {
+                test,
+                then: Box::new(out),
+            },
+        })
+    }
+
+    /// A link that remembers what it does (D-069): its instruction, noted.
+    fn note(&mut self, out: Effect, api: &str, chain: &mut Chain) -> Option<Effect> {
+        // Forge's `DestroyAll` forgets everything remembered before.
+        if api == "DestroyAll" && chain.noted_at.is_some() {
+            self.block("remember:DestroyAll forgets what came before");
+            return None;
+        }
+        if chain.noted_at.is_some() {
+            self.block("remember:twice in one chain");
+            return None;
+        }
+        // "You may search …": what is noted is what the search found, if there was one.
+        let (out, may) = match out {
+            Effect::May(inner) => (*inner, true),
+            other => (other, false),
+        };
+        let out = match out {
+            // A search whose cards stay in the library (Forge moves them to its top and
+            // back) is a search whose found cards wait for what comes next.
+            Effect::ChooseCards {
+                from: CardZone::Library,
+                to: CardDest::LibraryTop,
+                shuffle: false,
+                ..
+            } => {
+                let mut e = out;
+                if let Effect::ChooseCards { to, .. } = &mut e {
+                    *to = CardDest::Stay;
+                }
+                e
+            }
+            Effect::ChooseCards {
+                from: CardZone::Library,
+                to: CardDest::LibraryTop | CardDest::LibraryBottom,
+                ..
+            } => {
+                self.block("remember:found cards put back in the library");
+                return None;
+            }
+            Effect::Dig { to, rest, .. }
+                if matches!(to, CardDest::LibraryTop | CardDest::LibraryBottom) || to == rest =>
+            {
+                self.block("remember:Dig that leaves what it takes in the library");
+                return None;
+            }
+            other => other,
+        };
+        let Some(at) = noted_zone(&out) else {
+            self.block(format!("remember:{api} of this shape"));
+            return None;
+        };
+        chain.noted_at = Some(at);
+        let noted = Effect::Note(Box::new(out));
+        Some(if may {
+            Effect::May(Box::new(noted))
+        } else {
+            noted
+        })
+    }
+
+    /// `Condition…$` of one link of a chain: `ConditionPresent$` (+ `ConditionCompare$`)
+    /// counts permanents on the battlefield — or, with `ConditionDefined$ Remembered`,
+    /// "those cards" — and `ConditionCheckSVar$` (+ `ConditionSVarCompare$`) compares an
+    /// amount; both are counted as the link is reached.
+    fn link_condition(&mut self, rd: &Rd<'a>) -> Option<Option<Condition>> {
+        let (present, check) = (
+            rd.rec.get("ConditionPresent"),
+            rd.rec.get("ConditionCheckSVar"),
+        );
+        if present.is_none() && check.is_none() {
+            return Some(None);
+        }
+        rd.get("ConditionDescription");
+        let mut out = None;
+        if let Some(filter) = present {
+            rd.get("ConditionPresent");
+            let (cmp, n) = self.compare(rd.get("ConditionCompare").unwrap_or("GE1"))?;
+            out = Some(match rd.rec.get("ConditionDefined") {
+                None => {
+                    let what = self.selector(filter)?;
+                    match cmp {
+                        Cmp::AtLeast => Condition::Control { what, at_least: n },
+                        Cmp::AtMost => Condition::ControlAtMost { what, at_most: n },
+                        _ => Condition::Compare {
+                            amount: Amount::Count(what),
+                            cmp,
+                            n,
+                        },
+                    }
+                }
+                Some("Remembered") if self.memory && !self.in_effect => {
+                    rd.get("ConditionDefined");
+                    let cards = self.card_alts(filter, true)?;
+                    if cards
+                        .iter()
+                        .any(|s| s.controller != Who::Any || s.owner != Who::Any)
+                    {
+                        self.block("condition:remembered whose");
+                        return None;
+                    }
+                    Condition::Compare {
+                        amount: Amount::Noted(cards),
+                        cmp,
+                        n,
+                    }
+                }
+                Some(_) => {
+                    self.block(format!("param:{}.ConditionDefined", rd.what));
+                    return None;
+                }
+            });
+        }
+        if let Some(name) = check {
+            if out.is_some() {
+                self.block("condition:two");
+                return None;
+            }
+            rd.get("ConditionCheckSVar");
+            let (cmp, n) = self.compare(rd.get("ConditionSVarCompare").unwrap_or("GE1"))?;
+            let amount = match name.parse::<u32>() {
+                Ok(n) => Amount::Fixed(n),
+                Err(_) => self.expr(name)?,
+            };
+            out = Some(Condition::Compare { amount, cmp, n });
+        }
+        Some(out)
+    }
+
+    /// "Return those cards to the battlefield", "… to their owners' hands": a move of the
+    /// cards the chain noted (D-069), from where they are.
+    fn move_noted(
+        &mut self,
+        rd: &Rd<'a>,
+        chain: &mut Chain,
+        dest: Option<&str>,
+        controller: Option<PlayerRef>,
+    ) -> Option<Effect> {
+        let at = chain.noted_at;
+        // Forge's `Origin$`: where the cards must be (`All`, or none: wherever they are).
+        match rd.rec.get("Origin") {
+            None | Some("All") => {}
+            Some(o) if Some(o) == at => {}
+            Some(_) => {
+                self.block("ChangeZone:those cards are elsewhere");
+                return None;
+            }
+        }
+        // A card put into a hand can't be found again (CR 400.7j); cards a search found
+        // are moved by Forge's searching form (shuffling), not this one.
+        if matches!(at, Some("Hand" | "Library")) {
+            self.block("ChangeZone:those cards in a hidden zone");
+            return None;
+        }
+        let what = ObjRef::Noted;
+        let no_shuffle = |tx: &mut Self| match rd.get("Shuffle") {
+            None => Some(false),
+            Some("True") => Some(true),
+            Some(_) => {
+                tx.block("param:ChangeZone.Shuffle");
+                None
+            }
+        };
+        Some(match dest {
+            Some("Battlefield") => {
+                let tapped = match rd.get("Tapped") {
+                    None => false,
+                    Some("True") => true,
+                    Some(_) => {
+                        self.block("param:ChangeZone.Tapped");
+                        return None;
+                    }
+                };
+                Effect::PutInto {
+                    what,
+                    to: CardDest::Battlefield { tapped },
+                    shuffle: false,
+                    controller,
+                }
+            }
+            Some("Hand") => Effect::ReturnToHand { what },
+            Some("Exile") => Effect::Exile { what },
+            Some("Graveyard") => Effect::PutInto {
+                what,
+                to: CardDest::Graveyard,
+                shuffle: false,
+                controller: None,
+            },
+            Some("Library") => {
+                let to = self.library_position(rd)?;
+                let shuffle = no_shuffle(self)?;
+                Effect::PutInto {
+                    what,
+                    to,
+                    shuffle,
+                    controller: None,
+                }
+            }
+            other => {
+                self.block(format!("ChangeZone:those cards->{}", other.unwrap_or("?")));
+                return None;
             }
         })
     }
@@ -2805,6 +3294,13 @@ impl<'a> Tx<'a> {
             None => Some(Vec::new()),
             Some(f) => self.card_alts(f, from != CardZone::Battlefield),
         };
+        // Choosing among "those cards" (D-069) looks at nothing new.
+        if cards
+            .as_ref()
+            .is_some_and(|c| !c.is_empty() && c.iter().all(|s| s.noted == Some(true)))
+        {
+            rd.get("NoLooking");
+        }
         // In a public zone Forge offers every player's cards that fit; the engine offers
         // the chooser's own. The same thing only when the filter says "your".
         if public
@@ -3028,8 +3524,43 @@ impl<'a> Tx<'a> {
         Some((effects, rules))
     }
 
+    /// Does the chain starting at `first` keep its "remembered" cards to itself (D-069)?
+    /// It remembers some, and its last link — its only `Cleanup` — forgets them. Then
+    /// whatever reads them is in the chain, between the two (Forge's memory lives on the
+    /// card, and no other chain of a compiled card leaves anything in it).
+    fn local_memory(&self, first: &'a Record) -> (bool, bool) {
+        let mut links = vec![first];
+        while let Some(name) = links.last().and_then(|r| r.get("SubAbility")) {
+            match self.records.iter().find(|(n, _)| n == name) {
+                Some((_, r)) if links.len() < 32 => links.push(r),
+                _ => break,
+            }
+        }
+        let writes = links
+            .iter()
+            .any(|r| REMEMBER.iter().any(|k| r.get(k).is_some()));
+        let cleanup = |r: &Record| r.head().map(|h| h.1) == Some("Cleanup");
+        let forgets = links.last().is_some_and(|r| {
+            cleanup(r)
+                && r.get("ClearRemembered") == Some("True")
+                && !r.params.iter().any(|(k, _)| k.starts_with("Condition"))
+        }) && links.iter().filter(|r| cleanup(r)).count() == 1;
+        (writes && forgets, writes)
+    }
+
     /// A whole chain (an ability and its `SubAbility$` descendants) as one mode.
     fn mode(&mut self, first: &'a Record, triggered: bool, root: &str) -> Option<Mode> {
+        let (local, writes) = self.local_memory(first);
+        if writes && !local {
+            self.block("remember:not forgotten when the chain ends");
+        }
+        let was = std::mem::replace(&mut self.memory, local);
+        let mode = self.chain_mode(first, triggered, root);
+        self.memory = was;
+        mode
+    }
+
+    fn chain_mode(&mut self, first: &'a Record, triggered: bool, root: &str) -> Option<Mode> {
         let mut chain = Chain::default();
         let mut kind = root;
         // A trigger that runs an `AB$` with a cost: "you may pay [cost]. If you do, [the
@@ -3058,6 +3589,8 @@ impl<'a> Tx<'a> {
                 return None;
             }
             match self.effect(rec, &mut chain, triggered, kind) {
+                // (`Cleanup` at the end of a chain that remembers: nothing to do.)
+                Some(Effect::Seq(v)) if v.is_empty() => {}
                 Some(e) => chain.effects.push(e),
                 None => ok = false,
             }
@@ -3080,6 +3613,46 @@ impl<'a> Tx<'a> {
             ok = false;
         }
         if !ok {
+            return None;
+        }
+        // The link that moved the target a later link refers to: noted (the only thing
+        // the chain notes).
+        if chain.note_moved_target.get() {
+            let Some((i, _)) = chain.target_moved else {
+                unreachable!("set only with a moved target")
+            };
+            let plain = matches!(
+                chain.effects.get(i),
+                Some(
+                    Effect::Exile {
+                        what: ObjRef::Target(_)
+                    } | Effect::ReturnToBattlefield {
+                        what: ObjRef::Target(_)
+                    } | Effect::PutInto {
+                        what: ObjRef::Target(_),
+                        ..
+                    }
+                )
+            );
+            if !plain || format!("{:?}", chain.effects).contains("Note(") {
+                self.block("defined:Targeted after it moved");
+                return None;
+            }
+            let e = chain.effects[i].clone();
+            chain.effects[i] = Effect::Note(Box::new(e));
+        }
+        // Cards a search left in the library for what comes next are shuffled away by the
+        // end: a later search of that library shuffles it.
+        if let Some(i) = chain
+            .effects
+            .iter()
+            .position(|e| format!("{e:?}").contains("to: Stay"))
+            && !chain.effects[i + 1..].iter().any(|e| {
+                let t = format!("{e:?}");
+                t.contains("from: Library") && t.contains("shuffle: true")
+            })
+        {
+            self.block("remember:found cards not shuffled away");
             return None;
         }
         let mut effects = chain.effects;
@@ -6009,6 +6582,7 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
         player_is_you: BTreeSet::new(),
         took_player_for_you: false,
         nothing: false,
+        memory: false,
     };
     let mut def = CardDef {
         name: face.name.clone(),
@@ -6623,6 +7197,16 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
         if plain.contains(&format!("that {noun} deals")) && !compiled.contains("it deals") {
             missing.push("that one deals damage");
         }
+    }
+    // "Return it to the battlefield under your control" against "… under its owner's
+    // control": some scripts give control where the card doesn't (or the other way).
+    // ("Enters the battlefield under your control" is old wording for "you control".)
+    // ("… onto the battlefield tapped under your control" counts too.)
+    let under = |t: &str| t.replace("battlefield tapped under", "battlefield under");
+    if under(&compiled).contains("battlefield under your control")
+        != under(&plain).contains("to the battlefield under your control")
+    {
+        missing.push("under your control");
     }
     // "Is put into your graveyard from the battlefield" is about whose card it is; the
     // script may say whose creature it was.

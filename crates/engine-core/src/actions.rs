@@ -975,6 +975,11 @@ fn leave_game(st: &mut GameState, p: PlayerId) {
     for id in controlled {
         perform_move(st, id, Zone::Exile, LibraryPosition::Top, None, 0);
     }
+    // The layered view was worked out (by `controller_of`) before those moves, at this
+    // generation: it is stale now. (Found by the D-069 soak: a reanimated permanent of
+    // another player's, exiled as its controller left, was still in the view.) Dropping
+    // the derived cache leaves the serialized state — and its hash — as it was.
+    st.layer_cache.invalidate();
     // Their mana pool and life no longer matter; priority is handled by the priority frame.
     st.player_mut(p).mana_pool = Default::default();
     st.player_mut(p).restricted_mana.clear();
