@@ -1341,6 +1341,8 @@ pub struct AltCost {
 }
 
 /// Which kind of alternative cost an [`AltCost`] is.
+// Built once when the catalog loads, then only read (as `AbilityDef`).
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AltKind {
     /// "You may [cost] rather than pay this spell's mana cost" / "you may cast this spell

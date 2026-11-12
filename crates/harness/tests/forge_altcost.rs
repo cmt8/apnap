@@ -806,3 +806,37 @@ fn the_heuristic_agent_takes_free_spells_and_keeps_its_cards() {
 
 /// A land with the Island type, so that the test catalog knows the subtype.
 const ISLE: &str = "Name:Test Isle\nManaCost:no cost\nTypes:Land Island\nOracle:";
+
+// CR 601.2b, 712.8c, 118.9: an alternative cost belongs to the face being cast. A modal
+// double-faced card whose back face may be cast without paying its mana cost: the option
+// names that face; the front face has no alternative cost. (No compiled real card has
+// this shape yet: the only multi-face script with an alternative cost, a Saga that
+// transforms, is blocked for other reasons.)
+#[test]
+fn an_alternative_cost_of_the_back_face_of_a_modal_card() {
+    let mdfc = "Name:Test Tide Lesson\nManaCost:2 U\nTypes:Sorcery\n\
+        A:SP$ Draw | NumCards$ 1 | SpellDescription$ Draw a card.\n\
+        AlternateMode:Modal\nOracle:Draw a card.\n\nALTERNATE\n\n\
+        Name:Test Tide Gift\nManaCost:3 U\nTypes:Instant\n\
+        S:Mode$ AlternativeCost | ValidSA$ Spell.Self | EffectZone$ All | Cost$ 0 | IsPresent$ Card.IsCommander+YouCtrl | Description$ Text.\n\
+        A:SP$ Draw | NumCards$ 2 | SpellDescription$ Draw two cards.\n\
+        Oracle:If you control a commander, you may cast this spell without paying its mana cost.\\nDraw two cards.";
+    let mut sc = scenario(&[mdfc, CAPTAIN]);
+    sc.commander(P0, Zone::Battlefield, "Test Squad Captain");
+    sc.card(P0, Zone::Hand, "Test Tide Lesson");
+    let mut s = Script::new(sc.build());
+    let faces: Vec<u8> = s
+        .options()
+        .iter()
+        .filter_map(|o| match o {
+            OptionDesc::CastWith { face, .. } => Some(*face),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(faces, [1], "only the back face has one");
+    let before = hand(&s, P0);
+    s.cast_with("Test Tide Gift");
+    assert_eq!(s.kind(), ChoiceKind::Priority, "nothing to pay");
+    s.pass_all();
+    assert_eq!(hand(&s, P0), before - 1 + 2);
+}
