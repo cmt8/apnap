@@ -2080,6 +2080,10 @@ impl ResolveFrame {
                 Vec::new()
             }
             Effect::Counter { what } => match self.target(st, k, what) {
+                // CR 101.2, 614.17: "can't be countered" — this does nothing to it (D-073).
+                Some(Target::Object(spell)) if crate::replacement::cant_be_countered(st, spell) => {
+                    Vec::new()
+                }
                 // CR 701.6a: a countered spell is put into its owner's graveyard.
                 Some(Target::Object(spell)) => {
                     st.emit(Event::Countered { object: spell });
@@ -2113,6 +2117,7 @@ impl ResolveFrame {
                         token,
                         count,
                         controller,
+                        more: Vec::new(),
                     })
                     .collect()
             }
