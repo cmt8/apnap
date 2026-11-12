@@ -363,6 +363,15 @@ fn target_filter_plural(f: &TargetFilter, plain: bool) -> String {
             .to_string(),
         ),
         TargetFilter::SpellMatching(s) => target(format!("{} spells", spell_kind(s))),
+        TargetFilter::AbilityOnStack {
+            activated,
+            triggered,
+            yours,
+        } => target(format!(
+            "{} abilities{}",
+            ability_kind(*activated, *triggered),
+            if *yours { " you control" } else { "" }
+        )),
         TargetFilter::Permanent(selectors) => {
             let parts: Vec<String> = selectors.iter().map(|s| selector(s, true)).collect();
             target(join(parts, "or"))
@@ -445,8 +454,26 @@ fn target_filter_words(f: &TargetFilter) -> String {
             }
         ),
         TargetFilter::SpellMatching(s) => {
-            format!("target {} spell{}", spell_kind(s), of_chosen(s, false))
+            format!(
+                "target {} spell{}{}",
+                spell_kind(s),
+                of_chosen(s, false),
+                if s.controller == Who::You {
+                    " you control"
+                } else {
+                    ""
+                }
+            )
         }
+        TargetFilter::AbilityOnStack {
+            activated,
+            triggered,
+            yours,
+        } => format!(
+            "target {} ability{}",
+            ability_kind(*activated, *triggered),
+            if *yours { " you control" } else { "" }
+        ),
         TargetFilter::Permanent(selectors) => {
             let parts: Vec<String> = selectors.iter().map(|s| selector(s, false)).collect();
             format!("target {}", join(parts, "or"))
@@ -606,13 +633,23 @@ fn spell_kind(s: &Selector) -> String {
     } else {
         words.extend(s.not_colors.iter().map(|c| format!("non{}", color(*c))));
     }
-    words.extend(s.not_types.iter().map(|t| format!("non{}", card_type(*t))));
+    // "Permanent spell" (CR 110.4b): neither instant nor sorcery.
+    let permanent = s.types.is_empty()
+        && s.not_types.len() == 2
+        && s.not_types.contains(&CardType::Instant)
+        && s.not_types.contains(&CardType::Sorcery);
+    if !permanent {
+        words.extend(s.not_types.iter().map(|t| format!("non{}", card_type(*t))));
+    }
     let types: Vec<String> = s.types.iter().map(|t| card_type(*t).to_string()).collect();
     if !s.subtypes.is_empty() {
         words.push(join(s.subtypes.clone(), "or"));
     }
     if !types.is_empty() {
         words.push(join(types, "or"));
+    }
+    if permanent {
+        words.push("permanent".to_string());
     }
     words.join(" ")
 }
@@ -654,6 +691,7 @@ fn later_mention(mode: &Mode, i: usize) -> Option<String> {
             TargetFilter::OnStack {
                 abilities: true, ..
             } => "it".to_string(),
+            TargetFilter::AbilityOnStack { .. } => "that ability".to_string(),
             TargetFilter::AnyTarget => "it".to_string(),
             TargetFilter::CardInGraveyard { .. } => "that card".to_string(),
             TargetFilter::Permanent(sels) => match sels.as_slice() {
@@ -1328,6 +1366,49 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             out
         }
         Effect::SacrificeIt { what } => format!("you sacrifice {}", obj(mode, *what)),
+        Effect::CopySpell {
+            what,
+            count,
+            new_targets,
+            except,
+        } => {
+            let it = match what {
+                // Storm: "When you cast this spell, copy it …".
+                ObjRef::This if *count == Amount::TriggeringAmount => "it".to_string(),
+                ObjRef::This => "this spell".to_string(),
+                ObjRef::Triggering => "that spell".to_string(),
+                other => obj(mode, *other),
+            };
+            let (times, several) = match count {
+                Amount::Fixed(1) => (String::new(), false),
+                Amount::Fixed(2) => (" twice".to_string(), true),
+                // Storm (CR 702.40a); "copy it for each other instant and sorcery spell
+                // you've cast before it this turn".
+                Amount::TriggeringAmount if *what == ObjRef::This => (
+                    " for each other spell that was cast before it this turn".to_string(),
+                    true,
+                ),
+                Amount::TriggeringAmount => (
+                    " for each other such spell cast before it this turn".to_string(),
+                    true,
+                ),
+                n => (format!(" {} times", amount(n)), true),
+            };
+            let storm = *what == ObjRef::This && *count == Amount::TriggeringAmount;
+            format!(
+                "copy {it}{times}{}{}",
+                copy_except(except),
+                match (*new_targets, several) {
+                    (false, _) => "",
+                    // CR 702.40a.
+                    (true, _) if storm => {
+                        ". If the spell has any targets, you may choose new targets for any of the copies"
+                    }
+                    (true, false) => ". You may choose new targets for the copy",
+                    (true, true) => ". You may choose new targets for the copies",
+                }
+            )
+        }
         Effect::BecomeCopy { what, except } => format!(
             "this permanent becomes a copy of {}{}",
             obj(mode, *what),
@@ -2308,17 +2389,18 @@ fn card_list_words(cards: &[Selector], plural: bool) -> String {
             words.extend(s.not_subtypes.iter().map(|t| format!("non-{t}")));
             // "Permanent card" (CR 110.4a): neither instant nor sorcery.
             let permanent_card = s.types.is_empty()
-                && s.subtypes.is_empty()
                 && s.not_types.len() == 2
                 && s.not_types.contains(&CardType::Instant)
                 && s.not_types.contains(&CardType::Sorcery);
-            if permanent_card {
-                words.push("permanent".to_string());
-            } else {
+            if !permanent_card {
                 words.extend(s.not_types.iter().map(|t| format!("non{}", card_type(*t))));
             }
             if !s.subtypes.is_empty() {
                 words.push(s.subtypes.join(" or "));
+            }
+            // "Dragon permanent card".
+            if permanent_card {
+                words.push("permanent".to_string());
             }
             if !s.types.is_empty() {
                 words.push(types(&s.types, "or"));
@@ -2855,11 +2937,13 @@ fn trigger_event(t: &Trigger) -> String {
                 TriggerStep::BeginCombat | TriggerStep::EndCombat => "combat",
             }
         ),
+        Trigger::CastThis => "When you cast this spell".to_string(),
         Trigger::Cast {
             by,
             types: ts,
             spells,
             nth,
+            copies,
         } => {
             // "a creature or artifact spell", "a noncreature spell", "a Spirit spell".
             let mut kinds: Vec<String> = Vec::new();
@@ -2876,6 +2960,16 @@ fn trigger_event(t: &Trigger) -> String {
                 _ => format!("{} spell or {}", kinds[0], join(kinds[1..].to_vec(), "or")),
             };
             match nth {
+                // "Whenever you cast or copy an instant or sorcery spell" (magecraft).
+                None if *copies => format!(
+                    "Whenever {} {}",
+                    match by {
+                        Who::Any => "a player casts or copies",
+                        Who::You => "you cast or copy",
+                        Who::Opponent => "an opponent casts or copies",
+                    },
+                    with_article(&what)
+                ),
                 None => format!(
                     "Whenever {} {}",
                     match by {
@@ -2902,6 +2996,15 @@ fn trigger_event(t: &Trigger) -> String {
                 ),
             }
         }
+    }
+}
+
+/// "activated or triggered", "triggered", "activated".
+fn ability_kind(activated: bool, triggered: bool) -> &'static str {
+    match (activated, triggered) {
+        (true, true) => "activated or triggered",
+        (false, true) => "triggered",
+        _ => "activated",
     }
 }
 
@@ -4420,6 +4523,7 @@ mod tests {
                     types: Vec::new(),
                     spells: vec![spell_with(4), spell_with(5), spell_with(6)],
                     nth: None,
+                    copies: false,
                 },
                 intervening_if: None,
                 body: Body::Effect(mode(Effect::Draw {

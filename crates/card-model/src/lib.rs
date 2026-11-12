@@ -870,6 +870,10 @@ pub enum Trigger {
         /// when set.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         nth: Option<u32>,
+        /// "Whenever you cast or copy …" (magecraft): also when that player puts a copy of
+        /// such a spell on the stack (CR 707.10). Serialized only when set.
+        #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+        copies: bool,
     },
     /// CR 508.1m: "Whenever [filter] attacks" — it is declared as an attacker.
     Attacks(ObjFilter),
@@ -935,6 +939,10 @@ pub enum Trigger {
     /// tapped, whatever taps it (a cost, an effect, attacking). Entering tapped isn't
     /// becoming tapped. "It" is the permanent.
     BecomesTapped(ObjFilter),
+    /// CR 601.2i, 702.40a: "When you cast this spell" — triggers from the spell itself on
+    /// the stack. "That much" is the number of spells every player cast this turn before
+    /// it (storm).
+    CastThis,
 }
 
 /// What a damage trigger's damage was dealt to.
@@ -1446,6 +1454,13 @@ pub enum TargetFilter {
     OnStack {
         abilities: bool,
         single_target: bool,
+    },
+    /// An activated and/or triggered ability on the stack ("target triggered ability you
+    /// control"); `yours`: one the spell or ability's controller controls.
+    AbilityOnStack {
+        activated: bool,
+        triggered: bool,
+        yours: bool,
     },
 }
 
@@ -2130,6 +2145,18 @@ pub enum Effect {
     SacrificeIt {
         what: ObjRef,
     },
+    /// CR 707.10: "copy [`what`]" — `count` copies of a spell or ability on the stack (as
+    /// it last was there, if it has left: CR 608.2h), each put on the stack under the
+    /// controller's control with everything decided for the original. `new_targets`: "you
+    /// may choose new targets for the copy" (CR 707.10c), chosen as each copy is made.
+    /// `except`: part of a spell copy's copiable values ("except that the copy is red").
+    CopySpell {
+        what: ObjRef,
+        count: Amount,
+        new_targets: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        except: Vec<CopyExcept>,
+    },
 }
 
 /// When a delayed triggered ability ([`Effect::DelayedTrigger`]) can trigger.
@@ -2267,6 +2294,7 @@ impl Effect {
             | Effect::Choose(_)
             | Effect::BecomeCopy { .. }
             | Effect::SacrificeIt { .. } => {}
+            Effect::CopySpell { count, .. } => count.selectors_mut(f),
         }
     }
 

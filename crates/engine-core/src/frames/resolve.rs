@@ -159,6 +159,15 @@ pub enum Work {
     /// "Choose a creature type." (CR 608.2c): the controller chooses now; the instructions
     /// after it read the choice (`ResolveFrame::chosen`).
     Choose { what: card_model::ChoiceOf },
+    /// CR 707.10: `remaining` more copies of the spell or ability `original` to put on the
+    /// stack, one at a time; `new_targets`: its controller may choose new targets for each
+    /// before the next is made (CR 707.10c).
+    CopySpell {
+        original: ObjectId,
+        remaining: u32,
+        new_targets: bool,
+        except: Vec<card_model::CopyExcept>,
+    },
 }
 
 /// One of "those cards" (D-069): a card an instruction of this resolution moved, or a
@@ -1011,6 +1020,54 @@ impl ResolveFrame {
                         self.work.push(Work::Eval { k, effect: unpaid });
                     }
                 },
+                Work::CopySpell {
+                    original,
+                    remaining,
+                    new_targets,
+                    except,
+                } => {
+                    if remaining == 0 || !st.in_game(self.controller) {
+                        continue;
+                    }
+                    let crate::actions::ActionResult::Moved(copy) = execute(
+                        st,
+                        GameAction::CopyStackObject {
+                            original,
+                            controller: self.controller,
+                            except: except.clone(),
+                            written_on: self.card,
+                        },
+                    ) else {
+                        continue;
+                    };
+                    if remaining > 1 {
+                        self.work.push(Work::CopySpell {
+                            original,
+                            remaining: remaining - 1,
+                            new_targets,
+                            except,
+                        });
+                    }
+                    // "Whenever you cast or copy …".
+                    if st
+                        .stack_object(copy)
+                        .is_some_and(|s| s.kind == StackKind::Spell)
+                    {
+                        crate::triggers::detect_copy(st, self.controller, copy);
+                    }
+                    // CR 707.10c: before the next copy is made.
+                    if new_targets
+                        && st
+                            .stack_object(copy)
+                            .is_some_and(|s| s.all_targets().next().is_some())
+                    {
+                        self.work.push(Work::ChangeTargets {
+                            object: copy,
+                            single: false,
+                            chosen: Vec::new(),
+                        });
+                    }
+                }
                 Work::Choose { what } => match input.take() {
                     None if st.in_game(self.controller) => {
                         let controller = self.controller;
@@ -2616,6 +2673,35 @@ impl ResolveFrame {
             // CR 701.21a: a player can sacrifice only a permanent they control. "Its
             // controller sacrifices it" (CR 702.74a): whoever that is now.
             // CR 701.21a: only what its controller controls.
+            // CR 707.10: what is copied is the spell or ability as it is on the stack, or as
+            // it last was there (CR 608.2h) — not a target that has become illegal.
+            Effect::CopySpell {
+                what,
+                count,
+                new_targets,
+                except,
+            } => {
+                let original = match what {
+                    ObjRef::Target(i) => match self.target(st, k, TargetRef::Target(i)) {
+                        Some(Target::Object(o)) => Some(o),
+                        _ => None,
+                    },
+                    ObjRef::Triggering => self.subject,
+                    ObjRef::This => Some(self.source),
+                    _ => None,
+                };
+                // CR 608.2h: how many, once.
+                let remaining = self.amount(st, k, &count);
+                if let Some(original) = original {
+                    self.work.push(Work::CopySpell {
+                        original,
+                        remaining,
+                        new_targets,
+                        except,
+                    });
+                }
+                Vec::new()
+            }
             Effect::SacrificeIt { what } => self
                 .objs(st, k, what)
                 .into_iter()

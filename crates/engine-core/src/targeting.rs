@@ -61,6 +61,7 @@ pub fn describes(
                     TargetFilter::Creature
                     | TargetFilter::Spell
                     | TargetFilter::OnStack { .. }
+                    | TargetFilter::AbilityOnStack { .. }
                     | TargetFilter::SpellMatching(_)
                     | TargetFilter::Permanent(_)
                     | TargetFilter::CardInGraveyard { .. } => false,
@@ -81,6 +82,21 @@ pub fn describes(
                         && (!*single_target || s.all_targets().count() == 1)
                 });
             }
+            // "Target triggered ability you control".
+            if let TargetFilter::AbilityOnStack {
+                activated,
+                triggered,
+                yours,
+            } = filter
+            {
+                return st.stack_object(id).is_some_and(|s| match s.kind {
+                    StackKind::Ability { triggered: t, .. } => {
+                        (if t { *triggered } else { *activated })
+                            && (!*yours || s.controller == controller)
+                    }
+                    StackKind::Spell => false,
+                });
+            }
             // CR 400.7 / 608.2b: an object that changed zones is a new object, so a missing
             // id means the target left the zone it was in.
             let Some(o) = st.objects.get(&id) else {
@@ -94,9 +110,12 @@ pub fn describes(
                     .stack_object(id)
                     .is_some_and(|s| s.kind == StackKind::Spell),
                 TargetFilter::SpellMatching(sel) => {
-                    st.stack_object(id)
-                        .is_some_and(|s| s.kind == StackKind::Spell)
-                        && card_matches(st, id, &bind_target(st, sel, source))
+                    st.stack_object(id).is_some_and(|s| {
+                        s.kind == StackKind::Spell
+                            // "Target instant or sorcery spell you control".
+                            && (sel.controller != card_model::Who::You
+                                || s.controller == controller)
+                    }) && card_matches(st, id, &bind_target(st, sel, source))
                         && {
                             let c = chars(st, id);
                             sel.colors.is_empty() || sel.colors.iter().any(|x| c.colors.contains(x))
@@ -124,9 +143,10 @@ pub fn describes(
                         // "Another target card": not the card the ability is on.
                         && !(cards.other && Some(id) == source)
                 }
-                TargetFilter::Player | TargetFilter::Opponent | TargetFilter::OnStack { .. } => {
-                    false
-                }
+                TargetFilter::Player
+                | TargetFilter::Opponent
+                | TargetFilter::OnStack { .. }
+                | TargetFilter::AbilityOnStack { .. } => false,
             }
         }
     }
@@ -193,7 +213,10 @@ pub fn candidates(
 ) -> Vec<Target> {
     let mut out: Vec<Target> = Vec::new();
     match filter {
-        TargetFilter::Spell | TargetFilter::SpellMatching(_) | TargetFilter::OnStack { .. } => {
+        TargetFilter::Spell
+        | TargetFilter::SpellMatching(_)
+        | TargetFilter::OnStack { .. }
+        | TargetFilter::AbilityOnStack { .. } => {
             out.extend(st.stack.iter().map(|s| Target::Object(s.id)))
         }
         TargetFilter::AnyTarget | TargetFilter::Creature | TargetFilter::Permanent(_) => {

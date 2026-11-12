@@ -980,6 +980,16 @@ impl Narrator {
                 let l = format!("  {} has new targets", self.name(*object));
                 self.emit(l, out);
             }
+            Event::CopiedOnStack {
+                copy, controller, ..
+            } => {
+                let l = format!(
+                    "  {} puts a copy of {} on the stack",
+                    p(*controller),
+                    self.name(*copy)
+                );
+                self.emit(l, out);
+            }
             Event::Regenerated { object } => {
                 let l = format!("  {} regenerates", self.name(*object));
                 self.emit(l, out);

@@ -271,6 +271,10 @@ struct Tx<'a> {
     from_zone: ActivationZone,
     /// What the event of the trigger being compiled lets its ability refer to.
     trig: TrigCtx,
+    /// Compiling a "whenever you cast [one of these types] spell" trigger: those types
+    /// ("copy it for each other instant and sorcery spell you've cast before it this turn"
+    /// counts the same kind).
+    cast_kinds: Option<Vec<CardType>>,
     /// The trigger being compiled is "you may" as a whole (`OptionalDecider$`).
     optional_trigger: bool,
     /// Compiling the spell ability of an instant or sorcery ("exile this spell").
@@ -507,6 +511,8 @@ struct TrigCtx {
     died: bool,
     /// … and that permanent was the ability's own source.
     died_self: bool,
+    /// A spell was cast: `TriggeredSpellAbility` is that spell.
+    spell: bool,
 }
 
 /// What one of Forge's `Triggered…` names stands for.
@@ -527,6 +533,7 @@ impl Default for TrigCtx {
             amount: None,
             died: false,
             died_self: false,
+            spell: false,
         }
     }
 }
@@ -541,6 +548,7 @@ impl TrigCtx {
         amount: None,
         died: false,
         died_self: false,
+        spell: false,
     };
 
     fn named(&self, name: &str) -> Option<Named> {
@@ -599,6 +607,7 @@ impl TrigCtx {
             Trigger::Cast { by, .. } => TrigCtx {
                 players: &["TriggeredActivator", "TriggeredCardController"],
                 player_is_you: *by == Who::You,
+                spell: true,
                 ..TrigCtx::NOTHING
             },
             // Forge's `Phase`: `TriggeredPlayer` is the player whose step it is.
@@ -1302,6 +1311,35 @@ impl<'a> Tx<'a> {
         if depth > 4 {
             self.block("expr:too deep");
             return None;
+        }
+        // "For each other instant and sorcery spell you've cast before it this turn", in a
+        // "whenever you cast an instant or sorcery spell" trigger: Forge counts the spells
+        // of the filter cast this turn (this one included) as the trigger ran; the engine
+        // counts the trigger's own kind as it triggers (`EventFacts::amount`).
+        if let Some(kinds) = &self.cast_kinds
+            && let Some(filter) = v
+                .strip_prefix("TriggerObjectsCurrentCastSpells$Valid ")
+                .and_then(|f| f.strip_suffix("/Minus.1"))
+        {
+            let mut named: Vec<CardType> = Vec::new();
+            for alt in filter.split(',') {
+                match alt.trim().strip_suffix(".YouCtrl").and_then(card_type) {
+                    Some(t) => named.push(t),
+                    None => {
+                        named.clear();
+                        break;
+                    }
+                }
+            }
+            let mut a = named.clone();
+            let mut b = kinds.clone();
+            a.sort();
+            a.dedup();
+            b.sort();
+            b.dedup();
+            if !named.is_empty() && a == b {
+                return Some(Amount::TriggeringAmount);
+            }
         }
         let (head, math) = match v.split_once('/') {
             Some((h, m)) => (h, Some(m)),
@@ -2433,6 +2471,125 @@ impl<'a> Tx<'a> {
                 Effect::ChangeTargets {
                     what: TargetRef::Target(chain.targets.len() as u8 - 1),
                     single,
+                }
+            }
+            // CR 707.10: "copy target instant or sorcery spell", "copy that spell", "copy
+            // target triggered ability you control"; `MayChooseTarget$`: "you may choose new
+            // targets for the copy" (CopySpellAbilityEffect: without it the copy keeps the
+            // original's targets).
+            "CopySpellAbility" => {
+                for k in [
+                    "Controller",
+                    "CopyForEachCanTarget",
+                    "DefinedTarget",
+                    "SingleChoice",
+                    "Optional",
+                    "RememberCopies",
+                    "IgnoreFreeze",
+                    "Epic",
+                    "UseOriginalHost",
+                    "RememberNewCard",
+                    "ChooseOnlyOne",
+                ] {
+                    if rd.rec.get(k).is_some() {
+                        self.block(format!("param:CopySpellAbility.{k}"));
+                        return None;
+                    }
+                }
+                let new_targets = rd.get("MayChooseTarget").is_some();
+                let count = match rd.get("Amount") {
+                    None => Some(Amount::Fixed(1)),
+                    Some(a) => self.amount(a, chain),
+                };
+                let except = self.copy_except(&rd);
+                let what = match (rd.get("ValidTgts"), rd.get("Defined")) {
+                    (Some(valid), _) => {
+                        rd.get("TgtPrompt");
+                        let filter = match (rd.get("TargetType"), valid) {
+                            (Some("Spell"), "Card") => Some(TargetFilter::Spell),
+                            (Some("Spell"), text) => {
+                                let s = self.card_selector(text)?;
+                                // What a spell can be asked: its types and colors, and
+                                // whether its controller is "you".
+                                let asked = Selector {
+                                    types: s.types.clone(),
+                                    not_types: s.not_types.clone(),
+                                    subtypes: s.subtypes.clone(),
+                                    not_subtypes: s.not_subtypes.clone(),
+                                    colors: s.colors.clone(),
+                                    controller: if s.controller == Who::You {
+                                        Who::You
+                                    } else {
+                                        Who::Any
+                                    },
+                                    ..Selector::default()
+                                };
+                                if asked != s {
+                                    self.block("CopySpellAbility:filter");
+                                    return None;
+                                }
+                                Some(TargetFilter::SpellMatching(s))
+                            }
+                            (Some(kind), "Card" | "Card,Emblem") => {
+                                let (mut activated, mut triggered, mut yours) =
+                                    (false, false, None);
+                                for k in kind.split(',') {
+                                    let (head, mine) = match k.strip_suffix(".YouCtrl") {
+                                        Some(h) => (h, true),
+                                        None => (k, false),
+                                    };
+                                    match head {
+                                        "Activated" => activated = true,
+                                        "Triggered" => triggered = true,
+                                        _ => {
+                                            self.block(format!(
+                                                "CopySpellAbility:TargetType {}",
+                                                shape(kind)
+                                            ));
+                                            return None;
+                                        }
+                                    }
+                                    if yours.is_some_and(|y| y != mine) {
+                                        self.block("CopySpellAbility:TargetType mixed");
+                                        return None;
+                                    }
+                                    yours = Some(mine);
+                                }
+                                Some(TargetFilter::AbilityOnStack {
+                                    activated,
+                                    triggered,
+                                    yours: yours.unwrap_or(false),
+                                })
+                            }
+                            (kind, _) => {
+                                self.block(format!(
+                                    "CopySpellAbility:TargetType {} ValidTgts {}",
+                                    kind.map(shape).unwrap_or_else(|| "?".into()),
+                                    shape(valid)
+                                ));
+                                None
+                            }
+                        };
+                        chain.targets.push(filter?);
+                        Some(ObjRef::Target(chain.targets.len() as u8 - 1))
+                    }
+                    // "Copy that spell" of a "whenever … casts" trigger.
+                    (None, Some("TriggeredSpellAbility")) if self.in_trigger && self.trig.spell => {
+                        Some(ObjRef::Triggering)
+                    }
+                    (None, d) => {
+                        self.block(format!(
+                            "CopySpellAbility:Defined {}",
+                            d.map(shape).unwrap_or_else(|| "?".into())
+                        ));
+                        None
+                    }
+                };
+                Effect::CopySpell {
+                    what: what?,
+                    count: count?,
+                    new_targets,
+                    except: except?,
                 }
             }
             // CR 603.7: "at the beginning of the next …, [do something]".
@@ -5694,7 +5851,11 @@ impl<'a> Tx<'a> {
                     whose: whose?,
                 })
             }
-            "SpellCast" => {
+            // "Whenever you cast or copy …" (magecraft): Forge runs `SpellCastOrCopy` for a
+            // spell cast and for a copy of a spell put on the stack (MagicStack.add), the
+            // copy's controller as the activator.
+            mode @ ("SpellCast" | "SpellCastOrCopy") => {
+                let copies = mode == "SpellCastOrCopy";
                 let by = match rd.get("ValidActivatingPlayer") {
                     None => Some(Who::Any),
                     Some("You") => Some(Who::You),
@@ -5739,6 +5900,10 @@ impl<'a> Tx<'a> {
                 // included, compared; only `EQ<n>` is compiled).
                 let nth = match rd.get("ActivatorThisTurnCast") {
                     None => Some(None),
+                    Some(_) if copies => {
+                        self.block("param:trig SpellCastOrCopy.ActivatorThisTurnCast");
+                        None
+                    }
                     Some(c) => match c.strip_prefix("EQ").and_then(|n| n.parse::<u32>().ok()) {
                         Some(n) if n > 0 => Some(Some(n)),
                         _ => {
@@ -5755,6 +5920,7 @@ impl<'a> Tx<'a> {
                     types,
                     spells,
                     nth: nth?,
+                    copies,
                 })
             }
             "Attacks" => {
@@ -6121,6 +6287,16 @@ impl<'a> Tx<'a> {
             self.in_trigger = true;
             self.optional_trigger = optional;
             self.trig = event.as_ref().map(TrigCtx::of).unwrap_or_default();
+            self.cast_kinds = match &event {
+                Some(Trigger::Cast {
+                    by: Who::You,
+                    types,
+                    spells,
+                    nth: None,
+                    copies: false,
+                }) if spells.is_empty() && !types.is_empty() => Some(types.clone()),
+                _ => None,
+            };
             self.took_it_for_this = false;
             self.took_player_for_you = false;
             // "You may …", or "that creature's controller may …" (CR 603.5: decided as
@@ -6144,6 +6320,7 @@ impl<'a> Tx<'a> {
             self.in_trigger = false;
             self.optional_trigger = false;
             self.trig = TrigCtx::default();
+            self.cast_kinds = None;
             let (Some(when), Some(intervening_if), Some(mut body), Some(decider)) =
                 (event, cond, body, decider)
             else {
@@ -8580,6 +8757,7 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
         in_trigger: false,
         from_zone: ActivationZone::Battlefield,
         trig: TrigCtx::default(),
+        cast_kinds: None,
         optional_trigger: false,
         in_spell: false,
         additional: Vec::new(),
@@ -8805,9 +8983,33 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
                                 ..Selector::default()
                             }],
                             nth: None,
+                            copies: false,
                         },
                         intervening_if: None,
                         body: pump_one(ObjRef::This),
+                    },
+                ));
+                continue;
+            }
+            // CR 702.40a: "When you cast this spell, copy it for each other spell that was
+            // cast before it this turn. If the spell has any targets, you may choose new
+            // targets for any of the copies."
+            "Storm" => {
+                abilities.push((
+                    0,
+                    AbilityDef::Triggered {
+                        when: Trigger::CastThis,
+                        intervening_if: None,
+                        body: Body::Effect(Mode {
+                            targets: Vec::new(),
+                            effect: Effect::CopySpell {
+                                what: ObjRef::This,
+                                count: Amount::TriggeringAmount,
+                                new_targets: true,
+                                except: Vec::new(),
+                            },
+                            groups: Vec::new(),
+                        }),
                     },
                 ));
                 continue;
@@ -9294,6 +9496,13 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
         if sentences(plain, &["copy", "except"]) > 0 && !has_word(compiled, "except") {
             missing.push("says except");
         }
+        // "You may choose new targets for the copy": some scripts allow it where the card
+        // doesn't (Reflections of Littjara).
+        if compiled.contains("you may choose new targets for the cop")
+            && !plain.contains("new target")
+        {
+            missing.push("says new targets");
+        }
         // "[The token] gains haste until end of turn": an effect that ends, which a script
         // of a token copy may leave lasting ("that token gains haste").
         let token_gains = compiled.contains("token gains") || compiled.contains("tokens gain");
@@ -9670,6 +9879,18 @@ mod tests {
             vec![],
         ));
         assert!(has_word(&t, "damage") && t.contains("it deals"), "{t}");
+        // "you may choose new targets for the copy"
+        let t = text(&spell(
+            vec![TargetFilter::Spell],
+            Effect::CopySpell {
+                what: ObjRef::Target(0),
+                count: Amount::Fixed(1),
+                new_targets: true,
+                except: Vec::new(),
+            },
+            vec![],
+        ));
+        assert!(t.contains("you may choose new targets for the copy"), "{t}");
         // "another" (a target that excludes the source)
         let another = Selector {
             types: vec![CardType::Creature],
