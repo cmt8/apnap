@@ -5572,11 +5572,18 @@ fn ability_records(face: &Face) -> Vec<(String, Record)> {
 /// other than the card does. The compiler can't see that, so they are named here and
 /// never compile (invariant 8: a wrong card is worse than a missing one). Each entry says
 /// what differs; remove it when the pinned Forge commit has the script corrected.
-const SCRIPT_DIFFERS: &[(&str, &str)] = &[(
-    "Swarmyard Massacre",
-    "counts Insects, Rats, Spiders and Squirrels you control; the card counts *creatures* \
-     you control of those types (a noncreature permanent of such a type must not count)",
-)];
+const SCRIPT_DIFFERS: &[(&str, &str)] = &[
+    (
+        "Swarmyard Massacre",
+        "counts Insects, Rats, Spiders and Squirrels you control; the card counts *creatures* \
+         you control of those types (a noncreature permanent of such a type must not count)",
+    ),
+    (
+        "Clash of Realities",
+        "gives its trigger to Spirit *creatures*; the card says \"all Spirits\" (a noncreature \
+         Kindred Spirit must get it too)",
+    ),
+];
 
 /// Compile a script. `Err` lists every blocker found (not just the first).
 pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
