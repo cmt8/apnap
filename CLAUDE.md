@@ -84,6 +84,13 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
   countered" is `AbilityDef::CantBeCountered`. One event creates at most
   `MAX_TOKENS_AT_ONCE` = 10,000 tokens of a kind (a deviation from the CR, silent for now).
   Tests: `forge_doublers.rs`.
+- A delayed triggered ability (CR 603.7, D-075) is `Effect::DelayedTrigger` with a
+  `DelayWindow`, kept in `GameState::delayed`: it triggers once, and what it refers to (a
+  player, an amount) is fixed as it is created — whether or not the rest of the spell did
+  anything, unless the card says "if you do". Tests: `forge_staples.rs`.
+- A new top-level `GameState` field changes every golden state hash even while it is empty
+  (the stable hasher writes a tag for skipped fields): re-bless, and check that the event
+  logs did not change.
 - New dependency in engine-core/card-model ⇒ add to `PURE_ALLOWLIST` in `crates/xtask` AND
   log a decision. Must be `no_std`-capable with `default-features = false`.
 
@@ -169,9 +176,9 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-073): 10,914 of 34,463 scripts compile (31.7%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-073: 90% of
-the 100 most played Commander cards compile, 58% of the top 1,000, 35% of the top 5,000
+Status (D-075): 10,991 of 34,463 scripts compile (31.9%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-075: 93% of
+the 100 most played Commander cards compile, 59% of the top 1,000, 35% of the top 5,000
 (`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
 the rest. Feature tests live in `crates/harness/tests/forge_features.rs` and, one file per
 feature area since D-066, `forge_<area>.rs` next to it: invented cards written
@@ -200,7 +207,8 @@ craft, "enters/cast transformed" and "when this transforms" triggers (modal doub
 transforming, Adventure, Omen and split cards are built, D-071), searching another player's library, "X target creatures", changing a spell's targets, delve/convoke/improvise, flashback
 given to other cards, Channel cost reductions, draw and mana replacement effects, effects that change life
 loss, memory that outlives a resolution (effect objects remembering
-cards, linked abilities per CR 607, delayed triggers), counters other than +1/+1 and
+cards, linked abilities per CR 607, delayed triggers that remember objects or don't wait
+for the beginning of a step), counters other than +1/+1 and
 -1/-1, "as this enters, choose …" (how a permanent enters is otherwise built, D-067:
 `ReplaceWith::EntersTappedUnless…`, the choice asked inside `ApplyFrame` as
 `ChoiceKind::AsEnters`), "sacrifice … instead" lands, "lands enter untapped", "exile it
