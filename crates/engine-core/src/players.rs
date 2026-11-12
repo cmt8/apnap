@@ -158,6 +158,7 @@ fn casting(st: &GameState) -> bool {
                 if matches!(
                     c.source,
                     crate::frames::CastSource::Card(_)
+                        | crate::frames::CastSource::Face { .. }
                         | crate::frames::CastSource::Ability { .. }
                 )
         )
@@ -180,11 +181,36 @@ fn play_zone(st: &GameState, card: ObjectId) -> Option<PlayZone> {
 /// and a commander from the command zone, the game's own rules allow it.) Only cards `p`
 /// owns: every rule so far is about the player's own zones.
 pub fn may_play_from(st: &GameState, p: PlayerId, card: ObjectId) -> bool {
-    let rules: Vec<InForce<'_>> = about(st, p).collect();
-    may_play_with(st, p, card, &rules)
+    may_play_face_from(st, p, card, 0)
 }
 
-fn may_play_with(st: &GameState, p: PlayerId, card: ObjectId, rules: &[InForce<'_>]) -> bool {
+/// [`may_play_from`] for one face of the card (0 = its front): a rule about "lands" or
+/// "creature spells" is judged by the face that would be played or cast (CR 601.3e,
+/// 712.8c, 712.9: "you may play lands from your graveyard" lets a modal double-faced card
+/// be played as its land face, not cast as its spell face).
+pub fn may_play_face_from(st: &GameState, p: PlayerId, card: ObjectId, face: u8) -> bool {
+    let rules: Vec<InForce<'_>> = about(st, p).collect();
+    may_play_with(st, p, card, face, &rules)
+}
+
+/// May `p` play or cast `card` with face `face` up from where it is now: from their hand,
+/// a card they sent on an Adventure (CR 716.3d: as itself, never as the Adventure again),
+/// or where a rule lets them ([`may_play_face_from`]). (A commander in the command zone is
+/// the casting rules' own business, CR 903.8.)
+pub fn may_play_face(st: &GameState, p: PlayerId, card: ObjectId, face: u8) -> bool {
+    let o = st.object(card);
+    (o.zone == Zone::Hand && o.owner == p)
+        || (o.zone == Zone::Exile && o.adventure == Some(p) && face == 0)
+        || may_play_face_from(st, p, card, face)
+}
+
+fn may_play_with(
+    st: &GameState,
+    p: PlayerId,
+    card: ObjectId,
+    face: u8,
+    rules: &[InForce<'_>],
+) -> bool {
     let Some(o) = st.objects.get(&card) else {
         return false;
     };
@@ -201,7 +227,7 @@ fn may_play_with(st: &GameState, p: PlayerId, card: ObjectId, rules: &[InForce<'
                 *z == zone
                     && cards
                         .iter()
-                        .any(|s| crate::targeting::card_matches(st, card, s))
+                        .any(|s| crate::targeting::card_matches_as(st, card, face, s))
             }
             _ => false,
         })
@@ -235,7 +261,12 @@ pub fn playable_elsewhere(st: &GameState, p: PlayerId) -> Vec<ObjectId> {
     let mut cards: Vec<ObjectId> = st.zones.graveyards[p.index()].clone();
     cards.extend(st.zones.exile.iter().copied());
     cards.extend(library_top(st, p));
-    cards.retain(|&c| may_play_with(st, p, c, &rules));
+    // Any face it may be played or cast with (CR 712.8b, 712.9).
+    cards.retain(|&c| {
+        core::iter::once(0)
+            .chain(crate::frames::cast::castable_faces(st, c))
+            .any(|f| may_play_with(st, p, c, f, &rules))
+    });
     cards
 }
 

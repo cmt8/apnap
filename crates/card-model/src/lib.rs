@@ -317,9 +317,86 @@ pub struct CardDef {
     /// object that gets one is its source. And ones that work for a while on no object at
     /// all ([`Effect::Lasting`]): "target creature can't be blocked this turn".
     pub granted: Vec<AbilityDef>,
+    /// How the card's faces relate (CR 712, 716, 709). [`Layout::Normal`] for a card with
+    /// one face.
+    #[serde(skip_serializing_if = "Layout::is_normal")]
+    pub layout: Layout,
+    /// The card's other faces, in order: the back face of a double-faced card. Each is a
+    /// whole face of its own (name, cost, types, abilities); this definition is the front
+    /// face. In a catalog each face is also an entry of its own ([`CardCatalog::face`]),
+    /// so an ability written on a back face is named like any other ([`AbilityId`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub faces: Vec<CardDef>,
+    /// Set by the catalog on the entry it makes for another face of a card: that card.
+    /// Such an entry is never a card of its own (no deck holds it, `find` skips it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub face_of: Option<CardDefId>,
+}
+
+/// How the faces of a card relate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Layout {
+    /// One face.
+    #[default]
+    Normal,
+    /// A modal double-faced card (CR 712.3): either face may be cast, or played as a land
+    /// (CR 712.8b, 712.9); it is put onto the stack or battlefield with that face up.
+    Modal,
+    /// A nonmodal ("transforming") double-faced card (CR 712.2): cast and played with its
+    /// front face up; a permanent turns over by transforming (CR 701.27).
+    Transform,
+    /// An adventurer card (CR 716): face 1 is the Adventure, an instant or sorcery it may
+    /// be cast as; as that spell resolves it is exiled, and may then be cast as its
+    /// creature from exile (CR 716.3d). Everywhere else only its normal characteristics.
+    Adventure,
+    /// An omen card (CR 721): like an adventurer, but the Omen spell is shuffled into its
+    /// owner's library as it resolves (CR 721.3d).
+    Omen,
+    /// A split card (CR 709): faces 1 and 2 are its halves, one of which is cast (CR
+    /// 709.3); this definition is the two combined, which is what the card is everywhere
+    /// but on the stack (CR 709.4): both names, the combined mana cost, every type.
+    Split,
+}
+
+impl Layout {
+    pub fn is_normal(&self) -> bool {
+        *self == Layout::Normal
+    }
+
+    /// A double-faced card (CR 712.1): its back face is a face of its own, up only on the
+    /// stack or battlefield.
+    pub fn double_faced(self) -> bool {
+        matches!(self, Layout::Modal | Layout::Transform)
+    }
+
+    /// The card is cast only as one of its other faces (the halves of a split card, CR
+    /// 709.3), never as this definition.
+    pub fn cast_by_faces_only(self) -> bool {
+        self == Layout::Split
+    }
+
+    /// Face 1 is an alternative set of characteristics the card may have as a spell (CR
+    /// 716.2, 721.2), not a face of its own on the battlefield.
+    pub fn alternative_spell(self) -> bool {
+        matches!(self, Layout::Adventure | Layout::Omen)
+    }
 }
 
 impl CardDef {
+    /// Face `face` of this card: 0 is this definition (the front face), 1 the first of
+    /// [`CardDef::faces`]. Panics on a face the card doesn't have.
+    pub fn face(&self, face: u8) -> &CardDef {
+        match face {
+            0 => self,
+            n => &self.faces[n as usize - 1],
+        }
+    }
+
+    /// Every face of the card, front first.
+    pub fn all_faces(&self) -> impl Iterator<Item = &CardDef> {
+        core::iter::once(self).chain(self.faces.iter())
+    }
+
     /// CR 702.5a: the Aura's enchant restriction, if any.
     pub fn enchant(&self) -> Option<TargetFilter> {
         self.abilities.iter().find_map(|a| match a {
@@ -661,6 +738,10 @@ pub struct Selector {
     /// Not used for cards outside the battlefield, where `controller` is the owner.
     #[serde(default)]
     pub owner: Who,
+    /// "That has an Adventure" (CR 716.2a): an adventurer card, whether or not it is
+    /// using its Adventure's characteristics now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_adventure: Option<bool>,
     /// `Some(true)`: one of "those cards" — what an earlier instruction of the resolving
     /// spell or ability noted ([`Effect::Note`]); `Some(false)`: not one of them ("destroy
     /// all other creatures" after creating tokens). Only the resolving effect knows them:
@@ -1631,6 +1712,11 @@ pub enum Effect {
         of: Vec<ManaType>,
         amount: Amount,
     },
+    /// CR 701.27a: "transform [it]" — turn a double-faced permanent over so that its
+    /// other face is up. It stays the same object (CR 701.27c).
+    Transform {
+        what: ObjRef,
+    },
     /// Perform the instruction, and remember what it did for the rest of this resolution
     /// (CR 608.2c, 400.7j): the cards it moved — as the objects they became — and the
     /// tokens it created are "those cards" ([`ObjRef::Noted`], [`Selector::noted`],
@@ -2018,6 +2104,10 @@ pub fn color_identity(def: &CardDef) -> Vec<Color> {
             _ => {}
         }
     }
+    // CR 903.4d: the back face of a double-faced card counts too.
+    for f in &def.faces {
+        out.extend(color_identity(f));
+    }
     out.sort();
     out.dedup();
     out
@@ -2051,17 +2141,44 @@ impl CardCatalog {
         self.get(id.card).ability(id)
     }
 
+    /// Add a card. Its other faces get entries of their own right after it, so face `n`
+    /// of the card at `id` is at `id + n` ([`CardCatalog::face`]).
     pub fn add(&mut self, def: CardDef) -> CardDefId {
         let id = CardDefId(u32::try_from(self.defs.len()).expect("catalog overflow"));
+        let faces: Vec<CardDef> = def
+            .faces
+            .iter()
+            .map(|f| CardDef {
+                face_of: Some(id),
+                layout: def.layout,
+                ..f.clone()
+            })
+            .collect();
         self.defs.push(def);
+        self.defs.extend(faces);
         id
     }
 
-    /// The definition called `name`: by its key if it has one, otherwise by its name.
+    /// The entry of face `face` of the card `card` (0: the card itself, its front face).
+    pub fn face(&self, card: CardDefId, face: u8) -> CardDefId {
+        debug_assert!(
+            face as usize <= self.get(card).faces.len(),
+            "no face {face}"
+        );
+        CardDefId(card.0 + u32::from(face))
+    }
+
+    /// The card a catalog entry is a face of (itself for a front face).
+    pub fn card_of(&self, entry: CardDefId) -> CardDefId {
+        self.get(entry).face_of.unwrap_or(entry)
+    }
+
+    /// The definition called `name`: by its key if it has one, otherwise by its name. The
+    /// entries of back faces are not cards of their own and are never found.
     pub fn find(&self, name: &str) -> Option<CardDefId> {
         self.defs
             .iter()
-            .position(|d| d.key.as_deref().unwrap_or(&d.name) == name)
+            .position(|d| d.face_of.is_none() && d.key.as_deref().unwrap_or(&d.name) == name)
             .map(|i| CardDefId(i as u32))
     }
 }

@@ -1685,6 +1685,138 @@ Rules text: docs/rules-notes/605-mana-abilities-costs-and-yields.md. Tests:
   Path of Ancestry, Cavern of Souls, Opal Palace — mana that remembers its source),
   Bloom Tender (`EachColorAmong`), hybrid mana in spells.
 
+## D-071 Cards with more than one face: double-faced cards, adventurers, omens, split cards (2026-11-10)
+Rules text: docs/rules-notes/712-double-faced-cards.md (712, 202.3, 305.9, 903.4d–e),
+701.27-transform.md, 716-adventurers-721-omens-709-split.md. In this edition casting a
+face is CR 712.8, playing a land face 712.9, entering 712.10–712.11, "the same object"
+712.15; adventurers are 716 and omens 721.
+- **Vocabulary.** A `CardDef` is the card's front face (or, for a split card, its two
+  halves combined); `CardDef::faces` holds its other faces, each a whole face of its own
+  (name, cost, types, abilities, `granted`), and `CardDef::layout` says how they relate:
+  `Layout::{Normal, Modal, Transform, Adventure, Omen, Split}`. The new fields are skipped
+  when empty, so one-faced cards serialise as before.
+- **Catalog.** `CardCatalog::add` gives every other face an entry of its own right after
+  the card — face `n` of the card at `id` is `catalog.face(id, n)` = `id + n` — marked
+  `face_of` (never a card: `find` skips it, decks can't hold it, `new_game` refuses it). So
+  an ability written on a back face is named like any other,
+  `AbilityId { card: <the face's entry>, index, granted }`, and `catalog.ability`,
+  `layers::abilities`, triggers, replacement keys, mana sources and the views needed no
+  special case. The face definitions stay nested in the card too, so `describe`, the
+  validator and the Oracle guard work on a `CardDef` alone.
+- **Objects.** `GameObject::face` (0 = front) says which face is up. It is non-zero only on
+  the stack and the battlefield (CR 712.6a: anywhere else only the front face), which
+  `perform_move` guarantees: a moved card is front face up unless the move says otherwise
+  (`MoveZone::face`, `Proposed::Move::face`), except that a resolving spell becomes a
+  permanent with the face it had on the stack (CR 712.10). `GameState::face_card(id)` is the
+  entry of the face that is up and `card_def(id)` its definition; `layers::chars` starts from
+  it (CLAUDE.md invariant 3), and `layers::chars_as(st, id, face)` gives the characteristics
+  a card would have with another face up — what is evaluated before a face is cast or
+  played (CR 712.8c, 716.3a, 721.3a, 709.3a) and what a permanent about to enter is checked
+  against (CR 614.12: a land face's own "enters tapped").
+- **Mana value** is `Characteristics::mana_value()`; the back face of a transforming card
+  carries its front face's cost for it (`mana_value_from`, CR 202.3b / 712.6d).
+- **Casting and playing.** `OptionDesc::CastFace { card, face }` and
+  `OptionDesc::PlayLandFace { card, face }` (new variants at the end; `CastSpell` and
+  `PlayLand` stay the front face). `CastSource::Face` evaluates that face — its cost,
+  timing, targets, cost reductions and restricted mana (`Payee::SpellFace`) — and once
+  announced puts the card on the stack with that face up, after which the frame's source is
+  a plain `Card`. A land face uses the land drop. Which faces may be cast:
+  `cast::castable_faces` — either face of a modal card (CR 712.8b, 712.9; from a hand or
+  the command zone), the Adventure or Omen (not from exile, CR 716.3d), either half of a
+  split card (CR 709.3; the whole split card is never cast). A transforming card's back
+  face is never cast or played.
+- **Transform** (CR 701.27): `Effect::Transform { what }`, performed as
+  `GameAction::Transform`: the same object turns over (counters, damage, attachments stay;
+  it doesn't enter, so nothing triggers on entering), gets a new timestamp (CR 613.7g) and
+  emits `Event::Transformed`. Only a double-faced permanent transforms, never into an
+  instant or sorcery face (CR 701.27d–e). CR 701.27g: an ability of the permanent that
+  would transform it does nothing if the permanent transformed since the ability was put
+  on the stack (`GameObject::transforms`, recorded on the stack object as
+  `source_transforms` for double-faced sources only).
+- **Adventure** (CR 716.3d): a spell cast as an Adventure is exiled as it resolves (not
+  when countered) and marked `GameObject::adventure` = its controller, who may then cast
+  the card — or play it, if it is a land — from exile, but not as an Adventure again. The
+  mark moves with the card from the stack to exile only; it ends when the card leaves
+  exile. **Omen** (CR 721.3d): shuffled into its owner's library as it resolves.
+  "That has an Adventure" (CR 716.2a, Forge's `AdventureCard`) is
+  `Selector::has_adventure`, read from `Characteristics::has_adventure` — true for an
+  adventurer card whichever of its characteristics it uses now (Edgewall Innkeeper,
+  Frantic Firebolt, Mysterious Pathlighter).
+- **Split cards** (CR 709.4): the compiler makes the card's own definition the two halves
+  combined — both names ("Fire // Ice", which is also the card's name in the library and
+  decks, as at Scryfall), the combined mana cost (mana value and colors from it), every
+  type — and the halves faces 1 and 2. Only halves that are instants or sorceries with
+  nothing but their spell ability (and an additional cost) compile: an ability that works
+  from a hand would be the whole card's (`split:half with other abilities`); Rooms
+  (`split:Room`, CR 709.5), Fuse and Aftermath (`kw:Fuse`, `kw:Aftermath`) stay blocked.
+  Known limit: the combined card has one name string, so "a card named Fire" would not
+  match it (CR 709.4a); no compiled card names a split card's half.
+- **Commander.** Color identity counts every face (CR 903.4d–e); deck validation refuses a
+  face entry; the commander tax and identity are per card, and a modal commander may be
+  cast with either face from the command zone.
+- **Compiler.** `AlternateMode:` `Modal`, `DoubleFaced`, `Adventure`, `Omen`, `Split`
+  compile when every face compiles, each face as a card of its own (its own SVars, and its
+  own Oracle text for the Oracle guard; `unexplained:` and `invalid:` cover every face). A
+  blocker on any face blocks the card. `SetState | Mode$ Transform` with `Defined$ Self`
+  (Forge's default) is "transform this permanent"; other modes (`Flip`, turning face up or
+  down, specializing), a target, or another object stay blocked (`SetState:mode …`,
+  `SetState:target`, `SetState:not itself`). card-db checks that an Adventure/Omen card's
+  other face is an instant or sorcery with that spell type.
+- **Scryfall.** `ScryfallCard::card_faces`. `ScryfallData::get` also finds a card by its
+  front face's name (a real card wins over art cards that share face names);
+  `ScryfallData::face(name)` is one face as a card of its own, with its own picture for a
+  two-sided card (cached as `<id>-<n>.jpg`). The printed-data cross-check now runs for
+  cards with several faces, face by face, and compares the layout (`printed:faces`) — it
+  never ran for them before (they weren't found by name). Cards cached before the faces
+  were stored count as stale, so `fetch-cards` fetches them again. "Real cards per
+  Scryfall" counts a card compiled by its full or its front face's name.
+- **App and AI.** Option labels name the face ("cast Malakir Rebirth", "play Malakir
+  Mire"); the board, stack and card pickers draw the face that is up; the enlarged card
+  shows the other face of a double-faced card beside it (CR 712.4). The heuristic agent
+  plays a land face when it has no other land to play and fewer than five lands (or the
+  spell face can't be cast now), and judges a spell face as the spell it would be. Random
+  deck building (`forge-Np`) checks every face's cost against the deck's colors.
+- **Mis-rendering found by reading the sample:** `describe` of a trigger with several
+  events dropped the subject of the later ones ("Whenever this permanent enters or dies"
+  for Jerren's "enters or another nontoken Human you control dies"); the card was
+  compiled right. Fixed: a later event about another subject is written out.
+- Golden state hashes re-blessed: the stable hasher writes a tag for every skipped serde
+  field, so the new fields change every state hash. All 15 event-log hashes unchanged.
+- On its own (on D-065) this was 9,305 → 9,426 of 34,463 scripts (real cards per Scryfall
+  9,225 → 9,342). All newly compiled cards were read against both faces' Oracle text.
+- **With D-067 and D-068** (rebased onto them): 9,776 → 9,906 of 34,463 (real 9,691 →
+  9,817). No card that compiled on either side stops compiling. By layout: modal 32 of
+  101, transforming 19 of 399, adventurers 63 of 151, omens 5 of 16, split 6 of 128.
+  Nine cards compile only in the combination, all read on both faces: the MDFC lands
+  with "as this land enters, you may pay 3 life" (Fell the Profane, Witch Enchanter,
+  Boggart Trawler, Pinnacle Monk, Razorgrass Ambush), adventurers and a transforming
+  card whose other text needed those batches (Scalding Viper's "that player", Brightcap
+  Badger, Curious Homunculus), and
+  Ishgard, the Holy See (a land with an Adventure). A land face's own "as it enters"
+  choice and "enters tapped unless" are read from the entering face (CR 712.9, 614.12);
+  "its mana value" of a target (`TargetInfo`) uses `Characteristics::mana_value`, so a
+  transformed permanent has its front face's (CR 202.3b) and a spell cast as an Adventure
+  or a split half has that face's (CR 716.3b, 709.3b).
+- **With D-070 and D-066** (merged): 10,163 → 10,300 of 34,463 (real 10,076 → 10,209).
+  By layout: modal 33 of 101, transforming 22 of 399, adventurers 66 of 151, omens 5 of
+  16, split 6 of 128. Seven cards compile only in the combination, all read on both
+  faces: Growing Rites of Itlimoc, Storm the Vault, Mystic Skull (mana abilities that
+  count, cost mana, or are given), Sea Gate Restoration ("no maximum hand size" and the
+  pay-3-life land), Beanstalk Wurm and Beorn ("play an additional land"), Rosethorn
+  Acolyte (an Adventure that adds mana). Letter of Acceptance, which compiled on this
+  branch alone, is blocked by D-066's `oracle:{T}` guard, as on main. **A rule that lets
+  a player play or cast cards from another zone judges its cards by the face that would
+  be played or cast** (CR 601.3e, 712.8c, 712.9): "you may play lands from your
+  graveyard" lets a modal card be played as its land face, not cast as its spell face;
+  `players::may_play_face`, `targeting::card_matches_as`. A card sent on an Adventure is
+  one more such permission (only as itself, CR 716.3d). Restricted mana is judged by the
+  face being cast (`Payee::SpellFace`).
+- **What is left, by kind** (cards blocked by it alone): transforming cards — disturb
+  (`kw:Disturb`, 14), Sagas (`kw:Chapter`, 10), battles (`line:Defense`, 10), craft, and in
+  all 36 day/night werewolves (`kw:Daybound`), 32 old werewolf conditions ("if no spells
+  were cast last turn"), "enters transformed" (`param:ChangeZone.Transformed`),
+  `trig:Transformed`; split cards — Aftermath 13, Fuse 8, Rooms. Still blocked as
+  layouts: `Flip`, `Meld`, `Prepare`, `Specialize`, `Vengeance`.
 ## D-069 "Those cards": Forge's remembered cards within one resolution; conditions on one instruction (2026-11-10)
 Rules text: docs/rules-notes/608.2c-400.7j-those-cards.md.
 - **Vocabulary.** `Effect::Note(instruction)`: the cards the instruction moved — as the

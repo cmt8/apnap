@@ -115,6 +115,8 @@ fn effect_polarity(e: &Effect) -> Polarity {
         Effect::Apply { effects, .. } => continuous_polarity(effects),
         // What it does is in abilities written elsewhere on the card: no preference.
         Effect::Lasting { .. } => Polarity::Neutral,
+        // Its own permanent turning over: no target to judge.
+        Effect::Transform { .. } => Polarity::Neutral,
         Effect::May(inner) => effect_polarity(inner),
         // What happens either way: paying, or not paying.
         Effect::Pay { paid, unpaid, .. } => match effect_polarity(unpaid) {
@@ -325,7 +327,8 @@ impl HeuristicAgent {
     /// The body of the spell or ability currently being put on the stack (the top object).
     fn top_body(&self, v: &PlayerView) -> Option<Body> {
         let top = v.stack.last()?;
-        let def = self.catalog.get(top.card);
+        // The face of the spell that is up (CR 712.6e).
+        let def = self.catalog.get(self.catalog.face(top.card, top.face));
         match top.ability {
             None => def.spell_ability().cloned().or_else(|| {
                 def.enchant().map(|f| {
@@ -589,6 +592,25 @@ impl HeuristicAgent {
         if let Some(&i) = lands.first() {
             return Response::Pick(vec![i]);
         }
+        // The land face of a modal double-faced card (CR 712.9): while lands are short, or
+        // when its other face can't be cast now anyway.
+        let my_lands = v
+            .battlefield
+            .iter()
+            .filter(|o| o.controller == me && o.card_types.contains(&CardType::Land))
+            .count();
+        if let Some(i) = d.options.iter().position(|o| match o {
+            OptionDesc::PlayLandFace { card, .. } => {
+                my_lands < 5
+                    || !d
+                        .options
+                        .iter()
+                        .any(|x| matches!(x, OptionDesc::CastSpell { card: c } if c == card))
+            }
+            _ => false,
+        }) {
+            return Response::Pick(vec![i]);
+        }
         // 2. The best spell or ability with a positive score.
         let my_main = v.active == me;
         let mut best: Option<(i64, usize)> = None;
@@ -609,6 +631,21 @@ impl HeuristicAgent {
                         continue;
                     }
                     self.spell_score(v, ov.card, None) + if ov.is_commander { 20 } else { 0 }
+                }
+                // Another face of a modal double-faced card (CR 712.8b), judged as the spell
+                // it would be.
+                OptionDesc::CastFace { card, face } => {
+                    let Some(ov) = Self::find(v, *card) else {
+                        continue;
+                    };
+                    let entry = self.catalog.face(ov.card, *face);
+                    let def = self.catalog.get(entry);
+                    let permanent =
+                        !def.has_type(CardType::Instant) && !def.has_type(CardType::Sorcery);
+                    if permanent && !my_main && !v.stack.is_empty() {
+                        continue;
+                    }
+                    self.spell_score(v, entry, None)
                 }
                 OptionDesc::ActivateAbility { source, ability } => {
                     let used = self.ability_uses.get(&(*source, *ability)).copied();

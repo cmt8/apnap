@@ -1192,3 +1192,65 @@ fn a_noted_creature_sacrificed_for_mana_while_paying() {
     assert_eq!(s.st.object(card).counters_of(CounterKind::PlusOne), 0);
     assert!(on_battlefield(&s, "Test Golem").is_empty());
 }
+
+// D-069 with D-071 (CR 712.8a, 400.7j): in a library a modal double-faced card has only its
+// front face's characteristics. "Search your library for a land card, put it onto the
+// battlefield tapped, then untap that card; you gain 1 life for each land card found this
+// way" finds the card whose front is a land (not one whose back is), and still finds it
+// once it is on the battlefield.
+#[test]
+fn a_noted_double_faced_card_is_found_by_its_front_face() {
+    // An instant whose back face is a land; a land whose back face is a land.
+    let tide = "Name:Test Tide Charm\nManaCost:1 U\nTypes:Instant\n\
+        A:SP$ Draw | NumCards$ 1 | SpellDescription$ Draw a card.\n\
+        AlternateMode:Modal\nOracle:Draw a card.\n\nALTERNATE\n\n\
+        Name:Test Tide Flat\nManaCost:no cost\nTypes:Land\n\
+        A:AB$ Mana | Cost$ T | Produced$ U | SpellDescription$ Add {U}.\n\
+        Oracle:{T}: Add {U}.";
+    let path = "Name:Test Dawn Path\nManaCost:no cost\nTypes:Land\n\
+        A:AB$ Mana | Cost$ T | Produced$ W | SpellDescription$ Add {W}.\n\
+        AlternateMode:Modal\nOracle:{T}: Add {W}.\n\nALTERNATE\n\n\
+        Name:Test Dusk Path\nManaCost:no cost\nTypes:Land\n\
+        A:AB$ Mana | Cost$ T | Produced$ B | SpellDescription$ Add {B}.\n\
+        Oracle:{T}: Add {B}.";
+    let cards = [
+        tide.to_string(),
+        path.to_string(),
+        spell(
+            "Test Wayfinding",
+            "G",
+            "Sorcery",
+            "A:SP$ ChangeZone | Origin$ Library | Destination$ Battlefield | Tapped$ True | ChangeType$ Land | ChangeNum$ 1 | RememberChanged$ True | SubAbility$ DBUntap | SpellDescription$ Text.\n\
+             SVar:DBUntap:DB$ Untap | Defined$ Remembered | SubAbility$ DBGain\n\
+             SVar:DBGain:DB$ GainLife | LifeAmount$ X | SubAbility$ DBCleanup\n\
+             SVar:DBCleanup:DB$ Cleanup | ClearRemembered$ True\n\
+             SVar:X:Remembered$Valid Land",
+        ),
+    ];
+    let mut s = build(&cards, |sc| {
+        sc.card(P0, Zone::Battlefield, "Forest");
+        sc.card(P0, Zone::Hand, "Test Wayfinding");
+        sc.cards(P0, Zone::Library, &["Test Tide Charm", "Test Dawn Path"]);
+    });
+    let before = life(&s, P0);
+    s.cast("Test Wayfinding").pay().pass_all();
+    assert_eq!(s.kind(), ChoiceKind::SearchLibrary);
+    let offered: Vec<String> = s
+        .options()
+        .iter()
+        .filter_map(|o| match o {
+            OptionDesc::Card { card } => Some(s.name(*card)),
+            _ => None,
+        })
+        .collect();
+    assert!(offered.contains(&"Test Dawn Path".to_string()));
+    assert!(
+        !offered.contains(&"Test Tide Charm".to_string()),
+        "its land face is its back: not a land card in the library"
+    );
+    choose_cards(&mut s, &["Test Dawn Path"]);
+    let path = on_battlefield(&s, "Test Dawn Path");
+    assert_eq!(path.len(), 1, "front face up");
+    assert!(!s.st.object(path[0]).tapped, "found again and untapped");
+    assert_eq!(life(&s, P0), before + 1, "one land card found");
+}

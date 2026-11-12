@@ -525,11 +525,14 @@ pub fn forge_random_decks(
             let pool: Vec<&String> = lib
                 .cards
                 .iter()
+                // Every face's cost: a card's other faces are cast too.
                 .filter(|(_, c)| {
-                    c.def.mana_cost.as_ref().is_none_or(|m| {
-                        m.symbols.iter().all(|s| match s {
-                            ManaSymbol::Colored(c) => colors.contains(c),
-                            _ => true,
+                    c.def.all_faces().all(|f| {
+                        f.mana_cost.as_ref().is_none_or(|m| {
+                            m.symbols.iter().all(|s| match s {
+                                ManaSymbol::Colored(c) => colors.contains(c),
+                                _ => true,
+                            })
                         })
                     })
                 })

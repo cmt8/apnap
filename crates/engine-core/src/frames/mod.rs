@@ -9,7 +9,7 @@
 //! - Nothing that is needed after a suspension may live in a Rust local; put it in the frame.
 
 mod apply;
-mod cast;
+pub(crate) mod cast;
 mod check;
 mod combat;
 mod mana;

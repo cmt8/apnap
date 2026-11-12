@@ -225,6 +225,8 @@ pub fn compile(script: &RealCardScript, card: &ScryfallCard) -> Result<CardDef, 
         token: false,
         key: None,
         granted: script.granted.clone(),
+        // Hand-written real-card scripts have one face.
+        ..CardDef::default()
     })
 }
 
@@ -252,6 +254,7 @@ mod tests {
             collector_number: None,
             set_type: None,
             border_color: None,
+            card_faces: vec![],
         }
     }
 
