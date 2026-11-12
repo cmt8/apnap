@@ -314,7 +314,9 @@ fn shown_to(st: &GameState, viewer: PlayerId) -> Vec<ObjectId> {
             OptionDesc::Card { card } => Some(*card),
             // A card a rule lets them play from a hidden zone (the top of their library):
             // they know what they are offered.
-            OptionDesc::PlayLand { card } | OptionDesc::CastSpell { card } => Some(*card),
+            OptionDesc::PlayLand { card }
+            | OptionDesc::CastSpell { card }
+            | OptionDesc::CastWith { card, .. } => Some(*card),
             _ => None,
         })
         .filter(hidden)

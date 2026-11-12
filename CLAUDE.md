@@ -71,6 +71,10 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
   `Selector::noted`, `Amount::Noted*`, `PlayerRef::NotedControllers`); this is not
   `Affected/ObjFilter::Remembered`. `Effect::If` is a condition counted when the instruction
   is reached; `Effect::IfDone` is "if you do". Tests: `forge_remember.rs`.
+- An alternative cost (CR 118.9: "rather than pay", "without paying its mana cost",
+  flashback, evoke, overload) is `AbilityDef::AlternativeCost`, chosen as
+  `OptionDesc::CastWith { card, face, ability }` and turned into an ordinary cost before
+  payment (`frames/altcost.rs`, D-072); never a second payment path. Tests: `forge_altcost.rs`.
 - New dependency in engine-core/card-model ⇒ add to `PURE_ALLOWLIST` in `crates/xtask` AND
   log a decision. Must be `no_std`-capable with `default-features = false`.
 
@@ -156,9 +160,9 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-069): 10,508 of 34,463 scripts compile (30.5%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-069: 82% of
-the 100 most played Commander cards compile, 53% of the top 1,000, 32% of the top 5,000
+Status (D-072): 10,758 of 34,463 scripts compile (31.2%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-072: 88% of
+the 100 most played Commander cards compile, 55% of the top 1,000, 33% of the top 5,000
 (`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
 the rest. Feature tests live in `crates/harness/tests/forge_features.rs` and, one file per
 feature area since D-066, `forge_<area>.rs` next to it: invented cards written
@@ -169,7 +173,11 @@ yields nothing without a named blocker is `unexplained:*`; every compiled card g
 for words Forge scripts leave out or add (`oracle:*`: "may", "another target", a target
 narrowed to "you control", "unless"); and the `forge-Np` soak plays random decks of all of
 them. A script found by reading to differ from its card goes into `SCRIPT_DIFFERS` in
-`translate.rs` (`script:differs from the card`).
+`translate.rs` (`script:differs from the card`). A `#` line in a script is a comment, as in
+Forge, but only reviewed comment texts are ignored (`forge/comments.rs`, D-078: `HARMLESS`;
+`INCOMPLETE` ones block the card; anything else is `comment:unreviewed`). A variable Forge
+fills in at run time (`AFLifeLost`) is never read as its placeholder value
+(`expr:set by an effect …`).
 References written from Forge's sources: `docs/forge/script-format.md` (file format, costs,
 filters, `Defined$`, expressions), `effects.md` (every effect API), and
 `triggers-statics-replacements-keywords.md`. Read the relevant section before compiling a
@@ -179,7 +187,8 @@ presence, `Defined$ Targeted` means every target of the chain, a trigger that ru
 Not built yet: the full generated-text-vs-Oracle round trip (a word-level guard exists),
 flip, meld, prepare and specialize cards, Fuse, Aftermath, Rooms, day/night, disturb,
 craft, "enters/cast transformed" and "when this transforms" triggers (modal double-faced,
-transforming, Adventure, Omen and split cards are built, D-071), searching another player's library, "X target creatures", memory that outlives a resolution (effect objects remembering
+transforming, Adventure, Omen and split cards are built, D-071), searching another player's library, "X target creatures", changing a spell's targets, delve/convoke/improvise, flashback
+given to other cards, Channel cost reductions, memory that outlives a resolution (effect objects remembering
 cards, linked abilities per CR 607, delayed triggers), counters other than +1/+1 and
 -1/-1, "as this enters, choose …" (how a permanent enters is otherwise built, D-067:
 `ReplaceWith::EntersTappedUnless…`, the choice asked inside `ApplyFrame` as

@@ -1233,6 +1233,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             )
         }
         Effect::SacrificeThis => "sacrifice this permanent".to_string(),
+        Effect::ControllerSacrificesThis => "its controller sacrifices it".to_string(),
         Effect::AttachThis { to } => format!("attach this{KEEP} permanent to {}", obj(mode, *to)),
         Effect::May(inner) => {
             let text = effect(mode, inner);
@@ -1582,7 +1583,14 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                     let text = if part.starts_with('{') {
                         format!("pay {part}")
                     } else {
-                        part.to_lowercase()
+                        // "Return two Forests …" → "return two Forests …".
+                        let mut chars = part.chars();
+                        chars
+                            .next()
+                            .into_iter()
+                            .flat_map(|c| c.to_lowercase())
+                            .chain(chars)
+                            .collect()
                     };
                     parts.push(match (third, text.split_once(' ')) {
                         (true, Some((v, rest))) => format!("{v}s {rest}"),
@@ -1911,6 +1919,31 @@ fn capitalize(s: &str) -> String {
 }
 
 fn cost(c: &Cost) -> String {
+    cost_parts(c).join(", ")
+}
+
+/// A card in a hand by what is asked of it: "a green card", "a nonland card", "an Island
+/// card".
+fn hand_card_noun(s: &Selector) -> String {
+    let mut words: Vec<String> = Vec::new();
+    for c in &s.not_colors {
+        words.push(format!("non{}", color(*c)));
+    }
+    if !s.colors.is_empty() {
+        words.push(join(
+            s.colors.iter().map(|c| color(*c).to_string()).collect(),
+            "or",
+        ));
+    }
+    for t in &s.not_types {
+        words.push(format!("non{}", card_type(*t)));
+    }
+    words.push(card_noun(s));
+    words.join(" ")
+}
+
+/// The parts of a cost, each as an instruction ("Sacrifice a creature", "Pay 2 life").
+fn cost_parts(c: &Cost) -> Vec<String> {
     let mut parts = Vec::new();
     if let Some(m) = &c.mana {
         parts.push(m.to_text());
@@ -1956,13 +1989,101 @@ fn cost(c: &Cost) -> String {
     if c.life > 0 {
         parts.push(format!("Pay {} life", c.life));
     }
+    if c.life_x {
+        parts.push("Pay X life".to_string());
+    }
     if c.discard_self {
         parts.push("Discard this card".to_string());
     }
     if c.exile_self {
         parts.push("Exile this card from your graveyard".to_string());
     }
-    parts.join(", ")
+    if let Some(e) = &c.exile_from_hand {
+        let what = join(e.what.iter().map(hand_card_noun).collect(), "or");
+        parts.push(if e.count == 1 {
+            format!("Exile {} from your hand", with_article(&what))
+        } else {
+            format!("Exile {} {what}s from your hand", number_word(e.count))
+        });
+    }
+    if let Some(r) = &c.return_to_hand {
+        let mut what: Vec<String> = Vec::new();
+        for s in &r.what {
+            let mut s = s.clone();
+            s.controller = Who::You;
+            what.push(selector(&s, r.count != 1));
+        }
+        let what = join(what, "or");
+        parts.push(if r.count == 1 {
+            format!("Return {} to its owner's hand", with_article(&what))
+        } else {
+            format!(
+                "Return {} {what} to their owner's hand",
+                number_word(r.count)
+            )
+        });
+    }
+    parts
+}
+
+/// A cost as words inside a sentence: "pay {U}", "exile a green card from your hand",
+/// "pay {1} and return a basic land you control to its owner's hand".
+fn cost_words(c: &Cost) -> String {
+    let mut parts = Vec::new();
+    if let Some(m) = &c.mana {
+        parts.push(format!("pay {}", m.to_text()));
+    }
+    let rest = Cost {
+        mana: None,
+        ..c.clone()
+    };
+    for p in cost_parts(&rest) {
+        let mut chars = p.chars();
+        let first: String = chars
+            .next()
+            .into_iter()
+            .flat_map(|c| c.to_lowercase())
+            .collect();
+        parts.push(first + chars.as_str());
+    }
+    join(parts, "and")
+}
+
+/// "Flashback {2}{R}", "Evoke—Exile a white card from your hand".
+fn keyword_cost(name: &str, c: &Cost) -> String {
+    let rest = Cost {
+        mana: None,
+        ..c.clone()
+    };
+    match (&c.mana, rest == Cost::default()) {
+        (Some(m), true) => format!("{name} {}", m.to_text()),
+        (None, true) => format!("{name} {{0}}"),
+        // "Flashback—{1}{G}, Pay 3 life", "Evoke—Exile a white card from your hand".
+        _ => format!("{name}\u{2014}{}", cost(c)),
+    }
+}
+
+fn alt_cost(a: &crate::AltCost) -> String {
+    match &a.kind {
+        crate::AltKind::Rather => {
+            let free = a.cost == Cost::default();
+            let text = if free {
+                "you may cast this spell without paying its mana cost".to_string()
+            } else {
+                format!(
+                    "you may {} rather than pay this spell's mana cost",
+                    cost_words(&a.cost)
+                )
+            };
+            match &a.only_if {
+                Some(c) => format!("{}, {text}.", capitalize(&condition(c))),
+                None => format!("{}.", capitalize(&text)),
+            }
+        }
+        crate::AltKind::Flashback => keyword_cost("Flashback", &a.cost),
+        crate::AltKind::Evoke => keyword_cost("Evoke", &a.cost),
+        crate::AltKind::Overload(_) => keyword_cost("Overload", &a.cost),
+    }
 }
 
 fn who_possessive(w: Who) -> &'static str {
@@ -2270,6 +2391,9 @@ fn condition(c: &Condition) -> String {
                 Who::Any => format!("if there is {things} on the battlefield"),
             }
         }
+        Condition::ControlCommander { own: false } => "if you control a commander".to_string(),
+        Condition::ControlCommander { own: true } => "if you control your commander".to_string(),
+        Condition::CastFor(crate::AltKindName::Evoke) => "if its evoke cost was paid".to_string(),
     }
 }
 
@@ -2684,6 +2808,7 @@ fn ability(a: &AbilityDef) -> String {
             }
             format!("As an additional cost to cast this spell, {text}.")
         }
+        AbilityDef::AlternativeCost(a) => alt_cost(a),
         AbilityDef::SelfCostReduction(a) => match a {
             Amount::Fixed(n) => format!("This spell costs {{{n}}} less to cast."),
             other => format!(

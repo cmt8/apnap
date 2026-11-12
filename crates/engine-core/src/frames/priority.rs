@@ -1,6 +1,8 @@
 //! Priority (CR 117 (2026-11-06)). Text: docs/rules-notes/117-priority-101.4-apnap.md.
 
-use super::cast::{CastFrame, CastSource, can_begin, castable_faces, sorcery_timing};
+use super::cast::{
+    CastFrame, CastSource, can_begin, can_begin_with, castable_faces, sorcery_timing,
+};
 use super::resolve::ResolveFrame;
 use super::{ApplyFrame, Flow, Frame, Input, StateCheckFrame};
 use crate::decision::{ChoiceKind, OptionDesc};
@@ -111,6 +113,14 @@ impl PriorityFrame {
                 again,
                 Frame::Cast(CastFrame::new(p, CastSource::Face { card, face })),
             ]),
+            OptionDesc::CastWith {
+                card,
+                face,
+                ability,
+            } => Flow::Continue(vec![
+                again,
+                Frame::Cast(CastFrame::with_alt(p, spell_source(card, face), ability)),
+            ]),
             OptionDesc::ActivateAbility { source, ability } => Flow::Continue(vec![
                 again,
                 Frame::Cast(CastFrame::new(p, CastSource::Ability { source, ability })),
@@ -126,8 +136,37 @@ impl PriorityFrame {
     }
 }
 
-/// Legal priority actions in stable order: Pass, lands, spells (hand order), activated
-/// abilities, then mana abilities (battlefield order).
+/// The cast source for face `face` of `card` (0: as it is, its front face in a hand).
+fn spell_source(card: crate::ids::ObjectId, face: u8) -> CastSource {
+    match face {
+        0 => CastSource::Card(card),
+        face => CastSource::Face { card, face },
+    }
+}
+
+/// CR 118.9, 601.2b: the ways to cast face `face` of `card` for one of that face's
+/// alternative costs, in printed order, that `p` could begin and complete now.
+fn cast_with(
+    st: &GameState,
+    p: PlayerId,
+    card: crate::ids::ObjectId,
+    face: u8,
+    opts: &mut Vec<OptionDesc>,
+) {
+    for ability in super::altcost::alternatives(st, card, face) {
+        if can_begin_with(st, p, spell_source(card, face), Some(ability)) {
+            opts.push(OptionDesc::CastWith {
+                card,
+                face,
+                ability,
+            });
+        }
+    }
+}
+
+/// Legal priority actions in stable order: Pass, lands, spells (hand order; each card's
+/// alternative costs right after it), activated abilities, then mana abilities
+/// (battlefield order).
 fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
     let mut opts = vec![OptionDesc::Pass];
     let hand = &st.zones.hands[p.index()];
@@ -167,10 +206,21 @@ fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
         if can_begin(st, p, CastSource::Card(card)) {
             opts.push(OptionDesc::CastSpell { card });
         }
+        cast_with(st, p, card, 0, &mut opts);
         // CR 712.8b: the other faces of a modal double-faced card.
         for face in castable_faces(st, card) {
             if can_begin(st, p, CastSource::Face { card, face }) {
                 opts.push(OptionDesc::CastFace { card, face });
+            }
+            cast_with(st, p, card, face, &mut opts);
+        }
+    }
+    // CR 702.34a: flashback lets a card be cast from its owner's graveyard.
+    for &card in &st.zones.graveyards[p.index()] {
+        if !elsewhere.contains(&card) {
+            cast_with(st, p, card, 0, &mut opts);
+            for face in castable_faces(st, card) {
+                cast_with(st, p, card, face, &mut opts);
             }
         }
     }

@@ -249,6 +249,12 @@ pub enum GameAction {
     RemoveFromCombat {
         object: ObjectId,
     },
+    /// CR 601.2b: the spell is being cast with this alternative cost (an ability of its
+    /// card).
+    SetCastAlt {
+        object: ObjectId,
+        ability: card_model::AbilityId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -308,6 +314,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                     face: 0,
                     transforms: 0,
                     adventure: None,
+                    cast_with: None,
                 },
             );
             st.zones.battlefield.push(id);
@@ -695,6 +702,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                         o.zone == Zone::Battlefield && st.catalog.get(o.card).layout.double_faced()
                     })
                     .map(|o| o.transforms),
+                alt: None,
             });
             st.emit(Event::AbilityActivated {
                 player: controller,
@@ -717,6 +725,12 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             so.modes = modes;
             so.x = x;
             so.targets = targets;
+            ActionResult::Done
+        }
+        GameAction::SetCastAlt { object, ability } => {
+            if let Some(so) = st.stack.iter_mut().find(|s| s.id == object) {
+                so.alt = Some(ability);
+            }
             ActionResult::Done
         }
         GameAction::RemoveAbility { ability } => {
@@ -858,6 +872,12 @@ fn perform_move(
     controller: Option<PlayerId>,
     face: u8,
 ) -> ObjectId {
+    // CR 702.74a: a permanent spell's alternative cost is known to the permanent it becomes
+    // ("if its evoke cost was paid").
+    let cast_with = match to {
+        Zone::Battlefield => st.stack_object(id).and_then(|s| s.alt),
+        _ => None,
+    };
     let old = detach(st, id);
     // CR 712.6a: off the stack and battlefield a card has only its front face up. CR
     // 712.10: a resolving spell becomes a permanent with the face it had on the stack.
@@ -897,6 +917,7 @@ fn perform_move(
         } else {
             None
         },
+        cast_with,
     };
     st.objects.insert(new_id, obj);
     if to == Zone::Stack {
@@ -913,6 +934,7 @@ fn perform_move(
             sacrificed_power: 0,
             facts: Default::default(),
             source_transforms: None,
+            alt: None,
         });
     } else {
         let list = st.zones.list_mut(to, old.owner);

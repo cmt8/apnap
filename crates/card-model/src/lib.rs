@@ -608,6 +608,9 @@ pub enum AbilityDef {
         zone: ActivationZone,
         ability: Box<AbilityDef>,
     },
+    /// An alternative cost of the card's own (CR 118.9): a way to cast it, offered beside
+    /// casting it for its mana cost.
+    AlternativeCost(AltCost),
 }
 
 /// What an [`AbilityDef::PlayerRule`] changes for the players it is about.
@@ -949,6 +952,21 @@ pub enum Condition {
         cmp: Cmp,
         n: u32,
     },
+    /// "If you control a commander" (CR 903.3d: a permanent that is a commander);
+    /// `own`: one you own as well ("if you control your commander"). Not inside the layer
+    /// walk (card-db refuses it in a static ability's condition).
+    ControlCommander {
+        own: bool,
+    },
+    /// "If its [evoke] cost was paid": the permanent the ability is on was the spell cast
+    /// with that alternative cost (CR 702.74a). Only `Evoke` so far.
+    CastFor(AltKindName),
+}
+
+/// An [`AltKind`] by name, for conditions about how a spell was cast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AltKindName {
+    Evoke,
 }
 
 /// How a counted amount is compared with a number.
@@ -1273,6 +1291,80 @@ pub struct Cost {
     pub discard_self: bool,
     /// "Exile this card from your graveyard": for an ability activated from the graveyard.
     pub exile_self: bool,
+    /// "Exile N [cards] from your hand", chosen as the cost is paid (never the card being
+    /// cast: it is on the stack by then).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exile_from_hand: Option<CostChoice>,
+    /// "Return N [permanents] you control to their owner's hand", chosen as the cost is paid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_to_hand: Option<CostChoice>,
+    /// "Pay X life", X announced as the spell is cast (CR 107.3a): only in a spell's
+    /// additional cost (card-db), on top of `life`.
+    #[serde(skip_serializing_if = "core::ops::Not::not")]
+    pub life_x: bool,
+}
+
+impl Cost {
+    /// The non-mana parts of `self` and of `other` together: an alternative cost and the
+    /// spell's additional cost are paid together (CR 118.9d, 601.2f). `None` when both
+    /// choose the same kind of thing (card-db refuses such a card).
+    pub fn with(&self, other: &Cost) -> Option<Cost> {
+        fn one<T: Clone>(a: &Option<T>, b: &Option<T>) -> Option<Option<T>> {
+            match (a, b) {
+                (Some(_), Some(_)) => None,
+                (a, b) => Some(a.clone().or_else(|| b.clone())),
+            }
+        }
+        Some(Cost {
+            mana: self.mana.clone(),
+            tap: self.tap || other.tap,
+            sacrifice_self: self.sacrifice_self || other.sacrifice_self,
+            sacrifice: one(&self.sacrifice, &other.sacrifice)?,
+            discard: one(&self.discard, &other.discard)?,
+            life: self.life + other.life,
+            discard_self: self.discard_self || other.discard_self,
+            exile_self: self.exile_self || other.exile_self,
+            exile_from_hand: one(&self.exile_from_hand, &other.exile_from_hand)?,
+            return_to_hand: one(&self.return_to_hand, &other.return_to_hand)?,
+            life_x: self.life_x || other.life_x,
+        })
+    }
+}
+
+/// A cost that may be paid rather than a spell's mana cost (CR 118.9), and what choosing it
+/// means for the spell ([`AbilityDef::AlternativeCost`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AltCost {
+    pub kind: AltKind,
+    /// What is paid rather than the mana cost: `cost.mana` (none: "without paying its mana
+    /// cost") and the other parts. The spell's additional costs, cost increases (commander
+    /// tax) and reductions apply to it as well (CR 118.9d).
+    pub cost: Cost,
+    /// "If [condition], you may …": checked for the caster as casting begins.
+    #[serde(default)]
+    pub only_if: Option<Condition>,
+}
+
+/// Which kind of alternative cost an [`AltCost`] is.
+// Built once when the catalog loads, then only read (as `AbilityDef`).
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AltKind {
+    /// "You may [cost] rather than pay this spell's mana cost" / "you may cast this spell
+    /// without paying its mana cost" (CR 118.9): from wherever the card may be cast.
+    Rather,
+    /// CR 702.34a: "You may cast this card from your graveyard by paying [cost] rather than
+    /// paying its mana cost" and "If the flashback cost was paid, exile this card instead
+    /// of putting it anywhere else any time it would leave the stack."
+    Flashback,
+    /// CR 702.74a: "You may cast this card by paying [cost] rather than paying its mana
+    /// cost"; the card's "when this enters, if its evoke cost was paid, its controller
+    /// sacrifices it" is a triggered ability of its own (`Condition::CastFor`).
+    Evoke,
+    /// CR 702.96a: "You may choose to pay [cost] rather than pay this spell's mana cost"
+    /// and, if you did, the spell's text with "target" changed to "each": `Body` is that
+    /// text (no targets, CR 702.96b).
+    Overload(Body),
 }
 
 /// Where the card with an activated ability must be for the ability to be activated
@@ -1730,6 +1822,10 @@ pub enum Effect {
         test: Condition,
         then: Box<Effect>,
     },
+    /// "Its controller sacrifices it" of the ability's source, whoever controls it now
+    /// (CR 702.74a, evoke; 701.21a): unlike [`Effect::SacrificeThis`] not only by the
+    /// ability's controller.
+    ControllerSacrificesThis,
 }
 
 /// A zone an effect takes cards out of as it resolves.

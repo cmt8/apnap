@@ -82,6 +82,10 @@ pub enum CastStage {
     /// CR 601.2g: mana abilities, until the pool covers the mana in the cost.
     Pay,
     PayGeneric,
+    /// CR 601.2h: the cards to exile from the hand, then the permanents to return to the
+    /// hand, for the cost (after `ChooseDiscard`).
+    ChooseExile,
+    ChooseReturn,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +118,16 @@ pub struct CastFrame {
     /// player stopped, or nothing else can be targeted).
     #[serde(default)]
     pub targets_closed: Vec<bool>,
+    /// The alternative cost chosen as casting began (CR 601.2b, 118.9a): an ability of the
+    /// card ([`super::altcost`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt: Option<AbilityId>,
+    /// The cards chosen to be exiled from the hand, and the permanents chosen to be
+    /// returned to the hand, as part of the cost.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pay_exile: Vec<ObjectId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pay_return: Vec<ObjectId>,
 }
 
 /// CR 903.8: the commander tax `p` would pay to cast `card` from the command zone now.
@@ -230,6 +244,23 @@ fn extra_payable(st: &GameState, p: PlayerId, source: &CastSource, prop: &Propos
         .as_ref()
         .is_none_or(|ch| discard_candidates(st, p, ch, card).len() >= ch.count as usize)
         && st.player(p).life >= prop.extra.life as i32
+        && prop
+            .extra
+            .exile_from_hand
+            .as_ref()
+            .is_none_or(|ch| discard_candidates(st, p, ch, Some(this)).len() >= ch.count as usize)
+        && prop.extra.return_to_hand.as_ref().is_none_or(|ch| {
+            sacrifice_candidates(st, p, ch, this, prop.sacrifice).len() >= ch.count as usize
+        })
+}
+
+/// [`proposal`], with the alternative cost `alt` chosen (CR 601.2b, 118.9).
+fn proposal_with(st: &GameState, source: &CastSource, alt: Option<AbilityId>) -> Proposal {
+    let mut prop = proposal(st, source);
+    if let Some(alt) = alt {
+        super::altcost::apply(st, alt, &mut prop.cost, &mut prop.body, &mut prop.extra);
+    }
+    prop
 }
 
 fn proposal(st: &GameState, source: &CastSource) -> Proposal {
@@ -491,7 +522,13 @@ fn goal(
         payee,
         tap: prop.tap,
         sacrifice: prop.sacrifice,
-        sac: prop.extra.sacrifice.clone(),
+        // A permanent chosen to be returned to the hand can't have been sacrificed for mana
+        // either (card-db refuses a cost that both sacrifices and returns).
+        sac: prop
+            .extra
+            .sacrifice
+            .clone()
+            .or_else(|| prop.extra.return_to_hand.clone()),
         sac_source: cost_source(source),
         life: prop.extra.life,
     }
@@ -597,6 +634,16 @@ pub(crate) fn castable_faces(st: &GameState, card: ObjectId) -> Vec<u8> {
 
 /// Whether `p` may begin casting/activating `source` now and could complete it (D-019).
 pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool {
+    can_begin_with(st, p, source, None)
+}
+
+/// [`can_begin`], casting the card with the alternative cost `alt` (CR 601.2b, 118.9).
+pub(crate) fn can_begin_with(
+    st: &GameState,
+    p: PlayerId,
+    source: CastSource,
+    alt: Option<AbilityId>,
+) -> bool {
     match &source {
         CastSource::Card(_) | CastSource::Face { .. } => {
             let (card, face) = spell_face(st, &source);
@@ -605,8 +652,13 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
             // where a rule lets you (CR 601.3: "you may cast … from your graveyard") — the
             // rule judged by the face being cast (CR 712.8c) — or a card you sent on an
             // Adventure (CR 716.3d).
-            let from_ok = (o.owner == p && o.zone == Zone::Command && st.is_commander(card))
+            let mut from_ok = (o.owner == p && o.zone == Zone::Command && st.is_commander(card))
                 || crate::players::may_play_face(st, p, card, face);
+            // CR 601.2b, 118.9: an alternative cost of the face being cast; flashback is
+            // its own permission to cast from the graveyard (CR 702.34a).
+            if let Some(alt) = alt {
+                from_ok = super::altcost::may_begin(st, p, card, alt, from_ok);
+            }
             // CR 712.8b: another face only of a modal double-faced card (or a half of a
             // split card, which is never cast whole: CR 709.3).
             if face != 0 && !castable_faces(st, card).contains(&face) {
@@ -670,7 +722,7 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
             }
         }
     }
-    let prop = proposal(st, &source);
+    let prop = proposal_with(st, &source, alt);
     if let Some(b) = &prop.body
         && !body_possible(st, b, p, ability_source(st, &source))
     {
@@ -717,6 +769,18 @@ impl CastFrame {
             pay_discard: Vec::new(),
             generic: [0; 6],
             targets_closed: Vec::new(),
+            alt: None,
+            pay_exile: Vec::new(),
+            pay_return: Vec::new(),
+        }
+    }
+
+    /// Cast a card (`Card` or `Face`) with the alternative cost `alt` of the face being
+    /// cast (one `can_begin_with` allows).
+    pub(crate) fn with_alt(player: PlayerId, source: CastSource, alt: AbilityId) -> Self {
+        CastFrame {
+            alt: Some(alt),
+            ..CastFrame::new(player, source)
         }
     }
 
@@ -738,10 +802,23 @@ impl CastFrame {
         f
     }
 
-    /// The proposal's body/cost, read through the *current* source object.
+    /// The proposal's body/cost, read through the *current* source object; "pay X life"
+    /// with the X announced (CR 107.3a).
     fn proposal(&self, st: &GameState) -> Proposal {
+        let mut prop = self.proposal_as_written(st);
+        if prop.extra.life_x {
+            prop.extra.life += self.x;
+        }
+        prop
+    }
+
+    fn proposal_as_written(&self, st: &GameState) -> Proposal {
         match &self.source {
-            CastSource::Card(_) => proposal(st, &CastSource::Card(self.object.expect("announced"))),
+            CastSource::Card(_) => proposal_with(
+                st,
+                &CastSource::Card(self.object.expect("announced")),
+                self.alt,
+            ),
             s => proposal(st, s),
         }
     }
@@ -855,6 +932,11 @@ impl CastFrame {
                             },
                         ),
                     });
+                    // CR 601.2b: the alternative cost announced.
+                    if let Some(ability) = self.alt {
+                        let object = self.object.expect("announced");
+                        execute(st, GameAction::SetCastAlt { object, ability });
+                    }
                     self.stage = CastStage::Modes;
                 }
                 CastStage::Modes => {
@@ -912,8 +994,10 @@ impl CastFrame {
                 }
                 CastStage::X => {
                     // CR 107.3a / 601.2b: announce X; bounded by what can be paid.
-                    let prop = self.proposal(st);
-                    if prop.cost.as_ref().is_some_and(|c| c.has_x()) {
+                    let mut prop = self.proposal(st);
+                    // CR 107.3a: an X in the mana cost, or in an additional cost ("pay X
+                    // life").
+                    if prop.cost.as_ref().is_some_and(|c| c.has_x()) || prop.extra.life_x {
                         if let Some(inp) = input.take() {
                             let Response::Number(x) = inp.response else {
                                 unreachable!()
@@ -926,14 +1010,25 @@ impl CastFrame {
                         } else {
                             let mut max = 0;
                             let payee = self.payee();
-                            while feasible(
-                                st,
-                                p,
-                                &self.source,
-                                &prop,
-                                payee,
-                                &total(&prop.cost, max + 1, self.tax, self.discount),
-                            ) {
+                            let life = prop.extra.life;
+                            loop {
+                                // CR 119.4: no more life than they have.
+                                if prop.extra.life_x {
+                                    prop.extra.life = life + max + 1;
+                                    if st.player(p).life < prop.extra.life as i32 {
+                                        break;
+                                    }
+                                }
+                                if !feasible(
+                                    st,
+                                    p,
+                                    &self.source,
+                                    &prop,
+                                    payee,
+                                    &total(&prop.cost, max + 1, self.tax, self.discount),
+                                ) {
+                                    break;
+                                }
                                 max += 1;
                             }
                             return self.ask(
@@ -1076,8 +1171,59 @@ impl CastFrame {
                             return self.ask(kind, Primitive::PickN { min: n, max: n }, options);
                         }
                     }
-                    if sacrificing {
-                        self.stage = CastStage::ChooseDiscard;
+                    self.stage = if sacrificing {
+                        CastStage::ChooseDiscard
+                    } else {
+                        CastStage::ChooseExile
+                    };
+                }
+                // CR 601.2h: the cards exiled from the hand and the permanents returned to
+                // the hand for the cost, chosen like the sacrifices.
+                CastStage::ChooseExile | CastStage::ChooseReturn => {
+                    let exiling = self.stage == CastStage::ChooseExile;
+                    if let Some(inp) = input.take() {
+                        let picked: Vec<ObjectId> = inp
+                            .picked()
+                            .into_iter()
+                            .map(|o| match o {
+                                OptionDesc::Card { card } => *card,
+                                other => unreachable!("{other:?}"),
+                            })
+                            .collect();
+                        if exiling {
+                            self.pay_exile = picked;
+                        } else {
+                            self.pay_return = picked;
+                        }
+                    } else {
+                        let prop = self.proposal(st);
+                        let this = cost_source(&self.source);
+                        let (choice, pool, kind) = if exiling {
+                            let choice = prop.extra.exile_from_hand.clone();
+                            // Never the card whose cost it is (card-db: "another card").
+                            let pool = choice
+                                .as_ref()
+                                .map(|ch| discard_candidates(st, p, ch, Some(this)));
+                            (choice, pool, ChoiceKind::ExileFromHand)
+                        } else {
+                            let choice = prop.extra.return_to_hand.clone();
+                            let pool = choice
+                                .as_ref()
+                                .map(|ch| sacrifice_candidates(st, p, ch, this, prop.sacrifice));
+                            (choice, pool, ChoiceKind::ReturnToHand)
+                        };
+                        if let (Some(choice), Some(pool)) = (choice, pool) {
+                            let n = choice.count as usize;
+                            assert!(pool.len() >= n, "cost not payable: D-019 violated");
+                            let options = pool
+                                .into_iter()
+                                .map(|card| OptionDesc::Card { card })
+                                .collect();
+                            return self.ask(kind, Primitive::PickN { min: n, max: n }, options);
+                        }
+                    }
+                    if exiling {
+                        self.stage = CastStage::ChooseReturn;
                     } else {
                         let prop = self.proposal(st);
                         return self.finish(st, prop);
@@ -1260,6 +1406,18 @@ impl CastFrame {
                 .iter()
                 .filter(|id| st.objects.get(id).is_some_and(|o| o.zone == Zone::Hand))
                 .map(|&id| Proposed::moving(id, Zone::Graveyard, MoveCause::Discard)),
+        );
+        events.extend(
+            self.pay_exile
+                .iter()
+                .filter(|id| st.objects.get(id).is_some_and(|o| o.zone == Zone::Hand))
+                .map(|&id| Proposed::moving(id, Zone::Exile, MoveCause::Rule)),
+        );
+        events.extend(
+            self.pay_return
+                .iter()
+                .filter(|id| on_battlefield(st, id))
+                .map(|&id| Proposed::moving(id, Zone::Hand, MoveCause::Rule)),
         );
         // "Discard this card" / "exile this card from your graveyard": the card the
         // ability is on, where the ability works from.
