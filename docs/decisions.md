@@ -1533,6 +1533,17 @@ Rules text: docs/rules-notes/402-305-401.5-rules-about-players.md.
   missing from spell kinds ("Spend this mana only to cast  spells"), and cost reductions
   read "Creature with power 4 or greater spells you cast" (now "Creature spells you cast
   with power 4 or greater").
+- **Merged onto D-067/D-068** (main at 3e37f8d): 9,776 → 9,891 of 34,463 scripts (28.7%);
+  precons 156 of 275 deck slots. No card of main's stopped compiling. Nine cards compile
+  only in the combination, all read against their Oracle text (Anvil of Bogardan, Price of
+  Knowledge, Rites of Flourishing, Mogis, Marang River Prowler, Infernal Reckoning,
+  Leeching Sliver, Stoneshaker Shaman); the ninth, Clash of Realities, gives its trigger
+  to Spirit *creatures* where the card says "all Spirits" and went into `SCRIPT_DIFFERS`.
+  Tests of the combination: a land played from the graveyard or the top of the library
+  is asked "as this enters" (D-067); additional land plays with lands that enter tapped;
+  "its controller loses 2 life" reaches a player with hexproof or shroud (CR 115.10a: the
+  player isn't targeted). The golden re-bless is unchanged on top of main: only cmd-4p
+  seed 1, one `RemovedFromCombat` event more.
 - **Next:** alternative costs on a permission (Omniscience, One with the Multiverse,
   Bolas's Citadel) once the cast frame's payment rework lands; `MayPlayLimit` (Muldrotha,
   a once-per-turn permission counted per static ability); impulse draw ("you may play
