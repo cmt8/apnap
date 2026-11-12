@@ -2643,8 +2643,8 @@ Rules text: docs/rules-notes/707-copies.md. Tests: `crates/harness/tests/forge_c
   it choose again. (3) A copied "creature types are …" replaces all non-land subtypes.
 - Golden hashes: all 15 event logs unchanged; state hashes moved (the stable hasher writes
   a tag for each skipped `GameObject` field). Re-blessed.
-- 11,071 → 11,123 of 34,463 scripts (52 newly compiled, none lost, no existing text
-  changed); top 1,000 by EDHREC rank 601 → 606, top 5,000 1,782 → 1,809. All 52 read against
+- 11,071 → 11,123 (on main 31fa7b2: 11,301 → 11,353) of 34,463 scripts (52 newly compiled, none lost, no existing text
+  changed); top 1,000 by EDHREC rank 601 → 606 (on 31fa7b2: 609 → 614), top 5,000 1,782 → 1,809 (1,800 → 1,827). All 52 read against
   their Oracle text. Among the most played: Helm of the Host, Second Harvest, Sculpting
   Steel, Vesuva, Clone, Irenicus's Vile Duplication, Pack Rat, Relm's Sketching,
   Mirrormade, Copy Enchantment, Glasspool Mimic, Stunt Double, Quicksilver Gargantuan.
