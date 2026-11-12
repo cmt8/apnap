@@ -2458,6 +2458,26 @@ impl ResolveFrame {
                 self.work.push(Work::Proliferate);
                 Vec::new()
             }
+            // CR 701.19a: a regeneration shield on the permanent, if it is still there.
+            Effect::Regenerate { what } => {
+                if let Some(object) = self.obj(st, k, what) {
+                    execute(st, GameAction::AddRegenerationShield { object });
+                }
+                Vec::new()
+            }
+            // CR 701.19c: this destruction can't be replaced by regeneration.
+            Effect::CantBeRegenerated(inner) => self
+                .eval(st, k, *inner)
+                .into_iter()
+                .map(|mut e| {
+                    if let Proposed::Move { cause, .. } = &mut e
+                        && *cause == MoveCause::Destroy
+                    {
+                        *cause = MoveCause::DestroyNoRegen;
+                    }
+                    e
+                })
+                .collect(),
             // CR 701.24a.
             Effect::Shuffle { who } => {
                 let players = self.players_apnap(st, k, who);

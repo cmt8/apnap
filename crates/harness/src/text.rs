@@ -976,6 +976,10 @@ impl Narrator {
                 );
                 self.emit(l, out);
             }
+            Event::Regenerated { object } => {
+                let l = format!("  {} regenerates", self.name(*object));
+                self.emit(l, out);
+            }
             Event::RemovedFromCombat { object } => {
                 let l = format!("  {} is removed from combat", self.name(*object));
                 self.emit(l, out);
@@ -1395,7 +1399,7 @@ pub fn option_line(v: &PlayerView, o: &OptionDesc) -> String {
                 ability.index
             )
         }
-        OptionDesc::Shield { id } => format!("prevention shield #{id}"),
+        OptionDesc::Shield { id } => format!("shield #{id}"),
         OptionDesc::Lasting { id, index } => format!("lasting effect #{id} (part {index})"),
         OptionDesc::Accept => "yes".into(),
         OptionDesc::Decline => "no".into(),
