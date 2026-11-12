@@ -9,7 +9,8 @@ use crate::events::Event;
 use crate::ids::ObjectId;
 use crate::layers::controller_of;
 use crate::replacement::{
-    MoveCause, Pending, Proposed, RepKey, affected_player, applicable, apply,
+    MoveCause, Pending, Proposed, RepKey, affected_player, applicable, apply, apply_chosen,
+    entry_choice,
 };
 use crate::stack::StackKind;
 use crate::state::GameState;
@@ -25,6 +26,10 @@ pub struct ApplyFrame {
     pub queue: Vec<Pending>,
     /// Fully modified events, performed together at the end.
     pub ready: Vec<Proposed>,
+    /// An effect applying to the front event that waits for its controller's choice
+    /// (CR 614.12a: "as this enters, you may pay 2 life").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choosing: Option<RepKey>,
 }
 
 impl ApplyFrame {
@@ -55,6 +60,7 @@ impl ApplyFrame {
         ApplyFrame {
             queue: queue.into_iter().map(|(_, p)| p).collect(),
             ready: Vec::new(),
+            choosing: None,
         }
     }
 
@@ -73,29 +79,81 @@ impl ApplyFrame {
         }
     }
 
+    /// Apply `key` to the front event, unless it asks its controller something first
+    /// (CR 614.12a): then the question to suspend on.
+    fn apply_or_ask(&mut self, st: &mut GameState, key: RepKey) -> Option<Flow> {
+        // CR 614.13a: what moves in this batch can't be chosen for its cost.
+        let moving: Vec<ObjectId> = self
+            .queue
+            .iter()
+            .map(|p| &p.event)
+            .chain(self.ready.iter())
+            .filter_map(|e| match e {
+                Proposed::Move { object, .. } => Some(*object),
+                _ => None,
+            })
+            .collect();
+        if let Some((player, kind, options)) = entry_choice(st, key, &self.queue[0].event, &moving)
+        {
+            self.choosing = Some(key);
+            return Some(Flow::ask_one(
+                Frame::Apply(self.clone()),
+                player,
+                kind,
+                options,
+            ));
+        }
+        self.apply_front(st, key);
+        None
+    }
+
     pub(crate) fn run(mut self, st: &mut GameState, input: Option<Input>) -> Flow {
         if let Some(inp) = input {
-            match inp.picked_one().cloned() {
-                Some(OptionDesc::Replacement {
-                    source,
-                    ability,
-                    nth,
-                }) => self.apply_front(
-                    st,
-                    RepKey::Static {
+            if let Some(key) = self.choosing.take() {
+                // The answer to an "as this enters" choice.
+                let answer = inp.picked_one().cloned().expect("one option is picked");
+                let mut p = self.queue.remove(0);
+                p.applied.push(key);
+                let (event, caused) = apply_chosen(st, key, p.event, &answer);
+                self.queue.insert(
+                    0,
+                    Pending {
+                        event,
+                        applied: p.applied,
+                    },
+                );
+                if !caused.is_empty() {
+                    // Life paid now, before the permanent enters (CR 119.4, 614.12a); the
+                    // rest of this batch carries on afterwards.
+                    let pay = ApplyFrame::new(st, caused);
+                    return Flow::Continue(alloc::vec![Frame::Apply(self), Frame::Apply(pay)]);
+                }
+            } else {
+                let key = match inp.picked_one().cloned() {
+                    Some(OptionDesc::Replacement {
                         source,
                         ability,
                         nth,
-                    },
-                ),
-                Some(OptionDesc::Shield { id }) => self.apply_front(st, RepKey::Shield(id)),
-                Some(OptionDesc::Lasting { id, index }) => {
-                    self.apply_front(st, RepKey::Lasting { id, index })
+                    }) => Some(RepKey::Static {
+                        source,
+                        ability,
+                        nth,
+                    }),
+                    Some(OptionDesc::Shield { id }) => Some(RepKey::Shield(id)),
+                    Some(OptionDesc::Lasting { id, index }) => Some(RepKey::Lasting { id, index }),
+                    Some(OptionDesc::Accept) => Some(RepKey::CommanderReturn),
+                    // Declining an optional effect: it won't be offered again for this event.
+                    Some(OptionDesc::Decline) => {
+                        self.queue[0].applied.push(RepKey::CommanderReturn);
+                        None
+                    }
+                    o => unreachable!("not a replacement option: {o:?}"),
+                };
+                if let Some(key) = key
+                    && let Some(ask) = self.apply_or_ask(st, key)
+                {
+                    return ask;
                 }
-                Some(OptionDesc::Accept) => self.apply_front(st, RepKey::CommanderReturn),
-                // Declining an optional effect: it won't be offered again for this event.
-                Some(OptionDesc::Decline) => self.queue[0].applied.push(RepKey::CommanderReturn),
-                o => unreachable!("not a replacement option: {o:?}"),
             }
         }
         while let Some(front) = self.queue.first() {
@@ -106,7 +164,12 @@ impl ApplyFrame {
                     self.ready.push(p.event);
                 }
                 // CR 616.1f: one applicable (mandatory) effect simply applies; then re-check.
-                [only] if !only.optional() => self.apply_front(st, *only),
+                [only] if !only.optional() => {
+                    let only = *only;
+                    if let Some(ask) = self.apply_or_ask(st, only) {
+                        return ask;
+                    }
+                }
                 // CR 616.1 / 616.1e: the affected player chooses one to apply.
                 many => {
                     let player = affected_player(st, &front.event);

@@ -13,7 +13,7 @@ pub mod scryfall;
 
 use card_model::{
     AbilityDef, ActivationZone, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript,
-    CardType, Cost, Effect, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces, Supertype,
+    CardType, Condition, Cost, Effect, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces, Supertype,
     TargetFilter, TargetRef, Trigger, Who,
 };
 use serde::Deserialize;
@@ -395,7 +395,15 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                         !needs_player || matches!(to, card_model::DamageTo::Player(_))
                     }
                     Trigger::GainsLife(_) | Trigger::LosesLife(_) => true,
-                    Trigger::Draws { .. } | Trigger::Discards(_) => needs_player,
+                    // Who drew or discarded, who cast the spell, whose step it is.
+                    Trigger::Draws { .. }
+                    | Trigger::Discards(_)
+                    | Trigger::Cast { .. }
+                    | Trigger::BeginningOf { .. }
+                    | Trigger::Attacks(_)
+                    | Trigger::AttacksAlone(_)
+                    | Trigger::BecomesBlocked(_)
+                    | Trigger::Unblocked(_) => needs_player,
                     _ => false,
                 }),
                 _ => false,
@@ -683,14 +691,20 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                         | (Replaces::PutCountersOnYourPermanents, ReplaceWith::Twice)
                         | (Replaces::CardToGraveyard, ReplaceWith::Exile)
                         | (
-                            Replaces::ThisDies,
-                            ReplaceWith::Exile | ReplaceWith::ShuffleIntoLibrary
+                            Replaces::ThisDies | Replaces::Dies(_) | Replaces::ThisToGraveyard,
+                            ReplaceWith::Exile
+                                | ReplaceWith::ShuffleIntoLibrary
+                                | ReplaceWith::RevealShuffleIntoLibrary
                         )
                         | (
                             Replaces::ThisEnters,
                             ReplaceWith::EntersTapped
                                 | ReplaceWith::EntersWithCounters { .. }
                                 | ReplaceWith::EntersWithCounted { .. }
+                                // Its own: "you" is whoever it enters under the control of.
+                                | ReplaceWith::EntersTappedUnless(_)
+                                | ReplaceWith::EntersTappedUnlessYou(_)
+                                | ReplaceWith::EntersOnlyIfYou(_)
                         )
                         | (
                             Replaces::OtherEnters(_),
@@ -708,6 +722,14 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 {
                     p.push(at(
                         "counters counted from something a replacement can't know".into(),
+                    ));
+                }
+                // Judged before the permanent enters, with no spell or ability resolving.
+                if let ReplaceWith::EntersTappedUnless(Condition::Compare { amount, .. }) = with
+                    && !amount.stands_alone()
+                {
+                    p.push(at(
+                        "a condition counted from something a replacement can't know".into(),
                     ));
                 }
                 if !ok {
@@ -800,6 +822,35 @@ fn check_cost(cost: &Cost, p: &mut dyn FnMut(String)) {
     }
 }
 
+/// The target slots whose power, toughness or mana value an effect reads.
+fn amounts_of_targets(e: &Effect, out: &mut Vec<u8>, hands: &mut Vec<PlayerRef>) {
+    // Walk the serialized form: amounts sit in many places of many effects.
+    fn walk(v: &serde_json::Value, out: &mut Vec<u8>, hands: &mut Vec<PlayerRef>) {
+        match v {
+            serde_json::Value::Object(m) => {
+                if let Some(serde_json::Value::Object(t)) = m.get("OfTarget")
+                    && let Some(slot) = t.get("slot").and_then(serde_json::Value::as_u64)
+                {
+                    out.push(slot as u8);
+                }
+                if let Some(who) = m.get("HandOf")
+                    && let Ok(who) = serde_json::from_value::<PlayerRef>(who.clone())
+                {
+                    hands.push(who);
+                }
+                m.values().for_each(|x| walk(x, out, hands));
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, out, hands)),
+            _ => {}
+        }
+    }
+    if let Ok(v) = serde_json::to_value(e) {
+        walk(&v, out, hands);
+    }
+    out.sort_unstable();
+    out.dedup();
+}
+
 /// A selector used where "another" has no meaning must not say it.
 fn selector(_s: &card_model::Selector, _p: &mut dyn FnMut(String)) {}
 
@@ -832,15 +883,42 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         }
     }
     let amount = |a: &Amount, p: &mut dyn FnMut(String)| check_amount(a, has_x, &selector, p);
-    let player = |r: &PlayerRef, p: &mut dyn FnMut(String)| {
-        if let PlayerRef::Target(i) = r {
-            match mode.targets.get(*i as usize) {
-                Some(f) if f.allows_players() => {}
-                Some(f) => p(format!("PlayerRef::Target({i}) refers to a {f:?} target")),
-                None => p(format!("PlayerRef::Target({i}) has no target slot")),
+    // "Its controller", "its power": of a target that is a spell or a permanent.
+    let of_object =
+        |what: &str, i: u8, p: &mut dyn FnMut(String)| match mode.targets.get(i as usize) {
+            Some(TargetFilter::Player | TargetFilter::Opponent) => {
+                p(format!("{what}({i}) refers to a player target"))
             }
-        }
+            Some(TargetFilter::CardInGraveyard { .. }) => p(format!(
+                "{what}({i}): a card in a graveyard has no controller"
+            )),
+            Some(_) => {}
+            None => p(format!("{what}({i}) has no target slot")),
+        };
+    let player = |r: &PlayerRef, p: &mut dyn FnMut(String)| match r {
+        PlayerRef::Target(i) => match mode.targets.get(*i as usize) {
+            Some(f) if f.allows_players() => {}
+            Some(f) => p(format!("PlayerRef::Target({i}) refers to a {f:?} target")),
+            None => p(format!("PlayerRef::Target({i}) has no target slot")),
+        },
+        PlayerRef::ControllerOf(i) => of_object("PlayerRef::ControllerOf", *i, p),
+        PlayerRef::OwnerOf(i) => of_object("PlayerRef::OwnerOf", *i, p),
+        _ => {}
     };
+    // Amounts read off a target, or off another player's hand.
+    let (mut targets_read, mut hands) = (Vec::new(), Vec::new());
+    amounts_of_targets(e, &mut targets_read, &mut hands);
+    for i in targets_read {
+        of_object("Amount::OfTarget", i, p);
+    }
+    for who in hands {
+        match who {
+            PlayerRef::Each | PlayerRef::EachOpponent => {
+                p("Amount::HandOf counts one player's hand".into())
+            }
+            other => player(&other, p),
+        }
+    }
     let obj = |r: &ObjRef, p: &mut dyn FnMut(String)| {
         if let ObjRef::Target(i) = r {
             match mode.targets.get(*i as usize) {
@@ -861,6 +939,17 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         }
         Effect::SetX(a) => amount(a, p),
         Effect::May(inner) => check_effect(inner, mode, has_x, p),
+        Effect::PlayerMay { who, effect } => {
+            match who {
+                PlayerRef::Each | PlayerRef::EachOpponent => {
+                    p("one player decides a \"may\"".into())
+                }
+                // That is `May`.
+                PlayerRef::You => p("PlayerMay by you: write May".into()),
+                other => player(other, p),
+            }
+            check_effect(effect, mode, has_x, p);
+        }
         Effect::Pay {
             who,
             cost,
@@ -870,11 +959,6 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             match who {
                 PlayerRef::Each | PlayerRef::EachOpponent => {
                     p("a cost paid on resolution is paid by one player".into())
-                }
-                PlayerRef::ControllerOf(i) => {
-                    if mode.targets.get(*i as usize).is_none() {
-                        p(format!("PlayerRef::ControllerOf({i}) has no target slot"));
-                    }
                 }
                 other => player(other, p),
             }
@@ -896,7 +980,11 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             for x in v {
                 if matches!(
                     x,
-                    Effect::Seq(_) | Effect::May(_) | Effect::Together(_) | Effect::SetX(_)
+                    Effect::Seq(_)
+                        | Effect::May(_)
+                        | Effect::PlayerMay { .. }
+                        | Effect::Together(_)
+                        | Effect::SetX(_)
                 ) {
                     p("Together holds single instructions only".into());
                 }
@@ -932,7 +1020,15 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
                 p("ApplyAll needs at least one effect".into());
             }
         }
-        Effect::DealDamage { to, amount: a, .. } => {
+        Effect::DealDamage { to, amount: a, by } => {
+            if let card_model::DamageBy::Target(i) = by {
+                match mode.targets.get(*i as usize) {
+                    Some(TargetFilter::Creature | TargetFilter::Permanent(_)) => {}
+                    other => p(format!(
+                        "DamageBy::Target({i}) needs a permanent, got {other:?}"
+                    )),
+                }
+            }
             match to {
                 TargetRef::Players(r) => player(r, p),
                 TargetRef::Object(r) => obj(r, p),

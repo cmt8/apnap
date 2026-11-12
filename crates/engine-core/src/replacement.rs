@@ -246,6 +246,33 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
         for (i, a) in st.card_def(*object).abilities.iter().enumerate() {
             if let AbilityDef::Replacement {
                 replaces: Replaces::ThisEnters,
+                with,
+            } = a
+                && !entering_unchanged(st, with, &p.event)
+            {
+                out.push(RepKey::Static {
+                    source: *object,
+                    ability: AbilityId::printed(st.object(*object).card, i as u16),
+                    nth: 0,
+                });
+            }
+        }
+    }
+    // CR 113.6b: "if this card would be put into a graveyard from anywhere" works wherever
+    // the card is (on the battlefield it is one of the abilities above).
+    if let Proposed::Move {
+        object,
+        to: Zone::Graveyard,
+        ..
+    } = &p.event
+        && st
+            .objects
+            .get(object)
+            .is_some_and(|o| o.zone != Zone::Battlefield)
+    {
+        for (i, a) in st.card_def(*object).abilities.iter().enumerate() {
+            if let AbilityDef::Replacement {
+                replaces: Replaces::ThisToGraveyard,
                 ..
             } = a
             {
@@ -282,6 +309,153 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
     }
     out.retain(|k| !p.applied.contains(k));
     out
+}
+
+/// The player a permanent entering with this event will enter under the control of
+/// (CR 110.2, 110.2a): "you" for its own "as this enters" abilities (CR 109.5).
+pub fn entering_controller(st: &GameState, ev: &Proposed) -> Option<PlayerId> {
+    match ev {
+        Proposed::Move {
+            object,
+            to: Zone::Battlefield,
+            controller,
+            ..
+        } => st
+            .objects
+            .get(object)
+            .map(|o| controller.unwrap_or(o.owner)),
+        _ => None,
+    }
+}
+
+/// "Enters tapped unless [condition]" whose condition holds: the effect doesn't modify the
+/// event (judged on the battlefield as it is before the permanent enters, CR 614.12).
+fn entering_unchanged(st: &GameState, with: &ReplaceWith, ev: &Proposed) -> bool {
+    let ReplaceWith::EntersTappedUnless(cond) = with else {
+        return false;
+    };
+    let (Some(you), Proposed::Move { object, .. }) = (entering_controller(st, ev), ev) else {
+        return false;
+    };
+    crate::triggers::condition_holds(st, Some(cond), you, *object)
+}
+
+/// A choice an effect asks for as it is applied (CR 614.12a): "as this enters, you may
+/// pay 2 life" / "… reveal an Island card from your hand". `None` when there is nothing to
+/// choose — the effect doesn't ask for one, or the player can't do it (CR 118.3, 119.4: too
+/// little life; no such card) — and the effect simply applies.
+pub fn entry_choice(
+    st: &GameState,
+    key: RepKey,
+    ev: &Proposed,
+    moving: &[ObjectId],
+) -> Option<(
+    PlayerId,
+    crate::decision::ChoiceKind,
+    Vec<crate::decision::OptionDesc>,
+)> {
+    use crate::decision::{ChoiceKind, OptionDesc};
+    let RepKey::Static {
+        source, ability, ..
+    } = key
+    else {
+        return None;
+    };
+    let act = match st.catalog.ability(ability) {
+        AbilityDef::Replacement {
+            with: ReplaceWith::EntersTappedUnlessYou(act) | ReplaceWith::EntersOnlyIfYou(act),
+            ..
+        } => act,
+        _ => return None,
+    };
+    let player = entering_controller(st, ev)?;
+    let Proposed::Move { object, tapped, .. } = ev else {
+        return None;
+    };
+    let mut options = match act {
+        card_model::AsEnters::PayLife(n) => {
+            if st.player(player).life < *n as i32 {
+                return None;
+            }
+            alloc::vec![OptionDesc::Accept]
+        }
+        // CR 614.13a: not the card that is becoming the permanent, nor any other card
+        // moving at the same time.
+        card_model::AsEnters::Reveal(sel) | card_model::AsEnters::Discard(sel) => st
+            .zones
+            .list(Zone::Hand, player)
+            .iter()
+            .filter(|&&c| {
+                c != *object && !moving.contains(&c) && crate::targeting::card_matches(st, c, sel)
+            })
+            .map(|&card| OptionDesc::Card { card })
+            .collect(),
+    };
+    if options.is_empty() {
+        return None;
+    }
+    options.push(OptionDesc::Decline);
+    Some((
+        player,
+        ChoiceKind::AsEnters {
+            object: source,
+            ability,
+            tapped: *tapped,
+        },
+        options,
+    ))
+}
+
+/// Apply `key` — an effect that asked for a choice (see [`entry_choice`]) — with the
+/// answer. Returns the modified event and the events the answer itself causes: paying life
+/// is losing it (CR 119.4), a replaceable event of its own that happens now, before the
+/// permanent enters.
+pub fn apply_chosen(
+    st: &mut GameState,
+    key: RepKey,
+    ev: Proposed,
+    answer: &crate::decision::OptionDesc,
+) -> (Proposed, Vec<Proposed>) {
+    use crate::decision::OptionDesc;
+    let RepKey::Static {
+        source, ability, ..
+    } = key
+    else {
+        unreachable!("only an ability asks as it applies")
+    };
+    let (act, otherwise) = match st.catalog.ability(ability).clone() {
+        AbilityDef::Replacement {
+            with: ReplaceWith::EntersTappedUnlessYou(act),
+            ..
+        } => (act, ReplaceWith::EntersTapped),
+        AbilityDef::Replacement {
+            with: ReplaceWith::EntersOnlyIfYou(act),
+            ..
+        } => (act.clone(), ReplaceWith::EntersOnlyIfYou(act)),
+        _ => unreachable!("only \"as this enters, you may …\" asks"),
+    };
+    st.emit(crate::events::Event::Replaced { source });
+    let player = entering_controller(st, &ev).expect("an entering permanent");
+    match (act, answer) {
+        (card_model::AsEnters::PayLife(n), OptionDesc::Accept) => {
+            (ev, alloc::vec![Proposed::LoseLife { player, amount: n }])
+        }
+        (card_model::AsEnters::Reveal(_), OptionDesc::Card { card }) => {
+            // CR 701.20a–b: shown to all players; it stays in the hand.
+            st.emit(crate::events::Event::Revealed {
+                player,
+                cards: alloc::vec![*card],
+            });
+            (ev, Vec::new())
+        }
+        // CR 701.9: discarded now, before the permanent enters.
+        (card_model::AsEnters::Discard(_), OptionDesc::Card { card }) => (
+            ev,
+            alloc::vec![Proposed::moving(*card, Zone::Graveyard, MoveCause::Discard)],
+        ),
+        (_, OptionDesc::Decline) => (modify(ev, otherwise), Vec::new()),
+        (_, o) => unreachable!("not an answer to an \"as this enters\" choice: {o:?}"),
+    }
 }
 
 /// Is `id` — something that deals or is dealt damage — what `filter` says, for `who`?
@@ -406,6 +580,44 @@ fn applies(st: &GameState, who: Bearer<'_>, replaces: &Replaces, ev: &Proposed) 
                 ..
             },
         ) => *object == source && st.object(source).zone == Zone::Battlefield,
+        // CR 700.4: "dies" — from the battlefield, judged as it is there now (its last
+        // existence on the battlefield).
+        (
+            Replaces::Dies(sel),
+            Proposed::Move {
+                object,
+                to: Zone::Graveyard,
+                ..
+            },
+        ) => st.objects.get(object).is_some_and(|o| {
+            o.zone == Zone::Battlefield && {
+                let (attacking, blocking) = crate::layers::combat_role(st, *object);
+                crate::layers::matches_parts(
+                    sel,
+                    &crate::layers::chars(st, *object),
+                    crate::layers::Facts {
+                        id: *object,
+                        controller: crate::layers::controller_of(st, *object),
+                        owner: o.owner,
+                        is_token: o.is_token,
+                        tapped: o.tapped,
+                        attacking,
+                        blocking,
+                    },
+                    source,
+                    you,
+                )
+            }
+        }),
+        // From the battlefield; from anywhere else see `applicable`.
+        (
+            Replaces::ThisToGraveyard,
+            Proposed::Move {
+                object,
+                to: Zone::Graveyard,
+                ..
+            },
+        ) => *object == source,
         // CR 614.12: checked against the permanent as it would exist on the battlefield.
         (
             Replaces::OtherEnters(sel),
@@ -533,6 +745,10 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
                 };
                 with = ReplaceWith::EntersWithCounters { kind: *kind, n };
             }
+            // "Enters tapped unless …" whose condition has come to hold meanwhile.
+            if entering_unchanged(st, &with, &ev) {
+                return Some(ev);
+            }
             st.emit(crate::events::Event::Replaced { source });
             replace(st, ev, with)
         }
@@ -542,6 +758,16 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
 /// The event as `with` changes it; `None` if it no longer happens (CR 615.1a: prevented
 /// damage isn't dealt).
 fn replace(st: &mut GameState, ev: Proposed, with: ReplaceWith) -> Option<Proposed> {
+    // CR 701.20a: shown to all players first.
+    if with == ReplaceWith::RevealShuffleIntoLibrary
+        && let Proposed::Move { object, .. } = &ev
+    {
+        let player = st.object(*object).owner;
+        st.emit(crate::events::Event::Revealed {
+            player,
+            cards: alloc::vec![*object],
+        });
+    }
     if with == ReplaceWith::Prevent {
         if let Proposed::Damage { target, amount, .. } = &ev {
             st.emit(crate::events::Event::DamagePrevented {
@@ -573,9 +799,11 @@ fn modify(mut ev: Proposed, with: ReplaceWith) -> Proposed {
                 attach_to,
                 ..
             },
-            ReplaceWith::Exile | ReplaceWith::ShuffleIntoLibrary,
+            ReplaceWith::Exile
+            | ReplaceWith::ShuffleIntoLibrary
+            | ReplaceWith::RevealShuffleIntoLibrary,
         ) => {
-            let library = with == ReplaceWith::ShuffleIntoLibrary;
+            let library = with != ReplaceWith::Exile;
             *to = if library { Zone::Library } else { Zone::Exile };
             *position = LibraryPosition::Top;
             *tapped = false;
@@ -583,7 +811,34 @@ fn modify(mut ev: Proposed, with: ReplaceWith) -> Proposed {
             *shuffle = library;
             *attach_to = None;
         }
-        (Proposed::Move { tapped, .. }, ReplaceWith::EntersTapped) => *tapped = true,
+        // "If you don't, put it into its owner's graveyard" (reached only when nothing was
+        // done instead).
+        (
+            Proposed::Move {
+                to,
+                position,
+                tapped,
+                counters,
+                shuffle,
+                attach_to,
+                ..
+            },
+            ReplaceWith::EntersOnlyIfYou(_),
+        ) => {
+            *to = Zone::Graveyard;
+            *position = LibraryPosition::Top;
+            *tapped = false;
+            counters.clear();
+            *shuffle = false;
+            *attach_to = None;
+        }
+        // (Reached only when the condition doesn't hold / nothing was paid or revealed.)
+        (
+            Proposed::Move { tapped, .. },
+            ReplaceWith::EntersTapped
+            | ReplaceWith::EntersTappedUnless(_)
+            | ReplaceWith::EntersTappedUnlessYou(_),
+        ) => *tapped = true,
         (Proposed::Move { counters, .. }, ReplaceWith::EntersWithCounters { kind, n }) => {
             if *n > 0 {
                 counters.push((*kind, *n))

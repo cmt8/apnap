@@ -8,7 +8,9 @@ use crate::cardview::{self, Badge, CardLook, Corner, Icon, Plate};
 use crate::combat::Plan;
 use crate::session::Session;
 use card_model::describe;
-use card_model::{AbilityDef, CardCatalog, CardDefId, CardType, CounterKind};
+use card_model::{
+    AbilityDef, AsEnters, CardCatalog, CardDefId, CardType, CounterKind, ReplaceWith,
+};
 use eframe::egui::{self, Color32, RichText, Stroke, vec2};
 use engine_core::decision::{ChoiceKind, OptionDesc, PendingDecision, Primitive, Response};
 use engine_core::stack::Target;
@@ -381,6 +383,7 @@ pub fn prompt(kind: ChoiceKind) -> &'static str {
         ChoiceKind::SurveilGraveyard => "Surveil: choose cards to put into your graveyard",
         ChoiceKind::OrderBottom => "Order the cards for the bottom (the last one is bottom-most)",
         ChoiceKind::AuraHost => "Choose what the Aura enchants",
+        ChoiceKind::AsEnters { .. } => "As it enters",
     }
 }
 
@@ -458,6 +461,31 @@ pub fn option_label(
             text.unwrap_or_else(|| format!("mode {index}"))
         }
         OptionDesc::Attack { defender, .. } => format!("attack P{}", defender.0),
+        // CR 614.12a: "As this enters, you may pay 2 life. If you don't, it enters tapped."
+        OptionDesc::Accept if matches!(d.kind, ChoiceKind::AsEnters { .. }) => match d.kind {
+            ChoiceKind::AsEnters { ability, .. } => match cat.ability(ability) {
+                AbilityDef::Replacement {
+                    with: ReplaceWith::EntersTappedUnlessYou(AsEnters::PayLife(n)),
+                    ..
+                } => format!("pay {n} life"),
+                _ => "Yes".into(),
+            },
+            _ => "Yes".into(),
+        },
+        OptionDesc::Decline if matches!(d.kind, ChoiceKind::AsEnters { .. }) => match d.kind {
+            ChoiceKind::AsEnters { ability, .. }
+                if matches!(
+                    cat.ability(ability),
+                    AbilityDef::Replacement {
+                        with: ReplaceWith::EntersOnlyIfYou(_),
+                        ..
+                    }
+                ) =>
+            {
+                "No: it goes to the graveyard".into()
+            }
+            _ => "No: it enters tapped".into(),
+        },
         OptionDesc::Accept => "Yes".into(),
         OptionDesc::Decline => "No".into(),
         OptionDesc::Pass if d.kind == ChoiceKind::Priority => "Pass priority".into(),
@@ -2055,11 +2083,26 @@ fn decision_panel(
         | ChoiceKind::ChooseModes
         | ChoiceKind::ChooseX
         | ChoiceKind::PayMana
-        | ChoiceKind::PayUnlessCost,
+        | ChoiceKind::PayUnlessCost
+        | ChoiceKind::MayAbility,
         Some(top),
     ) = (d.kind, cx.view.stack.last())
     {
         title.push_str(&format!(" for {}", top.name));
+    }
+    // "As Test Shockland enters, you may pay 2 life. If you don't, it enters tapped."
+    if let ChoiceKind::AsEnters {
+        object,
+        ability,
+        tapped,
+    } = d.kind
+    {
+        let name = find_object(cx.view, object).map_or("it".to_string(), |o| o.name.clone());
+        title = describe::ability_text(cx.cat.get(ability.card), cx.cat.ability(ability))
+            .replace("this permanent", &name);
+        if tapped {
+            title.push_str(" (It enters tapped anyway.)");
+        }
     }
     ui.strong(RichText::new(title).size(15.0).color(GOLD));
     let labels: Vec<String> = d

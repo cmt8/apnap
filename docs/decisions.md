@@ -1244,6 +1244,201 @@ Rules text: docs/rules-notes/611.2-lasting-effects-615-prevention.md.
   beginning of the next end step" (46 alone, 169 in all); then must-attack and
   can-attack-as-though rules, and effects about players.
 
+## D-067 How a permanent enters: "enters tapped unless …", "as this enters, you may …" (2026-11-10)
+Rules text: docs/rules-notes/614.12-enters-tapped-unless.md.
+- **Why first:** by EDHREC rank `repl:Moved` alone blocked more of the most played
+  Commander cards than any other blocker (the dual lands). 75 of the 1,000 and 114 of the
+  5,000 most played cards compile now that didn't: the ten shock lands, check lands,
+  battle lands, bond lands, slow lands, fast lands, reveal lands and Snarls, the Castles
+  with an "unless", Rivendell, Mox Diamond, Authority of the Consuls.
+- **Vocabulary** (all appended at the end of their enums):
+  `ReplaceWith::EntersTappedUnless(Condition)`, `ReplaceWith::EntersTappedUnlessYou(AsEnters)`
+  ("as this enters, you may [pay N life / reveal a … card from your hand]. If you don't,
+  it enters tapped"), `ReplaceWith::EntersOnlyIfYou(AsEnters)` ("if this would enter, you
+  may discard a land card instead. If you do, put it onto the battlefield. If you don't,
+  put it into its owner's graveyard"), `AsEnters { PayLife, Reveal, Discard }`,
+  `ReplaceWith::RevealShuffleIntoLibrary`, `Replaces::Dies(Selector)` ("if a creature an
+  opponent controls would die"), `Replaces::ThisToGraveyard` ("… from anywhere"),
+  `Amount::Players(Who)` ("the number of opponents you have") and
+  `Amount::LifeAmong { players, highest }`.
+- **The choice is made inside the replacement pipeline** (CR 614.12a, 603.6d: no stack,
+  no priority). `ApplyFrame` gets a `choosing` key (serialized only when set, so golden
+  hashes are unchanged) and suspends with the new `ChoiceKind::AsEnters { object,
+  ability, tapped }`: `Accept` (pay) or the cards that may be revealed / discarded, then
+  `Decline`. `tapped` says it enters tapped anyway, for the agents and the app. When
+  nothing can be done (less life than the payment, CR 119.4 / 118.3; no such card) there
+  is no question and the effect simply applies.
+- **What the answer causes is an event of its own, performed first.** Paid life is a
+  `Proposed::LoseLife` and a discard a `Proposed::Move(Discard)`, each through a nested
+  `Apply` frame pushed above the batch being modified: replaceable, they trigger
+  ("whenever you lose life"), and they happen before the permanent enters. So for
+  several permanents entering at once the second question sees the life already paid
+  (614.12b).
+- **The condition is judged as the event is modified**, for the player the permanent will
+  enter under the control of (109.5, 110.2): on the battlefield as it was before the
+  event, so the land never counts itself ("two or more other lands" is "two or more
+  lands") and lands entering together don't see each other — the batch is performed only
+  after all its events are modified. An "unless" whose condition holds is not an
+  applicable effect at all (no pointless choice between replacement effects); it is
+  checked again as it is applied. Entering tapped is not becoming tapped (110.5b: no
+  `Tapped` event).
+- **CR 614.13a:** a card being discarded for an effect that modifies how a permanent
+  enters can't be the entering card or any card moving in the same batch. The same
+  exclusion is applied to revealing — no rule says so, and no compiled card can tell the
+  difference (no reveal land asks for a card of its own types).
+- **Other permanents' entering** uses the existing `Replaces::OtherEnters` (the source must
+  already be on the battlefield, so "permanents enter tapped" never affects itself, 614.12
+  example). Only a permanent's own entering may have a condition or a choice; for others
+  "you" would be a different player, and those forms are blocked.
+- **Compiler:** `R:Event$ Moved | Destination$ Battlefield | ReplacementResult$ Updated`
+  with `DB$ Tap | ETB$ True` (`ConditionPresent$`/`ConditionCompare$`,
+  `ConditionCheckSVar$`/`ConditionSVarCompare$` — the conditions under which it is tapped,
+  negated into "unless"; `UnlessCost$ PayLife<N>` / `Reveal<1/A;B>` with
+  `UnlessPayer$ You`) or `DB$ PutCounter | ETB$ True`, on `Self` (or no `Defined$`,
+  Forge's default) or `ReplacedCard` (with `ActiveZones$ Battlefield`). Mox Diamond's
+  chain (discard, remembered; to the graveyard if none; to the battlefield if one;
+  cleanup) is recognized only exactly. `Destination$ Graveyard` with a `ChangeZone` of the
+  replaced card to exile or (shuffled, optionally revealed) into the library: "this
+  creature would die" (`ThisDies`), "a creature an opponent controls would die"
+  (`Dies`), "this card … from anywhere" (`ThisToGraveyard`, works in every zone,
+  CR 113.6b). Expressions `PlayerCount[Players|Opponents]$Amount`,
+  `…$HighestLifeTotal`, `…$LowestLifeTotal`.
+- **Filters (general, not only here):** alternatives that differ in exactly one
+  "at least one of" list — card types, subtypes or colors — and nothing else are one
+  selector ("Island.YouCtrl,Mountain.YouCtrl"; before, only bare card types merged). This
+  alone compiled about 120 more cards (Commander staples among them: Dockside
+  Extortionist, Archaeomancer, the Verges). The engine's text now joins several colors or
+  subtypes of one selector with "or". **Found while doing it:** Forge's `+` is "and", so
+  `Card.Red+White` ("a spell that's both red and white", the Mimics) would have read as
+  "red or white" — no compiled card had it yet; it is blocked now (`filter:two colors`).
+- **Oracle guard:** a card that says "unless" must say it in the engine's text too
+  (`oracle:says unless`). It blocks no current card.
+- **Read against the Oracle text:** all 256 newly compiled cards. No mis-compilation; texts
+  fixed: "the number of Islands you control is not 0" → "you control an Island", "an
+  opponent controls 8 or more lands" → "your opponents control …" (the engine counts all
+  of them together, as the cards mean), "Island Swamp card" → "Island or Swamp card".
+  Swarmyard Massacre counts "Insect, Rat, Spider, or Squirrel" permanents where the card
+  says creatures — Forge's script, compiled as written (a noncreature permanent of those
+  types would count).
+- **Heuristic agent:** reveals whenever it can; discards for a permanent that otherwise
+  goes to the graveyard; pays life only on its own turn, with at least 10 life left after
+  paying, not for a permanent that enters tapped anyway, and only if a card in its hand or
+  command zone costs exactly one more than its untapped lands (the mana is wanted now).
+  The app titles the question with the ability's text and labels the buttons "pay 2 life"
+  / "No: it enters tapped" / "No: it goes to the graveyard".
+- Golden hashes unchanged (state and event logs).
+- 9,305 → 9,561 of 34,463 scripts (27.7%); precons 149 → 150 of 275 deck slots.
+  `repl:Moved` fell from 135 cards blocked by it alone (353 in all) to none under that
+  name; what is left is named by form.
+- **Still blocked, by name:** "if this would enter, sacrifice … instead" (Lotus Vale and
+  the other sacrifice lands, `repl:Moved enters instead`); "enters tapped with N
+  [charge/depletion] counters" (`repl:Moved enters:Tap+SubAbility`, needs other counter
+  kinds); "lands you control enter untapped" (`repl:Moved enters:Untap`); "as this
+  enters, choose …" (`repl:Moved enters:ChooseType`, `…:ChoosePlayer`, `…:GenericChoice`);
+  enters as a copy (`param:repl Moved.Layer`); day/night (`repl:Moved enters:DayTime`);
+  "exile it instead. When you do, …" (Kalitas, Nemata: `repl:Moved to graveyard:
+  ChangeZone+SubAbility`); "if a card would be put into an opponent's graveyard from
+  anywhere" (`repl:Moved to graveyard:shape`: no vocabulary for other cards from anywhere);
+  leaving the battlefield to anywhere but a graveyard, from the stack, discards caused by
+  opponents (`repl:Moved`).
+- **Next here:** the sacrifice-instead lands (an `AsEnters::Sacrifice` with a count), other
+  counter kinds for the storage and Vivid lands, "lands you control enter untapped".
+
+## D-068 Players other than "you": "its controller", "its owner", "that player" (2026-11-10)
+Rules text: docs/rules-notes/608.2h-its-controller-that-player.md. Tests:
+`crates/harness/tests/forge_their.rs` (three- and four-player games).
+- **What a target was (CR 608.2h, 608.2b).** As resolution begins, the resolve frame
+  records each legal target (`resolve::TargetInfo`: controller, owner, power, toughness,
+  mana value with X on the stack, deathtouch, lifelink) and brings the record up to date
+  before every step of the resolution while the target is still the object that was
+  targeted, where it was targeted. Once it has gone, the record is how it last existed
+  there — changed by an earlier instruction of the same spell, if one did ("target creature
+  gets +3/+0, exile it, its controller gains life equal to its power" gains 8 from a 5/4).
+  A target that was illegal as resolution began tells nothing: "its controller gains life"
+  doesn't happen (608.2b's last sentence). This replaces D-063's `target_controllers`
+  (who controlled the target as resolution began), which a control change or a pump
+  earlier in the same resolution would have read wrong.
+- **Vocabulary:** `PlayerRef::OwnerOf(slot)` ("its owner"; differs from "its controller"
+  under a control change); `Amount::OfTarget { slot, what }` ("its power / toughness / mana
+  value"); `Amount::HandOf(player)` ("the number of cards in that player's hand");
+  `DamageBy::Target(slot)` ("target creature deals damage to itself equal to its power":
+  the target is the source, with its lifelink and deathtouch); `Effect::PlayerMay { who,
+  effect }` ("that creature's controller may draw a card": that player is asked, CR 608.2d;
+  with `who` = you it is `May`); `ChooseCards::optional` ("its controller may search their
+  library", "each player may search": each searching player decides for themselves,
+  before looking; one who declines neither searches nor shuffles). `CreateToken` may name
+  several players ("each player creates"): each owns and controls their tokens (CR 111.2).
+- **Triggers carry "that player"** (`EventFacts::player`): who cast the spell (Forge's
+  `TriggeredActivator`, `TriggeredCardController` of `SpellCast`), whose step it is
+  (`TriggeredPlayer` of `Phase`), the defending player of an attacking, blocked or
+  unblocked creature (`TriggeredDefendingPlayer`; CR 506.2 — creatures here attack
+  players only). The player who drew or discarded is also `TriggeredCardController` /
+  `TriggeredCardOwner` of `Drawn` and `Discarded` (the card is in their hand/graveyard).
+- **"You" where the event can only be yours.** "That player" of an event only the
+  controller's own events trigger ("at the beginning of your upkeep", "whenever you draw")
+  is compiled as "you"; so is "its controller" of the ability's own source ("when this
+  dies, its controller draws a card", CR 603.3a). Both are exactly the same player; the
+  text now matches the Oracle's. A second (`Secondary$`) event added to such an ability
+  must have the same property, else it is blocked (`trig:Secondary about another object`).
+- **The compiler** resolves every player name of a script in one place
+  (`Tx::named_player`): `Defined$`, `TokenOwner$`, `UnlessPayer$`, `DefinedPlayer$`, a
+  trigger's `OptionalDecider$` and a draw's. Forge's draw asks the player who would draw
+  whatever `OptionalDecider$` says; it is compiled only where it names that player
+  (`param:Draw.OptionalDecider not the drawer`). A trigger whose decider is someone else
+  and that also costs something is blocked (`trig:OptionalDecider with a cost`).
+  `TargetedController`/`TargetedOwner` of a player or of a card in a graveyard is blocked
+  (Forge finds no controller there). `AITgts$`/`AITgtsStrict$` are accepted as AI hints
+  (never read by Forge's rules code); a test shows the card is identical without them.
+- **Mis-compilations found (older than this batch), fixed:**
+  - Opponents' cast triggers that hit "its controller" did nothing at all: the cast
+    trigger's "it" was taken for an object the event doesn't carry (Ishi-Ishi, Isolation
+    Cell, Spelltithe Enforcer). The spell is no "it" of a cast trigger now; "that player"
+    is the caster.
+  - "Each player / each opponent may search their library" was decided by the caster for
+    everyone (Boldwyr Heavyweights, Jungle Wayfinder, New Frontiers, Noble Benefactor,
+    Old-Growth Dryads, Veteran Explorer, Weird Harvest). Now each searcher decides.
+  - Found reading the new cards: "that player may search" where the script has no
+    `Optional$` but the Oracle says "may" (Volatile Fault, White Orchid Phantom) was being
+    made the caster's choice; the searcher decides now. Goblin Tinkerer ("that artifact
+    deals damage … to this creature", scripted as the creature damaging itself) and
+    Commander Mustard ("it deals 1 damage to defending player", scripted as life loss) are
+    now blocked by two new Oracle guards: `oracle:that one deals damage` and
+    `oracle:says damage`. Selectors' "non[color]" was missing from the text (Soot Imp's
+    "nonblack spell" read "spell"; the engine had it right).
+- **New Oracle guards:** `oracle:another player` — the card says "its controller", "its
+  owner", "that player", "defending player"… and the compiled card names nobody but you
+  (blocks no compiled card today: a regression guard); the two damage guards above; "may
+  pay" counts as answered by "unless … pays" (CR 118.12a: Smothering Tithe).
+- **Hidden information:** a library being searched is shown only to the searcher, and only
+  while searching — not while they decide whether to (view `shown`).
+- **The heuristic agent** treats an effect given to someone else (its controller's life,
+  token, card) as neither help nor harm when choosing a target; accepts "may" choices;
+  pays an opponent's "unless that player pays" (a tested case). The app titles a "may"
+  question with the card it is for (it can be an opponent's).
+- Descriptions: an ability with several trigger events reads each in full ("enters or
+  deals combat damage to a player", not "enters or player"); "you may have this deal …".
+- Golden hashes unchanged.
+- 9,305 → 9,520 of 34,463 scripts (27.6%) before D-067; precons 149 → 152 of 275 deck
+  slots. All 215 newly compiled cards were read against their Oracle text. Rebased onto
+  D-067 (9,560 alone): 9,776 (28.4%), precons 153 of 275. Two cards compile only in the
+  combination (Cavalier of Dawn, A-Elderfang Ritualist), both read; nothing main compiles
+  is blocked by this batch's guards. Among the most played: Swords to Plowshares, Path to Exile, Beast
+  Within, An Offer You Can't Refuse, Rhystic Study, Solemn Simulacrum, Generous Gift, Swan
+  Song, Smothering Tithe, Feed the Swarm, Assassin's Trophy, Stroke of Midnight, Chaos
+  Warp, Sheoldred the Apocalypse, Consecrated Sphinx, Fecundity, Dictate of Kruphix.
+- **Still blocked, by design or for later:** "creature defending player controls" and
+  other selectors relative to a triggering player (`filter:.ControlledBy
+  TriggeredDefendingPlayer/TriggeredTarget/TriggeredPlayer`, ~40 cards alone); "unless any
+  player pays" (`unless:payer Player`); lasting effects about a player
+  (`Effect:remembers TargetedController`); `TriggeredCardOwner` of a cast spell; `Targeted$`
+  amounts with several targets; `TargetedAndYou`, `ParentTarget`.
+- **Known and not fixed (found reading the rebased cards):** "another target card from
+  your graveyard" in a dies trigger can target the dying card itself (the ability's
+  source is the old permanent, the card is a new object): Elderfang Ritualist (on main)
+  and A-Elderfang Ritualist. And "you may [X]. If you do, [Y]" compiled as "you may [X,
+  then Y]" still does Y when X turned out impossible (11 compiled cards, the same
+  convention as before this batch).
+
 ## D-070 Rules about players; playing cards from other zones; Theros gods (2026-11-10)
 Rules text: docs/rules-notes/402-305-401.5-rules-about-players.md.
 - **`AbilityDef::PlayerRule { who, rule, only_if }`**: a static ability that changes a rule

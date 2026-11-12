@@ -24,6 +24,7 @@ One file per rules area, written **before** that area is implemented (CLAUDE.md 
 | 702.29 Cycling, 113.6 ability zones | [702.29-cycling-113.6-ability-zones.md](702.29-cycling-113.6-ability-zones.md) | M4 |
 | 113 Abilities an object is given (+305.6, 613.1f, 613.7a) | [113-abilities-given.md](113-abilities-given.md) | M4 |
 | 611.2 Effects that last on no object, 615.1 prevention | [611.2-lasting-effects-615-prevention.md](611.2-lasting-effects-615-prevention.md) | M4 |
+| 614.12 "Enters tapped unless …", "as this enters, you may …" (+119.4, 701.20, 614.13a) | [614.12-enters-tapped-unless.md](614.12-enters-tapped-unless.md) | M4 |
 | Rules about players: 402.2 hand size, 305.2 land plays, 601.3 other zones, 401.5 top card, 702.11c/702.18a | [402-305-401.5-rules-about-players.md](402-305-401.5-rules-about-players.md) | M4 |
 
 Excerpts are committed verbatim by explicit decision (D-012). If the repo is ever
