@@ -2332,6 +2332,54 @@ Rules text: docs/rules-notes/614-doublers-603.2d-additional-triggers.md (with
   Reflection); Torbran (`RedSource`); "you may" token replacements; Winding Constrictor
   once players have counters.
 
+## D-075 part 2: share a land type, delayed triggers, "draw up to", look and rearrange (2026-11-12)
+Rules text: docs/rules-notes/d075-commander-staples.md (sections 205.3i, 603.7, 401.4 /
+701.24a). Tests: `crates/harness/tests/forge_staples.rs`.
+- **Cards that share a land type** (CR 205.3i): `Effect::ChooseCards::share_land_type`
+  (serialized only when set; `Work::ChooseCards::partial` likewise). The cards are chosen one
+  at a time, each further one sharing a land type with each chosen before it — Forge's rule
+  (for two cards the same as having one in common). Myriad Landscape.
+- **Delayed triggered abilities** (CR 603.7): `Effect::DelayedTrigger { ability, window,
+  player, amount }` (the ability is an entry of `CardDef::granted`; `DelayWindow::{Next,
+  ThisTurn, NextTurn}`), `GameState::delayed` (`effects::Delayed`, serialized only when not
+  empty), `GameAction::{AddDelayed, RemoveDelayed}`. Detected with the step triggers
+  (`triggers::detect_step`); each triggers once and is removed (603.7b); "this turn" ones
+  that didn't trigger end at cleanup (514.2); "next turn" ones can't trigger before it. Its
+  source is the spell's or ability's source (603.7d–e; a spell's is gone by then, so it
+  carries the source as it was). What it remembers is fixed as it is created (603.7c): a
+  player — "its controller" of a countered spell (`RememberObjects$ RememberedController`
+  after `RememberTargets$`) — or an amount — that spell's mana value on the stack, X
+  included (`RememberNumber$` after `RememberCounteredCMC$`). Forge remembers the mana value
+  only of a spell that was countered; with nothing countered the delayed ability would add
+  nothing, so it is created only if the counter happened (`Effect::IfDone`). Compiled:
+  `Mode$ Phase` only (`DelayedTrigger:mode …` otherwise); remembering objects is not
+  (`DelayedTrigger:remembers objects`: 195 cards in all — "exile it, return it at the beginning of the
+  next end step" needs D-069's memory to outlive the resolution); "this turn" over two steps
+  unless the card says "next" (603.7b would make it trigger at each:
+  `DelayedTrigger:this turn, more than once`).
+- **"Draw up to N cards"** (Forge's `Draw | Upto$`): `Effect::DrawUpTo`, `ChoiceKind::DrawUpTo`
+  (PickNumber; the drawer chooses). The heuristic agent draws all; the app asks "How many cards
+  do you draw?".
+- **Look at the top N cards and put them back in any order; shuffle** (CR 401.4, 701.24a):
+  Forge's `RearrangeTopOfLibrary` compiles to a "look at the top N" that takes none and puts
+  the rest on top in the controller's order; `MayShuffle$` to `May(Effect::Shuffle)`
+  (appended; "you may have that player shuffle"). `AIRespondsToOwnAbility$` is a Forge AI
+  hint. Ponder, Sensei's Divining Top, Index, Natural Selection, Portent, Halimar Depths.
+- **`CostDesc$` is text only** (how the cost reads in Forge's description; the cost is
+  `Cost$`). Big Score, Unexpected Windfall, Tormenting Voice, Cathartic Reunion.
+- Golden hashes unchanged.
+- Against main `0b956d9` (D-073 merged), by a card-by-card diff of `forge-coverage --sample 1`:
+  77 cards newly compile, none stops compiling, no engine text changes. All 77 were read
+  against their Oracle text. Among the most played: Arcane Denial, Mana Drain, Ponder,
+  Sensei's Divining Top, Myriad Landscape, Big Score, Unexpected Windfall.
+- **Deliberately not done here:** Path of Ancestry (`Mana.TriggersWhenSpent`: mana that
+  remembers a trigger needs the player to choose which mana pays — CR 601.2h — inside the
+  payment planner, and "shares a creature type with your commander"; left until the cast
+  frame is quiet); War Room (pay life equal to a count, `ActivationGameTypes$`,
+  `Count$ColorsColorIdentity`).
+- **Next:** regeneration with "can't be regenerated" (`api:Regenerate` alone blocks 185
+  cards, `NoRegen` 61), the Channel lands, Esper Sentinel, City of Brass, cumulative upkeep.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…
