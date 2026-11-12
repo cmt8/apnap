@@ -78,6 +78,9 @@ pub enum ManaSymbol {
     Colorless,
     /// `{X}` (CR 107.3): its value is announced while casting.
     X,
+    /// A two-color hybrid symbol such as `{R/W}` (CR 107.4e): paid with either color. So
+    /// far only in the costs of mana abilities (D-066).
+    Hybrid(Color, Color),
 }
 
 /// The six mana types (CR 106.1b): five colors plus colorless.
@@ -154,7 +157,7 @@ impl ManaCost {
             .iter()
             .map(|s| match s {
                 ManaSymbol::Generic(n) => *n,
-                ManaSymbol::Colored(_) | ManaSymbol::Colorless => 1,
+                ManaSymbol::Colored(_) | ManaSymbol::Colorless | ManaSymbol::Hybrid(..) => 1,
                 // CR 202.3e: X is 0 everywhere except on the stack.
                 ManaSymbol::X => 0,
             })
@@ -175,6 +178,14 @@ impl ManaCost {
                 ManaSymbol::Colored(c) => out.push_str(ManaType::from_color(*c).symbol()),
                 ManaSymbol::Colorless => out.push_str("{C}"),
                 ManaSymbol::X => out.push_str("{X}"),
+                ManaSymbol::Hybrid(a, b) => {
+                    let letter =
+                        |c: &Color| ManaType::from_color(*c).symbol().trim_matches(['{', '}']);
+                    let _ = core::fmt::Write::write_fmt(
+                        &mut out,
+                        format_args!("{{{}/{}}}", letter(a), letter(b)),
+                    );
+                }
             }
         }
         out
@@ -193,6 +204,21 @@ impl ManaCost {
             };
             let sym = &body[..end];
             rest = &body[end + 1..];
+            let color = |l: &str| match l {
+                "W" => Some(Color::White),
+                "U" => Some(Color::Blue),
+                "B" => Some(Color::Black),
+                "R" => Some(Color::Red),
+                "G" => Some(Color::Green),
+                _ => None,
+            };
+            if let Some((a, b)) = sym.split_once('/') {
+                match (color(a), color(b)) {
+                    (Some(a), Some(b)) if a != b => symbols.push(ManaSymbol::Hybrid(a, b)),
+                    _ => return Err(ParseManaCostError),
+                }
+                continue;
+            }
             symbols.push(match sym {
                 "W" => ManaSymbol::Colored(Color::White),
                 "U" => ManaSymbol::Colored(Color::Blue),
@@ -294,9 +320,86 @@ pub struct CardDef {
     /// object that gets one is its source. And ones that work for a while on no object at
     /// all ([`Effect::Lasting`]): "target creature can't be blocked this turn".
     pub granted: Vec<AbilityDef>,
+    /// How the card's faces relate (CR 712, 716, 709). [`Layout::Normal`] for a card with
+    /// one face.
+    #[serde(skip_serializing_if = "Layout::is_normal")]
+    pub layout: Layout,
+    /// The card's other faces, in order: the back face of a double-faced card. Each is a
+    /// whole face of its own (name, cost, types, abilities); this definition is the front
+    /// face. In a catalog each face is also an entry of its own ([`CardCatalog::face`]),
+    /// so an ability written on a back face is named like any other ([`AbilityId`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub faces: Vec<CardDef>,
+    /// Set by the catalog on the entry it makes for another face of a card: that card.
+    /// Such an entry is never a card of its own (no deck holds it, `find` skips it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub face_of: Option<CardDefId>,
+}
+
+/// How the faces of a card relate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Layout {
+    /// One face.
+    #[default]
+    Normal,
+    /// A modal double-faced card (CR 712.3): either face may be cast, or played as a land
+    /// (CR 712.8b, 712.9); it is put onto the stack or battlefield with that face up.
+    Modal,
+    /// A nonmodal ("transforming") double-faced card (CR 712.2): cast and played with its
+    /// front face up; a permanent turns over by transforming (CR 701.27).
+    Transform,
+    /// An adventurer card (CR 716): face 1 is the Adventure, an instant or sorcery it may
+    /// be cast as; as that spell resolves it is exiled, and may then be cast as its
+    /// creature from exile (CR 716.3d). Everywhere else only its normal characteristics.
+    Adventure,
+    /// An omen card (CR 721): like an adventurer, but the Omen spell is shuffled into its
+    /// owner's library as it resolves (CR 721.3d).
+    Omen,
+    /// A split card (CR 709): faces 1 and 2 are its halves, one of which is cast (CR
+    /// 709.3); this definition is the two combined, which is what the card is everywhere
+    /// but on the stack (CR 709.4): both names, the combined mana cost, every type.
+    Split,
+}
+
+impl Layout {
+    pub fn is_normal(&self) -> bool {
+        *self == Layout::Normal
+    }
+
+    /// A double-faced card (CR 712.1): its back face is a face of its own, up only on the
+    /// stack or battlefield.
+    pub fn double_faced(self) -> bool {
+        matches!(self, Layout::Modal | Layout::Transform)
+    }
+
+    /// The card is cast only as one of its other faces (the halves of a split card, CR
+    /// 709.3), never as this definition.
+    pub fn cast_by_faces_only(self) -> bool {
+        self == Layout::Split
+    }
+
+    /// Face 1 is an alternative set of characteristics the card may have as a spell (CR
+    /// 716.2, 721.2), not a face of its own on the battlefield.
+    pub fn alternative_spell(self) -> bool {
+        matches!(self, Layout::Adventure | Layout::Omen)
+    }
 }
 
 impl CardDef {
+    /// Face `face` of this card: 0 is this definition (the front face), 1 the first of
+    /// [`CardDef::faces`]. Panics on a face the card doesn't have.
+    pub fn face(&self, face: u8) -> &CardDef {
+        match face {
+            0 => self,
+            n => &self.faces[n as usize - 1],
+        }
+    }
+
+    /// Every face of the card, front first.
+    pub fn all_faces(&self) -> impl Iterator<Item = &CardDef> {
+        core::iter::once(self).chain(self.faces.iter())
+    }
+
     /// CR 702.5a: the Aura's enchant restriction, if any.
     pub fn enchant(&self) -> Option<TargetFilter> {
         self.abilities.iter().find_map(|a| match a {
@@ -312,10 +415,16 @@ impl CardDef {
         }
         let mut out: Vec<Color> = Vec::new();
         for s in self.mana_cost.iter().flat_map(|m| &m.symbols) {
-            if let ManaSymbol::Colored(c) = s
-                && !out.contains(c)
-            {
-                out.push(*c);
+            // CR 105.2, 107.4e: a hybrid symbol is both its colors.
+            let colors: &[Color] = match s {
+                ManaSymbol::Colored(c) => core::slice::from_ref(c),
+                ManaSymbol::Hybrid(a, b) => &[*a, *b],
+                _ => &[],
+            };
+            for c in colors {
+                if !out.contains(c) {
+                    out.push(*c);
+                }
             }
         }
         out.sort();
@@ -435,8 +544,9 @@ pub enum AbilityDef {
     CostReduction { spells: Selector, amount: u32 },
     /// "This spell costs {N} less to cast[, where N is …]": functions while it is cast.
     SelfCostReduction(Amount),
-    /// An activated mana ability (CR 605.1a). Its cost is `{T}`, optionally with
-    /// "sacrifice this" (Treasure, CR 111.10a).
+    /// An activated mana ability (CR 605.1a): no target, adds mana, resolves at once
+    /// (CR 605.3b). Its cost includes `{T}` or a sacrifice (D-066); it may also cost mana
+    /// and life.
     Mana {
         cost: Cost,
         produce: ManaProduce,
@@ -446,6 +556,11 @@ pub enum AbilityDef {
         /// "Spend this mana only …" (CR 106.6).
         #[serde(default)]
         spend: Option<ManaRestriction>,
+        /// What else it does as it resolves, after adding the mana (CR 605.3b): "This
+        /// land deals 1 damage to you", "You gain 2 life". Nothing with a target (CR
+        /// 605.5a) and nothing that moves a card to or from a library (CR 605.1a).
+        #[serde(default)]
+        then: Option<Effect>,
     },
     /// A triggered ability (CR 603): "[When/Whenever/At] `when`, [if `intervening_if`,] `body`."
     Triggered {
@@ -500,6 +615,9 @@ pub enum AbilityDef {
         zone: ActivationZone,
         ability: Box<AbilityDef>,
     },
+    /// An alternative cost of the card's own (CR 118.9): a way to cast it, offered beside
+    /// casting it for its mana cost.
+    AlternativeCost(AltCost),
 }
 
 /// What an [`AbilityDef::PlayerRule`] changes for the players it is about.
@@ -630,6 +748,16 @@ pub struct Selector {
     /// Not used for cards outside the battlefield, where `controller` is the owner.
     #[serde(default)]
     pub owner: Who,
+    /// "That has an Adventure" (CR 716.2a): an adventurer card, whether or not it is
+    /// using its Adventure's characteristics now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_adventure: Option<bool>,
+    /// `Some(true)`: one of "those cards" — what an earlier instruction of the resolving
+    /// spell or ability noted ([`Effect::Note`]); `Some(false)`: not one of them ("destroy
+    /// all other creatures" after creating tokens). Only the resolving effect knows them:
+    /// card-db allows this only in the selectors of one-shot effects it filters itself.
+    #[serde(default)]
+    pub noted: Option<bool>,
     /// "Of the chosen type" / "that aren't of the chosen type" / "of the chosen color":
     /// compared with the choice of the ability's source (CR 607.2d) where the selector is
     /// used. A selector with `Type` has no `subtypes` of its own, with `Color` no `colors`
@@ -837,6 +965,39 @@ pub enum Condition {
         cmp: Cmp,
         n: u32,
     },
+    /// "If you control a commander" (CR 903.3d: a permanent that is a commander);
+    /// `own`: one you own as well ("if you control your commander"). Not inside the layer
+    /// walk (card-db refuses it in a static ability's condition).
+    ControlCommander {
+        own: bool,
+    },
+    /// "If its [evoke] cost was paid": the permanent the ability is on was the spell cast
+    /// with that alternative cost (CR 702.74a). Only `Evoke` so far.
+    CastFor(AltKindName),
+}
+
+impl Condition {
+    /// The selectors of what it counts.
+    pub fn selectors_mut(&mut self, f: &mut dyn FnMut(&mut Selector)) {
+        match self {
+            Condition::Control { what, .. } | Condition::ControlAtMost { what, .. } => f(what),
+            Condition::CardsInGraveyard { cards, .. } => f(cards),
+            Condition::Compare { amount, .. } => amount.selectors_mut(f),
+            Condition::LifeAtMost(_)
+            | Condition::LifeAtLeast(_)
+            | Condition::YourTurn
+            | Condition::NotYourTurn
+            | Condition::HandAtMost(_)
+            | Condition::ControlCommander { .. }
+            | Condition::CastFor(_) => {}
+        }
+    }
+}
+
+/// An [`AltKind`] by name, for conditions about how a spell was cast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AltKindName {
+    Evoke,
 }
 
 /// How a counted amount is compared with a number.
@@ -1169,6 +1330,80 @@ pub struct Cost {
     pub discard_self: bool,
     /// "Exile this card from your graveyard": for an ability activated from the graveyard.
     pub exile_self: bool,
+    /// "Exile N [cards] from your hand", chosen as the cost is paid (never the card being
+    /// cast: it is on the stack by then).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exile_from_hand: Option<CostChoice>,
+    /// "Return N [permanents] you control to their owner's hand", chosen as the cost is paid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_to_hand: Option<CostChoice>,
+    /// "Pay X life", X announced as the spell is cast (CR 107.3a): only in a spell's
+    /// additional cost (card-db), on top of `life`.
+    #[serde(skip_serializing_if = "core::ops::Not::not")]
+    pub life_x: bool,
+}
+
+impl Cost {
+    /// The non-mana parts of `self` and of `other` together: an alternative cost and the
+    /// spell's additional cost are paid together (CR 118.9d, 601.2f). `None` when both
+    /// choose the same kind of thing (card-db refuses such a card).
+    pub fn with(&self, other: &Cost) -> Option<Cost> {
+        fn one<T: Clone>(a: &Option<T>, b: &Option<T>) -> Option<Option<T>> {
+            match (a, b) {
+                (Some(_), Some(_)) => None,
+                (a, b) => Some(a.clone().or_else(|| b.clone())),
+            }
+        }
+        Some(Cost {
+            mana: self.mana.clone(),
+            tap: self.tap || other.tap,
+            sacrifice_self: self.sacrifice_self || other.sacrifice_self,
+            sacrifice: one(&self.sacrifice, &other.sacrifice)?,
+            discard: one(&self.discard, &other.discard)?,
+            life: self.life + other.life,
+            discard_self: self.discard_self || other.discard_self,
+            exile_self: self.exile_self || other.exile_self,
+            exile_from_hand: one(&self.exile_from_hand, &other.exile_from_hand)?,
+            return_to_hand: one(&self.return_to_hand, &other.return_to_hand)?,
+            life_x: self.life_x || other.life_x,
+        })
+    }
+}
+
+/// A cost that may be paid rather than a spell's mana cost (CR 118.9), and what choosing it
+/// means for the spell ([`AbilityDef::AlternativeCost`]).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AltCost {
+    pub kind: AltKind,
+    /// What is paid rather than the mana cost: `cost.mana` (none: "without paying its mana
+    /// cost") and the other parts. The spell's additional costs, cost increases (commander
+    /// tax) and reductions apply to it as well (CR 118.9d).
+    pub cost: Cost,
+    /// "If [condition], you may …": checked for the caster as casting begins.
+    #[serde(default)]
+    pub only_if: Option<Condition>,
+}
+
+/// Which kind of alternative cost an [`AltCost`] is.
+// Built once when the catalog loads, then only read (as `AbilityDef`).
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AltKind {
+    /// "You may [cost] rather than pay this spell's mana cost" / "you may cast this spell
+    /// without paying its mana cost" (CR 118.9): from wherever the card may be cast.
+    Rather,
+    /// CR 702.34a: "You may cast this card from your graveyard by paying [cost] rather than
+    /// paying its mana cost" and "If the flashback cost was paid, exile this card instead
+    /// of putting it anywhere else any time it would leave the stack."
+    Flashback,
+    /// CR 702.74a: "You may cast this card by paying [cost] rather than paying its mana
+    /// cost"; the card's "when this enters, if its evoke cost was paid, its controller
+    /// sacrifices it" is a triggered ability of its own (`Condition::CastFor`).
+    Evoke,
+    /// CR 702.96a: "You may choose to pay [cost] rather than pay this spell's mana cost"
+    /// and, if you did, the spell's text with "target" changed to "each": `Body` is that
+    /// text (no targets, CR 702.96b).
+    Overload(Body),
 }
 
 /// Where the card with an activated ability must be for the ability to be activated
@@ -1218,22 +1453,51 @@ pub enum ManaProduce {
     /// "Add one mana of any color in your commander's color identity" (CR 903.4; with no
     /// commander it adds nothing, CR 903.4f).
     CommanderIdentity,
+    /// Exactly this mana, of at least two types: "Add {U}{B}", "Add {C}{C}{R}" (D-066).
+    Fixed(Vec<ManaType>),
+    /// `count` mana, each of any type in `of` independently: "Add two mana in any
+    /// combination of colors", "Add two mana in any combination of {R} and/or {G}".
+    Combination {
+        of: Vec<ManaType>,
+        count: u32,
+    },
+    /// `amount` mana of ONE type chosen from `of`, the amount counted as the ability
+    /// resolves: "Add {G} for each creature you control", "Add X mana of any one color,
+    /// where X is the number of enchantments you control".
+    Counted {
+        of: Vec<ManaType>,
+        amount: Amount,
+    },
+    /// "Add one mana of any color (`types`: any type) that a [`from`] could produce"
+    /// (CR 106.7): Exotic Orchard, Reflecting Pool. `from` is relative to the ability's
+    /// controller.
+    Reflected {
+        from: Selector,
+        types: bool,
+    },
 }
 
 /// "Spend this mana only to cast [spells] or activate abilities of [permanents]" (CR 106.6).
-/// The mana can pay for a spell matching any of `spells`, or an ability whose source matches
-/// any of `abilities`; the selectors are relative to the player spending it.
+/// The mana can pay for a spell matching any of `spells`, or an ability of a permanent
+/// matching any of `abilities` or of a source matching any of `sources`; the selectors are
+/// relative to the player spending it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ManaRestriction {
     #[serde(default)]
     pub spells: Vec<Selector>,
     #[serde(default)]
     pub abilities: Vec<Selector>,
+    /// Abilities whose source matches any of these wherever it is ("activate abilities of
+    /// artifact sources", "activate an ability": the empty selector). `abilities` is about
+    /// permanents only (D-066).
+    #[serde(default)]
+    pub sources: Vec<Selector>,
 }
 
 impl ManaProduce {
-    /// The types the player chooses between. For [`ManaProduce::CommanderIdentity`] these
-    /// are the five colors: the game narrows them to the identity.
+    /// The types the player chooses between (for [`ManaProduce::Fixed`], the types it
+    /// makes). For [`ManaProduce::CommanderIdentity`] these are the five colors, and for
+    /// [`ManaProduce::Reflected`] all it could ever be: the game narrows them.
     pub fn options(&self) -> Vec<ManaType> {
         match self {
             ManaProduce::One(t) => alloc::vec![*t],
@@ -1241,14 +1505,33 @@ impl ManaProduce {
                 .iter()
                 .map(|c| ManaType::from_color(*c))
                 .collect(),
-            ManaProduce::OneOf(of) | ManaProduce::Times { of, .. } => of.clone(),
+            ManaProduce::OneOf(of)
+            | ManaProduce::Times { of, .. }
+            | ManaProduce::Combination { of, .. }
+            | ManaProduce::Counted { of, .. } => of.clone(),
+            ManaProduce::Fixed(v) => {
+                let mut out: Vec<ManaType> = Vec::new();
+                for t in v {
+                    if !out.contains(t) {
+                        out.push(*t);
+                    }
+                }
+                out
+            }
+            ManaProduce::Reflected { types, .. } => ManaType::ALL
+                .iter()
+                .copied()
+                .filter(|t| *types || *t != ManaType::Colorless)
+                .collect(),
         }
     }
 
-    /// How many mana (all of the chosen type) one activation adds.
+    /// How many mana one activation adds, when that is fixed (not for
+    /// [`ManaProduce::Counted`], which counts as it resolves).
     pub fn count(&self) -> u32 {
         match self {
-            ManaProduce::Times { count, .. } => *count,
+            ManaProduce::Times { count, .. } | ManaProduce::Combination { count, .. } => *count,
+            ManaProduce::Fixed(v) => v.len() as u32,
             _ => 1,
         }
     }
@@ -1470,6 +1753,10 @@ pub enum Effect {
         to: CardDest,
         #[serde(default)]
         shuffle: bool,
+        /// Onto the battlefield under this player's control ("return that card to the
+        /// battlefield under your control"); `None`: under its owner's.
+        #[serde(default)]
+        controller: Option<PlayerRef>,
     },
     /// Everything in a zone that matches, at once: "return all creatures to their owners'
     /// hands", "exile all artifacts", "return all creature cards from your graveyard to
@@ -1548,6 +1835,36 @@ pub enum Effect {
         first: Box<Effect>,
         then: Box<Effect>,
     },
+    /// A spell or a non-mana ability adds `amount` mana of ONE type its controller chooses
+    /// from `of` as it resolves (CR 106.4, 605.5a): "add one mana of any color" (Lotus
+    /// Cobra's landfall, which is not a mana ability), "add three mana of any one color".
+    AddManaOf {
+        who: PlayerRef,
+        of: Vec<ManaType>,
+        amount: Amount,
+    },
+    /// CR 701.27a: "transform [it]" — turn a double-faced permanent over so that its
+    /// other face is up. It stays the same object (CR 701.27c).
+    Transform {
+        what: ObjRef,
+    },
+    /// Perform the instruction, and remember what it did for the rest of this resolution
+    /// (CR 608.2c, 400.7j): the cards it moved — as the objects they became — and the
+    /// tokens it created are "those cards" ([`ObjRef::Noted`], [`Selector::noted`],
+    /// [`Amount::Noted`]). Of a [`Effect::Dig`], only the cards put in its first place.
+    /// Forge's "remembered" cards of a chain that forgets them when it ends (D-069); not
+    /// the same as what a lasting effect is about (`ObjFilter::Remembered`).
+    Note(Box<Effect>),
+    /// "If [condition], [instruction]": the condition is checked as this instruction is
+    /// reached (CR 608.2c); amounts in it are counted then, and may count "those cards".
+    If {
+        test: Condition,
+        then: Box<Effect>,
+    },
+    /// "Its controller sacrifices it" of the ability's source, whoever controls it now
+    /// (CR 702.74a, evoke; 701.21a): unlike [`Effect::SacrificeThis`] not only by the
+    /// ability's controller.
+    ControllerSacrificesThis,
     /// "Choose a creature type / a color.": the controller chooses as this resolves (CR
     /// 608.2c); "the chosen type" in the instructions after it is that choice (CR 607.2d).
     Choose(ChoiceOf),
@@ -1569,7 +1886,13 @@ impl Effect {
         };
         match self {
             Effect::Seq(v) | Effect::Together(v) => v.iter_mut().for_each(|e| e.selectors_mut(f)),
-            Effect::May(e) | Effect::PlayerMay { effect: e, .. } => e.selectors_mut(f),
+            Effect::May(e) | Effect::PlayerMay { effect: e, .. } | Effect::Note(e) => {
+                e.selectors_mut(f)
+            }
+            Effect::If { test, then } => {
+                test.selectors_mut(f);
+                then.selectors_mut(f);
+            }
             Effect::IfDone { first, then } => {
                 first.selectors_mut(f);
                 then.selectors_mut(f);
@@ -1595,6 +1918,7 @@ impl Effect {
             | Effect::Scry { amount, .. }
             | Effect::Surveil { amount, .. }
             | Effect::AddMana { amount, .. }
+            | Effect::AddManaOf { amount, .. }
             | Effect::CreateToken { count: amount, .. }
             | Effect::PutCounters { count: amount, .. } => amount.selectors_mut(f),
             Effect::DestroyAll(s) | Effect::TapAll(s) | Effect::UntapAll(s) => f(s),
@@ -1638,6 +1962,8 @@ impl Effect {
             | Effect::AttachThis { .. }
             | Effect::PutInto { .. }
             | Effect::ThisSpellTo { .. }
+            | Effect::Transform { .. }
+            | Effect::ControllerSacrificesThis
             | Effect::Lasting { .. }
             | Effect::Choose(_) => {}
         }
@@ -1675,7 +2001,7 @@ impl Amount {
     pub fn selectors_mut(&mut self, f: &mut dyn FnMut(&mut Selector)) {
         match self {
             Amount::Count(s) | Amount::TotalPower(s) | Amount::Greatest { of: s, .. } => f(s),
-            Amount::CardsIn { cards, .. } => cards.iter_mut().for_each(f),
+            Amount::CardsIn { cards, .. } | Amount::Noted(cards) => cards.iter_mut().for_each(f),
             Amount::Calc(base, _) => base.selectors_mut(f),
             Amount::IfAtLeast { test, .. } => test.selectors_mut(f),
             Amount::Fixed(_)
@@ -1693,7 +2019,8 @@ impl Amount {
             | Amount::Players(_)
             | Amount::LifeAmong { .. }
             | Amount::OfTarget { .. }
-            | Amount::HandOf(_) => {}
+            | Amount::HandOf(_)
+            | Amount::NotedTotal(_) => {}
         }
     }
 }
@@ -1720,6 +2047,11 @@ pub enum CardDest {
     Exile,
     LibraryTop,
     LibraryBottom,
+    /// Nowhere: the cards chosen stay where they are, found ("search your library for up
+    /// to two basic land cards, reveal those cards, put one onto the battlefield and the
+    /// other into your hand"). Only for a search whose cards are noted ([`Effect::Note`])
+    /// for the instructions after it.
+    Stay,
 }
 
 /// How many of the cards a [`Effect::Dig`] looks at are taken.
@@ -1752,6 +2084,10 @@ pub enum ObjRef {
     /// triggered the ability: the card it became in the zone it went to, for as long as it
     /// is still there (CR 400.7).
     TriggeringCard,
+    /// "Those cards", "that card", "it": each of the cards an earlier instruction of this
+    /// resolution noted ([`Effect::Note`]), while it is still where this resolution put it
+    /// — in a public zone (CR 400.7j), or found by a search and not moved.
+    Noted,
 }
 
 /// Which object deals the damage of a `DealDamage`.
@@ -1813,6 +2149,14 @@ pub enum PlayerRef {
     /// "Its owner": the owner of the spell or permanent chosen for target slot `n`
     /// (CR 108.3) — not its controller, if someone else controls it.
     OwnerOf(u8),
+    /// The players who control "those cards" ([`Effect::Note`]) — as each is now if it is
+    /// on the battlefield, otherwise as it last was before it moved (CR 608.2h: "each
+    /// player who sacrificed a creature this way").
+    NotedControllers,
+    /// The players in the game who control none of "those cards" (as for
+    /// [`PlayerRef::NotedControllers`]): "each player who didn't sacrifice a creature this
+    /// way".
+    NotNotedControllers,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1891,6 +2235,14 @@ pub enum Amount {
     /// hand", "target player's hand" (as the effect is applied, CR 608.2h). 0 for a
     /// player who has left the game.
     HandOf(PlayerRef),
+    /// The number of "those cards" ([`Effect::Note`]) that match any of the selectors (no
+    /// selectors: all of them) — "for each creature destroyed this way", "if it's a
+    /// Spirit". Wherever they went, they count; each as it is now if this resolution can
+    /// still find it, otherwise as it last was before it moved (CR 608.2h).
+    Noted(Vec<Selector>),
+    /// The total power, toughness or mana value of "those cards" ("its mana value", "that
+    /// creature's power"), each as for [`Amount::Noted`].
+    NotedTotal(Measure),
 }
 
 impl Amount {
@@ -1920,7 +2272,9 @@ impl Amount {
             | Amount::TriggeringAmount
             | Amount::SacrificedPower
             | Amount::OfTarget { .. }
-            | Amount::HandOf(_) => false,
+            | Amount::HandOf(_)
+            | Amount::Noted(_)
+            | Amount::NotedTotal(_) => false,
         }
     }
 
@@ -1993,8 +2347,11 @@ pub fn color_identity(def: &CardDef) -> Vec<Color> {
     let mut out: Vec<Color> = def.colors.clone().unwrap_or_default();
     let add_cost = |m: &ManaCost, out: &mut Vec<Color>| {
         for s in &m.symbols {
-            if let ManaSymbol::Colored(c) = s {
-                out.push(*c);
+            match s {
+                ManaSymbol::Colored(c) => out.push(*c),
+                // CR 903.4: a hybrid symbol counts as both its colors.
+                ManaSymbol::Hybrid(a, b) => out.extend([*a, *b]),
+                _ => {}
             }
         }
     };
@@ -2014,8 +2371,18 @@ pub fn color_identity(def: &CardDef) -> Vec<Color> {
                         ManaProduce::One(t) => alloc::vec![*t],
                         ManaProduce::AnyColor | ManaProduce::CommanderIdentity => Vec::new(),
                         ManaProduce::OneOf(of) => of.clone(),
-                        ManaProduce::Times { of, .. } if of.len() < 5 => of.clone(),
-                        ManaProduce::Times { .. } => Vec::new(),
+                        ManaProduce::Times { of, .. }
+                        | ManaProduce::Combination { of, .. }
+                        | ManaProduce::Counted { of, .. }
+                            if of.len() < 5 =>
+                        {
+                            of.clone()
+                        }
+                        ManaProduce::Times { .. }
+                        | ManaProduce::Combination { .. }
+                        | ManaProduce::Counted { .. }
+                        | ManaProduce::Reflected { .. } => Vec::new(),
+                        ManaProduce::Fixed(v) => v.clone(),
                     };
                     for t in named {
                         if let Some(c) = Color::ALL
@@ -2029,6 +2396,10 @@ pub fn color_identity(def: &CardDef) -> Vec<Color> {
             }
             _ => {}
         }
+    }
+    // CR 903.4d: the back face of a double-faced card counts too.
+    for f in &def.faces {
+        out.extend(color_identity(f));
     }
     out.sort();
     out.dedup();
@@ -2063,17 +2434,44 @@ impl CardCatalog {
         self.get(id.card).ability(id)
     }
 
+    /// Add a card. Its other faces get entries of their own right after it, so face `n`
+    /// of the card at `id` is at `id + n` ([`CardCatalog::face`]).
     pub fn add(&mut self, def: CardDef) -> CardDefId {
         let id = CardDefId(u32::try_from(self.defs.len()).expect("catalog overflow"));
+        let faces: Vec<CardDef> = def
+            .faces
+            .iter()
+            .map(|f| CardDef {
+                face_of: Some(id),
+                layout: def.layout,
+                ..f.clone()
+            })
+            .collect();
         self.defs.push(def);
+        self.defs.extend(faces);
         id
     }
 
-    /// The definition called `name`: by its key if it has one, otherwise by its name.
+    /// The entry of face `face` of the card `card` (0: the card itself, its front face).
+    pub fn face(&self, card: CardDefId, face: u8) -> CardDefId {
+        debug_assert!(
+            face as usize <= self.get(card).faces.len(),
+            "no face {face}"
+        );
+        CardDefId(card.0 + u32::from(face))
+    }
+
+    /// The card a catalog entry is a face of (itself for a front face).
+    pub fn card_of(&self, entry: CardDefId) -> CardDefId {
+        self.get(entry).face_of.unwrap_or(entry)
+    }
+
+    /// The definition called `name`: by its key if it has one, otherwise by its name. The
+    /// entries of back faces are not cards of their own and are never found.
     pub fn find(&self, name: &str) -> Option<CardDefId> {
         self.defs
             .iter()
-            .position(|d| d.key.as_deref().unwrap_or(&d.name) == name)
+            .position(|d| d.face_of.is_none() && d.key.as_deref().unwrap_or(&d.name) == name)
             .map(|i| CardDefId(i as u32))
     }
 }

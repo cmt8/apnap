@@ -58,6 +58,15 @@ pub struct StackObject {
     /// For triggered abilities: what else the triggering event carries.
     #[serde(default)]
     pub facts: crate::triggers::EventFacts,
+    /// For an ability of a permanent: how many times the permanent had transformed when
+    /// the ability was put on the stack (CR 701.27g).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_transforms: Option<u32>,
+    /// For spells: the alternative cost paid to cast it (CR 118.9, 601.2b), an ability of
+    /// its card. It decides where the card goes as it leaves the stack (flashback, CR
+    /// 702.34a) and what its text is (overload, CR 702.96a).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt: Option<AbilityId>,
     /// For abilities: what was chosen for the source as it entered, as it was when the
     /// ability was put on the stack — "the chosen type" in the ability's text (CR 607.2d),
     /// also once the source has left (CR 608.2h: a permanent's choice never changes while

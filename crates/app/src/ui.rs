@@ -98,6 +98,9 @@ pub struct App {
     pub alloc: Vec<u32>,
     pub order: Vec<usize>,
     pub focus: Option<Anchor>,
+    /// What is typed into the search field of a long list of options ("choose a creature
+    /// type").
+    pub search: String,
     /// Card images and mana symbols.
     pub art: Art,
     /// Pause after each thing an AI seat visibly does, in milliseconds (0 = no pause).
@@ -206,6 +209,7 @@ impl App {
             alloc: Vec::new(),
             order: Vec::new(),
             focus: None,
+            search: String::new(),
             art,
             pace_ms,
             resume_at: None,
@@ -384,6 +388,16 @@ pub fn prompt(kind: ChoiceKind) -> &'static str {
         ChoiceKind::OrderBottom => "Order the cards for the bottom (the last one is bottom-most)",
         ChoiceKind::AuraHost => "Choose what the Aura enchants",
         ChoiceKind::AsEnters { .. } => "As it enters",
+        ChoiceKind::ExileFromHand => "Exile from your hand to pay the cost",
+        ChoiceKind::ReturnToHand => "Return to its owner's hand to pay the cost",
+        ChoiceKind::Choose {
+            what: card_model::ChoiceOf::CreatureType,
+            ..
+        } => "Choose a creature type",
+        ChoiceKind::Choose {
+            what: card_model::ChoiceOf::Color,
+            ..
+        } => "Choose a color",
     }
 }
 
@@ -393,6 +407,9 @@ pub fn anchor(o: &OptionDesc) -> Option<Anchor> {
     Some(match o {
         OptionDesc::PlayLand { card }
         | OptionDesc::CastSpell { card }
+        | OptionDesc::PlayLandFace { card, .. }
+        | OptionDesc::CastFace { card, .. }
+        | OptionDesc::CastWith { card, .. }
         | OptionDesc::Card { card } => Anchor::Obj(*card),
         OptionDesc::ActivateAbility { source, .. }
         | OptionDesc::TapForMana { source, .. }
@@ -413,6 +430,8 @@ pub fn anchor(o: &OptionDesc) -> Option<Anchor> {
         | OptionDesc::Mode { .. }
         | OptionDesc::Mana { .. }
         | OptionDesc::Shield { .. }
+        | OptionDesc::CreatureType { .. }
+        | OptionDesc::Color { .. }
         | OptionDesc::Accept
         | OptionDesc::Decline => return None,
     })
@@ -445,7 +464,10 @@ pub fn option_label(
             let text = v.stack.last().and_then(|top| {
                 // The card the text is written on: an ability can be another card's gift.
                 let (def, body) = match top.ability {
-                    None => (cat.get(top.card), cat.get(top.card).spell_ability()),
+                    None => {
+                        let def = cat.get(cat.face(top.card, top.face));
+                        (def, def.spell_ability())
+                    }
                     Some(a) => (
                         cat.get(a.card),
                         match cat.ability(a) {
@@ -486,6 +508,7 @@ pub fn option_label(
             }
             _ => "No: it enters tapped".into(),
         },
+        OptionDesc::Color { color } => format!("{color:?}"),
         OptionDesc::Accept => "Yes".into(),
         OptionDesc::Decline => "No".into(),
         OptionDesc::Pass if d.kind == ChoiceKind::Priority => "Pass priority".into(),
@@ -499,12 +522,34 @@ pub fn option_label(
                 matches!(x, OptionDesc::TapForMana { source: s, mana: m, ability: a }
                     if s == source && m == mana && a != ability)
             });
+            // A mana ability that does more than tap for one mana: say what it is.
+            let more = ability.is_some_and(|a| match cat.ability(a) {
+                AbilityDef::Mana {
+                    cost,
+                    produce,
+                    then,
+                    ..
+                } => {
+                    !cost.tap
+                        || cost.mana.is_some()
+                        || cost.life > 0
+                        || cost.sacrifice.is_some()
+                        || then.is_some()
+                        || produce.count() > 1
+                        || matches!(
+                            produce,
+                            card_model::ManaProduce::Counted { .. }
+                                | card_model::ManaProduce::Reflected { .. }
+                        )
+                }
+                _ => false,
+            });
             match (find_object(v, *source), ability) {
-                (Some(src), Some(a)) if twice => format!(
-                    "tap {} for {} — {}",
+                (Some(src), Some(a)) if twice || more => format!(
+                    "{}: {} (first mana: {})",
                     src.name,
+                    describe::ability_text(cat.get(a.card), cat.ability(*a)),
                     mana.symbol(),
-                    describe::ability_text(cat.get(a.card), cat.ability(*a))
                 ),
                 (Some(src), _) => format!("tap {} for {}", src.name, mana.symbol()),
                 (None, _) => harness::text::option_line(v, o),
@@ -540,6 +585,21 @@ pub fn option_label(
                 None => harness::text::option_line(v, o),
             }
         }
+        // Casting it for an alternative cost: which one (CR 118.9).
+        OptionDesc::CastWith {
+            card,
+            face,
+            ability,
+        } => match find_object(v, *card) {
+            Some(c) => {
+                let mut text = describe::ability_text(cat.get(ability.card), cat.ability(*ability));
+                if text.chars().count() > 90 {
+                    text = text.chars().take(89).chain(['…']).collect();
+                }
+                format!("cast {} — {text}", cat.get(cat.face(c.card, *face)).name)
+            }
+            None => harness::text::option_line(v, o),
+        },
         // The ability itself, so that two abilities of one card (or casting it and
         // cycling it) can be told apart.
         OptionDesc::ActivateAbility { source, ability } => {
@@ -551,6 +611,19 @@ pub fn option_label(
                 format!("{} — {text}", src.name)
             });
             text.unwrap_or_else(|| harness::text::option_line(v, o))
+        }
+        // A face that isn't up names itself (CR 712.8b, 712.9): "Play Malakir Mire".
+        OptionDesc::PlayLandFace { card, face } | OptionDesc::CastFace { card, face } => {
+            match find_object(v, *card) {
+                Some(ov) => {
+                    let name = &cat.get(cat.face(ov.card, *face)).name;
+                    match o {
+                        OptionDesc::PlayLandFace { .. } => format!("play {name}"),
+                        _ => format!("cast {name}"),
+                    }
+                }
+                None => harness::text::option_line(v, o),
+            }
         }
         other => harness::text::option_line(v, other),
     }
@@ -716,7 +789,7 @@ fn whereabouts(v: &PlayerView, id: ObjectId) -> String {
 
 /// A card's accessible name: everything the picture and its badges show, as text.
 fn card_text(o: &ObjectView, cat: &CardCatalog) -> String {
-    let def = cat.get(o.card);
+    let def = cat.get(cat.face(o.card, o.face));
     let cost = def
         .mana_cost
         .as_ref()
@@ -857,7 +930,7 @@ fn badges(cx: &Ctx<'_>, o: &ObjectView, place: Place) -> Vec<Badge> {
         ));
     }
     if let (true, Some(p), Some(t)) = (creature, o.power, o.toughness) {
-        let def = cx.cat.get(o.card);
+        let def = cx.cat.get(cx.cat.face(o.card, o.face));
         if let Some(fg) = pt_badge((def.power, def.toughness), (p, t)) {
             out.push(Badge::new(
                 Corner::BottomRight,
@@ -948,7 +1021,8 @@ fn card(
         label.push_str(&format!("\nx{}", group.len()));
     }
     let look = CardLook {
-        def: cx.cat.get(o.card),
+        // The face that is up (CR 712.6).
+        def: cx.cat.get(cx.cat.face(o.card, o.face)),
         label: &label,
         height,
         tapped: o.tapped && on_battlefield,
@@ -965,7 +1039,7 @@ fn card(
     }
     if resp.hovered() {
         let pv = Preview {
-            card: o.card,
+            card: cx.cat.face(o.card, o.face),
             object: Some(o.id),
         };
         ptr.hovered = Some(Hover {
@@ -1009,6 +1083,7 @@ fn piles<'a>(cx: &Ctx<'_>, lands: &[&'a ObjectView]) -> Vec<Vec<&'a ObjectView>>
     let key = |o: &ObjectView| {
         (
             o.card,
+            o.face,
             o.tapped,
             o.owner,
             cx.options_at(Anchor::Obj(o.id)).is_empty(),
@@ -1717,9 +1792,26 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
     let screen = ctx.content_rect();
     let ppp = ctx.pixels_per_point();
     // The image's own size where the screen allows (one image pixel per screen pixel).
-    let height = (680.0 / ppp).max(500.0).min(screen.height() - 70.0);
-    let (card, _) = cardview::card_size(height, ppp);
+    let mut height = (680.0 / ppp).max(500.0).min(screen.height() - 70.0);
     let def = cx.cat.get(pv.card);
+    // Players may look at both faces of a double-faced card (CR 712.4): the other face is
+    // shown beside the one that is up.
+    let front = cx.cat.card_of(pv.card);
+    let others: Vec<&card_model::CardDef> = if cx.cat.get(front).layout.double_faced() {
+        (0..=cx.cat.get(front).faces.len() as u8)
+            .map(|i| cx.cat.face(front, i))
+            .filter(|&e| e != pv.card)
+            .map(|e| cx.cat.get(e))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let (mut card, _) = cardview::card_size(height, ppp);
+    let across = 1.0 + others.len() as f32;
+    if card.x * across + 6.0 * across + 12.0 > screen.width() {
+        height *= (screen.width() - 12.0 - 6.0 * across) / (card.x * across);
+        card = cardview::card_size(height, ppp).0;
+    }
     let credit = if def.token {
         art.token_credit(ctx, def)
     } else {
@@ -1741,6 +1833,10 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
         }
         if o.damage_marked > 0 {
             now.push(format!("{} damage", o.damage_marked));
+        }
+        // CR 607.2d: what was chosen for it as it entered (public).
+        for c in &o.chosen {
+            now.push(chosen_line(*c));
         }
         for (kind, n) in &o.counters {
             now.push(format!("{} x{n}", counter_name(*kind)));
@@ -1787,7 +1883,11 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
         }
     }
     let lines = usize::from(credit.is_some()) + usize::from(!now.is_empty()) + gained.len();
-    let size = card + vec2(12.0, 12.0 + lines as f32 * 18.0);
+    let size = card
+        + vec2(
+            12.0 + others.len() as f32 * (card.x + 6.0),
+            12.0 + lines as f32 * 18.0,
+        );
     let (x, y) = zoom_position(screen, near, size, hover.in_hand);
     egui::Area::new(egui::Id::unique("zoomed card"))
         .order(egui::Order::Tooltip)
@@ -1800,8 +1900,13 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
                 .corner_radius(10.0)
                 .inner_margin(6.0)
                 .show(ui, |ui| {
-                    ui.set_max_width(card.x);
-                    cardview::card_large(ui, art, def, height);
+                    ui.set_max_width(card.x * across + 6.0 * (across - 1.0));
+                    ui.horizontal(|ui| {
+                        cardview::card_large(ui, art, def, height);
+                        for other in &others {
+                            cardview::card_large(ui, art, other, height);
+                        }
+                    });
                     if let Some(credit) = credit {
                         ui.add(egui::Label::new(RichText::new(credit).small().weak()).truncate());
                     }
@@ -1860,7 +1965,7 @@ fn side_panel(ui: &mut egui::Ui, art: &mut Art, cx: &Ctx<'_>, s: &Session, ptr: 
         ui.horizontal(|ui| {
             let opts = cx.options_at(Anchor::Obj(so.id));
             let look = CardLook {
-                def: cx.cat.get(so.card),
+                def: cx.cat.get(cx.cat.face(so.card, so.face)),
                 label: &format!("on the stack: {line}"),
                 height: 96.0,
                 tapped: false,
@@ -1874,7 +1979,7 @@ fn side_panel(ui: &mut egui::Ui, art: &mut Art, cx: &Ctx<'_>, s: &Session, ptr: 
             let resp = cardview::card_widget(ui, art, &look);
             if resp.hovered() {
                 let pv = Preview {
-                    card: so.card,
+                    card: cx.cat.face(so.card, so.face),
                     object: None,
                 };
                 ptr.hovered = Some(Hover {
@@ -2015,7 +2120,7 @@ fn card_strip(
                     ui.vertical(|ui| {
                         let chosen = cx.picked.contains(i);
                         let look = CardLook {
-                            def: cx.cat.get(o.card),
+                            def: cx.cat.get(cx.cat.face(o.card, o.face)),
                             label,
                             height: 150.0,
                             tapped: false,
@@ -2034,7 +2139,7 @@ fn card_strip(
                         if resp.hovered() {
                             ptr.hovered = Some(Hover {
                                 card: Preview {
-                                    card: o.card,
+                                    card: cx.cat.face(o.card, o.face),
                                     object: Some(o.id),
                                 },
                                 rect: resp.rect,
@@ -2055,6 +2160,65 @@ fn card_strip(
             });
         });
     clicked
+}
+
+/// "Chosen type: Elf", "Chosen color: Green".
+pub fn chosen_line(c: card_model::Chosen) -> String {
+    match c {
+        card_model::Chosen::CreatureType(t) => format!("Chosen type: {}", t.name()),
+        card_model::Chosen::Color(c) => format!("Chosen color: {c:?}"),
+    }
+}
+
+/// How many creature types the picker shows at once (the rest are found by typing).
+pub const TYPES_SHOWN: usize = 24;
+
+/// "Choose a creature type": a search field and the matching types as buttons, in the
+/// engine's order (the types among the player's own cards first, the most common first).
+fn type_picker(app: &mut App, ui: &mut egui::Ui, d: &PendingDecision, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        ui.label("Search:");
+        ui.add(
+            egui::TextEdit::singleline(&mut app.search)
+                .hint_text("type a creature type")
+                .desired_width(180.0),
+        )
+        .request_focus();
+    });
+    let needle = app.search.trim().to_lowercase();
+    let matching: Vec<(usize, &'static str)> = d
+        .options
+        .iter()
+        .enumerate()
+        .filter_map(|(i, o)| match o {
+            OptionDesc::CreatureType { name } => Some((i, name.name())),
+            _ => None,
+        })
+        .filter(|(_, n)| n.to_lowercase().contains(&needle))
+        .collect();
+    // Enter takes the first match.
+    if !matching.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        actions.push(Action::Respond(Response::Pick(vec![matching[0].0])));
+    }
+    egui::ScrollArea::vertical()
+        .max_height(160.0)
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for &(i, name) in matching.iter().take(TYPES_SHOWN) {
+                    if ui.button(name).clicked() {
+                        actions.push(Action::Respond(Response::Pick(vec![i])));
+                    }
+                }
+            });
+        });
+    if matching.len() > TYPES_SHOWN {
+        ui.weak(format!(
+            "{} more — type to narrow the list",
+            matching.len() - TYPES_SHOWN
+        ));
+    } else if matching.is_empty() {
+        ui.weak("No creature type has that in its name.");
+    }
 }
 
 /// The decision panel: prompt plus a button for every option, by primitive.
@@ -2104,7 +2268,36 @@ fn decision_panel(
             title.push_str(" (It enters tapped anyway.)");
         }
     }
+    // "As Test Banner enters, choose a creature type." / "… for Test Dominion".
+    if let ChoiceKind::Choose {
+        object, ability, ..
+    } = d.kind
+    {
+        match ability {
+            Some(ability) => {
+                let name =
+                    find_object(cx.view, object).map_or("it".to_string(), |o| o.name.clone());
+                title = describe::ability_text(cx.cat.get(ability.card), cx.cat.ability(ability))
+                    .replace("this permanent", &name);
+            }
+            None => {
+                if let Some(top) = cx.view.stack.last() {
+                    title.push_str(&format!(" for {}", top.name));
+                }
+            }
+        }
+    }
     ui.strong(RichText::new(title).size(15.0).color(GOLD));
+    // Every creature type may be chosen (CR 205.3m): a searchable list, the types of the
+    // player's own cards first.
+    if let ChoiceKind::Choose {
+        what: card_model::ChoiceOf::CreatureType,
+        ..
+    } = d.kind
+    {
+        type_picker(app, ui, d, actions);
+        return;
+    }
     let labels: Vec<String> = d
         .options
         .iter()
@@ -2418,6 +2611,7 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
         app.order.clear();
         app.number = 0;
         app.focus = None;
+        app.search.clear();
     }
     let view = session.view();
     let decision = session.human_decision().cloned();
@@ -3080,5 +3274,37 @@ mod tests {
             option_label(&v, &cat, &d, option),
             "Test Golem — {T}: This deals 1 damage to any target."
         );
+    }
+
+    // A card with two faces (D-071): each option names the face it is about (CR 712.8b,
+    // 712.9), and the card is drawn with the face that is up.
+    #[test]
+    fn options_name_the_face_they_are_about() {
+        use engine_core::testing::Scenario;
+        use engine_core::zones::Zone;
+        let tide = "Name:Test Tide Charm\nManaCost:1 U\nTypes:Instant\n\
+            A:SP$ Draw | NumCards$ 1 | SpellDescription$ Draw a card.\nAlternateMode:Modal\n\
+            Oracle:Draw a card.\nALTERNATE\nName:Test Tide Flat\nManaCost:no cost\nTypes:Land\n\
+            A:AB$ Mana | Cost$ T | Produced$ U | SpellDescription$ Add {U}.\nOracle:{T}: Add {U}.";
+        let cat = harness::forge_test_catalog(&[tide], &[]);
+        let me = PlayerId(0);
+        let mut sc = Scenario::new(engine_core::GameConfig::commander(2), cat.clone(), 7);
+        for p in [me, PlayerId(1)] {
+            sc.library(p, "Forest", 10);
+        }
+        sc.cards(me, Zone::Battlefield, &["Island", "Island"]);
+        let card = sc.card(me, Zone::Hand, "Test Tide Charm");
+        let mut st = sc.build();
+        let d = engine_core::start(&mut st).next.expect("a decision");
+        let v = engine_core::view::player_view(&st, me);
+        let labels: Vec<String> = d
+            .options
+            .iter()
+            .filter(|o| anchor(o) == Some(Anchor::Obj(card)))
+            .map(|o| option_label(&v, &cat, &d, o))
+            .collect();
+        assert_eq!(labels, ["play Test Tide Flat", "cast Test Tide Charm"]);
+        let o = find_object(&v, card).unwrap();
+        assert_eq!(cat.get(cat.face(o.card, o.face)).name, "Test Tide Charm");
     }
 }

@@ -85,7 +85,7 @@ pub(crate) fn snapshot(st: &GameState, id: ObjectId) -> Lki {
     let o = st.object(id);
     let (attacking, blocking) = crate::layers::combat_role(st, id);
     Lki {
-        card: o.card,
+        card: st.face_card(id),
         chars: chars(st, id),
         controller: crate::layers::controller_of(st, id),
         owner: o.owner,
@@ -158,6 +158,13 @@ pub(crate) fn condition_holds(
             crate::layers::count_amount(st, amount, source, controller),
             *n,
         ),
+        // CR 903.3d: a permanent on the battlefield that is a commander.
+        Some(Condition::ControlCommander { own }) => st.zones.battlefield.iter().any(|&id| {
+            st.is_commander(id)
+                && crate::layers::controller_of(st, id) == controller
+                && (!own || st.object(id).owner == controller)
+        }),
+        Some(Condition::CastFor(kind)) => crate::frames::altcost::cast_for(st, source, *kind),
     }
 }
 
@@ -198,7 +205,7 @@ fn battlefield_sources(st: &GameState) -> Vec<Source<'_>> {
         .iter()
         .map(|&id| Source {
             id,
-            card: st.object(id).card,
+            card: st.face_card(id),
             controller: crate::layers::controller_of(st, id),
             abilities: abilities(st, id),
             lki: None,
@@ -969,7 +976,7 @@ fn detect_cycled(st: &mut GameState, player: PlayerId, card: ObjectId) {
     if st.objects.contains_key(&card) {
         sources.push(Source {
             id: card,
-            card: st.object(card).card,
+            card: st.face_card(card),
             controller: player,
             abilities: abilities(st, card),
             lki: None,

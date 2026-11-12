@@ -286,6 +286,12 @@ pub enum Event {
     RemovedFromCombat {
         object: ObjectId,
     },
+    /// CR 701.27a: the permanent turned over; `face` is the face now up. It is the same
+    /// object (CR 701.27c).
+    Transformed {
+        object: ObjectId,
+        face: u8,
+    },
     /// `player` chose `chosen` for `object`: as the permanent entered (CR 614.12a), or for
     /// the spell or ability `object` while it resolved (CR 608.2c). Public.
     Chose {

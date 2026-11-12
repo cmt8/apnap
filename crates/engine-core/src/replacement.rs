@@ -60,6 +60,10 @@ pub enum Proposed {
         shuffle: bool,
         /// An Aura entering attached to this object (CR 303.4).
         attach_to: Option<ObjectId>,
+        /// The face it enters the stack or battlefield with (CR 712.9: a land face played);
+        /// 0 for the default (`actions::GameAction::MoveZone`).
+        #[serde(default, skip_serializing_if = "is_zero")]
+        face: u8,
     },
     Damage {
         source: ObjectId,
@@ -121,7 +125,22 @@ impl Proposed {
             counters: Vec::new(),
             shuffle: false,
             attach_to: None,
+            face: 0,
         }
+    }
+}
+
+fn is_zero(n: &u8) -> bool {
+    *n == 0
+}
+
+/// The face `object` would have up on the battlefield after a move to it with `face`
+/// (CR 712.10–712.11): what its own "enters" replacement effects are read from (CR 614.12).
+pub(crate) fn entering_face(st: &GameState, object: ObjectId, face: u8) -> u8 {
+    let o = st.object(object);
+    match face {
+        0 if o.zone == Zone::Stack => o.face,
+        f => f,
     }
 }
 
@@ -236,6 +255,7 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
     if let Proposed::Move {
         object,
         to: Zone::Battlefield,
+        face,
         ..
     } = &p.event
         && st
@@ -243,7 +263,11 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
             .get(object)
             .is_some_and(|o| o.zone != Zone::Battlefield)
     {
-        for (i, a) in st.card_def(*object).abilities.iter().enumerate() {
+        // The face it will have up there (CR 712.9–712.11).
+        let entry = st
+            .catalog
+            .face(st.object(*object).card, entering_face(st, *object, *face));
+        for (i, a) in st.catalog.get(entry).abilities.iter().enumerate() {
             if let AbilityDef::Replacement {
                 replaces: Replaces::ThisEnters,
                 with,
@@ -252,7 +276,7 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
             {
                 out.push(RepKey::Static {
                     source: *object,
-                    ability: AbilityId::printed(st.object(*object).card, i as u16),
+                    ability: AbilityId::printed(entry, i as u16),
                     nth: 0,
                 });
             }
@@ -270,6 +294,8 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
             .get(object)
             .is_some_and(|o| o.zone != Zone::Battlefield)
     {
+        // The face it has up there: off the battlefield and stack only its front face
+        // (CR 712.6a).
         for (i, a) in st.card_def(*object).abilities.iter().enumerate() {
             if let AbilityDef::Replacement {
                 replaces: Replaces::ThisToGraveyard,
@@ -278,11 +304,23 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
             {
                 out.push(RepKey::Static {
                     source: *object,
-                    ability: AbilityId::printed(st.object(*object).card, i as u16),
+                    ability: AbilityId::printed(st.face_card(*object), i as u16),
                     nth: 0,
                 });
             }
         }
+    }
+    // CR 702.34a: "If the flashback cost was paid, exile this card instead of putting it
+    // anywhere else any time it would leave the stack."
+    if let Proposed::Move { object, to, .. } = &p.event
+        && *to != Zone::Exile
+        && let Some(ability) = crate::frames::altcost::exiled_on_leaving(st, *object)
+    {
+        out.push(RepKey::Static {
+            source: *object,
+            ability,
+            nth: 0,
+        });
     }
     if let Proposed::Damage { target, amount, .. } = &p.event
         && *amount > 0
@@ -652,6 +690,7 @@ fn applies(st: &GameState, who: Bearer<'_>, replaces: &Replaces, ev: &Proposed) 
                 object,
                 to: Zone::Battlefield,
                 controller,
+                face,
                 ..
             },
         ) => st.objects.get(object).is_some_and(|o| {
@@ -659,7 +698,7 @@ fn applies(st: &GameState, who: Bearer<'_>, replaces: &Replaces, ev: &Proposed) 
                 && *object != source
                 && crate::layers::matches_parts(
                     &crate::chosen::bind_for(st, sel, source),
-                    &crate::layers::chars(st, *object),
+                    &crate::layers::chars_as(st, *object, entering_face(st, *object, *face)),
                     crate::layers::Facts {
                         id: *object,
                         controller: controller.unwrap_or(o.owner),
@@ -750,6 +789,25 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
         RepKey::Static {
             source, ability, ..
         } => {
+            // CR 702.34a: a flashback spell leaving the stack is exiled instead.
+            if let AbilityDef::AlternativeCost(_) = st.catalog.ability(ability) {
+                let mut ev = ev;
+                if let Proposed::Move {
+                    to,
+                    position,
+                    shuffle,
+                    controller,
+                    ..
+                } = &mut ev
+                {
+                    *to = Zone::Exile;
+                    *position = LibraryPosition::Top;
+                    *shuffle = false;
+                    *controller = None;
+                }
+                st.emit(crate::events::Event::Replaced { source });
+                return Some(ev);
+            }
             let AbilityDef::Replacement { with, .. } = st.catalog.ability(ability) else {
                 unreachable!()
             };

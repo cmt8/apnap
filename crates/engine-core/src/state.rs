@@ -155,10 +155,17 @@ impl GameState {
             .unwrap_or_else(|| panic!("no object {id:?}"))
     }
 
-    /// Printed card data. Engine code must not use this for objects on the battlefield or
-    /// stack; use `layers::chars` (CLAUDE.md invariant 3).
+    /// The catalog entry of the face of `id` that is up (CR 712.6): the card's own entry
+    /// unless a back face is up on the stack or battlefield.
+    pub fn face_card(&self, id: ObjectId) -> card_model::CardDefId {
+        let o = self.object(id);
+        self.catalog.face(o.card, o.face)
+    }
+
+    /// Printed card data of the face that is up. Engine code must not use this for objects
+    /// on the battlefield or stack; use `layers::chars` (CLAUDE.md invariant 3).
     pub fn card_def(&self, id: ObjectId) -> &CardDef {
-        self.catalog.get(self.object(id).card)
+        self.catalog.get(self.face_card(id))
     }
 
     pub fn player(&self, p: PlayerId) -> &PlayerState {

@@ -42,6 +42,10 @@ pub struct ObjectView {
     /// effects (public: the text is the giving card's).
     #[serde(default)]
     pub granted: Vec<card_model::AbilityId>,
+    /// Which face of `card` is up (CR 712.6; 0 = the front face): its text and picture are
+    /// those of `catalog.face(card, face)`. Players may look at both faces (CR 712.4).
+    #[serde(default)]
+    pub face: u8,
     /// What was chosen for it as it entered ("chosen type: Elf", CR 607.2d; public).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen: Vec<card_model::Chosen>,
@@ -72,6 +76,9 @@ pub struct StackView {
     pub modes: Vec<u8>,
     pub x: u32,
     pub targets: Vec<Target>,
+    /// The face of the spell's card that is up (CR 712.8): `catalog.face(card, face)`.
+    #[serde(default)]
+    pub face: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +155,7 @@ pub struct PlayerView {
 fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
     let o = st.object(id);
     let c = chars(st, id);
+    let mana_value = c.mana_value();
     ObjectView {
         id,
         card: o.card,
@@ -160,13 +168,14 @@ fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
         tapped: o.tapped,
         damage_marked: o.damage_marked,
         summoning_sick: o.summoning_sick,
-        mana_value: c.mana_cost.as_ref().map_or(0, |m| m.mana_value()),
+        mana_value,
         keywords: c.keywords,
         counters: o.counters.iter().map(|(k, n)| (*k, *n)).collect(),
         is_commander: st.is_commander(id),
         card_instance: o.card_instance,
         attached_to: o.attached_to,
         granted: c.abilities.iter().copied().filter(|a| a.granted).collect(),
+        face: o.face,
         chosen: o.chosen.clone(),
     }
 }
@@ -247,6 +256,10 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
                 modes: so.modes.clone(),
                 x: so.x,
                 targets: so.all_targets().copied().collect(),
+                face: match so.kind {
+                    StackKind::Spell => st.object(so.id).face,
+                    StackKind::Ability { .. } => 0,
+                },
             })
             .collect(),
         exile: views(st, &st.zones.exile),
@@ -305,7 +318,9 @@ fn shown_to(st: &GameState, viewer: PlayerId) -> Vec<ObjectId> {
             OptionDesc::Card { card } => Some(*card),
             // A card a rule lets them play from a hidden zone (the top of their library):
             // they know what they are offered.
-            OptionDesc::PlayLand { card } | OptionDesc::CastSpell { card } => Some(*card),
+            OptionDesc::PlayLand { card }
+            | OptionDesc::CastSpell { card }
+            | OptionDesc::CastWith { card, .. } => Some(*card),
             _ => None,
         })
         .filter(hidden)

@@ -121,6 +121,10 @@ pub enum ChoiceKind {
         ability: AbilityId,
         tapped: bool,
     },
+    /// CR 601.2h: choose the cards to exile from your hand for a cost (PickN over `Card`).
+    ExileFromHand,
+    /// CR 601.2h: choose the permanents to return to their owner's hand for a cost.
+    ReturnToHand,
     /// Choose a creature type (PickN 1 over `OptionDesc::CreatureType`: every creature type
     /// of CR 205.3m — those among the chooser's own cards first, most common first, then the
     /// rest alphabetically) or a color (over `OptionDesc::Color`, CR 105.4) — for permanent
@@ -218,6 +222,27 @@ pub enum OptionDesc {
     /// A recipient of divided damage.
     DamageRecipient {
         object: ObjectId,
+    },
+    /// Play face `face` (not the front) of a card as a land (CR 712.9: a modal
+    /// double-faced card's land face). `PlayLand` plays the front face.
+    PlayLandFace {
+        card: ObjectId,
+        face: u8,
+    },
+    /// Cast face `face` (not the front) of a card (CR 712.8b). `CastSpell` casts the front
+    /// face.
+    CastFace {
+        card: ObjectId,
+        face: u8,
+    },
+    /// Cast `card` with its alternative cost `ability` (CR 118.9, 601.2b): "without paying
+    /// its mana cost", flashback, evoke, overload. Offered right after `CastSpell` for the
+    /// same card, in printed order.
+    CastWith {
+        card: ObjectId,
+        /// The face being cast (0: the front, as for `CastSpell`; else as for `CastFace`).
+        face: u8,
+        ability: AbilityId,
     },
     /// A creature type to choose (CR 205.3m).
     CreatureType {
