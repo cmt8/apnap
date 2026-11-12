@@ -118,6 +118,12 @@ fn texts() -> Vec<String> {
             abilities: vec![cycling],
             ..spell(Vec::new())
         },
+        // A Saga's chapter ability ("IV — Draw a card.", CR 715.2a).
+        spell(vec![AbilityDef::Triggered {
+            when: card_model::Trigger::Chapter(4),
+            intervening_if: None,
+            body: Body::Effect(mode(draw.clone())),
+        }]),
     ];
     let mut out: Vec<String> = cards
         .iter()

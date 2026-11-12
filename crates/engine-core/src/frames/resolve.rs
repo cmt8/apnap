@@ -771,6 +771,11 @@ impl ResolveFrame {
             Amount::SacrificedPower => self.sacrificed_power,
             Amount::TriggeringAmount => self.facts.amount,
             Amount::LifeLostThisWay => self.life_lost,
+            // CR 608.2h: on the source as it is, or as it last existed on the battlefield.
+            Amount::CountersOnThis(kind) => self
+                .source_chars(st)
+                .and_then(|c| c.counters.iter().find(|(k, _)| k == kind).map(|(_, n)| *n))
+                .unwrap_or(0),
             // CR 608.2h: counted as the effect is applied.
             Amount::HandOf(who) => self
                 .player(st, k, *who)

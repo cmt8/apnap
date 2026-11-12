@@ -939,6 +939,10 @@ pub enum Trigger {
     /// tapped, whatever taps it (a cost, an effect, attacking). Entering tapped isn't
     /// becoming tapped. "It" is the permanent.
     BecomesTapped(ObjFilter),
+    /// CR 715.2b: a chapter ability, "{rN} — [effect]": "When one or more lore counters are
+    /// put onto this Saga, if the number of lore counters on it was less than N and became
+    /// at least N, [effect]." Counters it enters with count (CR 122.6).
+    Chapter(u32),
     /// CR 601.2i, 702.40a: "When you cast this spell" — triggers from the spell itself on
     /// the stack. "That much" is the number of spells every player cast this turn before
     /// it (storm).
@@ -1352,13 +1356,95 @@ pub struct Signed {
     pub amount: Amount,
 }
 
-/// Counter kinds (CR 122). M2: the two P/T counters.
+/// Counter kinds (CR 122). Counters with the same name are interchangeable (CR 122.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum CounterKind {
     /// +1/+1 (CR 122.1a)
     PlusOne,
     /// -1/-1
     MinusOne,
+    /// Any other kind, by its name ("charge", "lore", "oil"): it does nothing by itself —
+    /// only what refers to it (D-084). Kinds with rules of their own (CR 122.1b–j) are not
+    /// compiled.
+    Named(CounterName),
+}
+
+/// The name of a kind of counter, lower case ("charge", "lore"): at most
+/// [`CounterName::MAX`] bytes, so that a counter kind stays a plain value.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CounterName {
+    len: u8,
+    bytes: [u8; CounterName::MAX],
+}
+
+impl CounterKind {
+    /// Lore counters, which Sagas use to track their progress (CR 715.3).
+    pub const LORE: CounterKind = CounterKind::Named(CounterName::constant("lore"));
+}
+
+impl CounterName {
+    pub const MAX: usize = 24;
+
+    /// A name known when the program is written (lower case letters only).
+    const fn constant(name: &str) -> Self {
+        let b = name.as_bytes();
+        assert!(!b.is_empty() && b.len() <= Self::MAX);
+        let mut bytes = [0u8; Self::MAX];
+        let mut i = 0;
+        while i < b.len() {
+            assert!(b[i].is_ascii_lowercase());
+            bytes[i] = b[i];
+            i += 1;
+        }
+        CounterName {
+            len: b.len() as u8,
+            bytes,
+        }
+    }
+
+    /// `None` if the name is empty, too long, or not plain ASCII letters, digits, spaces or
+    /// hyphens.
+    pub fn new(name: &str) -> Option<Self> {
+        if name.is_empty()
+            || name.len() > Self::MAX
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b' ' || b == b'-')
+        {
+            return None;
+        }
+        let mut bytes = [0u8; Self::MAX];
+        for (i, b) in name.bytes().enumerate() {
+            bytes[i] = b.to_ascii_lowercase();
+        }
+        Some(CounterName {
+            len: name.len() as u8,
+            bytes,
+        })
+    }
+
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..self.len as usize]).unwrap_or("")
+    }
+}
+
+impl core::fmt::Debug for CounterName {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{:?}", self.as_str())
+    }
+}
+
+impl Serialize for CounterName {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for CounterName {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        CounterName::new(&s).ok_or_else(|| serde::de::Error::custom("not a counter name"))
+    }
 }
 
 /// What a spell or ability does: either a single effect or a modal choice (CR 700.2).
@@ -1515,6 +1601,13 @@ pub struct Cost {
     /// additional cost (card-db), on top of `life`.
     #[serde(skip_serializing_if = "core::ops::Not::not")]
     pub life_x: bool,
+    /// "Remove N [kind] counters from this permanent" (CR 118.3: only if it has them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remove_counters: Option<(CounterKind, u32)>,
+    /// "Put N [kind] counters on this permanent" (CR 122.6: replacement effects that
+    /// modify putting counters apply).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add_counters: Option<(CounterKind, u32)>,
 }
 
 impl Cost {
@@ -1540,6 +1633,8 @@ impl Cost {
             exile_from_hand: one(&self.exile_from_hand, &other.exile_from_hand)?,
             return_to_hand: one(&self.return_to_hand, &other.return_to_hand)?,
             life_x: self.life_x || other.life_x,
+            remove_counters: one(&self.remove_counters, &other.remove_counters)?,
+            add_counters: one(&self.add_counters, &other.add_counters)?,
         })
     }
 }
@@ -2350,7 +2445,8 @@ impl Amount {
             | Amount::OfTarget { .. }
             | Amount::HandOf(_)
             | Amount::NotedTotal(_)
-            | Amount::LifeLostThisWay => {}
+            | Amount::LifeLostThisWay
+            | Amount::CountersOnThis(_) => {}
         }
     }
 }
@@ -2580,6 +2676,9 @@ pub enum Amount {
     /// life" instruction of this resolution — after replacement effects, so what was
     /// actually lost (CR 119.3, 608.2c). 0 before any.
     LifeLostThisWay,
+    /// "The number of [kind] counters on this permanent" (CR 122): on the ability's source
+    /// while it is on the battlefield (card-db refuses it where the source may be gone).
+    CountersOnThis(CounterKind),
 }
 
 impl Amount {
@@ -2613,6 +2712,7 @@ impl Amount {
             | Amount::Noted(_)
             | Amount::NotedTotal(_)
             | Amount::LifeLostThisWay => false,
+            Amount::CountersOnThis(_) => true,
         }
     }
 
@@ -2628,7 +2728,8 @@ impl Amount {
             | Amount::Players(_)
             | Amount::LifeAmong { .. }
             | Amount::Domain
-            | Amount::Devotion(_) => true,
+            | Amount::Devotion(_)
+            | Amount::CountersOnThis(_) => true,
             Amount::Count(s) => !s.looks_at_pt(),
             Amount::CardsIn { zone, cards } => {
                 *zone != CardZone::Battlefield && cards.iter().all(|s| !s.looks_at_pt())

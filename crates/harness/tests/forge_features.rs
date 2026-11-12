@@ -2444,10 +2444,14 @@ fn entering_with_counters() {
     s.cast("Test Hydra").x(2).pay().pass_all();
     let hydra = s.find(P0, Zone::Battlefield, "Test Hydra").unwrap();
     assert_eq!(counters(&s, hydra), 2);
-    // Other kinds of counters aren't modelled.
-    let charged =
-        "Name:Test Battery\nManaCost:1\nTypes:Artifact\nK:etbCounter:CHARGE:3\nOracle:Text.";
-    assert_eq!(forge_test_blockers(charged), ["counter:CHARGE"]);
+    // Kinds of counters with rules of their own aren't built (D-084; other kinds are:
+    // forge_counters.rs).
+    let stunned =
+        "Name:Test Battery\nManaCost:1\nTypes:Artifact\nK:etbCounter:STUN:3\nOracle:Text.";
+    assert_eq!(
+        forge_test_blockers(stunned),
+        ["counter:STUN (rules of its own)"]
+    );
 }
 
 // CR 614.1c, 614.12 (2026-11-06). Forge:
@@ -3348,9 +3352,12 @@ fn counters_on_each_creature_you_control() {
         "Test Charge Up",
         "G",
         "Sorcery",
-        "A:SP$ PutCounterAll | ValidCards$ Artifact | CounterType$ CHARGE | CounterNum$ 1 | SpellDescription$ Text.",
+        "A:SP$ PutCounterAll | ValidCards$ Artifact | CounterType$ SHIELD | CounterNum$ 1 | SpellDescription$ Text.",
     );
-    assert_eq!(forge_test_blockers(&other), ["counter:CHARGE"]);
+    assert_eq!(
+        forge_test_blockers(&other),
+        ["counter:SHIELD (rules of its own)"]
+    );
 }
 
 // ---------------------------------------------------------------------------------------
