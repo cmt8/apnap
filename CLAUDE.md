@@ -137,7 +137,7 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
   (`Cost::remove_counters/add_counters`, through the replacement pipeline) take any kind;
   only ±1 annihilate. Kinds with rules of their own are blocked by name until built.
   Sagas (CR **715** in this edition) are `Trigger::Chapter(n)`; the first lore counter is
-  an ordinary "enters with" replacement compiled onto each Saga, the yearly one a
+  an ordinary "enters with" replacement compiled onto each Saga, the one each turn a
   turn-based action (505.4), the sacrifice a state-based action (`sagas.rs`, 704.5s).
   Tests: `forge_counters.rs`, `forge_sagas.rs`.
 - The text of a compiled card (`card_model::describe`) is written like a printed card:
