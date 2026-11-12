@@ -160,9 +160,9 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-072): 10,758 of 34,463 scripts compile (31.2%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-072: 88% of
-the 100 most played Commander cards compile, 55% of the top 1,000, 33% of the top 5,000
+Status (D-075 part 1): 10,827 of 34,463 scripts compile (31.4%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-075 part 1: 90% of
+the 100 most played Commander cards compile, 56% of the top 1,000, 34% of the top 5,000
 (`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
 the rest. Feature tests live in `crates/harness/tests/forge_features.rs` and, one file per
 feature area since D-066, `forge_<area>.rs` next to it: invented cards written
@@ -177,7 +177,8 @@ them. A script found by reading to differ from its card goes into `SCRIPT_DIFFER
 Forge, but only reviewed comment texts are ignored (`forge/comments.rs`, D-078: `HARMLESS`;
 `INCOMPLETE` ones block the card; anything else is `comment:unreviewed`). A variable Forge
 fills in at run time (`AFLifeLost`) is never read as its placeholder value
-(`expr:set by an effect …`).
+(`expr:set by an effect …`, `SET_WHILE_RESOLVING`); `AFLifeLost` right after a life loss is
+`Amount::LifeLostThisWay` (D-075).
 References written from Forge's sources: `docs/forge/script-format.md` (file format, costs,
 filters, `Defined$`, expressions), `effects.md` (every effect API), and
 `triggers-statics-replacements-keywords.md`. Read the relevant section before compiling a
