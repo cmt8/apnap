@@ -95,11 +95,17 @@ fn allocate_widget_divides_combat_damage() {
     h.run_ok();
     let s = h.state().session.as_ref().unwrap();
     assert!(
-        s.log.iter().any(|l| l.contains("deals 2 to Test Sprout")),
+        s.log
+            .iter()
+            .any(|l| l.contains("deals 2 combat damage to Test Sprout")),
         "{:?}",
         s.log
     );
-    assert!(s.log.iter().any(|l| l.contains("deals 1 to Test Spark")));
+    assert!(
+        s.log
+            .iter()
+            .any(|l| l.contains("deals 1 combat damage to Test Spark"))
+    );
 }
 
 /// CR 603.3b: order your triggered abilities — the Order widget. Also plays the spell by
