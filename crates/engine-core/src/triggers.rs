@@ -623,7 +623,67 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
             }
         }
     }
+    for t in chapters(st, events, &entered) {
+        found.push(t);
+        conds.push(None);
+        causes.push(Cause::Other);
+    }
     queue_caused(st, found, conds, causes, lki);
+}
+
+/// CR 715.2b: chapter abilities of permanents lore counters were put on in this batch —
+/// by an effect or a cost, or as the permanent entered (CR 122.6) — whose chapter number
+/// the count passed from below.
+fn chapters(st: &GameState, events: &[Event], entered: &[ObjectId]) -> Vec<PendingTrigger> {
+    let lore = card_model::CounterKind::LORE;
+    // (Lore counters put on, taken off) in the batch, for each permanent.
+    let mut moved: BTreeMap<ObjectId, (u32, u32)> = BTreeMap::new();
+    for e in events {
+        match e {
+            Event::CountersPut { object, kind, n } if *kind == lore => {
+                moved.entry(*object).or_default().0 += n
+            }
+            Event::CountersRemoved { object, kind, n } if *kind == lore => {
+                moved.entry(*object).or_default().1 += n
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for &id in &st.zones.battlefield {
+        let now = st.object(id).counters_of(lore);
+        let before = if entered.contains(&id) {
+            0
+        } else {
+            match moved.get(&id) {
+                Some(&(put, removed)) if put > 0 => (now + removed).saturating_sub(put),
+                _ => continue,
+            }
+        };
+        if now <= before {
+            continue;
+        }
+        let controller = crate::layers::controller_of(st, id);
+        for (ability, a) in abilities(st, id) {
+            if let Some(n) = crate::sagas::chapter_of(a)
+                && before < n
+                && n <= now
+            {
+                out.push(PendingTrigger {
+                    controller,
+                    source: id,
+                    source_card: st.face_card(id),
+                    ability,
+                    source_lki: None,
+                    subject: Some(id),
+                    subject_lki: None,
+                    facts: EventFacts::default(),
+                    remembered: Vec::new(),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// CR 603.2b: "at the beginning of" triggers, when a step begins.

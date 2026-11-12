@@ -29,6 +29,7 @@ pub mod objects;
 pub mod players;
 pub mod replacement;
 pub mod rng;
+pub mod sagas;
 mod sba;
 pub mod stack;
 pub mod state;

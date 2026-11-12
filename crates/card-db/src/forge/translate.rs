@@ -676,6 +676,12 @@ impl TrigCtx {
                 it_is_this: *f == ObjFilter::This,
                 ..TrigCtx::default()
             },
+            // Forge's `CounterAdded`: `TriggeredCard` is what the counters were put on —
+            // the Saga itself.
+            Trigger::Chapter(_) => TrigCtx {
+                this: &["TriggeredCard"],
+                ..TrigCtx::NOTHING
+            },
             _ => TrigCtx::default(),
         }
     }
@@ -1354,6 +1360,10 @@ impl<'a> Tx<'a> {
             .and_then(|n| n.parse::<u32>().ok())
         {
             return Some(Amount::Fixed(n));
+        }
+        // "The number of [kind] counters on this permanent" (CR 122).
+        if let Some(kind) = v.strip_prefix("Count$CardCounters.") {
+            return self.counter_kind(Some(kind)).map(Amount::CountersOnThis);
         }
         // Another variable, so that it can take a second arithmetic suffix.
         if let Some(name) = v.strip_prefix("SVar$") {
@@ -4867,14 +4877,97 @@ impl<'a> Tx<'a> {
     }
 
     fn counter_kind(&mut self, text: Option<&str>) -> Option<CounterKind> {
-        match text {
-            Some("P1P1") => Some(CounterKind::PlusOne),
-            Some("M1M1") => Some(CounterKind::MinusOne),
-            other => {
-                self.block(format!("counter:{}", other.unwrap_or("?")));
+        let name = match text {
+            Some("P1P1") => return Some(CounterKind::PlusOne),
+            Some("M1M1") => return Some(CounterKind::MinusOne),
+            Some(name) => name,
+            None => {
+                self.block("counter:?");
+                return None;
+            }
+        };
+        // Kinds with rules of their own (CR 122.1a–j) aren't built (D-084).
+        let pt = |n: &str| {
+            let mut c = n.chars();
+            matches!(c.next(), Some('P' | 'M'))
+                && n[1..]
+                    .split(['P', 'M'])
+                    .all(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
+                && n[1..].contains(['P', 'M'])
+        };
+        let why = if pt(name) {
+            Some("+X/+Y")
+        } else if keyword(name).is_some()
+            || matches!(
+                name,
+                "First Strike" | "Double Strike" | "Exalted" | "Decayed" | "Indestructible"
+            )
+        {
+            Some("keyword counter")
+        } else {
+            match name {
+                "SHIELD" | "STUN" | "LOYALTY" | "DEFENSE" | "FINALITY" | "HONE" => {
+                    Some("rules of its own")
+                }
+                "POISON" | "ENERGY" | "EXPERIENCE" | "Experience" | "RAD" | "TICKET" => {
+                    Some("on players")
+                }
+                // Forge's words for several kinds at once, not a kind.
+                "ALL" | "Any" | "ANY" | "EachFromSource" | "ExistingCounter" => {
+                    Some("not one kind")
+                }
+                _ => None,
+            }
+        };
+        if let Some(why) = why {
+            self.block(format!("counter:{name} ({why})"));
+            return None;
+        }
+        // Forge's names are upper case words ("CHARGE", "LORE").
+        if !name.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
+            self.block(format!("counter:{name}"));
+            return None;
+        }
+        match card_model::CounterName::new(&name.replace('_', " ")) {
+            Some(n) => Some(CounterKind::Named(n)),
+            None => {
+                self.block(format!("counter:{name}"));
                 None
             }
         }
+    }
+
+    /// `K:Chapter:<N>:<SVar1>,…,<SVarN>` (CR 715.2): a Saga's chapter abilities, the i-th
+    /// SVar being chapter i's effect. "I, II — [effect]" names the same SVar twice: two
+    /// abilities (CR 715.2c), as Forge makes them.
+    fn chapters(&mut self, rest: &str) -> Option<Vec<AbilityDef>> {
+        let (n, names) = rest.split_once(':')?;
+        let names: Vec<&str> = names.split(',').map(str::trim).collect();
+        if n.parse::<usize>().ok() != Some(names.len()) || names.iter().any(|s| s.is_empty()) {
+            self.block("kw:Chapter shape");
+            return None;
+        }
+        let mut out = Vec::new();
+        for (i, name) in names.into_iter().enumerate() {
+            let when = Trigger::Chapter(i as u32 + 1);
+            let rec = self.sub(name)?;
+            self.in_trigger = true;
+            self.optional_trigger = false;
+            self.trig = TrigCtx::of(&when);
+            self.took_it_for_this = false;
+            self.took_player_for_you = false;
+            let body = self.body(rec, true, "DB");
+            self.in_trigger = false;
+            self.trig = TrigCtx::default();
+            self.took_it_for_this = false;
+            self.took_player_for_you = false;
+            out.push(AbilityDef::Triggered {
+                when,
+                intervening_if: None,
+                body: body?,
+            });
+        }
+        Some(out)
     }
 
     /// `K:etbCounter:<type>:<amount>[:<condition>[:<description>]]` — "this permanent
@@ -5396,6 +5489,27 @@ impl<'a> Tx<'a> {
                         && count == Some(1) =>
                 {
                     cost.exile_self = true
+                }
+                // "Remove N [kind] counters from this" / "put N [kind] counters on this"
+                // (`SubCounter<N/TYPE>`, `AddCounter<N/TYPE>`; on this card only — a third
+                // argument names something else).
+                ("SubCounter" | "AddCounter", true)
+                    if count.is_some_and(|n| n > 0)
+                        && (args.len() == 2
+                            || matches!(args.get(2), Some(&"CARDNAME" | &"NICKNAME"))) =>
+                {
+                    let n = count.expect("checked");
+                    let k = self.counter_kind(args.get(1).copied())?;
+                    let slot = if kind == "SubCounter" {
+                        &mut cost.remove_counters
+                    } else {
+                        &mut cost.add_counters
+                    };
+                    if slot.is_some() {
+                        self.block(format!("cost:{kind} twice"));
+                        return None;
+                    }
+                    *slot = Some((k, n));
                 }
                 ("Sac" | "Discard", true) => {
                     let (Some(count), Some(types)) = (count.filter(|n| *n > 0), args.get(1)) else {
@@ -8374,6 +8488,11 @@ fn ability_records(face: &Face) -> Vec<(String, Record)> {
 /// what differs; remove it when the pinned Forge commit has the script corrected.
 const SCRIPT_DIFFERS: &[(&str, &str)] = &[
     (
+        "Origin of the Avengers",
+        "chapter II puts any Hero card (`Hero.cmcLE3`); the card says \"a Hero *creature* card\" \
+         (a Kindred Hero card that isn't a creature must not be put onto the battlefield)",
+    ),
+    (
         "Manabond",
         "puts the lands from the hand without revealing it; the card says \"reveal your hand\", \
          and \"if you do, discard your hand\" whether or not a land was put",
@@ -8705,6 +8824,20 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
     // Abilities, in the order the engine's own scripts use: as written, line kind by line
     // kind (the order within a kind is the script's).
     let mut abilities: Vec<(usize, AbilityDef)> = Vec::new();
+    // CR 715.3a: "Each Saga without read ahead has the intrinsic ability 'This Saga enters
+    // with a lore counter on it.'" (A Saga with read ahead is blocked by its keyword.)
+    if face.types.iter().any(|t| t == "Saga") && !face.keywords.iter().any(|k| k == "Read ahead") {
+        abilities.push((
+            0,
+            AbilityDef::Replacement {
+                replaces: Replaces::ThisEnters,
+                with: ReplaceWith::EntersWithCounters {
+                    kind: CounterKind::LORE,
+                    n: 1,
+                },
+            },
+        ));
+    }
     // Equip abilities are printed last.
     let mut equips: Vec<AbilityDef> = Vec::new();
     for k in &face.keywords {
@@ -9016,6 +9149,14 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
                     }));
                 }
                 _ => tx.explained(before, "keyword"),
+            }
+            continue;
+        }
+        if let Some(rest) = k.strip_prefix("Chapter:") {
+            let before = tx.blockers.len();
+            match tx.chapters(rest) {
+                Some(v) => abilities.extend(v.into_iter().map(|a| (0, a))),
+                None => tx.explained(before, "keyword"),
             }
             continue;
         }

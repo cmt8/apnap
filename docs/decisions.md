@@ -2825,6 +2825,59 @@ Rules text: docs/rules-notes/603-delayed.md. Tests: `crates/harness/tests/forge_
   Viper, Sosuke, Son of Seshiro. Most other cards of these shapes wait on other blockers
   (`trig:Secondary-alone` for "blocks or becomes blocked by", Banding, Madness).
 
+## D-084 Counters of any kind; Sagas (2026-11-12)
+Rules text: docs/rules-notes/122-counters.md, docs/rules-notes/715-sagas.md (Sagas are CR
+**715** in this edition, not 714). Tests: `crates/harness/tests/forge_counters.rs`,
+`forge_sagas.rs`.
+- **One representation:** `CounterKind::Named(CounterName)` next to `PlusOne`/`MinusOne` — a
+  name (lower case, at most 24 bytes, so the kind stays `Copy` and a `BTreeMap` key). Every
+  path that knew ±1 counters takes any kind: `Proposed::PutCounters`/`RemoveCounters`, the
+  D-073 doublers, proliferate, "enters with N [kind] counters", Forge's
+  `Count$CardCounters.<KIND>` (`Amount::CountersOnThis(kind)`, read from the source — or as
+  it last existed: `Characteristics::counters` carries an object's counters, so last known
+  information has them, CR 122.2), and costs `SubCounter<n/KIND>` / `AddCounter<n/KIND>`
+  on the object itself (`Cost::remove_counters` / `add_counters`; the cost's counters are
+  put through the replacement pipeline like any others). Only +1/+1 and -1/-1 do anything
+  by themselves; only they annihilate (704.5q).
+- **Blocked by name:** kinds with rules of their own (`counter:<KIND> (rules of its own)`:
+  shield, stun, loyalty, defense, finality, hone), keyword counters (CR 122.1b,
+  `(keyword counter)`), +X/+Y other than ±1 (`(+X/+Y)`), counters on players (`(on
+  players)`: poison, energy, experience, rad, ticket), Forge's words for several kinds
+  (`(not one kind)`: ALL, Any, EachFromSource, ExistingCounter); filters "with a [kind]
+  counter on it" (`filter:.counters_…`) stay blocked (a filter's `Facts` have no counters).
+  Counter costs on mana abilities and as additional costs of spells are not built (card-db
+  rejects them).
+- **Sagas (CR 715):** a chapter symbol is `Trigger::Chapter(n)` on a triggered ability
+  (`K:Chapter:N:<SVar>,…`; "I, II — X" is two abilities, 715.2c). It triggers from a batch
+  in which lore counters were put on the permanent — by an effect, a cost, the turn-based
+  action or as it entered (122.6) — when the count went from below n to at least n
+  (715.2b): two counters at once trigger two chapters. The intrinsic "this Saga enters with
+  a lore counter" (715.3a) is compiled onto each Saga as its `ThisEnters` replacement, so
+  doublers modify it and copies have it (LIMIT: a permanent that becomes a Saga only by a
+  type-changing effect lacks it; card-db rejects a chapter ability on anything but a Saga
+  that has it). CR 505.4/715.3c: as the active player's precombat main phase begins, one
+  batch puts a lore counter on each Saga they control with a chapter ability (no stack).
+  CR 704.5s/715.4: a state-based action sacrifices a Saga whose lore count is at least its
+  final chapter number (715.2d, from the abilities it has now) unless a chapter ability of
+  it is waiting to be put on the stack or is on it. Read ahead (702.155) is blocked by name
+  (`kw:Read ahead`); Sagas that transform (exile, return transformed) are blocked by
+  `ChangeZone.Transformed`; creature Sagas (715.1a) need nothing more and compile.
+- **App:** counters of named kinds are badges "lore x2" (`describe::counter`).
+- **Script differs:** Origin of the Avengers (chapter II puts any Hero card; the card says a
+  Hero creature card).
+- **Coverage:** 11,535 → 11,632 scripts (+97 against main, every one read against its Oracle
+  text: 63 with counters of named kinds — Walking Ballista, Devoted Druid, the Spikes,
+  Triskelion, Karlov of the Ghost Council, … — and 34 Sagas, 7 of them creature Sagas).
+  EDHREC top 1,000: 629 → 631; top 5,000: 1,863 → 1,878. Most other Sagas wait on other
+  features (transforming, `Effect:Triggers`, read ahead, fight, goad, …).
+- **Not built — what loyalty needs beyond a counter kind:** starting loyalty as the
+  planeswalker enters (306.5b, an intrinsic "enters with" like 715.3a); loyalty abilities
+  (606): a cost of putting or removing loyalty counters (the counter costs above, plus −X),
+  sorcery timing and one loyalty ability per permanent per turn (606.3, a per-object
+  record of this turn); damage dealt to a planeswalker removes that many loyalty counters
+  (120.3c); attacking planeswalkers (506.3, 508.1b: the engine's creatures attack only
+  players); the SBA at 0 loyalty (704.5i); "loyalty" as a number read by effects.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

@@ -252,6 +252,18 @@ fn extra_payable(st: &GameState, p: PlayerId, source: &CastSource, prop: &Propos
         && prop.extra.return_to_hand.as_ref().is_none_or(|ch| {
             sacrifice_candidates(st, p, ch, this, prop.sacrifice).len() >= ch.count as usize
         })
+        // CR 118.3: counters can be removed from this only if it has them; put on it only
+        // while it is on the battlefield.
+        && prop.extra.remove_counters.is_none_or(|(kind, n)| {
+            st.objects
+                .get(&this)
+                .is_some_and(|o| o.zone == Zone::Battlefield && o.counters_of(kind) >= n)
+        })
+        && prop.extra.add_counters.is_none_or(|_| {
+            st.objects
+                .get(&this)
+                .is_some_and(|o| o.zone == Zone::Battlefield)
+        })
 }
 
 /// [`proposal`], with the alternative cost `alt` chosen (CR 601.2b, 118.9).
@@ -1511,6 +1523,32 @@ impl CastFrame {
             }
             if prop.extra.exile_self && o.zone == Zone::Graveyard {
                 events.push(Proposed::moving(*source, Zone::Exile, MoveCause::Rule));
+            }
+        }
+        // "Remove N [kind] counters from this" / "put N [kind] counters on this".
+        if let CastSource::Ability { source, .. } | CastSource::Payment { source, .. } =
+            &self.source
+            && st
+                .objects
+                .get(source)
+                .is_some_and(|o| o.zone == Zone::Battlefield)
+        {
+            if let Some((kind, n)) = prop.extra.remove_counters {
+                execute(
+                    st,
+                    GameAction::RemoveCounters {
+                        object: *source,
+                        kind,
+                        n,
+                    },
+                );
+            }
+            if let Some((kind, count)) = prop.extra.add_counters {
+                events.push(Proposed::PutCounters {
+                    object: *source,
+                    kind,
+                    count,
+                });
             }
         }
         if life > 0 {

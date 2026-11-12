@@ -113,10 +113,21 @@ impl StepStage {
                         Frame::Step(StepStage::AfterCleanupDiscard),
                         Frame::CleanupDiscard { player: ap },
                     ]),
-                    // CR 503.1, 505.6 (no Archenemy/Saga/Attraction actions in M0), 507
-                    // (FFA: all opponents are defending players), 511.1, 513.1.
+                    // CR 505.4, 715.3c: a lore counter on each of the active player's Sagas,
+                    // then priority (505.6). (No Archenemy or Attraction actions: 505.3,
+                    // 505.5.)
+                    Step::PrecombatMain => {
+                        let lore = crate::sagas::lore_as_main_phase_begins(st, ap);
+                        if lore.is_empty() {
+                            return Flow::then(Frame::Step(StepStage::Priority));
+                        }
+                        Flow::Continue(vec![
+                            Frame::Step(StepStage::Priority),
+                            Frame::Apply(ApplyFrame::new(st, lore)),
+                        ])
+                    }
+                    // CR 503.1, 507 (FFA: all opponents are defending players), 511.1, 513.1.
                     Step::Upkeep
-                    | Step::PrecombatMain
                     | Step::BeginningOfCombat
                     | Step::EndOfCombat
                     | Step::PostcombatMain
