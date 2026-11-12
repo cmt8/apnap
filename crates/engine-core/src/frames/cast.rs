@@ -363,6 +363,13 @@ pub(crate) fn may_spend(
     r: &card_model::ManaRestriction,
     payee: Payee,
 ) -> bool {
+    // What the mana would pay for is gone (a mana ability sacrificed the source of the
+    // ability being paid for): restricted mana isn't counted on (D-066, conservative).
+    if let Payee::Spell(id) | Payee::Ability(id) = payee
+        && !st.objects.contains_key(&id)
+    {
+        return false;
+    }
     match payee {
         Payee::Spell(card) => {
             let c = chars(st, card);

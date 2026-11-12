@@ -1659,6 +1659,13 @@ Rules text: docs/rules-notes/605-mana-abilities-costs-and-yields.md. Tests:
   second (still untyped, restricted) mana, so the Orb was no longer offered. Untyped mana
   now keeps its restriction in the plan. Regression test
   `restricted_mana_of_open_types_still_pays`.
+- **Found by the soak after merging D-070 (forge-4p, 2 games in 500):** an altar could
+  plan to sacrifice the source of the ability being paid for while mana restricted to
+  abilities of such sources was in the pool; once the source is gone that mana's use
+  depends on last known information the payment doesn't keep (the engine panicked, then
+  dead-ended). Mana abilities no longer sacrifice the source of what is being paid for
+  (conservative), and restricted mana for something that is gone isn't counted on.
+  Regression test `an_altar_doesnt_sacrifice_the_source_of_the_ability_being_paid_for`.
 - **AI and app.** The heuristic agent pays with the cheapest way first (free taps, then
   Treasure, mana-for-mana, damage, life, sacrificing another permanent last), and when it
   has a "sacrifice a creature: add mana" ability it doesn't cast what it couldn't pay for

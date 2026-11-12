@@ -881,11 +881,15 @@ pub struct PayGoal {
 pub(crate) fn plan_input(st: &GameState, p: PlayerId, goal: &PayGoal) -> PlanInput {
     let mut ways = mana_ways(st, p, goal.tap, goal.payee);
     // "Sacrifice this" in the cost being paid: it can't be sacrificed for mana as well,
-    // nor be sacrificed by a mana ability; neither can the permanent the cost taps.
+    // nor be sacrificed by a mana ability; neither can the permanent the cost taps, nor
+    // the source of what is being paid for (D-066, conservative: its last known
+    // information would decide what restricted mana may pay for it).
     ways.retain(|w| !(w.sac_self && Some(w.id) == goal.sacrifice));
     for w in &mut ways {
         if let Some((_, cands)) = &mut w.sac {
-            cands.retain(|c| Some(*c) != goal.sacrifice && Some(*c) != goal.tap);
+            cands.retain(|c| {
+                Some(*c) != goal.sacrifice && Some(*c) != goal.tap && *c != goal.sac_source
+            });
         }
     }
     let pool = st.player(p).mana_pool;
@@ -1114,12 +1118,15 @@ fn option_keeps(
 }
 
 /// The sacrifices the ability could be activated with (one candidate each; an empty list
-/// when it sacrifices nothing chosen). Never what the cost being paid taps or sacrifices.
+/// when it sacrifices nothing chosen). Never what the cost being paid taps or sacrifices,
+/// nor the source of what is being paid for.
 fn sacrifice_choices(w: &ManaWay, goal: Option<&PayGoal>) -> Vec<Vec<ObjectId>> {
     match &w.sac {
         Some((_, cands)) => cands
             .iter()
-            .filter(|&&c| goal.is_none_or(|g| Some(c) != g.tap && Some(c) != g.sacrifice))
+            .filter(|&&c| {
+                goal.is_none_or(|g| Some(c) != g.tap && Some(c) != g.sacrifice && c != g.sac_source)
+            })
             .map(|&c| vec![c])
             .collect(),
         None => vec![Vec::new()],

@@ -828,6 +828,47 @@ fn if_you_do_after_a_sacrifice_adds_mana() {
     }
 }
 
+// Found by the soak (forge-4p, 2 games in 500): paying for a creature's ability with an
+// altar that could sacrifice that very creature, while mana restricted to abilities of
+// Dragons was around. Once the source is gone, whether that mana may still pay for its
+// ability depends on last known information the payment doesn't keep: the engine
+// panicked, and then dead-ended. A mana ability doesn't sacrifice the source of what is
+// being paid for (D-066, conservative); another creature can be.
+#[test]
+fn an_altar_doesnt_sacrifice_the_source_of_the_ability_being_paid_for() {
+    let orb = "Name:Test Orb\nManaCost:1 R\nTypes:Artifact\n\
+        A:AB$ Mana | Cost$ T | Produced$ R | RestrictValid$ Activated.Dragon+inZoneBattlefield | SpellDescription$ Text.\n\
+        Oracle:{T}: Add {R}. Spend this mana only to activate abilities of Dragons.";
+    let wyrm = "Name:Test Wyrm\nManaCost:3 R\nTypes:Creature Dragon\nPT:2/2\n\
+        A:AB$ GainLife | Cost$ 2 R | LifeAmount$ 1 | SpellDescription$ Text.\n\
+        Oracle:{2}{R}: You gain 1 life.";
+    let build = |cubs: usize| {
+        let mut sc = scenario(&[orb, wyrm, ALTAR, BEAR]);
+        sc.card(P0, Zone::Battlefield, "Test Altar");
+        sc.card(P0, Zone::Battlefield, "Test Orb");
+        sc.card(P0, Zone::Battlefield, "Test Wyrm");
+        for _ in 0..cubs {
+            sc.card(P0, Zone::Battlefield, "Test Cub");
+        }
+        Script::new(sc.build())
+    };
+    let s = build(0);
+    assert!(
+        !s.has(|_, o| matches!(o, OptionDesc::ActivateAbility { .. })),
+        "only by sacrificing the Wyrm itself"
+    );
+    let mut s = build(1);
+    s.activate("Test Wyrm");
+    s.tap("Test Orb", ManaType::Red);
+    s.tap("Test Altar", ManaType::Colorless);
+    assert_eq!(s.kind(), ChoiceKind::Sacrifice);
+    assert_eq!(s.options().len(), 1, "the Cub, not the Wyrm");
+    s.respond(Response::Pick(vec![0]));
+    s.pass_all();
+    assert_eq!(life(&s, P0), 41);
+    assert!(s.find(P0, Zone::Battlefield, "Test Wyrm").is_some());
+}
+
 // What stays blocked (D-066), each with its name.
 #[test]
 fn mana_abilities_that_stay_blocked() {
