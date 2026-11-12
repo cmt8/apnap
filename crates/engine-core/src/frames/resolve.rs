@@ -1848,6 +1848,18 @@ impl ResolveFrame {
         self.source_lki = top.source_lki.clone();
         self.subject = top.subject;
         self.subject_lki = top.subject_lki.clone();
+        // CR 603.7c: a delayed ability's objects are "those cards" — each while it is still
+        // the object it remembered (a new object after a zone change, CR 400.7).
+        for &object in &top.remembered {
+            if let Some(o) = st.objects.get(&object) {
+                self.noted.push(NotedCard {
+                    object,
+                    at: o.zone,
+                    findable: true,
+                    before: None,
+                });
+            }
+        }
         let body: Body = match &top.kind {
             StackKind::Spell => {
                 self.source = top.id;
@@ -2463,6 +2475,13 @@ impl ResolveFrame {
             }
             // CR 701.21a: a player can sacrifice only a permanent they control. "Its
             // controller sacrifices it" (CR 702.74a): whoever that is now.
+            // CR 701.21a: only what its controller controls.
+            Effect::SacrificeIt { what } => self
+                .objs(st, k, what)
+                .into_iter()
+                .filter(|&o| crate::layers::controller_of(st, o) == self.controller)
+                .map(|o| Proposed::moving(o, Zone::Graveyard, MoveCause::Sacrifice))
+                .collect(),
             e @ (Effect::SacrificeThis | Effect::ControllerSacrificesThis) => {
                 let mine = st
                     .objects
@@ -2567,6 +2586,7 @@ impl ResolveFrame {
                 window,
                 player,
                 amount,
+                objects,
             } => {
                 let turn = st.turn.turn_number;
                 let facts = crate::triggers::EventFacts {
@@ -2575,7 +2595,13 @@ impl ResolveFrame {
                     moved: None,
                 };
                 // A "that player" who is gone: nothing for it to refer to.
-                if player.is_none() || facts.player.is_some() {
+                // Its objects, fixed now (CR 603.7c); about objects of which none is left,
+                // it would do nothing.
+                let remembered: Vec<ObjectId> =
+                    objects.map_or_else(Vec::new, |r| self.objs(st, k, r));
+                if (player.is_none() || facts.player.is_some())
+                    && (objects.is_none() || !remembered.is_empty())
+                {
                     let (from_turn, until_turn) = match window {
                         card_model::DelayWindow::Next => (turn, None),
                         card_model::DelayWindow::ThisTurn => (turn, Some(turn)),
@@ -2595,6 +2621,7 @@ impl ResolveFrame {
                         facts,
                         from_turn,
                         until_turn,
+                        objects: remembered,
                     };
                     execute(st, GameAction::AddDelayed { delayed });
                 }
