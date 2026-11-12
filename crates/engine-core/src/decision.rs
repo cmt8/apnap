@@ -215,6 +215,18 @@ pub enum OptionDesc {
     DamageRecipient {
         object: ObjectId,
     },
+    /// Play face `face` (not the front) of a card as a land (CR 712.9: a modal
+    /// double-faced card's land face). `PlayLand` plays the front face.
+    PlayLandFace {
+        card: ObjectId,
+        face: u8,
+    },
+    /// Cast face `face` (not the front) of a card (CR 712.8b). `CastSpell` casts the front
+    /// face.
+    CastFace {
+        card: ObjectId,
+        face: u8,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

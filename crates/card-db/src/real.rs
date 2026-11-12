@@ -156,8 +156,16 @@ pub fn compile(script: &RealCardScript, card: &ScryfallCard) -> Result<CardDef, 
     let mana_cost = match card.mana_cost.as_deref() {
         None | Some("") => None,
         Some(text) => match ManaCost::parse(text) {
-            Ok(c) => Some(c),
-            Err(_) => {
+            // Hybrid symbols are paid only in mana abilities' costs so far (D-066).
+            Ok(c)
+                if !c
+                    .symbols
+                    .iter()
+                    .any(|s| matches!(s, card_model::ManaSymbol::Hybrid(..))) =>
+            {
+                Some(c)
+            }
+            _ => {
                 p.push(format!(
                     "mana cost {text:?} has symbols the engine doesn't support"
                 ));
@@ -217,6 +225,8 @@ pub fn compile(script: &RealCardScript, card: &ScryfallCard) -> Result<CardDef, 
         token: false,
         key: None,
         granted: script.granted.clone(),
+        // Hand-written real-card scripts have one face.
+        ..CardDef::default()
     })
 }
 
@@ -244,6 +254,7 @@ mod tests {
             collector_number: None,
             set_type: None,
             border_color: None,
+            card_faces: vec![],
         }
     }
 

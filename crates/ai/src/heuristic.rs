@@ -60,11 +60,28 @@ fn effect_polarity(e: &Effect) -> Polarity {
             Polarity::Neutral => effect_polarity(then),
             p => p,
         },
+        // "Exile it, then return it to the battlefield": a fresh start for one's own
+        // permanent (its enters abilities again).
+        Effect::Seq(v)
+            if v.iter().any(|x| {
+                matches!(
+                    x,
+                    Effect::PutInto {
+                        what: card_model::ObjRef::Noted,
+                        to: card_model::CardDest::Battlefield { .. },
+                        ..
+                    }
+                )
+            }) =>
+        {
+            Polarity::Help
+        }
         Effect::Seq(v) => v
             .iter()
             .map(effect_polarity)
             .find(|p| *p != Polarity::Neutral)
             .unwrap_or(Polarity::Neutral),
+        Effect::Note(inner) | Effect::If { then: inner, .. } => effect_polarity(inner),
         Effect::DealDamage { .. }
         | Effect::Destroy { .. }
         | Effect::Counter { .. }
@@ -102,6 +119,8 @@ fn effect_polarity(e: &Effect) -> Polarity {
         Effect::Apply { effects, .. } => continuous_polarity(effects),
         // What it does is in abilities written elsewhere on the card: no preference.
         Effect::Lasting { .. } => Polarity::Neutral,
+        // Its own permanent turning over: no target to judge.
+        Effect::Transform { .. } => Polarity::Neutral,
         Effect::May(inner) => effect_polarity(inner),
         // What happens either way: paying, or not paying.
         Effect::Pay { paid, unpaid, .. } => match effect_polarity(unpaid) {
@@ -111,6 +130,7 @@ fn effect_polarity(e: &Effect) -> Polarity {
         Effect::Together(v) => v.first().map_or(Polarity::Neutral, effect_polarity),
         Effect::GainLife { .. }
         | Effect::AddMana { .. }
+        | Effect::AddManaOf { .. }
         | Effect::ReturnToBattlefield { .. }
         | Effect::Draw { .. }
         | Effect::CreateToken { .. }
@@ -311,7 +331,8 @@ impl HeuristicAgent {
     /// The body of the spell or ability currently being put on the stack (the top object).
     fn top_body(&self, v: &PlayerView) -> Option<Body> {
         let top = v.stack.last()?;
-        let def = self.catalog.get(top.card);
+        // The face of the spell that is up (CR 712.6e).
+        let def = self.catalog.get(self.catalog.face(top.card, top.face));
         match top.ability {
             None => def.spell_ability().cloned().or_else(|| {
                 def.enchant().map(|f| {
@@ -496,8 +517,59 @@ impl HeuristicAgent {
         best
     }
 
+    /// D-066: when `me` can make mana by sacrificing other permanents (Ashnod's Altar),
+    /// roughly how much mana they have without doing that — so as not to cast a spell by
+    /// sacrificing their board. `None` when they have no such ability.
+    fn mana_without_sacrifices(&self, v: &PlayerView, me: PlayerId) -> Option<u32> {
+        let mine: Vec<&ObjectView> = v
+            .battlefield
+            .iter()
+            .filter(|o| o.controller == me)
+            .collect();
+        let mana_of = |o: &ObjectView| -> Vec<(card_model::Cost, u32)> {
+            self.catalog
+                .get(o.card)
+                .abilities
+                .iter()
+                .chain(o.granted.iter().map(|a| self.catalog.ability(*a)))
+                .filter_map(|a| match a {
+                    AbilityDef::Mana { cost, produce, .. } => Some((cost.clone(), produce.count())),
+                    _ => None,
+                })
+                .collect()
+        };
+        let altar = mine
+            .iter()
+            .any(|o| mana_of(o).iter().any(|(cost, _)| cost.sacrifice.is_some()));
+        if !altar {
+            return None;
+        }
+        let pool = v
+            .players
+            .iter()
+            .find(|p| p.id == me)
+            .map_or(0, |p| p.mana_pool.total());
+        let mut n = pool;
+        for o in mine.into_iter().filter(|o| !o.tapped) {
+            let sick = o.card_types.contains(&CardType::Creature)
+                && o.summoning_sick
+                && !has(o, Keyword::Haste);
+            let best = mana_of(o)
+                .iter()
+                .filter(|(cost, _)| cost.sacrifice.is_none() && !(cost.tap && sick))
+                .map(|(cost, count)| {
+                    count.saturating_sub(cost.mana.as_ref().map_or(0, |m| m.mana_value()))
+                })
+                .max();
+            // A land's basic land types give it a mana ability too (CR 305.6).
+            n += best.unwrap_or(u32::from(o.card_types.contains(&CardType::Land)));
+        }
+        Some(n)
+    }
+
     fn priority(&mut self, v: &PlayerView, d: &PendingDecision) -> Response {
         let me = Self::me(v);
+        let affordable = self.mana_without_sacrifices(v, me);
         if self.ability_turn != v.turn_number {
             self.ability_turn = v.turn_number;
             self.ability_uses.clear();
@@ -524,6 +596,25 @@ impl HeuristicAgent {
         if let Some(&i) = lands.first() {
             return Response::Pick(vec![i]);
         }
+        // The land face of a modal double-faced card (CR 712.9): while lands are short, or
+        // when its other face can't be cast now anyway.
+        let my_lands = v
+            .battlefield
+            .iter()
+            .filter(|o| o.controller == me && o.card_types.contains(&CardType::Land))
+            .count();
+        if let Some(i) = d.options.iter().position(|o| match o {
+            OptionDesc::PlayLandFace { card, .. } => {
+                my_lands < 5
+                    || !d
+                        .options
+                        .iter()
+                        .any(|x| matches!(x, OptionDesc::CastSpell { card: c } if c == card))
+            }
+            _ => false,
+        }) {
+            return Response::Pick(vec![i]);
+        }
         // 2. The best spell or ability with a positive score.
         let my_main = v.active == me;
         let mut best: Option<(i64, usize)> = None;
@@ -534,6 +625,9 @@ impl HeuristicAgent {
                         continue;
                     };
                     let def = self.catalog.get(ov.card);
+                    if affordable.is_some_and(|n| ov.mana_value > n) {
+                        continue;
+                    }
                     let permanent =
                         !def.has_type(CardType::Instant) && !def.has_type(CardType::Sorcery);
                     // Creatures with flash: on an opponent's turn only when the stack is empty.
@@ -542,9 +636,33 @@ impl HeuristicAgent {
                     }
                     self.spell_score(v, ov.card, None) + if ov.is_commander { 20 } else { 0 }
                 }
+                // Another face of a modal double-faced card (CR 712.8b), judged as the spell
+                // it would be.
+                OptionDesc::CastFace { card, face } => {
+                    let Some(ov) = Self::find(v, *card) else {
+                        continue;
+                    };
+                    let entry = self.catalog.face(ov.card, *face);
+                    let def = self.catalog.get(entry);
+                    let permanent =
+                        !def.has_type(CardType::Instant) && !def.has_type(CardType::Sorcery);
+                    if permanent && !my_main && !v.stack.is_empty() {
+                        continue;
+                    }
+                    self.spell_score(v, entry, None)
+                }
                 OptionDesc::ActivateAbility { source, ability } => {
                     let used = self.ability_uses.get(&(*source, *ability)).copied();
                     if used.unwrap_or(0) >= ABILITY_USES_PER_TURN {
+                        continue;
+                    }
+                    let mana = match self.catalog.ability(*ability) {
+                        AbilityDef::Activated { cost, .. } => {
+                            cost.mana.as_ref().map_or(0, |m| m.mana_value())
+                        }
+                        _ => 0,
+                    };
+                    if affordable.is_some_and(|n| mana > n) {
                         continue;
                     }
                     match Self::find(v, *source) {
@@ -1117,15 +1235,28 @@ impl Agent for HeuristicAgent {
                 Response::Allocate(alloc)
             }
             (ChoiceKind::PayMana, Primitive::PickN { .. }) => {
-                // Tap what stays before sacrificing what doesn't (Treasure).
-                let keeps = |o: &OptionDesc| match o {
-                    OptionDesc::TapForMana { ability, .. } => ability.is_none_or(|a| {
-                        !matches!(self.catalog.ability(a),
-                            AbilityDef::Mana { cost, .. } if cost.sacrifice_self)
-                    }),
-                    _ => true,
+                // The cheapest mana first: tap what stays before sacrificing what doesn't
+                // (Treasure), before paying mana for mana, taking damage or paying life,
+                // and sacrifice another permanent last (D-066).
+                let price = |o: &OptionDesc| match o {
+                    OptionDesc::TapForMana {
+                        ability: Some(a), ..
+                    } => match self.catalog.ability(*a) {
+                        AbilityDef::Mana { cost, then, .. } => {
+                            u32::from(cost.sacrifice_self) * 2
+                                + u32::from(cost.mana.is_some())
+                                + u32::from(then.is_some()) * 3
+                                + cost.life * 4
+                                + u32::from(cost.sacrifice.is_some()) * 20
+                        }
+                        _ => 0,
+                    },
+                    _ => 0,
                 };
-                Response::Pick(vec![d.options.iter().position(keeps).unwrap_or(0)])
+                let best = (0..d.options.len())
+                    .min_by_key(|&i| (price(&d.options[i]), i))
+                    .unwrap_or(0);
+                Response::Pick(vec![best])
             }
             // "You may draw", "its controller may search their library": what a "may"
             // offers is nearly always worth having.
