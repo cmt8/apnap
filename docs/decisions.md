@@ -2541,7 +2541,9 @@ Rules text: docs/rules-notes/701-regenerate.md (CR 701.19, 614.8, 701.8, 704.5fâ
   (`static:CantRegenerate-who`: `Creature.DamagedBy`), regenerating the enchanted creature
   (`defined:card Enchanted`, a blocker of many effects, 17 Regenerate cards among them).
 - The heuristic agent counts regenerating as help (aimed at its own permanents).
-- Golden hashes unchanged.
+- **Golden: one state hash re-blessed (cmd-2p seed 1), all 15 event logs unchanged.** That
+  game ends with a prevention shield in force, and the stable hasher writes a tag for the
+  skipped `Shield::regenerate` field (`hash.rs`, `skip_field`).
 - Against main `6410af8`/`6252f08` by a card-by-card diff of `forge-coverage --sample 1`:
   230 cards newly compile, none stops compiling, no engine text changes. All 230 were read
   against their Oracle text. Among them Pongify, Rapid Hybridization, Terminate, Putrefy,

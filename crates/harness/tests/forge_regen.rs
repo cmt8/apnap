@@ -169,7 +169,10 @@ fn a_shield_doesnt_replace_sacrifice_or_toughness_zero() {
     sc.card(P0, Zone::Hand, "Test Wither Away");
     let mut s = Script::new(sc.build());
     shield(&mut s);
-    s.cast("Test Wither Away").target("Test Troll").pay().pass_all();
+    s.cast("Test Wither Away")
+        .target("Test Troll")
+        .pay()
+        .pass_all();
     assert!(!s.st.objects.contains_key(&t));
     assert_eq!(regenerated(&s, t), 0);
 }
