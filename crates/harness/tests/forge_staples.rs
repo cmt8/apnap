@@ -658,7 +658,7 @@ fn a_delayed_trigger_for_this_turn_ends_at_cleanup() {
     assert_eq!(s.st.delayed.len(), 1);
     drive_until(&mut s, |s| s.st.turn.active == P1);
     assert!(s.st.delayed.is_empty(), "over at P0's cleanup");
-    // A delayed trigger that remembers objects is not compiled yet.
+    // A delayed trigger that remembers objects compiles (D-081, forge_delayed.rs).
     let returns = card(
         "Test Blink",
         "W",
@@ -668,9 +668,7 @@ fn a_delayed_trigger_for_this_turn_ends_at_cleanup() {
          SVar:TrigReturn:DB$ ChangeZone | Defined$ DelayTriggerRemembered | Origin$ Exile | Destination$ Battlefield\n\
          SVar:DBCleanup:DB$ Cleanup | ClearRemembered$ True",
     );
-    assert!(
-        forge_test_blockers(&returns).contains(&"DelayedTrigger:remembers objects".to_string())
-    );
+    assert_eq!(forge_test_blockers(&returns), Vec::<String>::new());
 }
 
 // ---------------------------------------------------------------------------------------

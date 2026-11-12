@@ -90,6 +90,10 @@ pub struct Delayed {
     pub from_turn: u32,
     /// It ends at the cleanup step of this turn (CR 514.2), if it hasn't triggered.
     pub until_turn: Option<u32>,
+    /// The objects it is about (CR 603.7c): in it they are "those cards", affected only
+    /// while each is still the same object.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<ObjectId>,
 }
 
 /// Who an ability is being read for: an object that has it, or a lasting effect that

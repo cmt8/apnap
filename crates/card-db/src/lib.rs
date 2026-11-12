@@ -1581,7 +1581,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             amount(a, p);
         }
         Effect::SacrificeThis | Effect::ControllerSacrificesThis => {}
-        Effect::BecomeCopy { what, .. } => obj(what, p),
+        Effect::BecomeCopy { what, .. } | Effect::SacrificeIt { what } => obj(what, p),
         Effect::CopyPermanent { what, count, .. } => {
             match what {
                 card_model::CopyWhat::Obj(r) => obj(r, p),

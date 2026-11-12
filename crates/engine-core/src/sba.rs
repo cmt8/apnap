@@ -116,7 +116,7 @@ pub(crate) fn gather(st: &mut GameState) -> Gathered {
         }
         // CR 704.5m / 303.4c: an Aura attached to an illegal object, or to nothing, goes to
         // its owner's graveyard.
-        if let Some(filter) = st.card_def(id).enchant() {
+        if let Some(filter) = crate::copy::text_def(st, id).enchant() {
             let legal = o.attached_to.is_some_and(|t| {
                 st.objects
                     .get(&t)
@@ -138,7 +138,7 @@ pub(crate) fn gather(st: &mut GameState) -> Gathered {
         // CR 704.5n / 301.5c: an Equipment attached to something that isn't a creature (or
         // is gone, or is itself), or an Equipment that is a creature, becomes unattached and
         // stays on the battlefield.
-        if st.card_def(id).enchant().is_none()
+        if crate::copy::text_def(st, id).enchant().is_none()
             && let Some(host) = o.attached_to
         {
             let legal = c.has_subtype("Equipment")

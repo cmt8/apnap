@@ -2698,6 +2698,51 @@ Rules text: docs/rules-notes/d080-top100.md. Tests: `crates/harness/tests/forge_
   newly compile, one stops compiling (Knight of the Mists, on purpose), no existing text
   changed. All 89 were read against their Oracle text.
 
+## D-081 Delayed triggered abilities that remember objects; copies of Auras (2026-11-12)
+Rules text: docs/rules-notes/603-delayed.md. Tests: `crates/harness/tests/forge_delayed.rs`
+(and the Aura/Equipment cases in `forge_copies.rs`).
+- **One mechanism, extended** (D-075's `Effect::DelayedTrigger` / `GameState::delayed`):
+  `Effect::DelayedTrigger::objects: Option<ObjRef>` names what the delayed ability is about;
+  as it is created the objects are fixed (CR 603.7c) into `effects::Delayed::objects`. When
+  it triggers they travel as `PendingTrigger::remembered` → `StackObject::remembered`, and as
+  it resolves they are its "those cards" (D-069's `ObjRef::Noted`) — each only while it is
+  still that object: a card that changed zones is a new object (CR 400.7) and is not
+  affected. Serialized in the game state (save/load tested); nothing lives in a card or a
+  Rust local. A delayed ability about objects of which none is left isn't created.
+  Controller: the spell's or ability's (CR 603.7d); one whose controller left the game never
+  triggers (CR 800.4a, tested).
+- **Compiler:** `RememberObjects$ Remembered | RememberedLKI` in a chain that notes what it
+  moved (D-069) → the chain's "those cards"; `RememberObjects$ TriggeredNewCardLKICopy` in a
+  dies trigger → the card the creature became. In the delayed ability
+  `Defined$ DelayTriggerRemembered[LKI]` is "those cards". `CopyPermanent | AtEOT$
+  Sacrifice|Exile` → `Seq[Note(CopyPermanent), DelayedTrigger { objects: Noted }]` with the
+  delayed ability "sacrifice / exile those cards" on the card's `granted` list (not in a
+  chain that notes other things). New `Effect::SacrificeIt { what }` (CR 701.21a: only what
+  its controller controls).
+- **D-074 follow-up — copies of Auras (CR 303.4f–g):** a permanent entering as a copy of an
+  Aura, or a token copy of one, is attached as it enters to what its controller chooses
+  (`ChoiceKind::AuraHost`, not targeted; one choice is made without asking); with nothing
+  it could enchant it doesn't enter (from the stack: to its owner's graveyard; a token isn't
+  created). Before, it entered attached to nothing and died to the state check. The state
+  check now reads a copy's "enchant" (`copy::text_def`). An Equipment copy enters
+  unattached (tested). `Proposed::TokenEnters::attach_to` is new.
+- **Newly compiled (31, all read against their Oracle text):** Kiki-Jiki, Splinter Twin, The
+  Fire Crystal, Saheeli the Sun's Brilliance, Tempestra, Orthion, Reg Barclay, Stormsplitter,
+  Kindred Charge, Cogwork Assembler; flicker until the next end step: Liberate, Ghost of
+  Illyria, Guardian of Ghirapur, Skyskipper Duo, Blizzard Strix, Chief Kyle, Kykar, Skybind,
+  Wiccan, Voyager Staff, Temporal Tribulation, Test of Priorities, Explosive Getaway,
+  Mystifying Maze, Astral Slide, Astral Drift, Nahiri's Resolve; "return that card":
+  The Scarab God, The Locust God, Liesa, Avacyn Angel of Horror. None lost; no existing
+  text changed. The delayed text reads "Then at the beginning of the next end step, put
+  those cards onto the battlefield" (the engine's wording for "return it").
+- **Still blocked, by name:** a delayed ability about a target the effect didn't move
+  (`DelayedTrigger:remembers Targeted`, 17; `ParentTarget`, 7), about attackers or blockers
+  (`…TriggeredAttackerLKICopy` 17, `…TriggeredBlockerLKICopy` 16), about remembered cards
+  outside a chain that notes them (`…remembers Remembered` 15), imprinted cards; token
+  copies "at end of combat" or "your next end step" (`CopyPermanent:AtEOT ExileCombat` …)
+  and `AtEOT$` in a chain that already notes (Jaxis).
+- Golden: see the commit message.
+
 ## D-082 The most played gaps of the EDHREC top 1,000: changing targets, mass moves from graveyards, "mana value X or less" (2026-11-12)
 Rules text: docs/rules-notes/d082-top1000.md. Tests: `crates/harness/tests/forge_top1000.rs`.
 - Text first (from the D-080 review): "X is this creature's power" for the source's power or

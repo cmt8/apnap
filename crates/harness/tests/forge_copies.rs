@@ -599,23 +599,15 @@ fn copy_forms_not_compiled_are_named() {
         SVar:DBCopy:DB$ Clone | Choices$ Creature.Other+YouCtrl | SubAbility$ DBPump | SpellDescription$ Text.\n\
         SVar:DBPump:DB$ PutCounter | Defined$ Self | CounterType$ P1P1 | ETB$ True\nOracle:Text.";
     assert!(forge_test_blockers(spark).contains(&"Clone:SubAbility".to_string()));
-    // "Sacrifice it at the beginning of the next end step": a delayed trigger about the
-    // token (CR 603.7c) — not built.
-    let twin = "Name:Test Twin\nManaCost:R\nTypes:Sorcery\n\
-        A:SP$ CopyPermanent | ValidTgts$ Creature | AtEOT$ Sacrifice | SpellDescription$ Text.\nOracle:Text.";
-    assert!(
-        forge_test_blockers(twin)
-            .contains(&"CopyPermanent:AtEOT (a delayed trigger about the token)".to_string())
-    );
     // Two abilities blocked by the same name: both are explained (the second isn't
     // `unexplained:` because the name was already raised).
     let twice = "Name:Test Twice\nManaCost:R\nTypes:Creature Human\nPT:1/1\n\
-        A:AB$ CopyPermanent | Cost$ T | ValidTgts$ Creature | AtEOT$ Sacrifice | SpellDescription$ Text.\n\
-        A:AB$ CopyPermanent | Cost$ 1 T | ValidTgts$ Creature | NumCopies$ 2 | AtEOT$ Sacrifice | SpellDescription$ Text.\n\
+        A:AB$ CopyPermanent | Cost$ T | ValidTgts$ Creature | AtEOT$ ExileCombat | SpellDescription$ Text.\n\
+        A:AB$ CopyPermanent | Cost$ 1 T | ValidTgts$ Creature | NumCopies$ 2 | AtEOT$ ExileCombat | SpellDescription$ Text.\n\
         Oracle:Text.";
     assert_eq!(
         forge_test_blockers(twice),
-        ["CopyPermanent:AtEOT (a delayed trigger about the token)"]
+        ["CopyPermanent:AtEOT ExileCombat"]
     );
     // "Becomes a copy … until end of turn".
     let mirror = "Name:Test Mirror\nManaCost:2\nTypes:Artifact\n\
@@ -912,4 +904,129 @@ fn a_copy_regenerates_with_the_copied_ability() {
         s.count(|e| matches!(e, Event::Regenerated { object } if *object == copy)),
         1
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// Copies of Auras and Equipment (CR 303.4f–g, 301.5).
+
+const BLESSING: &str = "Name:Test Blessing\nManaCost:W\nTypes:Enchantment Aura\nK:Enchant:Creature\n\
+    S:Mode$ Continuous | AffectedDefined$ Enchanted | Affected$ Creature | AddPower$ 2 | AddToughness$ 2 | Description$ Text.\n\
+    Oracle:Enchant creature\\nEnchanted creature gets +2/+2.";
+
+const MIRROR_ENCHANTMENT: &str = "Name:Test Mirror Enchantment\nManaCost:W\nTypes:Enchantment\n\
+    K:ETBReplacement:Copy:DBCopy:Optional\n\
+    SVar:DBCopy:DB$ Clone | Choices$ Enchantment.Other | SpellDescription$ Text.\n\
+    Oracle:You may have this enchantment enter as a copy of any enchantment on the battlefield.";
+
+// CR 303.4f (2026-11-06): an Aura entering the battlefield other than by resolving as an
+// Aura spell — here a permanent entering as a copy of one, and a token copy of one — is
+// attached to something its controller chooses as it enters (not targeted). CR 303.4g:
+// with nothing it could enchant, it doesn't enter: a token isn't created.
+#[test]
+fn cr_303_4f_a_copy_of_an_aura_enchants_what_its_controller_chooses() {
+    let sketch = "Name:Test Sketching\nManaCost:W\nTypes:Sorcery\n\
+        A:SP$ CopyPermanent | ValidTgts$ Enchantment | TgtPrompt$ Select target enchantment | SpellDescription$ Text.\n\
+        Oracle:Create a token that's a copy of target enchantment.";
+    let healer = healer();
+    let mut sc = scenario(&[BLESSING, MIRROR_ENCHANTMENT, sketch, &healer]);
+    sc.cards(P0, Zone::Battlefield, &["Plains", "Plains"]);
+    let mine = sc.card(P0, Zone::Battlefield, "Test Healer");
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Healer");
+    let aura = sc.card(P0, Zone::Battlefield, "Test Blessing");
+    sc.attach(aura, mine);
+    sc.cards(
+        P0,
+        Zone::Hand,
+        &["Test Mirror Enchantment", "Test Sketching"],
+    );
+    sc.turn(P0, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    assert_eq!(looks(&s, mine).1, Some(4));
+    s.cast("Test Mirror Enchantment").pay().pass_all();
+    choose_copy(&mut s, aura);
+    assert_eq!(s.kind(), ChoiceKind::AuraHost);
+    assert_eq!(s.who(), P0);
+    assert_eq!(
+        s.options(),
+        [
+            OptionDesc::Card { card: mine },
+            OptionDesc::Card { card: theirs }
+        ]
+    );
+    s.pick("their Healer", |_, o| {
+        *o == OptionDesc::Card { card: theirs }
+    });
+    let copy = s
+        .find(P0, Zone::Battlefield, "Test Mirror Enchantment")
+        .expect("it entered and stays");
+    assert_eq!(s.st.object(copy).attached_to, Some(theirs));
+    assert_eq!(looks(&s, theirs).1, Some(4));
+    // A token copy of it, too.
+    s.cast("Test Sketching");
+    s.target_object(aura).pay();
+    s.pass_all();
+    s.pick("my Healer", |_, o| *o == OptionDesc::Card { card: mine });
+    assert_eq!(looks(&s, mine).1, Some(6), "two Blessings");
+    assert_eq!(named(&s, "Test Blessing").len(), 3);
+}
+
+// CR 303.4g: "If an Aura is entering the battlefield and there is no legal object or
+// player for it to enchant, the Aura remains in its current zone, unless that zone is the
+// stack. In that case, the Aura is put into its owner's graveyard instead of entering the
+// battlefield. If the Aura is a token, it isn't created."
+#[test]
+fn cr_303_4g_a_copy_of_an_aura_with_nothing_to_enchant_doesnt_enter() {
+    // "Enchant creature you control": P1's, on P1's creature; P0 controls no creature.
+    let ward = "Name:Test Ownward\nManaCost:W\nTypes:Enchantment Aura\n\
+        K:Enchant:Creature.YouCtrl:creature you control\n\
+        Oracle:Enchant creature you control";
+    let healer = healer();
+    let mut sc = scenario(&[ward, MIRROR_ENCHANTMENT, &healer]);
+    sc.cards(P0, Zone::Battlefield, &["Plains"]);
+    let h = sc.card(P1, Zone::Battlefield, "Test Healer");
+    let aura = sc.card(P1, Zone::Battlefield, "Test Ownward");
+    sc.attach(aura, h);
+    sc.card(P0, Zone::Hand, "Test Mirror Enchantment");
+    sc.turn(P0, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Mirror Enchantment").pay().pass_all();
+    choose_copy(&mut s, aura);
+    assert!(
+        s.find(P0, Zone::Graveyard, "Test Mirror Enchantment")
+            .is_some(),
+        "from the stack to the graveyard"
+    );
+    assert!(
+        s.find(P0, Zone::Battlefield, "Test Mirror Enchantment")
+            .is_none()
+    );
+}
+
+// CR 301.5 (2026-11-06): an Equipment copy enters unattached; the original stays on its
+// creature.
+#[test]
+fn cr_301_5_an_equipment_copy_enters_unattached() {
+    let axe = "Name:Test Axe\nManaCost:1\nTypes:Artifact Equipment\nK:Equip:1\n\
+        S:Mode$ Continuous | AffectedDefined$ Equipped | Affected$ Creature | AddPower$ 2 | Description$ Text.\n\
+        Oracle:Equipped creature gets +2/+0.\\nEquip {1}";
+    let steel = "Name:Test Steel\nManaCost:1\nTypes:Artifact\n\
+        K:ETBReplacement:Copy:DBCopy:Optional\n\
+        SVar:DBCopy:DB$ Clone | Choices$ Artifact.Other | SpellDescription$ Text.\n\
+        Oracle:You may have this artifact enter as a copy of any artifact on the battlefield.";
+    let healer = healer();
+    let mut sc = scenario(&[axe, steel, &healer]);
+    sc.cards(P0, Zone::Battlefield, &["Plains"]);
+    let h = sc.card(P0, Zone::Battlefield, "Test Healer");
+    let eq = sc.card(P0, Zone::Battlefield, "Test Axe");
+    sc.attach(eq, h);
+    sc.card(P0, Zone::Hand, "Test Steel");
+    sc.turn(P0, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Steel").pay().pass_all();
+    choose_copy(&mut s, eq);
+    let copy = s.find(P0, Zone::Battlefield, "Test Steel").unwrap();
+    assert_eq!(chars(&s.st, copy).name, "Test Axe");
+    assert_eq!(s.st.object(copy).attached_to, None);
+    assert_eq!(s.st.object(eq).attached_to, Some(h));
+    assert_eq!(looks(&s, h).1, Some(4));
 }

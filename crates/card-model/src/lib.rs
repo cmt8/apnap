@@ -2060,6 +2060,11 @@ pub enum Effect {
         /// "That much" of the delayed ability, fixed now.
         #[serde(default)]
         amount: Option<Amount>,
+        /// The objects the delayed ability is about ("return it", "sacrifice them"), fixed
+        /// now (CR 603.7c): in it they are "those cards" ([`ObjRef::Noted`]), affected only
+        /// while each is still the same object, where it was.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        objects: Option<ObjRef>,
     },
     /// "[Who] may draw up to N cards": the player who would draw chooses how many, from 0
     /// to N, as it resolves (CR 107.1c, 608.2d), then draws that many.
@@ -2116,6 +2121,11 @@ pub enum Effect {
         what: ObjRef,
         #[serde(default)]
         except: Vec<CopyExcept>,
+    },
+    /// "Sacrifice it / them" (CR 701.21a): each of the objects, if it is still on the
+    /// battlefield under the control of the ability's controller.
+    SacrificeIt {
+        what: ObjRef,
     },
 }
 
@@ -2252,7 +2262,8 @@ impl Effect {
             | Effect::ChangeTargets { .. }
             | Effect::Lasting { .. }
             | Effect::Choose(_)
-            | Effect::BecomeCopy { .. } => {}
+            | Effect::BecomeCopy { .. }
+            | Effect::SacrificeIt { .. } => {}
         }
     }
 

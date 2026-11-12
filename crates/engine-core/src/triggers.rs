@@ -45,6 +45,9 @@ pub struct PendingTrigger {
     /// What else the triggering event carries ("that player", "that much").
     #[serde(default)]
     pub facts: EventFacts,
+    /// For a delayed triggered ability: the objects it remembers (CR 603.7c).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remembered: Vec<ObjectId>,
 }
 
 /// What a triggering event carries besides its object, for the ability to refer to.
@@ -519,6 +522,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                             &src.chosen,
                         ) {
                             found.push(PendingTrigger {
+                                remembered: Vec::new(),
                                 controller: src.controller,
                                 source: src.id,
                                 source_card: src.card,
@@ -593,6 +597,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                             &src.chosen,
                         ) {
                             found.push(PendingTrigger {
+                                remembered: Vec::new(),
                                 controller: src.controller,
                                 source: src.id,
                                 source_card: src.card,
@@ -642,6 +647,7 @@ pub(crate) fn detect_step(st: &mut GameState, step: Step) {
                 };
                 if step_matches(*ts, step) && who_matches(*whose, active, src.controller) {
                     found.push(PendingTrigger {
+                        remembered: Vec::new(),
                         controller: src.controller,
                         source: src.id,
                         source_card: src.card,
@@ -678,6 +684,7 @@ pub(crate) fn detect_step(st: &mut GameState, step: Step) {
         if hit {
             fired.push(d.id);
             found.push(PendingTrigger {
+                remembered: d.objects.clone(),
                 controller: d.controller,
                 source: d.source,
                 source_card: d.source_card,
@@ -772,6 +779,7 @@ pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
                                 .map(|a| a.defender)
                         });
                         found.push(PendingTrigger {
+                            remembered: Vec::new(),
                             controller: src.controller,
                             source: src.id,
                             source_card: src.card,
@@ -843,6 +851,7 @@ fn detect_with_cause(
             for t in when.events() {
                 for (subject, facts, subject_lki) in hits(st, &src, t) {
                     found.push(PendingTrigger {
+                        remembered: Vec::new(),
                         controller: src.controller,
                         source: src.id,
                         source_card: src.card,
@@ -1182,6 +1191,7 @@ fn detect_damage(st: &mut GameState, dealt: &[Dealt], lki: &BTreeMap<ObjectId, L
                         None => (Some(g.source), None),
                     };
                     found.push(PendingTrigger {
+                        remembered: Vec::new(),
                         controller: src.controller,
                         source: src.id,
                         source_card: src.card,
@@ -1276,6 +1286,7 @@ fn detect_cycled(st: &mut GameState, player: PlayerId, card: ObjectId) {
                 };
                 if hit {
                     found.push(PendingTrigger {
+                        remembered: Vec::new(),
                         controller: src.controller,
                         source: src.id,
                         source_card: src.card,
@@ -1353,6 +1364,7 @@ pub(crate) fn detect_cast(st: &mut GameState, caster: PlayerId, spell: ObjectId)
                     })
                 {
                     found.push(PendingTrigger {
+                        remembered: Vec::new(),
                         controller: src.controller,
                         source: src.id,
                         source_card: src.card,
