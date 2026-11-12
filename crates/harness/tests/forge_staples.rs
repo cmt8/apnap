@@ -424,3 +424,355 @@ fn untap_up_to_n_after_a_land_was_returned_to_pay_the_cost() {
         .collect();
     assert_eq!(offered, [forest, swamp]);
 }
+
+// ---------------------------------------------------------------------------------------
+// Cards that share a land type
+
+// CR 205.3i (2026-11-06): "Lands have their own unique set of subtypes; these subtypes are
+// called land types." CR 701.23b: cards with a stated quality needn't be found. Forge:
+// `ChangeZone … | ChangeNum$ 2 | ShareLandType$ True` ("search your library for up to two
+// basic land cards that share a land type"): chosen one at a time, each further card
+// sharing a land type with each one chosen before.
+#[test]
+fn search_for_lands_that_share_a_land_type() {
+    let landscape = card(
+        "Test Vista",
+        "no cost",
+        "Land",
+        "A:AB$ ChangeZone | Cost$ 2 T Sac<1/CARDNAME> | Origin$ Library | Destination$ Battlefield | ChangeType$ Land.Basic | Tapped$ True | ChangeNum$ 2 | ShareLandType$ True | SpellDescription$ Text.",
+    );
+    let mut sc = Scenario::new(
+        GameConfig::commander(2),
+        forge_test_catalog(&[&landscape], &[]),
+        31,
+    );
+    sc.library(P1, "Forest", 20);
+    let islands = sc.cards(P0, Zone::Library, &["Island", "Island"]);
+    let mountain = sc.card(P0, Zone::Library, "Mountain");
+    sc.card(P0, Zone::Battlefield, "Test Vista");
+    sc.cards(P0, Zone::Battlefield, &["Swamp", "Swamp"]);
+    let mut s = Script::new(sc.build());
+    s.activate("Test Vista").pay();
+    s.pass_all();
+    assert_eq!(s.kind(), ChoiceKind::SearchLibrary);
+    assert!(matches!(
+        s.decision().prim,
+        Primitive::PickN { min: 0, max: 1 }
+    ));
+    assert_eq!(s.options().len(), 3);
+    pick_cards(&mut s, &[islands[0]]);
+    // The second: only a card sharing a land type with the Island.
+    assert_eq!(s.kind(), ChoiceKind::SearchLibrary);
+    let offered: Vec<ObjectId> = s
+        .options()
+        .iter()
+        .filter_map(|o| match o {
+            OptionDesc::Card { card } => Some(*card),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(offered, [islands[1]]);
+    assert!(!offered.contains(&mountain));
+    pick_cards(&mut s, &[islands[1]]);
+    let on_field: Vec<ObjectId> =
+        s.st.zones
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|&o| s.name(o) == "Island")
+            .collect();
+    assert_eq!(on_field.len(), 2);
+    assert!(on_field.iter().all(|&o| s.st.object(o).tapped));
+    assert_eq!(
+        s.count(|e| matches!(e, engine_core::Event::SearchedLibrary { .. })),
+        1
+    );
+    // Stopping after one card is allowed ("up to two").
+    let mut sc = Scenario::new(
+        GameConfig::commander(2),
+        forge_test_catalog(&[&landscape], &[]),
+        31,
+    );
+    sc.library(P1, "Forest", 20);
+    sc.cards(P0, Zone::Library, &["Island", "Island"]);
+    let mountain = sc.card(P0, Zone::Library, "Mountain");
+    sc.card(P0, Zone::Battlefield, "Test Vista");
+    sc.cards(P0, Zone::Battlefield, &["Swamp", "Swamp"]);
+    let mut s = Script::new(sc.build());
+    s.activate("Test Vista").pay();
+    s.pass_all();
+    pick_cards(&mut s, &[mountain]);
+    // Nothing else shares a land type with the Mountain: no second question.
+    assert_ne!(
+        s.next.as_ref().map(|d| d.kind),
+        Some(ChoiceKind::SearchLibrary)
+    );
+    assert!(s.find(P0, Zone::Battlefield, "Mountain").is_some());
+    assert!(s.find(P0, Zone::Battlefield, "Island").is_none());
+}
+
+// ---------------------------------------------------------------------------------------
+// Delayed triggered abilities
+
+/// Answer with the least until `who` has priority in `step` of their own turn, with an
+/// empty stack.
+fn drive_to(s: &mut Script, who: PlayerId, step: engine_core::turn::Step) {
+    drive_until(s, |s| {
+        s.kind() == ChoiceKind::Priority
+            && s.who() == who
+            && s.st.turn.active == who
+            && s.st.turn.step == step
+            && s.st.stack.is_empty()
+    });
+}
+
+const BIG: &str = "Name:Test Big Idea\nManaCost:X G\nTypes:Sorcery\n\
+    A:SP$ Draw | NumCards$ 1 | SpellDescription$ Text.\nSVar:X:Count$xPaid\nOracle:Text.";
+
+// CR 603.7a (2026-11-06): "A delayed triggered ability is created during the resolution of
+// a spell or ability … it triggers when its trigger event occurs" — once (603.7c), and
+// what it refers to was determined as it was created. Forge: `DB$ DelayedTrigger | Mode$
+// Phase | Phase$ Main1,Main2 | ValidPlayer$ You | RememberNumber$ True` after a counter
+// with `RememberCounteredCMC$` ("counter target spell; at the beginning of your next main
+// phase, add {C} equal to that spell's mana value"). The mana value is the one it had on
+// the stack, X included (CR 202.3e).
+#[test]
+fn a_delayed_trigger_adds_mana_equal_to_the_countered_spells_mana_value() {
+    let drain = card(
+        "Test Siphon",
+        "U U",
+        "Instant",
+        "A:SP$ Counter | TargetType$ Spell | RememberCounteredCMC$ True | ValidTgts$ Card | SubAbility$ DBDelTrig | SpellDescription$ Text.\n\
+         SVar:DBDelTrig:DB$ DelayedTrigger | Mode$ Phase | Phase$ Main1,Main2 | ValidPlayer$ You | Execute$ AddMana | RememberNumber$ True | SubAbility$ DBCleanup\n\
+         SVar:DBCleanup:DB$ Cleanup | ClearRemembered$ True\n\
+         SVar:AddMana:DB$ Mana | Produced$ C | Amount$ X\n\
+         SVar:X:Count$TriggerRememberAmount",
+    );
+    let mut sc = scenario(&[&drain, BIG]);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Forest", "Forest", "Forest", "Island", "Island"],
+    );
+    sc.cards(P0, Zone::Hand, &["Test Big Idea", "Test Siphon"]);
+    sc.turn(P0, engine_core::turn::Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Big Idea").x(2).pay();
+    s.cast("Test Siphon").target("Test Big Idea").pay();
+    s.pass_all();
+    assert!(s.find(P0, Zone::Graveyard, "Test Big Idea").is_some());
+    assert_eq!(s.st.delayed.len(), 1);
+    // Not now: at the beginning of the next main phase (this turn's second one).
+    drive_to(&mut s, P0, engine_core::turn::Step::PostcombatMain);
+    assert_eq!(
+        s.st.player(P0).mana_pool.total(),
+        3,
+        "{{2}}{{G}} cast with X = 2"
+    );
+    assert!(s.st.delayed.is_empty(), "it triggers only once");
+    let text = card_model::describe::rules_text(
+        s.st.card_def(s.find(P0, Zone::Graveyard, "Test Siphon").unwrap()),
+    )
+    .join(" ");
+    assert!(
+        text.contains("at the beginning of your next precombat main phase"),
+        "{text}"
+    );
+}
+
+// CR 603.7c: "A delayed triggered ability that refers to a particular object still affects
+// it even if the object changes zones" — here the player: "its controller may draw up to
+// two cards at the beginning of the next turn's upkeep. You draw a card at the beginning of
+// the next turn's upkeep." Forge: `NextTurn$ True`, `RememberObjects$ RememberedController`
+// with `RememberTargets$` on the counter, and `Draw | Upto$ True` (the drawer chooses how
+// many).
+#[test]
+fn delayed_triggers_of_the_next_turn_remember_a_player() {
+    let denial = card(
+        "Test Refusal",
+        "1 U",
+        "Instant",
+        "A:SP$ Counter | TargetType$ Spell | RememberTargets$ True | ValidTgts$ Card | SubAbility$ DelTrigSlowtrip | SpellDescription$ Text.\n\
+         SVar:DelTrigSlowtrip:DB$ DelayedTrigger | NextTurn$ True | Mode$ Phase | Phase$ Upkeep | ValidPlayer$ Player | Execute$ DrawSlowtrip | SubAbility$ DelTrigDrawTwo\n\
+         SVar:DrawSlowtrip:DB$ Draw | Defined$ You\n\
+         SVar:DelTrigDrawTwo:DB$ DelayedTrigger | NextTurn$ True | Mode$ Phase | Phase$ Upkeep | ValidPlayer$ Player | RememberObjects$ RememberedController | Execute$ DrawTwo | SubAbility$ DBCleanup\n\
+         SVar:DrawTwo:DB$ Draw | NumCards$ 2 | Defined$ DelayTriggerRemembered | Upto$ True\n\
+         SVar:DBCleanup:DB$ Cleanup | ClearRemembered$ True",
+    );
+    let mut sc = scenario(&[&denial, BIG]);
+    sc.cards(P0, Zone::Battlefield, &["Forest", "Forest"]);
+    sc.card(P0, Zone::Hand, "Test Big Idea");
+    sc.cards(P1, Zone::Battlefield, &["Island", "Island"]);
+    sc.card(P1, Zone::Hand, "Test Refusal");
+    sc.turn(P0, engine_core::turn::Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Big Idea").x(1).pay().pass();
+    // P1 counters it.
+    s.cast("Test Refusal").target("Test Big Idea").pay();
+    s.pass_all();
+    assert_eq!(s.st.delayed.len(), 2);
+    let hands = |s: &Script| {
+        (
+            s.st.zones.list(Zone::Hand, P0).len(),
+            s.st.zones.list(Zone::Hand, P1).len(),
+        )
+    };
+    let before = hands(&s);
+    // Nothing during the rest of this turn (P0's end step included).
+    drive_until(&mut s, |s| {
+        s.st.turn.active == P1 && s.st.turn.step == engine_core::turn::Step::Upkeep
+    });
+    assert_eq!(hands(&s), before);
+    // P1's upkeep: P1 orders their two triggers, then P0 chooses how many to draw.
+    drive_until(&mut s, |s| s.kind() == ChoiceKind::DrawUpTo);
+    assert_eq!(s.who(), P0);
+    assert!(matches!(
+        s.decision().prim,
+        Primitive::PickNumber { min: 0, max: 2 }
+    ));
+    s.respond(Response::Number(1));
+    drive_until(&mut s, |s| s.st.delayed.is_empty() && s.st.stack.is_empty());
+    let after = hands(&s);
+    assert_eq!(after.0, before.0 + 1, "P0 chose to draw one");
+    // P1 drew its slowtrip card (P1 has not reached its draw step yet).
+    assert_eq!(s.st.turn.step, engine_core::turn::Step::Upkeep);
+    assert_eq!(after.1, before.1 + 1);
+}
+
+// CR 514.2: "… 'this turn' effects end" at cleanup; a delayed trigger for "this turn" that
+// hasn't triggered is gone then. Forge: `ThisTurn$ True`.
+#[test]
+fn a_delayed_trigger_for_this_turn_ends_at_cleanup() {
+    let conduit = card(
+        "Test Conduit",
+        "2 R",
+        "Artifact",
+        "A:AB$ DelayedTrigger | Cost$ T | Mode$ Phase | Phase$ Main2 | ValidPlayer$ You | ThisTurn$ True | Execute$ TrigMana | SpellDescription$ Text.\n\
+         SVar:TrigMana:DB$ Mana | Produced$ R | Amount$ 1",
+    );
+    let mut sc = scenario(&[&conduit]);
+    sc.card(P0, Zone::Battlefield, "Test Conduit");
+    sc.turn(P0, engine_core::turn::Step::PostcombatMain);
+    let mut s = Script::new(sc.build());
+    s.activate("Test Conduit").pass_all();
+    assert_eq!(s.st.delayed.len(), 1);
+    drive_until(&mut s, |s| s.st.turn.active == P1);
+    assert!(s.st.delayed.is_empty(), "over at P0's cleanup");
+    // A delayed trigger that remembers objects is not compiled yet.
+    let returns = card(
+        "Test Blink",
+        "W",
+        "Instant",
+        "A:SP$ ChangeZone | ValidTgts$ Creature | Origin$ Battlefield | Destination$ Exile | RememberChanged$ True | SubAbility$ DelTrig | SpellDescription$ Text.\n\
+         SVar:DelTrig:DB$ DelayedTrigger | Mode$ Phase | Phase$ End of Turn | Execute$ TrigReturn | RememberObjects$ Remembered | SubAbility$ DBCleanup\n\
+         SVar:TrigReturn:DB$ ChangeZone | Defined$ DelayTriggerRemembered | Origin$ Exile | Destination$ Battlefield\n\
+         SVar:DBCleanup:DB$ Cleanup | ClearRemembered$ True",
+    );
+    assert!(
+        forge_test_blockers(&returns).contains(&"DelayedTrigger:remembers objects".to_string())
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// Text only
+
+// Forge's `CostDesc$` is how the cost reads in the ability's description
+// (`SpellAbility.getDescription`); the cost is `Cost$`. A card compiles the same with or
+// without it, and the discard is still an additional cost (CR 601.2b, 601.2h).
+#[test]
+fn a_cost_description_is_text_only() {
+    let with = |desc: &str| {
+        card(
+            "Test Score",
+            "3 R",
+            "Instant",
+            &format!(
+                "A:SP$ Draw | Cost$ 3 R Discard<1/Card/card> {desc}| NumCards$ 2 | Defined$ You | SpellDescription$ Text."
+            ),
+        )
+    };
+    let a = forge_test_catalog(
+        &[&with("| CostDesc$ As an additional cost, discard a card. ")],
+        &[],
+    );
+    let b = forge_test_catalog(&[&with("")], &[]);
+    let def = |c: &card_model::CardCatalog| c.get(c.find("Test Score").unwrap()).clone();
+    assert_eq!(def(&a), def(&b));
+    assert!(
+        card_model::describe::rules_text(&def(&a))
+            .join(" ")
+            .contains("discard a card")
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// Look at the top N cards and put them back in any order
+
+// CR 401.4 (2026-11-06) and CR 701.24a ("To shuffle a library or a face-down pile of
+// cards, randomize the cards within it so that no player knows their order."). Forge: `SP$ RearrangeTopOfLibrary | Defined$ You | NumCards$ 3 |
+// MayShuffle$ True` ("look at the top three cards of your library, then put them back in
+// any order. You may shuffle."). The controller looks and orders, whoever's library it is.
+#[test]
+fn look_at_the_top_cards_put_them_back_in_any_order_then_maybe_shuffle() {
+    let ponder = card(
+        "Test Musing",
+        "U",
+        "Sorcery",
+        "A:SP$ RearrangeTopOfLibrary | Defined$ You | NumCards$ 3 | MayShuffle$ True | SubAbility$ DBDraw | SpellDescription$ Text.\n\
+         SVar:DBDraw:DB$ Draw | Defined$ You | NumCards$ 1",
+    );
+    let mut sc = scenario(&[&ponder]);
+    let island = sc.card(P0, Zone::Library, "Island");
+    let swamp = sc.card(P0, Zone::Library, "Swamp");
+    let mountain = sc.card(P0, Zone::Library, "Mountain");
+    sc.card(P0, Zone::Battlefield, "Island");
+    sc.card(P0, Zone::Hand, "Test Musing");
+    sc.turn(P0, engine_core::turn::Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Musing").pay().pass_all();
+    assert_eq!(s.kind(), ChoiceKind::ScryOrder);
+    assert_eq!(s.who(), P0);
+    let order: Vec<usize> = [swamp, island, mountain]
+        .iter()
+        .map(|c| {
+            s.options()
+                .iter()
+                .position(|o| matches!(o, OptionDesc::Card { card } if card == c))
+                .unwrap()
+        })
+        .collect();
+    s.respond(Response::Order(order));
+    // "You may shuffle": no.
+    assert_eq!(s.kind(), ChoiceKind::MayAbility);
+    s.pick("decline", |_, o| matches!(o, OptionDesc::Decline));
+    assert!(
+        s.find(P0, Zone::Hand, "Swamp").is_some(),
+        "the new top card was drawn"
+    );
+    let library = s.st.zones.list(Zone::Library, P0);
+    let top: Vec<String> = library.iter().rev().take(2).map(|&c| s.name(c)).collect();
+    assert_eq!(top, ["Island", "Mountain"]);
+    let text = card_model::describe::rules_text(
+        s.st.card_def(s.find(P0, Zone::Graveyard, "Test Musing").unwrap()),
+    );
+    assert_eq!(
+        text,
+        [
+            "You look at the top 3 cards of your library, then put them back in any order. Then you may shuffle your library. Then you draw a card."
+        ]
+    );
+    // Accepting shuffles it.
+    let mut sc = scenario(&[&ponder]);
+    sc.cards(P0, Zone::Library, &["Island", "Swamp", "Mountain"]);
+    sc.card(P0, Zone::Battlefield, "Island");
+    sc.card(P0, Zone::Hand, "Test Musing");
+    sc.turn(P0, engine_core::turn::Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Musing").pay().pass_all();
+    s.respond(Response::Order(vec![0, 1, 2]));
+    s.pick("accept", |_, o| matches!(o, OptionDesc::Accept));
+    assert_eq!(
+        s.count(|e| matches!(e, engine_core::Event::Shuffled { player } if *player == P0)),
+        1
+    );
+}

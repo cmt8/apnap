@@ -367,6 +367,25 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
             }
         }
     }
+    // The delayed triggered abilities the card creates (CR 603.7).
+    let mut delayed: Vec<usize> = Vec::new();
+    // Those that remember an amount ("that much" of the delayed ability).
+    let mut delayed_amount: Vec<usize> = Vec::new();
+    for rest in text.split("DelayedTrigger { ability: ").skip(1) {
+        let index = rest.split(',').next().unwrap_or_default();
+        let remembers_amount = rest
+            .split_once("amount: ")
+            .is_some_and(|(_, a)| a.starts_with("Some"));
+        match index.parse::<usize>() {
+            Ok(i) if i < c.granted.len() => {
+                delayed.push(i);
+                if remembers_amount {
+                    delayed_amount.push(i);
+                }
+            }
+            _ => p.push(format!("no granted ability {index} for a delayed trigger")),
+        }
+    }
     if text.contains("while_source: true") && instant_or_sorcery {
         p.push("an effect of a spell can't last while its source stays".into());
     }
@@ -382,6 +401,16 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
         };
         // What a lasting effect carries works on no object: rules about combat and
         // prevention so far. Only there does anything mean "what the effect is about".
+        // A delayed triggered ability: "at the beginning of [step]" so far, about nothing
+        // remembered.
+        if granted && delayed.contains(&i) {
+            let fits = matches!(a, AbilityDef::Triggered { when, intervening_if: None, .. }
+                if when.events().iter().all(|t| matches!(t, card_model::Trigger::BeginningOf { .. })));
+            if !fits || lasting.contains(&i) {
+                p.push(at("not a delayed triggered ability the engine has".into()));
+                continue;
+            }
+        }
         let carried = granted && lasting.contains(&i);
         if carried {
             let fits = match a {
@@ -546,7 +575,7 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                     _ => false,
                 }),
                 _ => false,
-            };
+            } || (!needs_player && granted && delayed_amount.contains(&i));
             if !given {
                 p.push(at(format!(
                     "{word}: the ability's trigger event doesn't have one"
@@ -1445,6 +1474,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         Effect::Tap { what } | Effect::Untap { what } | Effect::Transform { what } => obj(what, p),
         Effect::TapAll(s) | Effect::UntapAll(s) => selector(s, p),
         Effect::Proliferate => {}
+        Effect::Shuffle { who } => player(who, p),
         Effect::UntapChosen { what, count } => {
             selector(what, p);
             amount(count, p);
@@ -1553,6 +1583,32 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         Effect::DamageEachPlayer { amount: a } => amount(a, p),
         Effect::Destroy { what } | Effect::ReturnToHand { what } | Effect::Apply { what, .. } => {
             obj(what, p)
+        }
+        Effect::DrawUpTo { who, amount: a } => {
+            match who {
+                PlayerRef::Each | PlayerRef::EachOpponent => {
+                    p("one player draws up to a number".into())
+                }
+                other => player(other, p),
+            }
+            amount(a, p);
+        }
+        Effect::DelayedTrigger {
+            player: who,
+            amount: a,
+            ..
+        } => {
+            if let Some(who) = who {
+                match who {
+                    PlayerRef::Each | PlayerRef::EachOpponent => {
+                        p("a delayed trigger remembers one player".into())
+                    }
+                    other => player(other, p),
+                }
+            }
+            if let Some(a) = a {
+                amount(a, p);
+            }
         }
         Effect::Lasting { about, .. } => {
             if let Some(what) = about {

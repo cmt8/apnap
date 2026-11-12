@@ -85,6 +85,14 @@ pub enum GameAction {
         until_end_of_turn: bool,
         while_source: bool,
     },
+    /// CR 603.7: a delayed triggered ability is created (its `id` is assigned here).
+    AddDelayed {
+        delayed: crate::effects::Delayed,
+    },
+    /// CR 603.7c: it has triggered (or can't any more) and is gone.
+    RemoveDelayed {
+        id: u32,
+    },
     /// Use up `n` of a shield's remaining prevention.
     ConsumeShield {
         id: u32,
@@ -410,6 +418,16 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             st.emit(Event::ContinuousEffectBegan { id, source });
             ActionResult::Done
         }
+        GameAction::AddDelayed { mut delayed } => {
+            delayed.id = st.next_effect_id;
+            st.next_effect_id += 1;
+            st.delayed.push(delayed);
+            ActionResult::Done
+        }
+        GameAction::RemoveDelayed { id } => {
+            st.delayed.retain(|d| d.id != id);
+            ActionResult::Done
+        }
         GameAction::AddShield { target, amount } => {
             let id = st.next_effect_id;
             st.next_effect_id += 1;
@@ -502,6 +520,9 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 .map(|e| e.id)
                 .collect();
             st.lasting.retain(|e| !over.contains(&e.id));
+            // Delayed triggered abilities for this turn only (CR 514.2).
+            let turn = st.turn.turn_number;
+            st.delayed.retain(|d| d.until_turn.is_none_or(|t| t > turn));
             ActionResult::Done
         }
         GameAction::Draw { player } => {
