@@ -88,6 +88,14 @@ pub struct PlayerPublic {
     pub commander_damage: Vec<(CardInstanceId, u32)>,
     /// CR 903.8: casts from the command zone, per commander card.
     pub commander_casts: Vec<(CardInstanceId, u32)>,
+    /// The top card of the player's library, if the viewer may see it (CR 401.5): the
+    /// player plays with it revealed, or it is the viewer's and they may look at it.
+    #[serde(default)]
+    pub library_top: Option<ObjectView>,
+    /// Rules about the player in force (CR 613.10), for showing: "no maximum hand size",
+    /// "may play an additional land", "hexproof".
+    #[serde(default)]
+    pub rules: Vec<card_model::PlayerRule>,
 }
 
 /// An effect that holds for a while without being on any object (CR 611.2; public):
@@ -164,6 +172,7 @@ fn views(st: &GameState, ids: &[ObjectId]) -> Vec<ObjectView> {
 }
 
 pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
+    let rules = crate::players::in_force(st);
     PlayerView {
         viewer,
         turn_number: st.turn.turn_number,
@@ -195,6 +204,14 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
                 graveyard: views(st, &st.zones.graveyards[p.id.index()]),
                 commander_damage: p.commander_damage.iter().map(|(c, n)| (*c, *n)).collect(),
                 commander_casts: p.commander_casts.iter().map(|(c, n)| (*c, *n)).collect(),
+                library_top: crate::players::library_top(st, p.id)
+                    .filter(|_| crate::players::sees_library_top(st, viewer, p.id))
+                    .map(|id| object_view(st, id)),
+                rules: rules
+                    .iter()
+                    .filter(|r| r.about(p.id))
+                    .map(|r| r.rule.clone())
+                    .collect(),
             })
             .collect(),
         hand: views(st, &st.zones.hands[viewer.index()]),
@@ -282,6 +299,9 @@ fn shown_to(st: &GameState, viewer: PlayerId) -> Vec<ObjectId> {
         .iter()
         .filter_map(|o| match o {
             OptionDesc::Card { card } => Some(*card),
+            // A card a rule lets them play from a hidden zone (the top of their library):
+            // they know what they are offered.
+            OptionDesc::PlayLand { card } | OptionDesc::CastSpell { card } => Some(*card),
             _ => None,
         })
         .filter(hidden)

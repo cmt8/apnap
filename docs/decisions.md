@@ -1432,12 +1432,259 @@ Rules text: docs/rules-notes/608.2h-its-controller-that-player.md. Tests:
   player pays" (`unless:payer Player`); lasting effects about a player
   (`Effect:remembers TargetedController`); `TriggeredCardOwner` of a cast spell; `Targeted$`
   amounts with several targets; `TargetedAndYou`, `ParentTarget`.
-- **Known and not fixed (found reading the rebased cards):** "another target card from
-  your graveyard" in a dies trigger can target the dying card itself (the ability's
-  source is the old permanent, the card is a new object): Elderfang Ritualist (on main)
-  and A-Elderfang Ritualist. And "you may [X]. If you do, [Y]" compiled as "you may [X,
-  then Y]" still does Y when X turned out impossible (11 compiled cards, the same
-  convention as before this batch).
+- **Follow-ups (2026-11-11), found reading the rebased cards; fixed:**
+  - **"Another target … card" in a dies trigger** could target the dying card itself (the
+    ability's source is the old permanent; its card in the graveyard is a new object,
+    CR 400.7). "Another" is now other than the card the source became when the ability
+    triggered on its leaving (`triggers::this_card`, CR 400.7e/603.10a), for targets
+    (when chosen and on resolution) and for cards chosen as it resolves (`Hidden$`).
+    With no other card, the trigger has no target and is removed (CR 603.3d). Affected:
+    Elderfang Ritualist, A-Elderfang Ritualist. Text: "another target Elf card" (was
+    "target another …": the wording of 122 cards).
+  - **"You may [X]. If you do, [Y]"** was "you may [X, then Y]": Y happened even when X
+    had nothing to act on. `Effect::IfDone { first, then }` (Y only if carrying out X made
+    an event happen, CR 608.2c/614.6), compiled for a trigger whose `OptionalDecider$`
+    makes the "may" and whose text says "If you do" (or "… this way") once. Cards: Ob
+    Nixilis the Fallen, Stockpiling Celebrant, Turntimber Ranger, Zealot il-Vec, Unlucky
+    Cabbage Merchant, A-Elderfang Ritualist. Cards whose "if you do" follows a single
+    instruction that always happens once chosen (Cream of the Crop, Fertile Thicket,
+    Planar Atlas, Munda, Precognition: "you may look at …") or a target that makes the
+    spell fizzle anyway (Energy Tap) were right before and are unchanged; "you may X, then
+    Y" keeps doing both. Limit: a replacement that turns X into another event (614.6)
+    still counts as X having happened.
+  - **Who reveals and who puts a card onto the battlefield (CR 110.2a).** The engine was
+    right — a card another player searches for or reveals from their own library enters
+    under their control (no controller given = its owner, the player told to put it
+    there) — but the text said "you reveal". It now says "its owner reveals the top card
+    of their library. Then its owner puts …" (Chaos Warp; Goblin Guide, Clear the Land).
+    Every compiled card that puts another player's card onto the battlefield (Path to
+    Exile, Assassin's Trophy, Chaos Warp, the "each player searches" cards, Metamorphose…)
+    gives it to the player who searched or revealed, as the cards say. A dig of another
+    player's library onto the battlefield in which you choose is not compiled
+    (`Dig:another player's cards onto the battlefield, chosen by you`; none compiled).
+
+## D-070 Rules about players; playing cards from other zones; Theros gods (2026-11-10)
+Rules text: docs/rules-notes/402-305-401.5-rules-about-players.md.
+- **`AbilityDef::PlayerRule { who, rule, only_if }`**: a static ability that changes a rule
+  for players rather than an object (CR 613.10, 613.11). `PlayerRule`: no maximum hand size,
+  a maximum hand size / ±N (402.2), additional land plays / any number (305.2), hexproof and
+  shroud on a player (702.11c, 702.18a), the top card of the library revealed / looked at
+  (401.5), "you may play lands and cast [cards] from [your graveyard / the top of your
+  library / exile]" (`PlayFrom`, 601.3, 116.2a), and "you may cast this card from your
+  graveyard / from exile" (`PlayThisFrom`, the card's own ability, 113.6f).
+- **Nothing is stored.** `engine_core::players` reads the rules in force off the abilities
+  permanents have now (`layers::abilities`, CLAUDE.md invariant 4) and off lasting effects
+  (`effects::lasting_abilities`) on every question, in timestamp order. A lasting effect may
+  now carry a player rule: "you may play an additional land this turn" (Explore, Urban
+  Evolution, Summer Bloom, Scale the Heights) is Forge's `Effect` with an `AdjustLandPlays`
+  static, i.e. a rule until end of turn (611.2c).
+- **Where the engine asked the hard-coded rule, it asks `players`:** the cleanup discard
+  (`max_hand_size`), the land play (`land_play_left`: played < 1 + additional; a land from the
+  graveyard or the top of the library is a land play), the zones the priority frame offers
+  (`playable_elsewhere`) and `cast::can_begin` (`may_play_from`), targeting a player
+  (`targeting::is_legal`: shroud; hexproof against an opponent's spell or ability — also on
+  resolution, 608.2b). The cast itself is unchanged: timing, costs, commander tax.
+- **What players see:** `PlayerPublic::library_top` — the top card, for every viewer when it
+  is revealed, for its owner when they may look at it (the AI sees it through its
+  `PlayerView`). A card a decision offers to play from a hidden zone is in the decider's
+  `revealed`. `PlayerPublic::rules` lists the rules about each player. While a spell is being
+  cast or an ability activated no top card is shown at all: CR 401.5 hides a *new* top card
+  until the cast is complete, and the engine doesn't remember which card was on top when it
+  began (deliberately less than the rules show for that moment, never more).
+- **The app** shows a revealed / looked-at top card beside the library count (hover to
+  enlarge, click to play it), labels "play X from your graveyard / from the top of your
+  library", and lists the rules about a player behind an ⓘ next to their counts. The
+  heuristic agent plays every land it is offered, so it uses extra land plays and lands
+  from the graveyard or the top of its library.
+- **Compiler:** a `Mode$ Continuous` line is a player rule when it has `SetMaxHandSize`,
+  `RaiseMaxHandSize`, `AdjustLandPlays`, `MayPlay` or `MayLookAt`, or names a player in
+  `Affected$` (`You`, `Player`, `Opponent`, `Player.Opponent`). Card alternatives of the same
+  line given keywords ("you, planeswalkers you control and other creatures you control have
+  hexproof", Shalai) become one static ability per alternative (the keywords are redundant
+  where they overlap). `MayPlay` needs the card to be its controller's own (`YouOwn` /
+  `YouCtrl`), and `TopLibrary` exactly when the zone is the library. **Choice made:** a
+  `MayPlay` filter of a kind of card that isn't a land (`Creature`, `Merfolk`, `Instant`)
+  is read as Oracle's "cast [kind] spells" — such a card is never played as a land, not even
+  a land creature (Forge would let Dryad Arbor be played by Emperor Mihail's "Merfolk"
+  if it were one); `Card`, `Permanent` and land types include lands ("play lands and cast
+  spells"). `Colorless` is now a filter property (none of the five colors).
+- **Theros gods:** `ContinuousEffect::RemoveTypes` (layer 4, "isn't a creature"; subtypes
+  stay: a God that isn't a creature is still a God), `Count$DevotionDual`. CR 208.3: a
+  permanent that isn't a creature has no power or toughness — now true of every layered
+  view. CR 506.4: an attacking or blocking creature that stops being a creature is removed
+  from combat (`GameAction::RemoveFromCombat`, `Event::RemovedFromCombat`, checked with
+  the control sync after every step).
+- **Static abilities that work from the graveyard** (CR 113.6b): `AbilityDef::FromZone
+  { zone, ability }` — "as long as this card is in your graveyard [and you control a
+  Mountain], creatures you control have haste" (Anger, Wonder, Brawn, Filth, Valor,
+  Riftstone Portal). The layer walk takes them from the graveyards (`Key::FromZone`; "you"
+  is the card's owner; off the battlefield a card has only its printed abilities, so no
+  "has the ability" check is needed, only the condition). `EffectZone$ Battlefield` (the
+  default, written out) is accepted on any `Mode$ Continuous` line; any other zone is named
+  (`static:works from Stack`, `…Command`).
+- `AddType$ AllBasicLandType` ("every basic land type in addition", Dryad of the Ilysian
+  Grove, Prismatic Omen, Nylea's Presence).
+- **A `Mode$ Continuous` line that only copies Forge AI hints** (`AddSVar$` of `AITapDown`,
+  `HasAttackEffect`…) is no ability at all; such a line no longer blocks a card.
+- **Blocker names:** `static:Continuous-nothing` is gone — a line from which nothing was
+  compiled now names its unread parameters (`param:static Continuous.CanBlockAny`,
+  `…GainsAbilitiesOf`, `…AddAllCreatureTypes`, `…RemoveCardTypes`, `…EffectZone`).
+- **Deliberately still blocked:** alternative costs (`MayPlayWithoutManaCost` — Omniscience,
+  One with the Multiverse, Dracogenesis; `MayPlayAltManaCost` — Bolas's Citadel) because
+  paying them touches the cast frame's payment code another branch is reworking;
+  `MayPlayLimit` (Muldrotha: once each turn per permanent type), `MayPlayDontGrantZone
+  Permissions`, `MayPlayIgnoreType/Color`, `MayPlayPlayer`, `MayPlayWithFlash`; cards an
+  effect remembers (`static:MayPlay remembered cards` — impulse draw); another player's
+  zones (`static:MayPlay from every player's zone`); hand sizes and land plays that are
+  counted (`static:SetMaxHandSize variable`, `static:AdjustLandPlays variable`); player
+  keywords other than hexproof and shroud (`player keyword:…`: protection, `UntapAdjust`,
+  `CantSearchLibrary`…); players chosen by a property (`filter:player …`); "has all
+  activated abilities of …" (`…GainsAbilitiesOf`: Conspicuous Snoop, Necrotic Ooze);
+  "every creature type" off the battlefield (`…AddAllCreatureTypes`, Maskwood Nexus);
+  "can block any number / an additional creature" (`…CanBlockAny`, `…CanBlockAmount`);
+  "loses all other card types and creature types" (`…RemoveCardTypes`,
+  `…RemoveCreatureTypes`: Kenrith's Transformation, Darksteel Mutation).
+- Golden hashes: one game changed (cmd-4p seed 1) — by CR 506.4: an animated land was
+  attacking when the player whose permanent animated it left the game; it now leaves
+  combat and deals no combat damage (one new event). The other 14 games: unchanged event
+  logs and states. Re-blessed.
+- 9,305 → 9,412 of 34,463 scripts (27.3%); precons 149 → 152 of 275 deck slots. All 107
+  newly compiled cards were read against their Oracle text; famous ones now compiling:
+  Reliquary Tower, Thought Vessel, Decanter of Endless Water, Exploration, Explore, Azusa,
+  Oracle of Mul Daya, Crucible of Worlds, Ramunap Excavator, Mystic Forge, Courser of
+  Kruphix, Gravecrawler, Shalai, Purphoros, Heliod Sun-Crowned, Anger, Wonder, Dryad of the
+  Ilysian Grove. Text fixes found by reading them (no behaviour change): "colorless" was
+  missing from spell kinds ("Spend this mana only to cast  spells"), and cost reductions
+  read "Creature with power 4 or greater spells you cast" (now "Creature spells you cast
+  with power 4 or greater").
+- **Merged onto D-067/D-068** (main at 3e37f8d): 9,776 → 9,891 of 34,463 scripts (28.7%);
+  precons 156 of 275 deck slots. No card of main's stopped compiling. Nine cards compile
+  only in the combination, all read against their Oracle text (Anvil of Bogardan, Price of
+  Knowledge, Rites of Flourishing, Mogis, Marang River Prowler, Infernal Reckoning,
+  Leeching Sliver, Stoneshaker Shaman); the ninth, Clash of Realities, gives its trigger
+  to Spirit *creatures* where the card says "all Spirits" and went into `SCRIPT_DIFFERS`.
+  Tests of the combination: a land played from the graveyard or the top of the library
+  is asked "as this enters" (D-067); additional land plays with lands that enter tapped;
+  "its controller loses 2 life" reaches a player with hexproof or shroud (CR 115.10a: the
+  player isn't targeted). The golden re-bless is unchanged on top of main: only cmd-4p
+  seed 1, one `RemovedFromCombat` event more.
+- **Next:** alternative costs on a permission (Omniscience, One with the Multiverse,
+  Bolas's Citadel) once the cast frame's payment rework lands; `MayPlayLimit` (Muldrotha,
+  a once-per-turn permission counted per static ability); impulse draw ("you may play
+  that card this turn", effects that remember the cards they exiled); protection on
+  players.
+
+## D-066 Mana abilities that cost more than {T}, make several mana, count, reflect, or do more; the payment planner (2026-11-10)
+Rules text: docs/rules-notes/605-mana-abilities-costs-and-yields.md. Tests:
+`crates/harness/tests/forge_mana.rs` (one file per feature area from now on).
+- **Vocabulary.** `ManaProduce` gained `Fixed(types)` ("{U}{B}", "{C}{C}{R}"),
+  `Combination { of, count }` ("two mana in any combination of …", each mana chosen),
+  `Counted { of, amount }` ("{B} for each Swamp you control", "X mana of any one color";
+  counted as it resolves) and `Reflected { from, types }` ("any color that a land an
+  opponent controls could produce", CR 106.7). `AbilityDef::Mana` gained `then`: what the
+  ability also does as it resolves (CR 605.3b) — damage to, life loss and life gain of its
+  controller only (the pain lands, Talismans, Ancient Tomb, The Great Henge). A mana
+  ability's `Cost` may now hold mana, life, "sacrifice this" and one chosen sacrifice,
+  with or without `{T}`; it must tap or sacrifice something, so nothing can be activated
+  for ever. `ManaSymbol::Hybrid` (`{R/W}`, CR 107.4e) exists for the costs of mana
+  abilities only (the filter lands); card-db refuses it anywhere else, and Scryfall
+  printed costs with hybrid are refused as before. `ManaRestriction.sources`: "spend this
+  mana only to activate abilities of artifact sources / an ability" — wherever the source
+  is; `abilities` (Forge's `+inZoneBattlefield`) now really means permanents (CR 109.2:
+  before, Dragon-restricted mana could pay a Dragon card's cycling from the hand).
+  `Effect::AddManaOf { who, of, amount }`: a spell or non-mana ability adding mana of a
+  type chosen as it resolves (Lotus Cobra's landfall, which is an ordinary trigger, CR
+  605.5a; "add one mana of any color" when something enters); several types from one
+  `DB$ Mana` ("R R R G G G") are a `Seq` of `AddMana`.
+- **Engine: `frames/mana.rs`.** `mana_ways` lists every mana ability a player could
+  activate now (`ManaWay`: tap, sacrifice-self, mana cost, life, chosen sacrifice and its
+  candidates, what it makes, restricted, depends on the battlefield). Plain "{T}: Add one
+  mana" abilities of a permanent are still merged into one way. A way that is nothing but
+  a tap (and maybe "sacrifice this") is still done in one step (`tap_for_mana`, same
+  events in the same order as before); anything else runs a `ManaFrame` (new
+  `Frame::Mana`, boxed): choose what to sacrifice → choose which floating mana pays its
+  own cost (hybrid colors first, then generic, asked only when it is a real choice) → pay
+  (tap, `PayMana`, sacrifices and life through `ApplyFrame`) → choose the type of each
+  further mana (`ChoiceKind::ChooseColor` over `OptionDesc::Mana`) → add the mana → its
+  `then` runs in a `ResolveFrame::mana_ability` (no stack object, no targets). The same
+  path serves priority (CR 605.3a) and paying (CR 601.2g), including payments while
+  something resolves (D-063).
+- **Payment feasibility (replaces D-021's / D-049's / D-052's matching).** `plan` decides
+  whether a cost can be paid: one bipartite matching between units of mana wanted (each
+  symbol of the cost — specific, hybrid, generic — and of the costs of the mana-costing
+  abilities chosen) and units of mana that could be had (the pool, each permanent's
+  merged free ways, what the chosen mana-costing or sacrificing abilities make). Around
+  it: which mana-costing/sacrificing abilities to use (and how often: an altar as many
+  times as there are creatures) is enumerated (at most 4,096 combinations), their
+  sacrifices are a second matching together with the cost's own sacrifice; Treasures that
+  the cost could also sacrifice are counted by kind as before (D-052); several mana of
+  one chosen type are tried with each type for the first four such sources (D-049).
+  **Conservative rules (D-019: never offer what can't be completed; under-estimating is
+  allowed):** a mana ability's mana cost is paid only from the pool or from abilities
+  that cost no mana (a chain of Signets each paying the next is not found); mana that
+  can only be spent in certain ways never pays a mana ability's cost; an altar doesn't
+  plan to sacrifice a Treasure, a permanent with a mana-costing ability, or (when
+  Treasures are among them) what the cost itself could sacrifice; when life paid plus all
+  self-damage of mana abilities would exceed the player's life, life-paying abilities
+  aren't planned with. The planner assumes the best order (tap a mana creature before
+  sacrificing it, count Cradle before sacrificing creatures); each option offered while
+  paying is checked on the state it leads to — for a plain tap by updating the planner's
+  snapshot, for anything that sacrifices, costs mana or life, or makes mana of open types
+  by playing it out on a copy of the game (`simulate`) and planning again from there.
+  Choices inside an activation (which creature, which floating mana, which type) are
+  filtered the same way.
+- **Deviation from the rules' procedure (not their outcome):** a mana-costing mana
+  ability is offered once its cost is in the pool; the player taps the land first rather
+  than in the middle of activating the Signet (CR 605.3a allows both).
+- **Compiler.** `AB$ Mana` / `AB$ ManaReflected` go through `Tx::mana_ability`:
+  `Produced$` letters with different types, `Combo` with `Amount$ n`, a counted
+  `Amount$` (`Count$Valid …` only, no tapped/untapped filter, no sacrifice in the cost),
+  `SubAbility$` of DealDamage/LoseLife/GainLife (no target), costs with mana, `PayLife`,
+  `Sac<1/…>`, and hybrid tokens (`RW`). Blocked with names: `Mana:sub Draw` (drawing
+  moves a card from a library: not a mana ability, CR 605.1a), `Mana:sub <api>`,
+  `Mana:sub with a target`, `Mana:cost` (a mana ability that neither taps nor sacrifices:
+  "{R}: Add {B}", "{1}{G}: Add one mana of any color"), `Mana:cost sacrifice N`,
+  `Mana:counted` (other counts), `Mana:counted with sacrifice`, `ManaReflected:Is`,
+  `ManaReflected:Produced`, `Mana:produced` (`Combo AnyDifferent`, `Chosen`, `Special …`,
+  counted `Combo`), and the parameters `TriggersWhenSpent`, `AddsNoCounter`,
+  `AddsCounters`, `AddsKeywords`, `PersistentMana`, `ActivationLimit`. Hybrid mana in
+  anything but a mana ability's cost stays `cost:RW` etc.
+- **New Oracle guard `oracle:{T}`:** the card says `{T}` more often than the compiled card
+  does. Found two scripts that leave it out: Lotus Ring's given ability (newly compiled
+  without it — would have been a repeatable Black Lotus) and Letter of Acceptance's
+  "{2}, {T}, Sacrifice: Draw a card" (compiled wrongly before this batch). Both blocked.
+- **Found by the soak (precon-4p, heuristic, 3 games in 40): a payment dead-ended.** Orb of
+  Dragonkind ({1},{T}: two mana in any combination, Dragon-only) paid Lathliss's ability:
+  after the Mountain paid the Orb's {1}, the copy-of-the-game check dropped the Orb's
+  second (still untyped, restricted) mana, so the Orb was no longer offered. Untyped mana
+  now keeps its restriction in the plan. Regression test
+  `restricted_mana_of_open_types_still_pays`.
+- **Found by the soak after merging D-070 (forge-4p, 2 games in 500):** an altar could
+  plan to sacrifice the source of the ability being paid for while mana restricted to
+  abilities of such sources was in the pool; once the source is gone that mana's use
+  depends on last known information the payment doesn't keep (the engine panicked, then
+  dead-ended). Mana abilities no longer sacrifice the source of what is being paid for
+  (conservative), and restricted mana for something that is gone isn't counted on.
+  Regression test `an_altar_doesnt_sacrifice_the_source_of_the_ability_being_paid_for`.
+- **AI and app.** The heuristic agent pays with the cheapest way first (free taps, then
+  Treasure, mana-for-mana, damage, life, sacrificing another permanent last), and when it
+  has a "sacrifice a creature: add mana" ability it doesn't cast what it couldn't pay for
+  without one. The app's auto-pay only taps for mana that costs nothing else; it labels a
+  mana ability that does more than tap for one mana with its text.
+- **Old cards unchanged:** with the new code, 60 games each of real-4p, cmd-4p, m2-4p
+  (random) and 40 of real-4p (heuristic) ended exactly as with the old build; all 15
+  golden event logs are unchanged. State hashes changed (the catalog serializes the new
+  `then` field); re-blessed.
+- 9,305 → 9,571 of 34,463 scripts (27.8%); real cards 9,225 → 9,489; precons 149 → 150
+  of 275 deck slots. The `api:Mana` family fell from 356 cards blocked by it alone (708
+  at all) to about 120. All 266 newly compiled cards were read against their Oracle text.
+- **Next for mana:** "two mana of different colors" (`Combo AnyDifferent`), counted
+  combinations (Axebane Guardian), mana-for-mana abilities without `{T}` (they need a
+  loop guard), triggered mana abilities ("whenever a land is tapped for mana"), mana
+  whose spending does something (`TriggersWhenSpent`, `AddsNoCounter`, `AddsCounters`:
+  Path of Ancestry, Cavern of Souls, Opal Palace — mana that remembers its source),
+  Bloom Tender (`EachColorAmong`), hybrid mana in spells.
+
 ## D-069 "Those cards": Forge's remembered cards within one resolution; conditions on one instruction (2026-11-10)
 Rules text: docs/rules-notes/608.2c-400.7j-those-cards.md.
 - **Vocabulary.** `Effect::Note(instruction)`: the cards the instruction moved — as the
@@ -1533,8 +1780,36 @@ Rules text: docs/rules-notes/608.2c-400.7j-those-cards.md.
   drops the derived layer cache after those moves (the serialized state, and its hash, are
   unchanged). Test `a_reanimated_permanent_is_exiled_when_its_controller_leaves`
   (mutation-checked: it panics without the fix).
+- **With D-068's `Effect::IfDone` (merged 2026-11-11).** The two mean different things.
+  `IfDone { first, then }` is "[first]. If you do, [then]": `then` happens if `first`
+  changed anything at all (any event). `If { test, then }` is a condition counted as the
+  instruction is reached — here, from Forge's `ConditionDefined$ Remembered |
+  ConditionPresent$ … | ConditionCompare$ …`, how many of "those cards" (of a kind) there
+  are. One Forge shape reaches both: an optional trigger whose description says "If you
+  do" / "this way", whose chain notes cards and whose later link asks about them (Carrion
+  Imp, Geothermal Kami, Lagonna-Band Storyteller, Mardu Woe-Reaper). It compiles to
+  `IfDone { first: Note(…), then: If { noted …, … } }` — the two checks together, never one
+  without the other, so no card can reach that meaning two ways. They differ only where the
+  script's test is stricter than "something happened": "you may search … If you do, gain
+  2 life" with nothing found has searched and shuffled (IfDone holds) but noted nothing
+  (the script's `GE1` fails): no life, as the script says (test
+  `you_may_search_if_you_do_with_noted_cards`).
+- **With D-070 and D-066:** a rule about players whose source is exiled as its controller
+  leaves stops at once (`a_rule_about_players_ends_when_its_controller_leaves`); a noted
+  card later played from a graveyard under a "play lands from your graveyard" rule is a
+  new object and the memory is gone with the resolution
+  (`a_noted_card_played_later_is_no_longer_that_card`); counts of noted lands are of cards,
+  not of the mana they make (`counting_noted_lands_not_their_mana`); a noted creature
+  sacrificed to an altar's mana ability while paying "you may pay {2}. If you do, put two
+  +1/+1 counters on it" is a new object this resolution didn't move and gets nothing
+  (`a_noted_creature_sacrificed_for_mana_while_paying`).
 - State hashes changed (`Selector` gained a field: the catalog is part of the state); all
   15 event logs unchanged. Re-blessed.
+- Merged with main `4f75185` (D-066, D-068 follow-ups, D-070): 10,163 → 10,363 of 34,463
+  (30.1%). None of main's cards stops compiling; one changes text (Miraculous Recovery).
+  Letter of Acceptance, compiled on this branch alone, is blocked by D-066's `oracle:{T}`
+  (it had lost its `{T}`). Two cards compile on neither parent and were read: Klothys, God
+  of Destiny and Thassa, Deep-Dwelling.
 - On `04ef403`: 9,305 → 9,491 of 34,463 scripts; precons 149 → 151 of 275 deck slots.
   Rebased onto D-067/D-068 (`3e37f8d`): 9,776 → 9,974 (28.9%). Of the 9,776 cards main
   compiled none stops compiling, and the engine text of one changes: Miraculous Recovery

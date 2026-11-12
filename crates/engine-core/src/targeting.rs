@@ -21,6 +21,13 @@ pub fn is_legal(
     this: Option<ObjectId>,
     source: Option<ObjectId>,
 ) -> bool {
+    // CR 702.18a (shroud) and 702.11c (hexproof) on players.
+    if let Target::Player(p) = t
+        && (crate::players::has_shroud(st, p)
+            || (p != controller && crate::players::has_hexproof(st, p)))
+    {
+        return false;
+    }
     // CR 702.18a (shroud) and 702.11b (hexproof): abilities of permanents.
     if let Target::Object(id) = t
         && let Some(o) = st.objects.get(&id)

@@ -952,3 +952,243 @@ fn a_reanimated_permanent_is_exiled_when_its_controller_leaves() {
     assert!(s.find(P1, Zone::Exile, "Test Golem").is_some());
     assert!(s.next.is_some(), "the game goes on");
 }
+
+// CR 800.4a with D-070: a rule about players whose source the leaving player controlled
+// ("your opponents have hexproof", on another player's creature reanimated under their
+// control) stops applying as that permanent is exiled.
+#[test]
+fn a_rule_about_players_ends_when_its_controller_leaves() {
+    let cards = [
+        spell_saying(
+            "Test Revival",
+            "B",
+            "Sorcery",
+            "A:SP$ ChangeZone | Origin$ Graveyard | Destination$ Battlefield | GainControl$ True | ValidTgts$ Creature | SpellDescription$ Text.",
+            "Put target creature card from a graveyard onto the battlefield under your control.",
+        ),
+        spell(
+            "Test Folly",
+            "B",
+            "Sorcery",
+            "A:SP$ LoseLife | LifeAmount$ 50 | SpellDescription$ Text.",
+        ),
+        creature(
+            "Test Warden",
+            "2 W",
+            "Human",
+            "2/2",
+            "S:Mode$ Continuous | Affected$ Opponent | AddKeyword$ Hexproof | Description$ Text.",
+        ),
+    ];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = Scenario::new(
+        GameConfig::commander(3),
+        forge_test_catalog(&cards, &[SPIRIT]),
+        31,
+    );
+    sc.cards(P0, Zone::Battlefield, &["Swamp", "Swamp"]);
+    sc.cards(P0, Zone::Hand, &["Test Revival", "Test Folly"]);
+    sc.card(P1, Zone::Graveyard, "Test Warden");
+    for p in [P0, P1, PlayerId(2)] {
+        sc.library(p, "Forest", 20);
+    }
+    let mut s = Script::new(sc.build());
+    let warden = s.find(P1, Zone::Graveyard, "Test Warden").unwrap();
+    s.cast("Test Revival")
+        .target_object(warden)
+        .pay()
+        .pass_all();
+    use engine_core::players::has_hexproof;
+    assert!(has_hexproof(&s.st, P1) && has_hexproof(&s.st, PlayerId(2)));
+    assert!(!has_hexproof(&s.st, P0));
+    s.cast("Test Folly").pay().pass_all();
+    assert!(!s.st.in_game(P0));
+    assert!(s.find(P1, Zone::Exile, "Test Warden").is_some());
+    assert!(!has_hexproof(&s.st, P1) && !has_hexproof(&s.st, PlayerId(2)));
+    assert!(s.next.is_some(), "the game goes on");
+}
+
+// D-068's "you may X. If you do, Y" (`Effect::IfDone`) with D-069's "if a card was found
+// this way" (`Effect::If` counting noted cards): the trigger says "you may search your
+// library for a basic land card, put it onto the battlefield tapped, then shuffle. If you
+// do, you gain 2 life", and its script asks whether a card was remembered. Both checks
+// hold together: declining does nothing, searching and finding gains life, searching and
+// finding nothing (a search is done, the shuffle happens) gains none — what the script
+// asks.
+#[test]
+fn you_may_search_if_you_do_with_noted_cards() {
+    let scout = String::from(
+        "Name:Test Scout\nManaCost:G\nTypes:Creature Elf\nPT:1/1\n\
+         T:Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield | ValidCard$ Card.Self | Execute$ TrigSearch | OptionalDecider$ You | TriggerDescription$ When CARDNAME enters, you may search your library for a basic land card, put it onto the battlefield tapped, then shuffle. If you do, you gain 2 life.\n\
+         SVar:TrigSearch:DB$ ChangeZone | Origin$ Library | Destination$ Battlefield | Tapped$ True | ChangeType$ Land.Basic | ChangeNum$ 1 | RememberChanged$ True | SubAbility$ DBGain\n\
+         SVar:DBGain:DB$ GainLife | LifeAmount$ 2 | ConditionDefined$ Remembered | ConditionPresent$ Card | ConditionCompare$ GE1 | SubAbility$ DBCleanup\n\
+         SVar:DBCleanup:DB$ Cleanup | ClearRemembered$ True\n\
+         Oracle:When this creature enters, you may search your library for a basic land card, put it onto the battlefield tapped, then shuffle. If you do, you gain 2 life.",
+    );
+    let lib = harness::forge_test_catalog(&[&scout], &[]);
+    let def = lib.find("Test Scout").unwrap();
+    // Compiled through both: IfDone { first: Note(search), then: If { noted ≥ 1, gain } }.
+    let shape = format!("{:?}", lib.get(def).abilities);
+    assert!(
+        shape.contains("IfDone") && shape.contains("Note(") && shape.contains("If {"),
+        "{shape}"
+    );
+    // (accept?, pick a land?) -> life gained
+    for (accept, find, gained) in [(false, false, 0), (true, true, 2), (true, false, 0)] {
+        let cards = [scout.clone()];
+        let mut s = build(&cards, |sc| {
+            sc.card(P0, Zone::Battlefield, "Forest");
+            sc.card(P0, Zone::Hand, "Test Scout");
+        });
+        let before = life(&s, P0);
+        s.cast("Test Scout").pay().pass_all().pass_all();
+        assert_eq!(s.kind(), ChoiceKind::MayAbility);
+        let answer = if accept {
+            OptionDesc::Accept
+        } else {
+            OptionDesc::Decline
+        };
+        s.pick("may", |_, o| *o == answer);
+        if accept {
+            assert_eq!(s.kind(), ChoiceKind::SearchLibrary);
+            if find {
+                choose_cards(&mut s, &["Forest"]);
+            } else {
+                s.respond(Response::Pick(Vec::new()));
+            }
+        }
+        assert_eq!(
+            life(&s, P0),
+            before + gained,
+            "accept {accept}, find {find}"
+        );
+        assert_eq!(on_battlefield(&s, "Forest").len(), 1 + usize::from(find));
+    }
+}
+
+// D-069 with D-070 (CR 400.7): a card noted by one resolution and then played from the
+// graveyard under a "play lands from your graveyard" rule is a new object; the memory
+// ended with the resolution, so the next resolution of the same ability counts only what
+// it notes itself.
+#[test]
+fn a_noted_card_played_later_is_no_longer_that_card() {
+    let cards = [
+        "Name:Test Crucible\nManaCost:1\nTypes:Artifact\n\
+         S:Mode$ Continuous | Affected$ Land.YouOwn | MayPlay$ True | AffectedZone$ Graveyard | Description$ Text.\n\
+         Oracle:Text."
+            .to_string(),
+        spell(
+            "Test Dredging",
+            "G",
+            "Instant",
+            "A:SP$ Mill | NumCards$ 1 | Defined$ You | RememberMilled$ True | SubAbility$ DBGain | SpellDescription$ Text.\n\
+             SVar:DBGain:DB$ GainLife | LifeAmount$ X | SubAbility$ DBCleanup\n\
+             SVar:DBCleanup:DB$ Cleanup | ClearRemembered$ True\n\
+             SVar:X:Remembered$Valid Land",
+        ),
+    ];
+    let mut s = build(&cards, |sc| {
+        sc.cards(
+            P0,
+            Zone::Battlefield,
+            &["Forest", "Forest", "Test Crucible"],
+        );
+        sc.cards(P0, Zone::Hand, &["Test Dredging", "Test Dredging"]);
+    });
+    let before = life(&s, P0);
+    s.cast("Test Dredging").pay().pass_all();
+    assert_eq!(life(&s, P0), before + 1, "a land was milled");
+    let milled = s.find(P0, Zone::Graveyard, "Forest").expect("milled");
+    // Played from the graveyard: a new object on the battlefield.
+    s.pick(
+        "play the milled Forest",
+        |_, o| matches!(o, OptionDesc::PlayLand { card } if *card == milled),
+    );
+    assert!(
+        !s.st.objects.contains_key(&milled),
+        "CR 400.7: a new object"
+    );
+    // The second resolution notes its own card only.
+    s.cast("Test Dredging").pay().pass_all();
+    assert_eq!(life(&s, P0), before + 2);
+}
+
+// D-069 with D-066 (CR 106.7): "search for up to two land cards, put them onto the
+// battlefield tapped; you gain 1 life for each land put onto the battlefield this way" —
+// the count is of the cards noted, not of mana, even when one of them makes mana another
+// land could produce (`ManaProduce::Reflected`).
+#[test]
+fn counting_noted_lands_not_their_mana() {
+    let cards = [
+        "Name:Test Pool\nManaCost:no cost\nTypes:Land\n\
+         A:AB$ ManaReflected | Cost$ T | ColorOrType$ Type | Valid$ Land.YouCtrl | ReflectProperty$ Produce | SpellDescription$ Add one mana of any type that a land you control could produce.\n\
+         Oracle:{T}: Add one mana of any type that a land you control could produce."
+            .to_string(),
+        spell(
+            "Test Expedition",
+            "G",
+            "Sorcery",
+            "A:SP$ ChangeZone | Origin$ Library | Destination$ Battlefield | Tapped$ True | ChangeType$ Land | ChangeNum$ 2 | RememberChanged$ True | SubAbility$ DBGain | SpellDescription$ Text.\n\
+             SVar:DBGain:DB$ GainLife | LifeAmount$ X | SubAbility$ DBCleanup\n\
+             SVar:DBCleanup:DB$ Cleanup | ClearRemembered$ True\n\
+             SVar:X:Remembered$Amount",
+        ),
+    ];
+    let mut s = build(&cards, |sc| {
+        sc.card(P0, Zone::Battlefield, "Forest");
+        sc.card(P0, Zone::Hand, "Test Expedition");
+        sc.card(P0, Zone::Library, "Test Pool");
+    });
+    let before = life(&s, P0);
+    s.cast("Test Expedition").pay().pass_all();
+    choose_cards(&mut s, &["Forest", "Test Pool"]);
+    assert_eq!(on_battlefield(&s, "Test Pool").len(), 1);
+    assert_eq!(
+        life(&s, P0),
+        before + 2,
+        "two lands, whatever mana they make"
+    );
+}
+
+// D-069 with D-066 (CR 400.7, 601.2g): "return target creature card to the battlefield.
+// You may pay {2}; if you do, put two +1/+1 counters on it" — paying with an altar's mana
+// ability that sacrifices that very creature: it is a new object in the graveyard, which
+// this resolution didn't move, and it gets no counters.
+#[test]
+fn a_noted_creature_sacrificed_for_mana_while_paying() {
+    let cards = [
+        "Name:Test Altar\nManaCost:3\nTypes:Artifact\n\
+         A:AB$ Mana | Cost$ Sac<1/Creature> | Produced$ C | Amount$ 2 | SpellDescription$ Add {C}{C}.\n\
+         Oracle:Sacrifice a creature: Add {C}{C}."
+            .to_string(),
+        spell_saying(
+            "Test Rousing",
+            "B",
+            "Sorcery",
+            "A:SP$ ChangeZone | Origin$ Graveyard | Destination$ Battlefield | ValidTgts$ Creature.YouOwn | RememberChanged$ True | SubAbility$ DBCounter | SpellDescription$ Text.\n\
+             SVar:DBCounter:DB$ PutCounter | Defined$ Remembered | CounterType$ P1P1 | CounterNum$ 2 | UnlessCost$ 2 | UnlessPayer$ You | UnlessSwitched$ True | SubAbility$ DBCleanup\n\
+             SVar:DBCleanup:DB$ Cleanup | ClearRemembered$ True",
+            "Return target creature card from your graveyard to the battlefield. You may pay {2}. If you do, put two +1/+1 counters on it.",
+        ),
+    ];
+    let mut s = build(&cards, |sc| {
+        sc.cards(P0, Zone::Battlefield, &["Swamp", "Test Altar"]);
+        sc.card(P0, Zone::Graveyard, "Test Golem");
+        sc.card(P0, Zone::Hand, "Test Rousing");
+    });
+    s.cast("Test Rousing").target("Test Golem").pay().pass_all();
+    let golem = on_battlefield(&s, "Test Golem")[0];
+    assert_eq!(s.kind(), ChoiceKind::PayUnlessCost);
+    s.pick("pay", |_, o| *o == OptionDesc::Accept);
+    // The altar is the only source: sacrifice the Golem for {C}{C}.
+    s.tap("Test Altar", engine_core::mana::ManaType::Colorless);
+    assert_eq!(s.kind(), ChoiceKind::Sacrifice);
+    choose_cards(&mut s, &["Test Golem"]);
+    s.pay();
+    assert!(!s.st.objects.contains_key(&golem));
+    let card = s
+        .find(P0, Zone::Graveyard, "Test Golem")
+        .expect("sacrificed");
+    assert_eq!(s.st.object(card).counters_of(CounterKind::PlusOne), 0);
+    assert!(on_battlefield(&s, "Test Golem").is_empty());
+}

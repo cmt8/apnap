@@ -282,4 +282,8 @@ pub enum Event {
         player: PlayerId,
         card: ObjectId,
     },
+    /// CR 506.4: a permanent stopped being a creature and was removed from combat.
+    RemovedFromCombat {
+        object: ObjectId,
+    },
 }

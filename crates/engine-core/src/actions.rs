@@ -232,6 +232,11 @@ pub enum GameAction {
         object: ObjectId,
         power: u32,
     },
+    /// CR 506.4: an attacking or blocking creature that stopped being a creature is
+    /// removed from combat.
+    RemoveFromCombat {
+        object: ObjectId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -422,6 +427,18 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 st.generation += 1;
             }
             st.emit(Event::ControlChanged { object, controller });
+            ActionResult::Done
+        }
+        GameAction::RemoveFromCombat { object } => {
+            // (An attacker it was blocking stays blocked, CR 509.1h.)
+            if let Some(c) = st.combat.as_mut() {
+                c.attackers.retain(|a| a.attacker != object);
+                for a in &mut c.attackers {
+                    a.blockers.retain(|b| *b != object);
+                }
+                st.generation += 1;
+            }
+            st.emit(Event::RemovedFromCombat { object });
             ActionResult::Done
         }
         GameAction::RecordSourceLki { ability, chars } => {

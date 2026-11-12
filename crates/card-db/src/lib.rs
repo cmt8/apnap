@@ -14,7 +14,7 @@ pub mod scryfall;
 use card_model::{
     AbilityDef, ActivationZone, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript,
     CardType, Condition, Cost, Effect, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces, Supertype,
-    TargetFilter, TargetRef, Trigger,
+    TargetFilter, TargetRef, Trigger, Who,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -178,7 +178,11 @@ fn token_names(def: &CardDef) -> Vec<String> {
             | Effect::Note(x)
             | Effect::If { then: x, .. }
             | Effect::PlayerMay { effect: x, .. } => walk(x, out),
-            Effect::Pay { paid, unpaid, .. } => {
+            Effect::Pay { paid, unpaid, .. }
+            | Effect::IfDone {
+                first: paid,
+                then: unpaid,
+            } => {
                 walk(paid, out);
                 walk(unpaid, out);
             }
@@ -218,6 +222,14 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
     }
     if !land && !c.token && c.mana_cost.is_none() {
         p.push("non-land, non-token cards need a mana cost".into());
+    }
+    // CR 107.4e: spells can't be paid for with hybrid mana yet (D-066).
+    if c.mana_cost.as_ref().is_some_and(|m| {
+        m.symbols
+            .iter()
+            .any(|s| matches!(s, card_model::ManaSymbol::Hybrid(..)))
+    }) {
+        p.push("a hybrid mana cost (D-066: not paid for yet)".into());
     }
     if !c.land_types.is_empty() && !land {
         p.push("basic land types on a non-land".into());
@@ -295,6 +307,10 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 AbilityDef::Replacement { replaces, with } => {
                     matches!(replaces, Replaces::Damage { .. }) && *with == ReplaceWith::Prevent
                 }
+                // "You may play an additional land this turn" (CR 611.2c: a rule).
+                AbilityDef::PlayerRule { rule, .. } => {
+                    !matches!(rule, card_model::PlayerRule::PlayThisFrom(_))
+                }
                 _ => false,
             };
             if !fits {
@@ -314,7 +330,8 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 AbilityDef::Spell(_)
                 | AbilityDef::AdditionalCost(_)
                 | AbilityDef::Enchant(_)
-                | AbilityDef::SelfCostReduction(_) => false,
+                | AbilityDef::SelfCostReduction(_)
+                | AbilityDef::FromZone { .. } => false,
                 AbilityDef::Activated { from, cycling, .. } => {
                     *from == ActivationZone::Battlefield && !*cycling
                 }
@@ -328,6 +345,7 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                                 e,
                                 E::GainControl
                                     | E::AddTypes { .. }
+                                    | E::RemoveTypes(_)
                                     | E::SetColors(_)
                                     | E::SetPTBy { .. }
                             )
@@ -340,11 +358,21 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 AbilityDef::Mana { .. }
                 | AbilityDef::Triggered { .. }
                 | AbilityDef::CostReduction { .. } => true,
+                // "This card" may be cast from a zone: only its own, printed ability.
+                AbilityDef::PlayerRule { rule, .. } => {
+                    !matches!(rule, card_model::PlayerRule::PlayThisFrom(_))
+                }
             };
             if !fits {
                 p.push(at("not an ability another object can be given".into()));
                 continue;
             }
+        }
+        // CR 107.4e: hybrid mana is paid only in the costs of mana abilities so far (D-066).
+        if !matches!(a, AbilityDef::Mana { .. }) && format!("{a:?}").contains("Hybrid") {
+            p.push(at(
+                "hybrid mana outside a mana ability's cost (D-066)".into()
+            ));
         }
         // "Those cards" (D-069) are known only to the resolving effect that noted them: a
         // selector may ask about them only where that effect filters with it itself.
@@ -444,6 +472,7 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
             }
             AbilityDef::Triggered { intervening_if, .. } => (intervening_if.as_ref(), false),
             AbilityDef::Static { only_if, .. } => (only_if.as_ref(), true),
+            AbilityDef::PlayerRule { only_if, .. } => (only_if.as_ref(), false),
             _ => (None, false),
         };
         if let Some(card_model::Condition::Compare { amount, .. }) = cond {
@@ -513,29 +542,110 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 cost,
                 produce,
                 spend,
+                then,
                 ..
             } => {
-                // `{T}`, optionally with "sacrifice this" (D-052). A mana ability that
-                // costs mana, or anything chosen, is not modelled.
-                let allowed = Cost {
-                    tap: true,
-                    sacrifice_self: cost.sacrifice_self,
-                    ..Cost::default()
-                };
-                if *cost != allowed {
+                // D-066: `{T}` or a sacrifice (so that every activation uses something
+                // up), and maybe mana, life, "sacrifice a [permanent]". Nothing from a
+                // hand or graveyard, no X, no discards.
+                if !(cost.tap || cost.sacrifice_self || cost.sacrifice.is_some()) {
                     p.push(at(
-                        "a mana ability must cost {T}, or {T} and sacrificing itself (D-052)"
-                            .into(),
+                        "a mana ability must tap or sacrifice something (D-066)".into()
                     ));
                 }
+                if cost.discard.is_some()
+                    || cost.discard_self
+                    || cost.exile_self
+                    || cost.mana.as_ref().is_some_and(|m| m.has_x())
+                {
+                    p.push(at("a mana ability cost that isn't modelled (D-066)".into()));
+                }
+                if cost.sacrifice.as_ref().is_some_and(|ch| ch.count != 1) {
+                    p.push(at(
+                        "a mana ability that sacrifices more than one permanent (D-066)".into(),
+                    ));
+                }
+                check_cost(cost, &mut |m| p.push(at(m)));
                 if produce.count() == 0 || produce.options().is_empty() {
                     p.push(at("a mana ability that adds nothing".into()));
                 }
-                if spend
-                    .as_ref()
-                    .is_some_and(|r| r.spells.is_empty() && r.abilities.is_empty())
+                match produce {
+                    card_model::ManaProduce::Fixed(v) if v.len() < 2 => {
+                        p.push(at("fixed mana of one symbol is `One`".into()))
+                    }
+                    // Counted as it resolves: tapping must not change the count, and
+                    // nothing it sacrifices may (the planner counts before, D-066).
+                    card_model::ManaProduce::Counted { amount, .. } => {
+                        let plain = match amount {
+                            Amount::Count(s) => s.tapped.is_none(),
+                            _ => false,
+                        };
+                        if !plain || cost.sacrifice_self || cost.sacrifice.is_some() {
+                            p.push(at("counted mana must count permanents, with no sacrifice in the cost (D-066)".into()));
+                        }
+                    }
+                    _ => {}
+                }
+                // CR 605.3b: the rest of a mana ability happens as it resolves. Only what
+                // can't make the mana abilities used to pay a cost change is allowed
+                // (D-066): damage to, life loss and life gain of its controller.
+                if let Some(e) = then
+                    && !mana_side_effect(e)
                 {
+                    p.push(at(format!(
+                        "a mana ability may only also deal damage to, or change the life of, its controller (D-066): {e:?}"
+                    )));
+                }
+                if spend.as_ref().is_some_and(|r| {
+                    r.spells.is_empty() && r.abilities.is_empty() && r.sources.is_empty()
+                }) {
                     p.push(at("mana that can be spent on nothing".into()));
+                }
+            }
+            AbilityDef::FromZone { zone, ability } => {
+                let fits = *zone == ActivationZone::Graveyard
+                    && !granted
+                    && matches!(&**ability, AbilityDef::Static {
+                        affected: card_model::Affected::All(sel),
+                        effects,
+                        ..
+                    } if !sel.looks_at_pt()
+                        && effects.iter().all(|e| !matches!(
+                            e,
+                            card_model::ContinuousEffect::SetPTBy { .. }
+                        )));
+                if !fits {
+                    p.push(at(
+                        "only a static ability about permanents works from a graveyard".into(),
+                    ));
+                }
+            }
+            AbilityDef::PlayerRule { who, rule, .. } => {
+                use card_model::PlayerRule as R;
+                match rule {
+                    R::AdditionalLandPlays(0) => p.push(at("no additional land".into())),
+                    R::PlayFrom { cards, .. } => {
+                        // The cards are in the player's own zone: whose they are and what
+                        // is on the battlefield isn't asked (`card_matches`).
+                        if cards.is_empty()
+                            || cards.iter().any(|s| {
+                                s.controller != Who::Any
+                                    || s.owner != Who::Any
+                                    || s.other
+                                    || s.tapped.is_some()
+                                    || s.attacking.is_some()
+                                    || s.blocking.is_some()
+                            })
+                        {
+                            p.push(at(
+                                "cards a rule lets a player play: card properties only".into()
+                            ));
+                        }
+                    }
+                    R::PlayThisFrom(zones) if zones.is_empty() || *who != Who::You => p.push(at(
+                        "\"cast this card from …\" names zones, for its owner".into(),
+                    )),
+                    _ => {}
                 }
             }
             AbilityDef::CombatRule { affected, .. } => {
@@ -769,6 +879,28 @@ fn check_body(body: &Body, has_x: bool, p: &mut dyn FnMut(String)) {
 }
 
 /// The chosen parts of a cost.
+/// What a mana ability may do besides adding mana (D-066).
+pub(crate) fn mana_side_effect(e: &Effect) -> bool {
+    use card_model::{DamageBy, PlayerRef};
+    match e {
+        Effect::Seq(v) => !v.is_empty() && v.iter().all(mana_side_effect),
+        Effect::DealDamage {
+            to: TargetRef::Players(PlayerRef::You),
+            amount: Amount::Fixed(_),
+            by: DamageBy::This,
+        }
+        | Effect::LoseLife {
+            who: PlayerRef::You,
+            amount: Amount::Fixed(_),
+        }
+        | Effect::GainLife {
+            who: PlayerRef::You,
+            amount: Amount::Fixed(_),
+        } => true,
+        _ => false,
+    }
+}
+
 fn check_cost(cost: &Cost, p: &mut dyn FnMut(String)) {
     for (what, choice) in [("sacrifice", &cost.sacrifice), ("discard", &cost.discard)] {
         if let Some(ch) = choice {
@@ -794,6 +926,15 @@ fn check_cost(cost: &Cost, p: &mut dyn FnMut(String)) {
                 p("a discard cost can only ask for card types and subtypes".into());
             }
         }
+    }
+}
+
+/// Does this instruction define X for what follows ("…where X is", `SetX`)?
+fn first_sets_x(e: &Effect) -> bool {
+    match e {
+        Effect::SetX(_) => true,
+        Effect::Seq(v) => v.iter().any(first_sets_x),
+        _ => false,
     }
 }
 
@@ -839,7 +980,11 @@ fn noted_selectors(e: &Effect) -> usize {
         | Effect::Note(x)
         | Effect::If { then: x, .. }
         | Effect::PlayerMay { effect: x, .. } => noted_selectors(x),
-        Effect::Pay { paid, unpaid, .. } => noted_selectors(paid) + noted_selectors(unpaid),
+        Effect::Pay { paid, unpaid, .. }
+        | Effect::IfDone {
+            first: paid,
+            then: unpaid,
+        } => noted_selectors(paid) + noted_selectors(unpaid),
         Effect::DestroyAll(s) | Effect::TapAll(s) | Effect::UntapAll(s) => n(s),
         Effect::DamageEach { each: s, .. }
         | Effect::ApplyAll { affected: s, .. }
@@ -943,6 +1088,10 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         }
         Effect::SetX(a) => amount(a, p),
         Effect::May(inner) => check_effect(inner, mode, has_x, p),
+        Effect::IfDone { first, then } => {
+            check_effect(first, mode, has_x, p);
+            check_effect(then, mode, has_x || first_sets_x(first), p);
+        }
         Effect::PlayerMay { who, effect } => {
             match who {
                 PlayerRef::Each
@@ -963,6 +1112,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
                 | Effect::May(_)
                 | Effect::PlayerMay { .. }
                 | Effect::If { .. }
+                | Effect::IfDone { .. }
                 | Effect::Pay { .. } => p("only a single instruction is noted".into()),
                 // A search that leaves what it finds in the library, for what comes next.
                 Effect::ChooseCards { from, to, .. } if *to == card_model::CardDest::Stay => {
@@ -1030,6 +1180,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
                     Effect::Seq(_)
                         | Effect::May(_)
                         | Effect::PlayerMay { .. }
+                        | Effect::IfDone { .. }
                         | Effect::Together(_)
                         | Effect::SetX(_)
                 ) {
@@ -1179,6 +1330,13 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         | Effect::LoseLife { who, amount: a } => {
             player(who, p);
             amount(a, p);
+        }
+        Effect::AddManaOf { who, of, amount: a } => {
+            player(who, p);
+            amount(a, p);
+            if of.len() < 2 {
+                p("AddManaOf with no choice is AddMana".into());
+            }
         }
         Effect::Counter { what } => match slot(what) {
             Some(TargetFilter::Spell | TargetFilter::SpellMatching(_)) => {}

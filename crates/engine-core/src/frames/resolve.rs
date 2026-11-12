@@ -111,6 +111,20 @@ pub enum Work {
         player: PlayerId,
         effect: Box<Effect>,
     },
+    /// "If you do, [then]": the instruction before it has been carried out; `then` happens
+    /// if that changed anything — any event since `since` (`GameState::event_count`). An
+    /// instruction with nothing left to act on (the card is gone) does nothing at all.
+    IfDone {
+        k: usize,
+        then: Box<Effect>,
+        since: u64,
+    },
+    /// CR 106.4: `player` adds `count` mana of one type they choose from `of`.
+    AddManaOf {
+        player: PlayerId,
+        of: Vec<crate::mana::ManaType>,
+        count: u32,
+    },
     /// The instruction being noted ([`Effect::Note`]) has been performed: the tokens it
     /// created join "those cards", and noting stops.
     EndNote,
@@ -403,7 +417,7 @@ impl ResolveFrame {
                     st,
                     id,
                     core::slice::from_ref(s),
-                    self.source,
+                    self.this_card(st),
                     self.controller,
                 ) && self.noted_ok(st, s, id)
             })
@@ -427,6 +441,32 @@ impl ResolveFrame {
             Condition::Compare { amount, cmp, n } => cmp.holds(self.amount(st, k, amount), *n),
             other => condition_holds(st, Some(other), self.controller, self.source),
         }
+    }
+
+    /// The rest of what a mana ability does as it resolves (CR 605.3b): no stack object,
+    /// no targets (CR 605.5a). `object` is the source itself, which is not on the stack,
+    /// so resolving ends without anything leaving the stack.
+    pub(crate) fn mana_ability(
+        controller: PlayerId,
+        source: ObjectId,
+        card: card_model::CardDefId,
+        effect: Effect,
+        source_lki: Option<Characteristics>,
+    ) -> Self {
+        let mut f = ResolveFrame::new();
+        f.object = Some(source);
+        f.controller = controller;
+        f.source = source;
+        f.card = card;
+        f.source_lki = source_lki;
+        f.targets = vec![Vec::new()];
+        f.filters = vec![Vec::new()];
+        f.target_info = vec![Vec::new()];
+        f.work = vec![Work::Eval {
+            k: 0,
+            effect: Box::new(effect),
+        }];
+        f
     }
 
     /// Everything `r` stands for right now: objects and players.
@@ -467,7 +507,7 @@ impl ResolveFrame {
             t,
             self.controller,
             self.object,
-            self.ability_source(),
+            self.ability_source(st),
         )
         .then_some(t)
     }
@@ -601,8 +641,14 @@ impl ResolveFrame {
     }
 
     /// For an ability: the object it is on ("another target …" is other than it).
-    fn ability_source(&self) -> Option<ObjectId> {
-        (self.object != Some(self.source)).then_some(self.source)
+    fn ability_source(&self, st: &GameState) -> Option<ObjectId> {
+        (self.object != Some(self.source)).then(|| self.this_card(st))
+    }
+
+    /// What "another" is other than (`triggers::this_card`): the source, or the card it
+    /// became if this ability triggered on its leaving the battlefield.
+    fn this_card(&self, st: &GameState) -> ObjectId {
+        crate::triggers::this_card(st, self.source, self.subject, self.facts.moved)
     }
 
     /// The source's current characteristics, or its last known ones (CR 608.2h, 113.7a).
@@ -875,6 +921,11 @@ impl ResolveFrame {
                         self.work.push(Work::Eval { k, effect: unpaid });
                     }
                 },
+                Work::IfDone { k, then, since } => {
+                    if st.event_count > since {
+                        self.work.push(Work::Eval { k, effect: then });
+                    }
+                }
                 Work::PlayerMay { k, player, effect } => match input.take() {
                     None if st.in_game(player) => {
                         self.work.push(Work::PlayerMay { k, player, effect });
@@ -893,6 +944,32 @@ impl ResolveFrame {
                         }
                     }
                 },
+                Work::AddManaOf { player, of, count } => {
+                    let mana = match input.take() {
+                        Some(inp) => match inp.picked_one() {
+                            Some(OptionDesc::Mana { mana }) => Some(*mana),
+                            other => unreachable!("{other:?}"),
+                        },
+                        None if of.len() == 1 => Some(of[0]),
+                        None if st.in_game(player) => {
+                            let options =
+                                of.iter().map(|&mana| OptionDesc::Mana { mana }).collect();
+                            self.work.push(Work::AddManaOf { player, of, count });
+                            return Flow::ask_one(
+                                Frame::Resolve(Box::new(self)),
+                                player,
+                                ChoiceKind::ChooseColor,
+                                options,
+                            );
+                        }
+                        None => None,
+                    };
+                    if let Some(mana) = mana {
+                        for _ in 0..count {
+                            execute(st, GameAction::AddMana { player, mana });
+                        }
+                    }
+                }
                 Work::May { k, effect } => match input.take() {
                     None if st.in_game(self.controller) => {
                         let controller = self.controller;
@@ -1616,7 +1693,7 @@ impl ResolveFrame {
                     t,
                     self.controller,
                     Some(top.id),
-                    self.ability_source(),
+                    self.ability_source(st),
                 );
             }
         }
@@ -1715,6 +1792,20 @@ impl ResolveFrame {
                 for player in self.players(st, k, who) {
                     for _ in 0..amount {
                         execute(st, GameAction::AddMana { player, mana });
+                    }
+                }
+                Vec::new()
+            }
+            Effect::AddManaOf { who, of, amount } => {
+                let count = self.amount(st, k, &amount);
+                if count > 0 {
+                    // Each player chooses as their mana is added (last pushed = first).
+                    for player in self.players_apnap(st, k, who).into_iter().rev() {
+                        self.work.push(Work::AddManaOf {
+                            player,
+                            of: of.clone(),
+                            count,
+                        });
                     }
                 }
                 Vec::new()
@@ -2084,6 +2175,16 @@ impl ResolveFrame {
                     chosen: Vec::new(),
                     willing: false,
                 });
+                Vec::new()
+            }
+            // CR 608.2c: "If you do" — whether the first instruction happened.
+            Effect::IfDone { first, then } => {
+                self.work.push(Work::IfDone {
+                    k,
+                    then,
+                    since: st.event_count,
+                });
+                self.work.push(Work::Eval { k, effect: first });
                 Vec::new()
             }
             Effect::PlayerMay { who, effect } => {

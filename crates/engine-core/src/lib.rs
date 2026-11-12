@@ -24,6 +24,7 @@ pub mod ids;
 pub mod layers;
 pub mod mana;
 pub mod objects;
+pub mod players;
 pub mod replacement;
 pub mod rng;
 mod sba;
