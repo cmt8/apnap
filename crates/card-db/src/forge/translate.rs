@@ -4679,11 +4679,57 @@ impl<'a> Tx<'a> {
     }
 
     fn counter_kind(&mut self, text: Option<&str>) -> Option<CounterKind> {
-        match text {
-            Some("P1P1") => Some(CounterKind::PlusOne),
-            Some("M1M1") => Some(CounterKind::MinusOne),
-            other => {
-                self.block(format!("counter:{}", other.unwrap_or("?")));
+        let name = match text {
+            Some("P1P1") => return Some(CounterKind::PlusOne),
+            Some("M1M1") => return Some(CounterKind::MinusOne),
+            Some(name) => name,
+            None => {
+                self.block("counter:?");
+                return None;
+            }
+        };
+        // Kinds with rules of their own (CR 122.1a–j) aren't built (D-084).
+        let pt = |n: &str| {
+            let mut c = n.chars();
+            matches!(c.next(), Some('P' | 'M'))
+                && n[1..]
+                    .split(['P', 'M'])
+                    .all(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
+                && n[1..].contains(['P', 'M'])
+        };
+        let why = if pt(name) {
+            Some("+X/+Y")
+        } else if keyword(name).is_some()
+            || matches!(
+                name,
+                "First Strike" | "Double Strike" | "Exalted" | "Decayed" | "Indestructible"
+            )
+        {
+            Some("keyword counter")
+        } else {
+            match name {
+                "SHIELD" | "STUN" | "LOYALTY" | "DEFENSE" | "FINALITY" | "HONE" => {
+                    Some("rules of its own")
+                }
+                "POISON" | "ENERGY" | "EXPERIENCE" | "Experience" | "RAD" | "TICKET" => {
+                    Some("on players")
+                }
+                _ => None,
+            }
+        };
+        if let Some(why) = why {
+            self.block(format!("counter:{name} ({why})"));
+            return None;
+        }
+        // Forge's names are upper case words ("CHARGE", "LORE").
+        if !name.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
+            self.block(format!("counter:{name}"));
+            return None;
+        }
+        match card_model::CounterName::new(&name.replace('_', " ")) {
+            Some(n) => Some(CounterKind::Named(n)),
+            None => {
+                self.block(format!("counter:{name}"));
                 None
             }
         }
@@ -5208,6 +5254,27 @@ impl<'a> Tx<'a> {
                         && count == Some(1) =>
                 {
                     cost.exile_self = true
+                }
+                // "Remove N [kind] counters from this" / "put N [kind] counters on this"
+                // (`SubCounter<N/TYPE>`, `AddCounter<N/TYPE>`; on this card only — a third
+                // argument names something else).
+                ("SubCounter" | "AddCounter", true)
+                    if count.is_some_and(|n| n > 0)
+                        && (args.len() == 2
+                            || matches!(args.get(2), Some(&"CARDNAME" | &"NICKNAME"))) =>
+                {
+                    let n = count.expect("checked");
+                    let k = self.counter_kind(args.get(1).copied())?;
+                    let slot = if kind == "SubCounter" {
+                        &mut cost.remove_counters
+                    } else {
+                        &mut cost.add_counters
+                    };
+                    if slot.is_some() {
+                        self.block(format!("cost:{kind} twice"));
+                        return None;
+                    }
+                    *slot = Some((k, n));
                 }
                 ("Sac" | "Discard", true) => {
                     let (Some(count), Some(types)) = (count.filter(|n| *n > 0), args.get(1)) else {

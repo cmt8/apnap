@@ -941,10 +941,11 @@ fn selector(s: &Selector, plural: bool) -> String {
     out
 }
 
-fn counter(k: CounterKind) -> &'static str {
+pub fn counter(k: CounterKind) -> String {
     match k {
-        CounterKind::PlusOne => "+1/+1",
-        CounterKind::MinusOne => "-1/-1",
+        CounterKind::PlusOne => "+1/+1".into(),
+        CounterKind::MinusOne => "-1/-1".into(),
+        CounterKind::Named(n) => n.as_str().into(),
     }
 }
 
@@ -2435,6 +2436,18 @@ fn cost_parts(c: &Cost) -> Vec<String> {
     }
     if c.sacrifice_self {
         parts.push("Sacrifice this permanent".to_string());
+    }
+    if let Some((kind, n)) = c.add_counters {
+        parts.push(format!(
+            "Put {} on this permanent",
+            counters_phrase(&Amount::Fixed(n), kind)
+        ));
+    }
+    if let Some((kind, n)) = c.remove_counters {
+        parts.push(format!(
+            "Remove {} from this permanent",
+            counters_phrase(&Amount::Fixed(n), kind)
+        ));
     }
     let chosen = |c: &crate::CostChoice, cards: bool| {
         let what: Vec<String> = c

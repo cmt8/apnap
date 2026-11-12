@@ -118,6 +118,8 @@ fn effect_polarity(e: &Effect) -> Polarity {
         Effect::PutCounters { kind, .. } => match kind {
             CounterKind::PlusOne => Polarity::Help,
             CounterKind::MinusOne => Polarity::Harm,
+            // A charge counter on your own artifact, a lore counter on your Saga.
+            CounterKind::Named(_) => Polarity::Help,
         },
         Effect::Apply { effects, .. } => continuous_polarity(effects),
         // What it does is in abilities written elsewhere on the card: no preference.

@@ -1211,11 +1211,8 @@ fn indent(l: &str) -> usize {
     l.len() - l.trim_start().len()
 }
 
-fn counter(k: card_model::CounterKind) -> &'static str {
-    match k {
-        card_model::CounterKind::PlusOne => "+1/+1",
-        card_model::CounterKind::MinusOne => "-1/-1",
-    }
+fn counter(k: card_model::CounterKind) -> String {
+    card_model::describe::counter(k)
 }
 
 /// "P1 draws a card" -> "P1 draws 2 cards" -> "P1 draws 3 cards" ...

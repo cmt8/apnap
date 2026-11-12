@@ -715,6 +715,10 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                     || cost.discard_self
                     || cost.exile_self
                     || cost.mana.as_ref().is_some_and(|m| m.has_x())
+                    // Counters as a cost of mana (storage lands, "remove a charge counter:
+                    // add …"): not in the mana planner yet.
+                    || cost.remove_counters.is_some()
+                    || cost.add_counters.is_some()
                 {
                     p.push(at("a mana ability cost that isn't modelled (D-066)".into()));
                 }
@@ -837,6 +841,8 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                     || cost.sacrifice_self
                     || cost.discard_self
                     || cost.exile_self
+                    || cost.remove_counters.is_some()
+                    || cost.add_counters.is_some()
                 {
                     p.push(at(
                         "an additional cost is a sacrifice, a discard or life, nothing else".into(),
@@ -1154,6 +1160,14 @@ fn check_cost(cost: &Cost, p: &mut dyn FnMut(String)) {
     // choice of permanents, not for two (D-072).
     if cost.sacrifice.is_some() && cost.return_to_hand.is_some() {
         p("a cost that both sacrifices and returns permanents".into());
+    }
+    for (kind, n) in [cost.remove_counters, cost.add_counters]
+        .into_iter()
+        .flatten()
+    {
+        if n == 0 {
+            p(format!("a cost of zero {kind:?} counters"));
+        }
     }
     if let Some(e) = &cost.exile_from_hand {
         for s in &e.what {

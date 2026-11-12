@@ -745,11 +745,9 @@ enum Place {
     Pile,
 }
 
-fn counter_name(kind: CounterKind) -> &'static str {
-    match kind {
-        CounterKind::PlusOne => "+1/+1",
-        CounterKind::MinusOne => "-1/-1",
-    }
+/// "+1/+1", "charge", "lore" (CR 122): other kinds by their name.
+fn counter_name(kind: CounterKind) -> String {
+    describe::counter(kind)
 }
 
 /// CR 903.8: the additional generic mana a commander in the command zone costs its owner
@@ -897,6 +895,7 @@ fn badges(cx: &Ctx<'_>, o: &ObjectView, place: Place) -> Vec<Badge> {
         let (bg, fg) = match kind {
             CounterKind::PlusOne => (Color32::from_rgb(32, 84, 44), Color32::WHITE),
             CounterKind::MinusOne => (Color32::from_rgb(96, 34, 34), Color32::WHITE),
+            CounterKind::Named(_) => (Color32::from_rgb(52, 52, 84), Color32::WHITE),
         };
         out.push(Badge::new(
             Corner::TopLeft,
