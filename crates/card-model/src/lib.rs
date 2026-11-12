@@ -1126,6 +1126,9 @@ pub enum Replaces {
         kind: Option<CounterKind>,
         effect_only: bool,
     },
+    /// "If [you / an opponent / a player] would gain life" (CR 119.10: a gain of 0 is no
+    /// event), lifelink's included (CR 120.4c). Relative to this ability's controller.
+    GainLife(Who),
 }
 
 #[allow(clippy::large_enum_variant)]

@@ -214,7 +214,7 @@ fn replacement_rank(a: &AbilityDef) -> u8 {
         return 5;
     };
     let good = match replaces {
-        Replaces::Tokens { .. } | Replaces::CreateTokens => Some(true),
+        Replaces::Tokens { .. } | Replaces::CreateTokens | Replaces::GainLife(_) => Some(true),
         Replaces::Counters { kind, .. } => Some(*kind != Some(CounterKind::MinusOne)),
         Replaces::PutCountersOnYourPermanents => Some(true),
         Replaces::Damage { .. } => Some(false),

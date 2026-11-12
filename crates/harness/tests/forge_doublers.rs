@@ -1530,6 +1530,113 @@ fn damage_forms_left_blocked() {
 }
 
 // ---------------------------------------------------------------------------------------
+// Life gained that is doubled or increased (CR 119.10, 120.4c, 616.1)
+
+fn life_effect(name: &str, math: &str) -> String {
+    card(
+        name,
+        "Enchantment",
+        &format!(
+            "R:Event$ GainLife | ActiveZones$ Battlefield | ValidPlayer$ You | ReplaceWith$ Gain | AILogic$ DoubleLife | Description$ Text.\n\
+             SVar:Gain:DB$ ReplaceEffect | VarName$ LifeGained | VarValue$ X\n\
+             SVar:X:ReplaceCount$LifeGained/{math}"
+        ),
+    )
+}
+
+fn life_cards(extra: &[String]) -> Vec<String> {
+    let mut v = damage_cards(extra);
+    v.push(
+        "Name:Test Salve\nManaCost:W\nTypes:Instant\n\
+         A:SP$ GainLife | LifeAmount$ 3 | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+    );
+    v.push(watcher(
+        "Test Life Watch",
+        "Mode$ LifeGained | ValidPlayer$ You",
+    ));
+    v
+}
+
+// CR 119.10, 614.1a (2026-11-06): "if you would gain life, you gain twice that much life
+// instead" — its controller's gains only; "whenever you gain life" triggers once.
+#[test]
+fn twice_that_much_life() {
+    let mut sc = scenario_n(2, &life_cards(&[life_effect("Test Faithmender", "Twice")]));
+    sc.cards(P0, Zone::Battlefield, &["Test Faithmender", "Plains"]);
+    sc.cards(P1, Zone::Battlefield, &["Plains"]);
+    sc.card(P0, Zone::Hand, "Test Salve");
+    sc.card(P1, Zone::Hand, "Test Salve");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Salve").pay().pass();
+    s.cast("Test Salve").pay().pass_all();
+    s.pass_all();
+    assert_eq!((life(&s, P0), life(&s, P1)), (46, 43));
+}
+
+// CR 120.4c, 702.15b (2026-11-06): lifelink's life gain is a result of the damage, modified
+// by replacement effects on life gain — doubled; with the damage doubled too, it gains
+// what was dealt, doubled again.
+#[test]
+fn cr_120_4c_lifelink_gain_is_doubled() {
+    let mut sc = scenario_n(2, &life_cards(&[life_effect("Test Faithmender", "Twice")]));
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Test Faithmender", "Test Lifelinker"],
+    );
+    let mut s = Script::new(sc.build());
+    s.activate("Test Lifelinker").target_player(P1).pass_all();
+    assert_eq!((life(&s, P0), life(&s, P1)), (42, 39));
+
+    let mut sc = scenario_n(
+        2,
+        &life_cards(&[life_effect("Test Faithmender", "Twice"), twin_gods()]),
+    );
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Test Faithmender", "Test Twin Gods", "Test Lifelinker"],
+    );
+    let mut s = Script::new(sc.build());
+    s.activate("Test Lifelinker").target_player(P1).pass_all();
+    // 2 dealt, 4 gained, as one gain.
+    assert_eq!((life(&s, P0), life(&s, P1)), (44, 38));
+    assert_eq!(
+        s.count(|e| matches!(
+            e,
+            engine_core::Event::LifeChanged { player, delta, .. } if *player == P0 && *delta > 0
+        )),
+        1
+    );
+}
+
+// CR 616.1 (2026-11-06): the player gaining life orders "plus one" and "twice": 3 becomes
+// 8 or 7.
+#[test]
+fn cr_616_1_order_of_life_gain_effects() {
+    for (first, gained) in [("Test Plus Life", 8), ("Test Faithmender", 7)] {
+        let mut sc = scenario_n(
+            2,
+            &life_cards(&[
+                life_effect("Test Faithmender", "Twice"),
+                life_effect("Test Plus Life", "Plus.1"),
+            ]),
+        );
+        sc.cards(
+            P0,
+            Zone::Battlefield,
+            &["Test Faithmender", "Test Plus Life", "Plains"],
+        );
+        sc.card(P0, Zone::Hand, "Test Salve");
+        let mut s = Script::new(sc.build());
+        s.cast("Test Salve").pay().pass_all();
+        choose(&mut s, first);
+        assert_eq!(life(&s, P0), 40 + gained, "{first} first");
+    }
+}
+
+// ---------------------------------------------------------------------------------------
 // What doesn't compile.
 
 #[test]

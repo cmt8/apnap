@@ -5982,6 +5982,9 @@ impl<'a> Tx<'a> {
         if event == "Counter" {
             return self.cant_be_countered(&rd);
         }
+        if event == "GainLife" && rd.rec.get("Prevent").is_none() {
+            return self.replace_gain_life(&rd);
+        }
         // Not compiled yet: named by the event alone, so that it ranks as one feature.
         for key in [
             "ValidCard",
@@ -6168,6 +6171,53 @@ impl<'a> Tx<'a> {
             self.block(format!("repl:amount math {}", shape(math)));
         }
         calc
+    }
+
+    /// `R:Event$ GainLife | ValidPlayer$ You | ReplaceWith$ X` with `DB$ ReplaceEffect |
+    /// VarName$ LifeGained | VarValue$ Y`, `Y = ReplaceCount$LifeGained/<math>` (D-073):
+    /// "if you would gain life, you gain twice that much life / that much plus 1 instead".
+    fn replace_gain_life(&mut self, rd: &Rd<'a>) -> Option<AbilityDef> {
+        let zone = self.replacement_zone(rd, "GainLife");
+        let who = match rd.get("ValidPlayer") {
+            None | Some("Player") => Some(Who::Any),
+            Some("You") => Some(Who::You),
+            Some("Opponent" | "Player.Opponent") => Some(Who::Opponent),
+            Some(p) => {
+                self.block(format!("repl:GainLife.ValidPlayer {}", shape(p)));
+                None
+            }
+        };
+        // (A hint for Forge's AI.)
+        rd.get("AILogic");
+        let with = rd.get("ReplaceWith").and_then(|n| self.sub(n));
+        rd.finish(&mut self.blockers);
+        let calc = with.and_then(|w| {
+            if w.head() != Some(("DB", "ReplaceEffect")) {
+                self.block(format!("repl:GainLife:{}", w.head().map_or("?", |h| h.1)));
+                return None;
+            }
+            let rd = Rd::new(w, "repl GainLife ReplaceEffect");
+            let name = rd.get("VarName");
+            let value = rd.get("VarValue");
+            rd.finish(&mut self.blockers);
+            match (name, value) {
+                (Some("LifeGained"), Some(v)) => match v.strip_prefix("ReplaceCount$LifeGained/") {
+                    Some(math) => self.replace_math(math),
+                    None => self.replace_count(v, "LifeGained"),
+                },
+                _ => {
+                    self.block("repl:GainLife:ReplaceEffect shape");
+                    None
+                }
+            }
+        });
+        if !zone {
+            return None;
+        }
+        Some(AbilityDef::Replacement {
+            replaces: Replaces::GainLife(who?),
+            with: ReplaceWith::Scale(calc?),
+        })
     }
 
     /// `R:Event$ Counter | Layer$ CantHappen` (D-073): "this spell can't be countered"

@@ -876,7 +876,9 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                                 | ReplaceWith::ReplaceTokens(_)
                         )
                         | (
-                            Replaces::Counters { .. } | Replaces::Damage { .. },
+                            Replaces::Counters { .. }
+                                | Replaces::Damage { .. }
+                                | Replaces::GainLife(_),
                             ReplaceWith::Scale(_)
                         )
                         | (Replaces::Damage { .. }, ReplaceWith::Prevent)

@@ -214,7 +214,11 @@ impl ApplyFrame {
                 }
             }
         }
-        perform(st, core::mem::take(&mut self.ready));
+        let caused = perform(st, core::mem::take(&mut self.ready));
+        // Life that lifelink gains, where an effect would modify it (CR 120.4c, 119.10).
+        if !caused.is_empty() {
+            return Flow::then(Frame::Apply(ApplyFrame::new(st, caused)));
+        }
         Flow::done()
     }
 }
@@ -248,7 +252,12 @@ fn token_entries(ev: &Proposed) -> Vec<Proposed> {
 }
 
 /// Perform fully modified events simultaneously, then detect triggers (CR 603.2g).
-pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
+/// Returns the events the performed ones cause that replacement effects would modify:
+/// life gained through lifelink when an effect modifies life gain (CR 120.4c: the damage's
+/// results are processed as modified by replacement effects). They happen next, as a batch
+/// of their own (D-073); without such an effect lifelink's life is gained here.
+pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) -> Vec<Proposed> {
+    let mut caused = Vec::new();
     // CR 704.8 / 603.10a: last known information for everything leaving the battlefield,
     // captured before any of the batch happens.
     let mut lki: BTreeMap<ObjectId, Lki> = BTreeMap::new();
@@ -408,7 +417,20 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
                     && amount > 0
                     && let Some(player) = gainer
                 {
-                    execute(st, GameAction::GainLife { player, amount });
+                    let gain = Proposed::GainLife { player, amount };
+                    let modified = !crate::replacement::applicable(
+                        st,
+                        &Pending {
+                            event: gain.clone(),
+                            applied: Vec::new(),
+                        },
+                    )
+                    .is_empty();
+                    if modified {
+                        caused.push(gain);
+                    } else {
+                        execute(st, GameAction::GainLife { player, amount });
+                    }
                 }
             }
             Proposed::Draw { player } => {
@@ -486,4 +508,5 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
     if !st.is_over() {
         detect_events(st, &performed, &lki);
     }
+    caused
 }

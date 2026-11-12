@@ -597,6 +597,15 @@ fn applies(st: &GameState, who: Bearer<'_>, replaces: &Replaces, ev: &Proposed) 
                 controller, count, ..
             },
         ) => *controller == you && *count > 0,
+        // CR 119.10: no event for 0 life.
+        (Replaces::GainLife(w), Proposed::GainLife { player, amount }) => {
+            *amount > 0
+                && match w {
+                    card_model::Who::Any => true,
+                    card_model::Who::You => *player == you,
+                    card_model::Who::Opponent => *player != you,
+                }
+        }
         // CR 614.16: at least one token of the event is of a kind the effect is about.
         (Replaces::Tokens { token, .. }, ev @ Proposed::CreateTokens { controller, .. }) => {
             token_kinds(ev)
@@ -985,6 +994,14 @@ fn replace_amounts(
         (Replaces::Damage { .. }, ReplaceWith::Scale(c)) => {
             let mut ev = ev.clone();
             if let Proposed::Damage { amount, .. } = &mut ev {
+                *amount = c.apply(*amount);
+            }
+            Some(ev)
+        }
+        // "You gain twice that much life instead."
+        (Replaces::GainLife(_), ReplaceWith::Scale(c)) => {
+            let mut ev = ev.clone();
+            if let Proposed::GainLife { amount, .. } = &mut ev {
                 *amount = c.apply(*amount);
             }
             Some(ev)

@@ -2091,6 +2091,11 @@ fn ability(a: &AbilityDef) -> String {
                 }
                 // Written out by the arm above.
                 Replaces::Damage { .. } => "If damage would be dealt",
+                Replaces::GainLife(w) => match w {
+                    Who::You => "If you would gain life",
+                    Who::Opponent => "If an opponent would gain life",
+                    Who::Any => "If a player would gain life",
+                },
                 Replaces::Tokens { token, effect_only } => {
                     others = tokens_would(token, *effect_only);
                     others.as_str()
@@ -2116,6 +2121,7 @@ fn ability(a: &AbilityDef) -> String {
                     let noun = match replaces {
                         Replaces::Tokens { .. } => "of those tokens are created",
                         Replaces::Counters { .. } => "of those counters are put on it",
+                        Replaces::GainLife(_) => "life is gained",
                         _ => "happen",
                     };
                     format!("{what}, {} {noun} instead.", scaled(*c, "that many"))
