@@ -347,6 +347,11 @@ pub fn option_line(v: &PlayerView, o: &OptionDesc) -> String {
         OptionDesc::Pass => "pass".into(),
         OptionDesc::PlayLand { card } => format!("play {}", view_name(v, *card)),
         OptionDesc::CastSpell { card } => format!("cast {}", view_name(v, *card)),
+        OptionDesc::CastWith { card, ability } => format!(
+            "cast {} for its alternative cost (ability {})",
+            view_name(v, *card),
+            ability.index
+        ),
         OptionDesc::TapForMana {
             source,
             mana,

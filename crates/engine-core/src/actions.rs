@@ -237,6 +237,12 @@ pub enum GameAction {
     RemoveFromCombat {
         object: ObjectId,
     },
+    /// CR 601.2b: the spell is being cast with this alternative cost (an ability of its
+    /// card).
+    SetCastAlt {
+        object: ObjectId,
+        ability: card_model::AbilityId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -292,6 +298,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                     deathtouch_damage: false,
                     attached_to: None,
                     last_controller: controller,
+                    cast_with: None,
                 },
             );
             st.zones.battlefield.push(id);
@@ -655,6 +662,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 targets: Vec::new(),
                 sacrificed_power: 0,
                 facts,
+                alt: None,
             });
             st.emit(Event::AbilityActivated {
                 player: controller,
@@ -677,6 +685,12 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             so.modes = modes;
             so.x = x;
             so.targets = targets;
+            ActionResult::Done
+        }
+        GameAction::SetCastAlt { object, ability } => {
+            if let Some(so) = st.stack.iter_mut().find(|s| s.id == object) {
+                so.alt = Some(ability);
+            }
             ActionResult::Done
         }
         GameAction::RemoveAbility { ability } => {
@@ -790,6 +804,12 @@ fn perform_move(
     position: LibraryPosition,
     controller: Option<PlayerId>,
 ) -> ObjectId {
+    // CR 702.74a: a permanent spell's alternative cost is known to the permanent it becomes
+    // ("if its evoke cost was paid").
+    let cast_with = match to {
+        Zone::Battlefield => st.stack_object(id).and_then(|s| s.alt),
+        _ => None,
+    };
     let old = detach(st, id);
     // CR 400.7 (2026-11-06): a new object with no memory of its previous existence.
     let new_id = st.alloc_object_id();
@@ -814,6 +834,7 @@ fn perform_move(
         deathtouch_damage: false,
         attached_to: None,
         last_controller: controller,
+        cast_with,
     };
     st.objects.insert(new_id, obj);
     if to == Zone::Stack {
@@ -829,6 +850,7 @@ fn perform_move(
             targets: Vec::new(),
             sacrificed_power: 0,
             facts: Default::default(),
+            alt: None,
         });
     } else {
         let list = st.zones.list_mut(to, old.owner);

@@ -33,6 +33,10 @@ pub struct GameObject {
     /// The layered controller last seen by the engine; a change marks the permanent
     /// summoning sick (CR 302.6). Bookkeeping for `layers::sync_control`.
     pub last_controller: PlayerId,
+    /// The alternative cost paid for the spell this permanent was (CR 702.74a "if its
+    /// evoke cost was paid"): an ability of its card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_with: Option<card_model::AbilityId>,
 }
 
 impl GameObject {

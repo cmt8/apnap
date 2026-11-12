@@ -384,6 +384,8 @@ pub fn prompt(kind: ChoiceKind) -> &'static str {
         ChoiceKind::OrderBottom => "Order the cards for the bottom (the last one is bottom-most)",
         ChoiceKind::AuraHost => "Choose what the Aura enchants",
         ChoiceKind::AsEnters { .. } => "As it enters",
+        ChoiceKind::ExileFromHand => "Exile from your hand to pay the cost",
+        ChoiceKind::ReturnToHand => "Return to its owner's hand to pay the cost",
     }
 }
 
@@ -393,6 +395,7 @@ pub fn anchor(o: &OptionDesc) -> Option<Anchor> {
     Some(match o {
         OptionDesc::PlayLand { card }
         | OptionDesc::CastSpell { card }
+        | OptionDesc::CastWith { card, .. }
         | OptionDesc::Card { card } => Anchor::Obj(*card),
         OptionDesc::ActivateAbility { source, .. }
         | OptionDesc::TapForMana { source, .. }
@@ -540,6 +543,17 @@ pub fn option_label(
                 None => harness::text::option_line(v, o),
             }
         }
+        // Casting it for an alternative cost: which one (CR 118.9).
+        OptionDesc::CastWith { card, ability } => match find_object(v, *card) {
+            Some(c) => {
+                let mut text = describe::ability_text(cat.get(ability.card), cat.ability(*ability));
+                if text.chars().count() > 90 {
+                    text = text.chars().take(89).chain(['…']).collect();
+                }
+                format!("cast {} — {text}", c.name)
+            }
+            None => harness::text::option_line(v, o),
+        },
         // The ability itself, so that two abilities of one card (or casting it and
         // cycling it) can be told apart.
         OptionDesc::ActivateAbility { source, ability } => {

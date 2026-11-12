@@ -100,6 +100,9 @@ impl Script {
     pub fn describe(&self, o: &OptionDesc) -> String {
         match o {
             OptionDesc::CastSpell { card } => format!("cast {}", self.name(*card)),
+            OptionDesc::CastWith { card, .. } => {
+                format!("cast {} for its alternative cost", self.name(*card))
+            }
             OptionDesc::PlayLand { card } => format!("play {}", self.name(*card)),
             OptionDesc::ActivateAbility { source, .. } => {
                 format!("activate {}", self.name(*source))
@@ -145,6 +148,18 @@ impl Script {
 
     pub fn can_cast(&self, name: &str) -> bool {
         self.has(|s, o| matches!(o, OptionDesc::CastSpell { card } if s.name(*card) == name))
+    }
+
+    /// Cast `name` for its (first offered) alternative cost (CR 118.9).
+    pub fn cast_with(&mut self, name: &str) -> &mut Self {
+        self.pick(
+            &format!("cast {name} for its alternative cost"),
+            |s, o| matches!(o, OptionDesc::CastWith { card, .. } if s.name(*card) == name),
+        )
+    }
+
+    pub fn can_cast_with(&self, name: &str) -> bool {
+        self.has(|s, o| matches!(o, OptionDesc::CastWith { card, .. } if s.name(*card) == name))
     }
 
     pub fn activate(&mut self, name: &str) -> &mut Self {

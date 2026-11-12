@@ -693,6 +693,13 @@ impl Walk<'_> {
             Condition::Compare { amount, cmp, n } => {
                 cmp.holds(self.amount(amount, e, view).max(0) as u32, *n)
             }
+            // CR 903.3d: a permanent that is a commander, controlled as computed so far.
+            Condition::ControlCommander { own } => view.iter().any(|(id, c)| {
+                self.st.is_commander(*id)
+                    && c.controller == you
+                    && (!own || self.st.object(*id).owner == you)
+            }),
+            Condition::CastFor(kind) => crate::frames::altcost::cast_for(self.st, e.source, *kind),
         }
     }
 

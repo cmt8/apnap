@@ -121,6 +121,10 @@ pub enum ChoiceKind {
         ability: AbilityId,
         tapped: bool,
     },
+    /// CR 601.2h: choose the cards to exile from your hand for a cost (PickN over `Card`).
+    ExileFromHand,
+    /// CR 601.2h: choose the permanents to return to their owner's hand for a cost.
+    ReturnToHand,
 }
 
 /// A structured description of one option. Frames read the chosen option back from the
@@ -208,6 +212,13 @@ pub enum OptionDesc {
     /// A recipient of divided damage.
     DamageRecipient {
         object: ObjectId,
+    },
+    /// Cast `card` with its alternative cost `ability` (CR 118.9, 601.2b): "without paying
+    /// its mana cost", flashback, evoke, overload. Offered right after `CastSpell` for the
+    /// same card, in printed order.
+    CastWith {
+        card: ObjectId,
+        ability: AbilityId,
     },
 }
 

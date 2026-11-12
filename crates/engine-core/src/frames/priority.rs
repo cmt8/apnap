@@ -1,6 +1,8 @@
 //! Priority (CR 117 (2026-11-06)). Text: docs/rules-notes/117-priority-101.4-apnap.md.
 
-use super::cast::{CastFrame, CastSource, can_begin, mana_sources, sorcery_timing, tap_for_mana};
+use super::cast::{
+    CastFrame, CastSource, can_begin, can_begin_with, mana_sources, sorcery_timing, tap_for_mana,
+};
 use super::resolve::ResolveFrame;
 use super::{ApplyFrame, Flow, Frame, Input, StateCheckFrame};
 use crate::decision::{ChoiceKind, OptionDesc};
@@ -101,6 +103,10 @@ impl PriorityFrame {
                 again,
                 Frame::Cast(CastFrame::new(p, CastSource::Card(card))),
             ]),
+            OptionDesc::CastWith { card, ability } => Flow::Continue(vec![
+                again,
+                Frame::Cast(CastFrame::with_alt(p, card, ability)),
+            ]),
             OptionDesc::ActivateAbility { source, ability } => Flow::Continue(vec![
                 again,
                 Frame::Cast(CastFrame::new(p, CastSource::Ability { source, ability })),
@@ -124,8 +130,19 @@ impl PriorityFrame {
     }
 }
 
-/// Legal priority actions in stable order: Pass, lands, spells (hand order), activated
-/// abilities, then mana abilities (battlefield order).
+/// CR 118.9, 601.2b: the ways to cast `card` for one of its alternative costs, in printed
+/// order, that `p` could begin and complete now.
+fn cast_with(st: &GameState, p: PlayerId, card: crate::ids::ObjectId, opts: &mut Vec<OptionDesc>) {
+    for ability in super::altcost::alternatives(st, card) {
+        if can_begin_with(st, p, CastSource::Card(card), Some(ability)) {
+            opts.push(OptionDesc::CastWith { card, ability });
+        }
+    }
+}
+
+/// Legal priority actions in stable order: Pass, lands, spells (hand order; each card's
+/// alternative costs right after it), activated abilities, then mana abilities
+/// (battlefield order).
 fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
     let mut opts = vec![OptionDesc::Pass];
     let hand = &st.zones.hands[p.index()];
@@ -150,6 +167,13 @@ fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
     for &card in hand.iter().chain(commanders).chain(&elsewhere) {
         if can_begin(st, p, CastSource::Card(card)) {
             opts.push(OptionDesc::CastSpell { card });
+        }
+        cast_with(st, p, card, &mut opts);
+    }
+    // CR 702.34a: flashback lets a card be cast from its owner's graveyard.
+    for &card in &st.zones.graveyards[p.index()] {
+        if !elsewhere.contains(&card) {
+            cast_with(st, p, card, &mut opts);
         }
     }
     for &source in &st.zones.battlefield {

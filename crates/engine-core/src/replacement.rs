@@ -284,6 +284,18 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
             }
         }
     }
+    // CR 702.34a: "If the flashback cost was paid, exile this card instead of putting it
+    // anywhere else any time it would leave the stack."
+    if let Proposed::Move { object, to, .. } = &p.event
+        && *to != Zone::Exile
+        && let Some(ability) = crate::frames::altcost::exiled_on_leaving(st, *object)
+    {
+        out.push(RepKey::Static {
+            source: *object,
+            ability,
+            nth: 0,
+        });
+    }
     if let Proposed::Damage { target, amount, .. } = &p.event
         && *amount > 0
     {
@@ -723,6 +735,25 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
         RepKey::Static {
             source, ability, ..
         } => {
+            // CR 702.34a: a flashback spell leaving the stack is exiled instead.
+            if let AbilityDef::AlternativeCost(_) = st.catalog.ability(ability) {
+                let mut ev = ev;
+                if let Proposed::Move {
+                    to,
+                    position,
+                    shuffle,
+                    controller,
+                    ..
+                } = &mut ev
+                {
+                    *to = Zone::Exile;
+                    *position = LibraryPosition::Top;
+                    *shuffle = false;
+                    *controller = None;
+                }
+                st.emit(crate::events::Event::Replaced { source });
+                return Some(ev);
+            }
             let AbilityDef::Replacement { with, .. } = st.catalog.ability(ability) else {
                 unreachable!()
             };
