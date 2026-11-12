@@ -1973,11 +1973,6 @@ pub enum Effect {
         /// The tokens enter tapped.
         #[serde(default)]
         tapped: bool,
-        /// "[Sacrifice / exile] it at the beginning of the next end step": a delayed
-        /// triggered ability (CR 603.7) about each token — index into [`CardDef::granted`]
-        /// of this card, a triggered ability whose "it" is the token.
-        #[serde(default)]
-        at_end: Option<u16>,
     },
     /// CR 707.4: "[this permanent] becomes a copy of [`what`][, except …]" — for good.
     /// Its noncopy effects stay; nothing enters or leaves.
@@ -1985,11 +1980,6 @@ pub enum Effect {
         what: ObjRef,
         #[serde(default)]
         except: Vec<CopyExcept>,
-    },
-    /// "Sacrifice it" (CR 701.21a): the object, if it is still on the battlefield under the
-    /// control of the ability's controller.
-    SacrificeIt {
-        what: ObjRef,
     },
 }
 

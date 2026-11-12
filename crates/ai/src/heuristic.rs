@@ -101,7 +101,6 @@ fn effect_polarity(e: &Effect) -> Polarity {
         Effect::Untap { .. } | Effect::AttachThis { .. } => Polarity::Help,
         // A copy of the best thing there is: of yours, or of anyone's.
         Effect::CopyPermanent { .. } | Effect::BecomeCopy { .. } => Polarity::Help,
-        Effect::SacrificeIt { .. } => Polarity::Neutral,
         // Putting a permanent into its owner's library or hand: aimed at an opponent's.
         Effect::PutInto { .. } => Polarity::Harm,
         Effect::ChooseCards { .. }

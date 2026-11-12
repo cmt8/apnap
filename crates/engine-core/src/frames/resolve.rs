@@ -2284,13 +2284,6 @@ impl ResolveFrame {
                 }
                 Vec::new()
             }
-            // CR 701.21a: only a permanent its controller controls.
-            Effect::SacrificeIt { what } => match self.obj(st, k, what) {
-                Some(o) if crate::layers::controller_of(st, o) == self.controller => {
-                    vec![Proposed::moving(o, Zone::Graveyard, MoveCause::Sacrifice)]
-                }
-                _ => Vec::new(),
-            },
             // CR 707, 111.2: token copies, created by (and so owned and controlled by) the
             // controller. A copy of something that is gone isn't made (CR 111.12), nor one
             // of an instant or sorcery (CR 111.5).
@@ -2300,7 +2293,6 @@ impl ResolveFrame {
                 except,
                 gains,
                 tapped,
-                at_end,
             } => {
                 let count = self.amount(st, k, &count);
                 let originals: Vec<ObjectId> = match what {
@@ -2324,11 +2316,6 @@ impl ResolveFrame {
                                 values,
                                 tapped,
                                 gains: gains.clone(),
-                                at_end: at_end.map(|index| card_model::AbilityId {
-                                    card,
-                                    index,
-                                    granted: true,
-                                }),
                                 source: self.source,
                                 controller: self.controller,
                                 card,

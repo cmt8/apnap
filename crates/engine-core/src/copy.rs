@@ -176,10 +176,8 @@ fn land_type(name: &str) -> Option<BasicLandType> {
     })
 }
 
-/// What comes with a token copy just created (`id`): the keywords it gains (not copiable,
-/// CR 707.2: an effect of the instruction, for as long as it is on the battlefield) and a
-/// delayed triggered ability about it (CR 603.7: "sacrifice it at the beginning of the
-/// next end step").
+/// What comes with a token copy just created (`id`): the keywords it gains — not copiable
+/// (CR 707.2): an effect of the instruction, for as long as it is on the battlefield.
 pub(crate) fn token_extras(st: &mut GameState, c: &crate::replacement::TokenCopy, id: ObjectId) {
     use crate::actions::{GameAction, execute};
     if !c.gains.is_empty() {
@@ -192,17 +190,6 @@ pub(crate) fn token_extras(st: &mut GameState, c: &crate::replacement::TokenCopy
                 effects: alloc::vec![ContinuousEffect::AddKeywords(c.gains.clone())],
                 until_end_of_turn: false,
                 card: c.card,
-            },
-        );
-    }
-    if let Some(ability) = c.at_end {
-        execute(
-            st,
-            GameAction::AddDelayed {
-                source: c.source,
-                controller: c.controller,
-                ability,
-                about: Some(id),
             },
         );
     }

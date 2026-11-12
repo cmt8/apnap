@@ -136,9 +136,6 @@ pub struct GameState {
     /// Abilities that work for a while on no object (CR 611.2): see [`Lasting`].
     #[serde(default)]
     pub lasting: Vec<crate::effects::Lasting>,
-    /// Delayed triggered abilities waiting for their event (CR 603.7).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub delayed: Vec<crate::triggers::Delayed>,
 }
 
 impl GameState {

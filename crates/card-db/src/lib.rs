@@ -368,20 +368,6 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
             }
         }
     }
-    // "Sacrifice it at the beginning of the next end step" (CR 603.7): a triggered
-    // ability of the `granted` list, at the beginning of a step, about "it".
-    for index in text.split("at_end: Some(").skip(1) {
-        let index = index.split(')').next().unwrap_or_default();
-        match index.parse::<usize>().ok().and_then(|i| c.granted.get(i)) {
-            Some(AbilityDef::Triggered {
-                when: card_model::Trigger::BeginningOf { .. },
-                ..
-            }) => {}
-            _ => p.push(format!(
-                "delayed ability {index}: not a step trigger in granted"
-            )),
-        }
-    }
     // The abilities lasting effects carry ("target creature can't be blocked this turn").
     let mut lasting: Vec<usize> = Vec::new();
     for list in text.split("Lasting { abilities: [").skip(1) {
@@ -1494,7 +1480,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             amount(a, p);
         }
         Effect::SacrificeThis | Effect::ControllerSacrificesThis => {}
-        Effect::SacrificeIt { what } | Effect::BecomeCopy { what, .. } => obj(what, p),
+        Effect::BecomeCopy { what, .. } => obj(what, p),
         Effect::CopyPermanent { what, count, .. } => {
             match what {
                 card_model::CopyWhat::Obj(r) => obj(r, p),

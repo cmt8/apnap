@@ -55,17 +55,6 @@ pub enum GameAction {
         object: ObjectId,
         values: crate::copy::Copiable,
     },
-    /// CR 603.7: a delayed triggered ability is created.
-    AddDelayed {
-        source: ObjectId,
-        controller: PlayerId,
-        ability: AbilityId,
-        about: Option<ObjectId>,
-    },
-    /// CR 603.7b: it has triggered (once) and is gone.
-    RemoveDelayed {
-        id: u32,
-    },
     /// CR 122.1: put counters on a permanent.
     PutCounters {
         object: ObjectId,
@@ -324,27 +313,6 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             let card = values.card;
             st.object_mut(object).copy = Some(Box::new(values));
             st.emit(Event::BecameCopy { object, card });
-            ActionResult::Done
-        }
-        GameAction::AddDelayed {
-            source,
-            controller,
-            ability,
-            about,
-        } => {
-            let id = st.next_effect_id;
-            st.next_effect_id += 1;
-            st.delayed.push(crate::triggers::Delayed {
-                id,
-                source,
-                controller,
-                ability,
-                about,
-            });
-            ActionResult::Done
-        }
-        GameAction::RemoveDelayed { id } => {
-            st.delayed.retain(|d| d.id != id);
             ActionResult::Done
         }
         GameAction::CreateToken {

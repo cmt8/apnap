@@ -2998,17 +2998,19 @@ impl<'a> Tx<'a> {
                     }
                 }
                 let tapped = rd.get("TokenTapped") == Some("True");
-                let at_end = match rd.get("AtEOT") {
-                    Some(what) => Some(self.at_end(what)?),
-                    None => None,
-                };
+                // "Sacrifice / exile it at the beginning of the next end step": a delayed
+                // triggered ability about the token (CR 603.7c) — delayed triggers that
+                // remember objects aren't built (D-075 has players and amounts only).
+                if rd.get("AtEOT").is_some() || rd.get("AtEOTTrig").is_some() {
+                    self.block("CopyPermanent:AtEOT (a delayed trigger about the token)");
+                    return None;
+                }
                 Effect::CopyPermanent {
                     what,
                     count: count?,
                     except: except?,
                     gains,
                     tapped,
-                    at_end,
                 }
             }
             // "This permanent becomes a copy of …" for good (docs/forge/effects.md §43):
@@ -4295,38 +4297,6 @@ impl<'a> Tx<'a> {
             out.push(CopyExcept::SetCreatureTypes(types));
         }
         ok.then_some(out)
-    }
-
-    /// `AtEOT$ Sacrifice|Exile` of a token copy: "[sacrifice / exile] it at the beginning
-    /// of the next end step" — a delayed triggered ability (CR 603.7), added to the card's
-    /// `granted` list. Returns its place there.
-    fn at_end(&mut self, what: &str) -> Option<u16> {
-        let effect = match what {
-            "Sacrifice" => Effect::SacrificeIt {
-                what: ObjRef::Triggering,
-            },
-            "Exile" => Effect::Exile {
-                what: ObjRef::Triggering,
-            },
-            other => {
-                self.block(format!("param:AtEOT {other}"));
-                return None;
-            }
-        };
-        let index = self.granted.len() as u16;
-        self.granted.push(AbilityDef::Triggered {
-            when: Trigger::BeginningOf {
-                step: TriggerStep::EndStep,
-                whose: Who::Any,
-            },
-            intervening_if: None,
-            body: Body::Effect(Mode {
-                targets: Vec::new(),
-                effect,
-                groups: Vec::new(),
-            }),
-        });
-        Some(index)
     }
 
     /// `RestrictValid$` of a mana ability: `Spell.<card filter>` and

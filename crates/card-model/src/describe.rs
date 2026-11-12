@@ -696,20 +696,10 @@ fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
 const GRANTED: char = '\u{1}';
 /// Brackets "index|what it is about" of an ability a lasting effect carries.
 const LASTING: char = '\u{2}';
-/// Brackets the index of a delayed triggered ability "at the beginning of the next end
-/// step" (CR 603.7): its instruction is said with when it happens.
-const DELAYED: char = '\u{3}';
 
 /// Replace each marker `continuous` left with the quoted text of that ability of
 /// `def.granted` (which can quote others in turn).
 fn quote_granted(def: &CardDef, text: &str) -> String {
-    let delayed;
-    let text = if text.contains(DELAYED) {
-        delayed = say_delayed(def, text);
-        delayed.as_str()
-    } else {
-        text
-    };
     // The abilities of lasting effects first, said outright: "target creature can't be
     // blocked" for "That permanent can't be blocked."
     let mut said = String::new();
@@ -774,39 +764,6 @@ fn quote_granted(def: &CardDef, text: &str) -> String {
     out
 }
 
-/// Fill in the delayed triggered abilities: "Sacrifice it at the beginning of the next end
-/// step".
-fn say_delayed(def: &CardDef, text: &str) -> String {
-    let mut out = String::new();
-    let mut parts = text.split(DELAYED);
-    while let Some(plain) = parts.next() {
-        out.push_str(plain);
-        let Some(marker) = parts.next() else { break };
-        let (index, them) = match marker.split_once('|') {
-            Some((i, _)) => (i, true),
-            None => (marker, false),
-        };
-        match index.parse::<usize>().ok().and_then(|i| def.granted.get(i)) {
-            Some(AbilityDef::Triggered { body: b, .. }) => {
-                let mut text = body(b);
-                if them {
-                    text = text.replace(" it.", " them.");
-                }
-                let text = text.trim_end_matches('.');
-                let text = text.strip_prefix("You ").unwrap_or(text);
-                let mut chars = text.chars();
-                if let Some(first) = chars.next() {
-                    out.extend(first.to_uppercase());
-                    out.push_str(chars.as_str());
-                }
-                out.push_str(" at the beginning of the next end step");
-            }
-            _ => out.push_str("[a missing ability]"),
-        }
-    }
-    out
-}
-
 fn effect(mode: &Mode, e: &Effect) -> String {
     match e {
         Effect::CopyPermanent {
@@ -815,7 +772,6 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             except,
             gains,
             tapped,
-            at_end,
         } => {
             let n = amount(count);
             let one = n == "1";
@@ -851,10 +807,6 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                     )
                 ));
             }
-            if let Some(i) = at_end {
-                let them = if several { "|them" } else { "" };
-                out.push_str(&format!(". {DELAYED}{i}{them}{DELAYED}"));
-            }
             out
         }
         Effect::BecomeCopy { what, except } => format!(
@@ -862,7 +814,6 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             obj(mode, *what),
             copy_except(except)
         ),
-        Effect::SacrificeIt { what } => format!("you sacrifice {}", obj(mode, *what)),
         // The abilities' texts are filled in by `quote_granted`, which has the card.
         Effect::Lasting {
             abilities,

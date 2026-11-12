@@ -147,12 +147,8 @@ pub struct TokenCopy {
     /// battlefield ("that token gains haste").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gains: Vec<card_model::Keyword>,
-    /// A delayed triggered ability about each token (CR 603.7): "sacrifice it at the
-    /// beginning of the next end step".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub at_end: Option<AbilityId>,
     /// The source of the spell or ability that creates them, its controller, and the card
-    /// its text is written on (CR 603.7d–e, 611.2).
+    /// its text is written on (CR 611.2).
     pub source: ObjectId,
     pub controller: PlayerId,
     pub card: CardDefId,

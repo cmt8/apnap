@@ -47,23 +47,6 @@ pub struct PendingTrigger {
     pub facts: EventFacts,
 }
 
-/// CR 603.7: a delayed triggered ability — "sacrifice it at the beginning of the next end
-/// step" — created as a spell or ability resolves. It isn't on any object: it triggers
-/// once, the next time its event happens (CR 603.7b), and is then gone.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Delayed {
-    pub id: u32,
-    /// CR 603.7d–e: the source of the spell or ability that created it, and the player who
-    /// controlled that as it resolved.
-    pub source: ObjectId,
-    pub controller: PlayerId,
-    /// Its text: a triggered ability written on a card's `granted` list.
-    pub ability: AbilityId,
-    /// The object it is about — "it" (CR 603.7c): affected only while it is still the
-    /// same object, where it was.
-    pub about: Option<ObjectId>,
-}
-
 /// What a triggering event carries besides its object, for the ability to refer to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventFacts {
@@ -604,7 +587,17 @@ pub(crate) fn detect_step(st: &mut GameState, step: Step) {
                 let Trigger::BeginningOf { step: ts, whose } = t else {
                     continue;
                 };
-                if step_matches(*ts, step) && who_matches(*whose, active, src.controller) {
+                let step_matches = matches!(
+                    (ts, step),
+                    (TriggerStep::Upkeep, Step::Upkeep)
+                        | (TriggerStep::DrawStep, Step::Draw)
+                        | (TriggerStep::EndStep, Step::End)
+                        | (TriggerStep::BeginCombat, Step::BeginningOfCombat)
+                        | (TriggerStep::EndCombat, Step::EndOfCombat)
+                        | (TriggerStep::PrecombatMain, Step::PrecombatMain)
+                        | (TriggerStep::PostcombatMain, Step::PostcombatMain)
+                );
+                if step_matches && who_matches(*whose, active, src.controller) {
                     found.push(PendingTrigger {
                         controller: src.controller,
                         source: src.id,
@@ -624,58 +617,7 @@ pub(crate) fn detect_step(st: &mut GameState, step: Step) {
             }
         }
     }
-    // CR 603.7: delayed triggered abilities waiting for this step trigger once, and are
-    // gone (603.7b). They are on no object: nothing about a source is checked.
-    let mut fired = Vec::new();
-    for d in &st.delayed {
-        let AbilityDef::Triggered {
-            when,
-            intervening_if,
-            ..
-        } = st.catalog.ability(d.ability)
-        else {
-            continue;
-        };
-        let hit = when.events().iter().any(|t| {
-            matches!(t, Trigger::BeginningOf { step: ts, whose }
-                if step_matches(*ts, step) && who_matches(*whose, active, d.controller))
-        });
-        if hit && st.in_game(d.controller) {
-            fired.push(d.id);
-            found.push(PendingTrigger {
-                controller: d.controller,
-                source: d.source,
-                source_card: d.ability.card,
-                ability: d.ability,
-                source_lki: None,
-                subject: d.about,
-                subject_lki: None,
-                facts: EventFacts {
-                    player: Some(active),
-                    ..EventFacts::default()
-                },
-            });
-            conds.push(intervening_if.clone());
-        }
-    }
-    for id in fired {
-        crate::actions::execute(st, crate::actions::GameAction::RemoveDelayed { id });
-    }
     queue_matching(st, found, conds);
-}
-
-/// Is `step` the step a "at the beginning of [step]" trigger names?
-fn step_matches(ts: TriggerStep, step: Step) -> bool {
-    matches!(
-        (ts, step),
-        (TriggerStep::Upkeep, Step::Upkeep)
-            | (TriggerStep::DrawStep, Step::Draw)
-            | (TriggerStep::EndStep, Step::End)
-            | (TriggerStep::BeginCombat, Step::BeginningOfCombat)
-            | (TriggerStep::EndCombat, Step::EndOfCombat)
-            | (TriggerStep::PrecombatMain, Step::PrecombatMain)
-            | (TriggerStep::PostcombatMain, Step::PostcombatMain)
-    )
 }
 
 /// CR 508.1m: "whenever [a creature] attacks" triggers, as attackers are declared.

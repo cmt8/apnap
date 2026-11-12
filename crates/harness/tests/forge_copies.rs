@@ -1,8 +1,7 @@
 //! Copies (D-074): token copies (Forge's `CopyPermanent`), permanents that enter as a copy
-//! (`K:ETBReplacement:Copy` + `DB$ Clone`) or become one (`Clone`), the delayed "sacrifice
-//! it at the beginning of the next end step" (`AtEOT$`), and copies of spells and abilities
-//! (`CopySpellAbility`, `K:Storm`). Invented cards in Forge's format, compiled the way real
-//! ones are, then played. Rules text: docs/rules-notes/707-copies.md.
+//! (`K:ETBReplacement:Copy` + `DB$ Clone`) or become one (`Clone`). Invented cards in
+//! Forge's format, compiled the way real ones are, then played. Rules text:
+//! docs/rules-notes/707-copies.md.
 
 use engine_core::layers::chars;
 use engine_core::testing::Scenario;
@@ -93,15 +92,15 @@ fn healer() -> String {
 }
 
 /// "{T}: Create a token that's a copy of target nonlegendary creature you control, except
-/// it has haste. Sacrifice it at the beginning of the next end step."
+/// it has haste."
 fn mirror_goblin() -> String {
     creature(
         "Test Mirror Goblin",
         "2 R",
         "Creature Goblin",
         "2/2",
-        "A:AB$ CopyPermanent | Cost$ T | ValidTgts$ Creature.nonLegendary+YouCtrl | TgtPrompt$ Select target nonlegendary creature you control | AddKeywords$ Haste | AtEOT$ Sacrifice | SpellDescription$ Create a token that's a copy of target nonlegendary creature you control, except it has haste. Sacrifice it at the beginning of the next end step.\n\
-         Oracle:{T}: Create a token that's a copy of target nonlegendary creature you control, except it has haste. Sacrifice it at the beginning of the next end step.",
+        "A:AB$ CopyPermanent | Cost$ T | ValidTgts$ Creature.nonLegendary+YouCtrl | TgtPrompt$ Select target nonlegendary creature you control | AddKeywords$ Haste | SpellDescription$ Create a token that's a copy of target nonlegendary creature you control, except it has haste.\n\
+         Oracle:{T}: Create a token that's a copy of target nonlegendary creature you control, except it has haste.",
     )
 }
 
@@ -120,8 +119,7 @@ fn activate_on(s: &mut Script, source: ObjectId, target: ObjectId) {
 // CR 707.2 (2026-11-06): the copy acquires the copiable values — name, types, power and
 // toughness, abilities (its enters trigger triggers, CR 707.5) — but not counters or other
 // effects. CR 707.9a: "except it has haste" is part of the copy. CR 111.2: the token is
-// its creator's. CR 603.7: "sacrifice it at the beginning of the next end step" is a
-// delayed triggered ability that triggers once.
+// its creator's.
 #[test]
 fn cr_707_2_token_copy_has_the_copiable_values_and_the_exception() {
     let goblin = mirror_goblin();
@@ -158,22 +156,6 @@ fn cr_707_2_token_copy_has_the_copiable_values_and_the_exception() {
     assert!(!chars(&s.st, orig).has(card_model::Keyword::Haste));
     assert_eq!(life(&s, P0), 43, "the copied enters trigger");
     assert!(s.count(|e| matches!(e, Event::BecameCopy { object, .. } if *object == token)) == 1);
-    // At the beginning of the end step it is sacrificed — once.
-    drive_until(&mut s, |s| {
-        s.st.turn.step == Step::End && s.kind() == ChoiceKind::Priority
-    });
-    s.pass_all();
-    assert!(!s.st.objects.contains_key(&token) || s.st.object(token).zone != Zone::Battlefield);
-    assert_eq!(named(&s, "Test Healer"), vec![orig]);
-    assert!(
-        s.st.delayed.is_empty(),
-        "a delayed trigger triggers only once"
-    );
-    assert_eq!(
-        s.count(|e| matches!(e, Event::Sacrificed { .. })),
-        1,
-        "sacrificed, not destroyed"
-    );
 }
 
 // ---------------------------------------------------------------------------------------
@@ -448,7 +430,7 @@ fn season() -> String {
 
 // CR 111.2, 614.1a, 707.2 (2026-11-06): a token copy is created like any token — "twice
 // that many" doubles it — and each of them is the copy, with what the instruction says
-// about it (haste, sacrificed at the next end step).
+// about it (its haste).
 #[test]
 fn cr_614_1a_a_token_copy_is_doubled_and_each_is_a_copy() {
     let (goblin, healer, season) = (mirror_goblin(), healer(), season());
@@ -474,11 +456,6 @@ fn cr_614_1a_a_token_copy_is_doubled_and_each_is_a_copy() {
         assert!(chars(&s.st, t).has(card_model::Keyword::Haste));
     }
     assert_eq!(life(&s, P0), 46, "two enters triggers");
-    assert_eq!(s.st.delayed.len(), 2);
-    drive_until(&mut s, |s| {
-        s.st.turn.step == Step::Cleanup || s.st.turn.active != P0
-    });
-    assert_eq!(named(&s, "Test Healer"), vec![orig]);
 }
 
 // CR 707.5, 614.1c (2026-11-06): a token copy of a land that enters tapped enters tapped:
@@ -622,6 +599,14 @@ fn copy_forms_not_compiled_are_named() {
         SVar:DBCopy:DB$ Clone | Choices$ Creature.Other+YouCtrl | SubAbility$ DBPump | SpellDescription$ Text.\n\
         SVar:DBPump:DB$ PutCounter | Defined$ Self | CounterType$ P1P1 | ETB$ True\nOracle:Text.";
     assert!(forge_test_blockers(spark).contains(&"Clone:SubAbility".to_string()));
+    // "Sacrifice it at the beginning of the next end step": a delayed trigger about the
+    // token (CR 603.7c) — not built.
+    let twin = "Name:Test Twin\nManaCost:R\nTypes:Sorcery\n\
+        A:SP$ CopyPermanent | ValidTgts$ Creature | AtEOT$ Sacrifice | SpellDescription$ Text.\nOracle:Text.";
+    assert!(
+        forge_test_blockers(twin)
+            .contains(&"CopyPermanent:AtEOT (a delayed trigger about the token)".to_string())
+    );
     // "Becomes a copy … until end of turn".
     let mirror = "Name:Test Mirror\nManaCost:2\nTypes:Artifact\n\
         A:AB$ Clone | Cost$ 2 | ValidTgts$ Artifact | Duration$ UntilEndOfTurn | SpellDescription$ Text.\nOracle:Text.";

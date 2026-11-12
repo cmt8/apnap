@@ -106,7 +106,6 @@ pub fn new_game_with_commanders(
         continuous: Vec::new(),
         shields: Vec::new(),
         lasting: Vec::new(),
-        delayed: Vec::new(),
         next_effect_id: 0,
         commanders: Vec::new(),
         commander_cards: BTreeMap::new(),
