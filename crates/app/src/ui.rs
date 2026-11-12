@@ -390,6 +390,7 @@ pub fn prompt(kind: ChoiceKind) -> &'static str {
         ChoiceKind::AsEnters { .. } => "As it enters",
         ChoiceKind::ExileFromHand => "Exile from your hand to pay the cost",
         ChoiceKind::ReturnToHand => "Return to its owner's hand to pay the cost",
+        ChoiceKind::DrawUpTo => "How many cards do you draw?",
         ChoiceKind::Untap => "Choose what to untap",
         ChoiceKind::Proliferate => {
             "Proliferate: choose permanents to get another counter of each kind"

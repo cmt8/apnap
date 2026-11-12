@@ -6,9 +6,9 @@
 use crate::{
     AbilityDef, ActivationZone, Affected, Amount, AsEnters, Body, Calc, CardDef, CardDest,
     CardType, CardZone, ChoiceOf, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost,
-    CounterKind, DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword, ManaProduce,
-    Measure, Mode, ObjFilter, ObjRef, OfChosen, PlayerRef, ReplaceWith, Replaces, Selector, Take,
-    TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
+    CounterKind, DamageBy, DamagePer, DamageTo, DelayWindow, EachPlayerAction, Effect, Keyword,
+    ManaProduce, Measure, Mode, ObjFilter, ObjRef, OfChosen, PlayerRef, ReplaceWith, Replaces,
+    Selector, Take, TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
 };
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -673,6 +673,8 @@ fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
 const GRANTED: char = '\u{1}';
 /// Brackets "index|what it is about" of an ability a lasting effect carries.
 const LASTING: char = '\u{2}';
+/// Starts the "what it is about" of a delayed triggered ability: when it can trigger.
+const DELAYED: char = '\u{3}';
 
 /// Replace each marker `continuous` left with the quoted text of that ability of
 /// `def.granted` (which can quote others in turn).
@@ -688,6 +690,38 @@ fn quote_granted(def: &CardDef, text: &str) -> String {
         match index.parse::<usize>().ok().and_then(|i| def.granted.get(i)) {
             Some(a) => {
                 let mut text = ability(a);
+                // A delayed triggered ability (CR 603.7): "at the beginning of the next
+                // upkeep", "… of your next main phase", "… of the next turn's upkeep".
+                let delayed = about.strip_prefix(DELAYED);
+                if let Some(when) = delayed {
+                    let next = if when == "next-turn" {
+                        "the next turn's"
+                    } else {
+                        "the next"
+                    };
+                    text = text
+                        .replace(
+                            "At the beginning of each player's ",
+                            &format!("at the beginning of {next} "),
+                        )
+                        .replace(
+                            "At the beginning of each opponent's ",
+                            "at the beginning of the next opponent's ",
+                        )
+                        .replace(
+                            "At the beginning of your ",
+                            "at the beginning of your next ",
+                        )
+                        .replace(
+                            "At end of combat on each opponent's turn",
+                            "at end of combat on an opponent's turn",
+                        )
+                        .replace("At end of combat", "at end of combat");
+                    if when == "this-turn" {
+                        text = text.replacen(", ", " this turn, ", 1);
+                    }
+                }
+                let about = if delayed.is_some() { "" } else { about };
                 if !about.is_empty() {
                     text = text
                         .replace("That permanent", about)
@@ -962,7 +996,27 @@ fn effect(mode: &Mode, e: &Effect) -> String {
         }
         Effect::SacrificeThis => "sacrifice this permanent".to_string(),
         Effect::ControllerSacrificesThis => "its controller sacrifices it".to_string(),
+        // The delayed ability's own text, filled in by `quote_granted` ("at the beginning
+        // of the next upkeep, …").
+        Effect::DelayedTrigger {
+            ability, window, ..
+        } => {
+            let when = match window {
+                DelayWindow::Next => "next",
+                DelayWindow::ThisTurn => "this-turn",
+                DelayWindow::NextTurn => "next-turn",
+            };
+            format!("{LASTING}{ability}|{DELAYED}{when}{LASTING}")
+        }
         Effect::AttachThis { to } => format!("attach this permanent to {}", obj(mode, *to)),
+        // "You may have that player shuffle."
+        Effect::May(inner) if matches!(**inner, Effect::Shuffle { who } if who != PlayerRef::You) =>
+        {
+            let Effect::Shuffle { who } = **inner else {
+                unreachable!()
+            };
+            format!("you may have {} shuffle their library", player(mode, who))
+        }
         Effect::May(inner) => {
             let text = effect(mode, inner);
             // "You may draw a card", not "you may you draw a card"; and an instruction
@@ -979,6 +1033,23 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             format!("{}. If you do, {}", effect(mode, first), effect(mode, then))
         }
         Effect::Proliferate => "proliferate".to_string(),
+        Effect::Shuffle { who } => format!(
+            "{} {} library",
+            verb(&player(mode, *who), "shuffle", "shuffles"),
+            if player(mode, *who) == "you" {
+                "your"
+            } else {
+                "their"
+            }
+        ),
+        Effect::DrawUpTo { who, amount: a } => format!(
+            "{} draw up to {} cards",
+            match player(mode, *who).as_str() {
+                "you" => "you may".to_string(),
+                other => format!("{other} may"),
+            },
+            amount(a)
+        ),
         Effect::UntapChosen { what, count } => {
             format!("untap up to {} {}", amount(count), selector(what, true))
         }
@@ -1034,6 +1105,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             reveal,
             shuffle,
             optional,
+            share_land_type,
         } => {
             let who = player(mode, *who);
             let you = who == "you";
@@ -1054,6 +1126,11 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 (true, _) => with_article(&noun),
                 (false, true) => format!("{n} {noun}"),
                 (false, false) => format!("up to {n} {noun}"),
+            };
+            let what = if *share_land_type {
+                format!("{what} that share a land type")
+            } else {
+                what
             };
             let it = if one { "it" } else { "them" };
             let s = |base: &str| {
@@ -1187,6 +1264,17 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             } else {
                 ""
             };
+            if *take == Take::Exactly(0)
+                && *rest == CardDest::LibraryTop
+                && !*rest_random
+                && !*reveal
+            {
+                return if n == "1" {
+                    format!("{who} {look} {top}")
+                } else {
+                    format!("{who} {look} {top}, then put them back in any order")
+                };
+            }
             let taken = match take {
                 Take::Exactly(1) => {
                     format!("{shown}{} from among them", with_article(&noun(false)))

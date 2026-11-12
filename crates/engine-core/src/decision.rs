@@ -131,6 +131,8 @@ pub enum ChoiceKind {
     /// CR 701.34a: proliferate — choose any number of the permanents that have a counter
     /// (PickN over `OptionDesc::Card`).
     Proliferate,
+    /// "Draw up to N cards": how many (PickNumber).
+    DrawUpTo,
     /// Choose a creature type (PickN 1 over `OptionDesc::CreatureType`: every creature type
     /// of CR 205.3m — those among the chooser's own cards first, most common first, then the
     /// rest alphabetically) or a color (over `OptionDesc::Color`, CR 105.4) — for permanent
