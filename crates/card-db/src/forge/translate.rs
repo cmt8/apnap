@@ -1712,6 +1712,22 @@ impl<'a> Tx<'a> {
                 };
                 Effect::Destroy { what: what? }
             }
+            // CR 701.34a. `Amount$ N`: "proliferate N times" — one after the other, each
+            // its own choice (Forge's loop).
+            "Proliferate" => {
+                let times = match rd.get("Amount") {
+                    None => Some(1),
+                    Some(n) => n.parse::<usize>().ok().filter(|n| (1..=10).contains(n)),
+                };
+                match times {
+                    Some(1) => Effect::Proliferate,
+                    Some(n) => Effect::Seq(vec![Effect::Proliferate; n]),
+                    None => {
+                        self.block("param:Proliferate.Amount not a number");
+                        return None;
+                    }
+                }
+            }
             // "Untap up to N lands" (docs/forge/effects.md, Untap): the activator chooses
             // among every permanent on the battlefield that fits `UntapType$` (whoever
             // controls it) as it resolves. Forge offers untapped ones too, which can't be

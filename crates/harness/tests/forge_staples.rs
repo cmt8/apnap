@@ -307,3 +307,89 @@ fn untap_up_to_n_lands_chooses_among_tapped_lands_of_anyone() {
         ["param:Untap.UntapUpTo by another player"]
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Proliferate
+
+fn with_counters(
+    st: &mut engine_core::GameState,
+    id: ObjectId,
+    kind: card_model::CounterKind,
+    n: u32,
+) {
+    st.objects.get_mut(&id).unwrap().counters.insert(kind, n);
+}
+
+fn counters_of(s: &Script, id: ObjectId, kind: card_model::CounterKind) -> u32 {
+    s.st.object(id).counters.get(&kind).copied().unwrap_or(0)
+}
+
+// CR 701.34a (2026-11-06): "To proliferate means to choose any number of permanents and/or
+// players that have a counter, then give each one additional counter of each kind that
+// permanent or player already has." Forge: `SP$ Proliferate`; `Amount$ 2` is "proliferate
+// twice" (two choices, one after the other).
+#[test]
+fn proliferate_gives_each_chosen_permanent_another_counter_of_each_kind() {
+    use card_model::CounterKind::{MinusOne, PlusOne};
+    let spread = card(
+        "Test Spread",
+        "1 U",
+        "Sorcery",
+        "A:SP$ Proliferate | SpellDescription$ Text.",
+    );
+    let bear = "Name:Test Cub\nManaCost:1 G\nTypes:Creature Bear\nPT:4/4\nOracle:Text.";
+    let mut sc = scenario(&[&spread, bear]);
+    sc.cards(P0, Zone::Battlefield, &["Island", "Island"]);
+    let mine = sc.card(P0, Zone::Battlefield, "Test Cub");
+    let plain = sc.card(P0, Zone::Battlefield, "Test Cub");
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Cub");
+    let skipped = sc.card(P1, Zone::Battlefield, "Test Cub");
+    sc.card(P0, Zone::Hand, "Test Spread");
+    let mut st = sc.build();
+    with_counters(&mut st, mine, PlusOne, 2);
+    with_counters(&mut st, theirs, MinusOne, 1);
+    with_counters(&mut st, skipped, PlusOne, 1);
+    let mut s = Script::new(st);
+    s.cast("Test Spread").pay().pass_all();
+    assert_eq!(s.kind(), ChoiceKind::Proliferate);
+    // Only permanents that have a counter, the opponent's included.
+    let offered: Vec<ObjectId> = s
+        .options()
+        .iter()
+        .filter_map(|o| match o {
+            OptionDesc::Card { card } => Some(*card),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(offered, [mine, theirs, skipped]);
+    assert!(!offered.contains(&plain));
+    pick_cards(&mut s, &[mine, theirs]);
+    assert_eq!(counters_of(&s, mine, PlusOne), 3);
+    assert_eq!(counters_of(&s, theirs, MinusOne), 2);
+    assert_eq!(counters_of(&s, skipped, PlusOne), 1);
+    // Twice: two choices.
+    let twice = card(
+        "Test Double Spread",
+        "1 U",
+        "Sorcery",
+        "A:SP$ Proliferate | Amount$ 2 | SpellDescription$ Text.",
+    );
+    let mut sc = scenario(&[&twice, bear]);
+    sc.cards(P0, Zone::Battlefield, &["Island", "Island"]);
+    let mine = sc.card(P0, Zone::Battlefield, "Test Cub");
+    sc.card(P0, Zone::Hand, "Test Double Spread");
+    let mut st = sc.build();
+    with_counters(&mut st, mine, PlusOne, 1);
+    let mut s = Script::new(st);
+    s.cast("Test Double Spread").pay().pass_all();
+    pick_cards(&mut s, &[mine]);
+    assert_eq!(s.kind(), ChoiceKind::Proliferate);
+    pick_cards(&mut s, &[mine]);
+    assert_eq!(counters_of(&s, mine, PlusOne), 3);
+    assert_eq!(
+        card_model::describe::rules_text(
+            s.st.card_def(s.find(P0, Zone::Graveyard, "Test Double Spread").unwrap())
+        ),
+        ["Proliferate. Then proliferate."]
+    );
+}

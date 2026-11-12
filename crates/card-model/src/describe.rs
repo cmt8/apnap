@@ -838,6 +838,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
         Effect::IfDone { first, then } => {
             format!("{}. If you do, {}", effect(mode, first), effect(mode, then))
         }
+        Effect::Proliferate => "proliferate".to_string(),
         Effect::UntapChosen { what, count } => {
             format!("untap up to {} {}", amount(count), selector(what, true))
         }

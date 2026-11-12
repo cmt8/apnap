@@ -92,6 +92,7 @@ fn effect_polarity(e: &Effect) -> Polarity {
         Effect::TapAll(_)
         | Effect::UntapAll(_)
         | Effect::UntapChosen { .. }
+        | Effect::Proliferate
         | Effect::SacrificeThis => Polarity::Neutral,
         Effect::PutCountersAll { .. } | Effect::ThisSpellTo { .. } => Polarity::Neutral,
         Effect::PutCounters { kind, .. } => match kind {
@@ -1149,6 +1150,29 @@ impl Agent for HeuristicAgent {
                 },
                 _,
             ) => Response::Pick(vec![self.as_enters(v, d, ability, tapped)]),
+            // Proliferate: its own permanents with +1/+1 counters, others' with -1/-1
+            // counters (and none with both).
+            (ChoiceKind::Proliferate, Primitive::PickN { max, .. }) => Response::Pick(
+                d.options
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, o)| match o {
+                        OptionDesc::Card { card } => Self::find(v, *card).is_some_and(|c| {
+                            let has = |k| c.counters.iter().any(|(kind, n)| *kind == k && *n > 0);
+                            let (plus, minus) =
+                                (has(CounterKind::PlusOne), has(CounterKind::MinusOne));
+                            if c.controller == v.viewer {
+                                plus && !minus
+                            } else {
+                                minus && !plus
+                            }
+                        }),
+                        _ => false,
+                    })
+                    .map(|(i, _)| i)
+                    .take(*max)
+                    .collect(),
+            ),
             // "Untap up to N lands": its own permanents, as many as allowed.
             (ChoiceKind::Untap, Primitive::PickN { max, .. }) => Response::Pick(
                 d.options

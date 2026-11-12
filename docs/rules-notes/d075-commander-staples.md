@@ -47,3 +47,17 @@ one would do nothing).
 | Test | Rule |
 |---|---|
 | `untap_up_to_n_lands_chooses_among_tapped_lands_of_anyone` | 701.26b |
+
+## Proliferate (701.34)
+
+> 701.34a To proliferate means to choose any number of permanents and/or players that have a
+> counter, then give each one additional counter of each kind that permanent or player
+> already has.
+
+No player can have a counter in this engine yet (poison, energy and experience counters
+block every card that gives them), so only permanents are offered; the counters are put on
+all at once (one event, replaceable). `Amount$ 2` is "proliferate twice": two choices.
+
+| Test | Rule |
+|---|---|
+| `proliferate_gives_each_chosen_permanent_another_counter_of_each_kind` | 701.34a |

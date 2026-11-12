@@ -129,6 +129,8 @@ pub enum Work {
         what: Box<card_model::Selector>,
         n: u32,
     },
+    /// CR 701.34a: the controller proliferates.
+    Proliferate,
 }
 
 /// The fixed part of a [`Work::ChooseCards`] (amounts already worked out, CR 608.2h).
@@ -699,6 +701,58 @@ impl ResolveFrame {
                             Frame::Resolve(Box::new(self)),
                             controller,
                             ChoiceKind::Untap,
+                            Primitive::PickN { min: 0, max },
+                            options,
+                        );
+                    }
+                }
+                Work::Proliferate => {
+                    if let Some(inp) = input.take() {
+                        // One event: another counter of each kind on each one, at once.
+                        let events: Vec<Proposed> = picked_cards(&inp)
+                            .into_iter()
+                            .filter(|o| st.objects.contains_key(o))
+                            .flat_map(|object| {
+                                st.object(object)
+                                    .counters
+                                    .iter()
+                                    .filter(|(_, n)| **n > 0)
+                                    .map(|(&kind, _)| Proposed::PutCounters {
+                                        object,
+                                        kind,
+                                        count: 1,
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect();
+                        if !events.is_empty() {
+                            let apply = ApplyFrame::new(st, events);
+                            return Flow::Continue(vec![
+                                Frame::Resolve(Box::new(self)),
+                                Frame::Apply(apply),
+                            ]);
+                        }
+                        continue;
+                    }
+                    let pool: Vec<ObjectId> = st
+                        .zones
+                        .battlefield
+                        .iter()
+                        .copied()
+                        .filter(|o| st.object(*o).counters.values().any(|n| *n > 0))
+                        .collect();
+                    if !pool.is_empty() && st.in_game(self.controller) {
+                        let controller = self.controller;
+                        let max = pool.len();
+                        let options = pool
+                            .into_iter()
+                            .map(|card| OptionDesc::Card { card })
+                            .collect();
+                        self.work.push(Work::Proliferate);
+                        return Flow::ask(
+                            Frame::Resolve(Box::new(self)),
+                            controller,
+                            ChoiceKind::Proliferate,
                             Primitive::PickN { min: 0, max },
                             options,
                         );
@@ -1911,6 +1965,10 @@ impl ResolveFrame {
                     since: st.event_count,
                 });
                 self.work.push(Work::Eval { k, effect: first });
+                Vec::new()
+            }
+            Effect::Proliferate => {
+                self.work.push(Work::Proliferate);
                 Vec::new()
             }
             Effect::UntapChosen { what, count } => {

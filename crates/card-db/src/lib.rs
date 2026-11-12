@@ -1058,6 +1058,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         }
         Effect::Tap { what } | Effect::Untap { what } => obj(what, p),
         Effect::TapAll(s) | Effect::UntapAll(s) => selector(s, p),
+        Effect::Proliferate => {}
         Effect::UntapChosen { what, count } => {
             selector(what, p);
             amount(count, p);

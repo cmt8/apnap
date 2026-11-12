@@ -385,6 +385,9 @@ pub fn prompt(kind: ChoiceKind) -> &'static str {
         ChoiceKind::AuraHost => "Choose what the Aura enchants",
         ChoiceKind::AsEnters { .. } => "As it enters",
         ChoiceKind::Untap => "Choose what to untap",
+        ChoiceKind::Proliferate => {
+            "Proliferate: choose permanents to get another counter of each kind"
+        }
     }
 }
 

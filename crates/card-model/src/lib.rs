@@ -1534,6 +1534,11 @@ pub enum Effect {
         what: Selector,
         count: Amount,
     },
+    /// CR 701.34a: "Proliferate" — the controller chooses any number of permanents that
+    /// have a counter and gives each another counter of each kind already there, all at
+    /// once. (Players have no counters in this engine yet: no card that gives them
+    /// compiles. When one does, they must be offered too.)
+    Proliferate,
 }
 
 /// A zone an effect takes cards out of as it resolves.
