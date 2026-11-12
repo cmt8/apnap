@@ -1826,6 +1826,18 @@ pub enum Effect {
     /// (CR 702.74a, evoke; 701.21a): unlike [`Effect::SacrificeThis`] not only by the
     /// ability's controller.
     ControllerSacrificesThis,
+    /// "Untap up to N lands": the controller chooses up to `count` tapped permanents
+    /// matching `what` (anyone's, unless the selector says whose) as this resolves and
+    /// untaps them (CR 701.26b). Not targets.
+    UntapChosen {
+        what: Selector,
+        count: Amount,
+    },
+    /// CR 701.34a: "Proliferate" — the controller chooses any number of permanents that
+    /// have a counter and gives each another counter of each kind already there, all at
+    /// once. (Players have no counters in this engine yet: no card that gives them
+    /// compiles. When one does, they must be offered too.)
+    Proliferate,
 }
 
 /// A zone an effect takes cards out of as it resolves.
@@ -2046,6 +2058,10 @@ pub enum Amount {
     /// The total power, toughness or mana value of "those cards" ("its mana value", "that
     /// creature's power"), each as for [`Amount::Noted`].
     NotedTotal(Measure),
+    /// "The life lost this way": the life the players lost to the most recent "lose
+    /// life" instruction of this resolution — after replacement effects, so what was
+    /// actually lost (CR 119.3, 608.2c). 0 before any.
+    LifeLostThisWay,
 }
 
 impl Amount {
@@ -2077,7 +2093,8 @@ impl Amount {
             | Amount::OfTarget { .. }
             | Amount::HandOf(_)
             | Amount::Noted(_)
-            | Amount::NotedTotal(_) => false,
+            | Amount::NotedTotal(_)
+            | Amount::LifeLostThisWay => false,
         }
     }
 
