@@ -14,6 +14,7 @@ use crate::objects::GameObject;
 use crate::stack::{StackKind, StackObject, Target};
 use crate::state::GameState;
 use crate::zones::{LibraryPosition, Zone};
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use card_model::{AbilityId, CardDefId, ContinuousEffect, CounterKind};
 
@@ -36,6 +37,8 @@ pub enum GameAction {
         /// The face it is put onto the stack or battlefield with (CR 712.8–712.11); 0 for
         /// the default: the front face, or from the stack the face that was up there.
         face: u8,
+        /// It enters as a copy (CR 707.5): these are its copiable values.
+        copy: Option<Box<crate::copy::Copiable>>,
     },
     /// CR 111.1: create a token (from a token definition) on the battlefield.
     CreateToken {
@@ -44,6 +47,13 @@ pub enum GameAction {
         /// How it enters, as replacement effects modified it (CR 614.1c–d, 111.6).
         tapped: bool,
         counters: Vec<(CounterKind, u32)>,
+        /// A token that's a copy (CR 707, 111.3): its copiable values.
+        copy: Option<Box<crate::copy::Copiable>>,
+    },
+    /// CR 707.4: a permanent becomes a copy — these are its copiable values from now on.
+    BecomeCopy {
+        object: ObjectId,
+        values: crate::copy::Copiable,
     },
     /// CR 122.1: put counters on a permanent.
     PutCounters {
@@ -311,6 +321,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             tapped,
             counters,
             face,
+            copy,
         } => {
             let new = perform_move(st, object, to, position, controller, face);
             if to == Zone::Battlefield {
@@ -320,19 +331,41 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                     let have = o.counters.entry(kind).or_default();
                     *have = have.saturating_add(n);
                 }
+                // CR 707.5: it entered as a copy; it never was anything else here.
+                if let Some(values) = copy {
+                    let card = values.card;
+                    st.object_mut(new).copy = Some(values);
+                    st.emit(Event::BecameCopy { object: new, card });
+                }
             }
             ActionResult::Moved(new)
+        }
+        GameAction::BecomeCopy { object, values } => {
+            let card = values.card;
+            st.object_mut(object).copy = Some(Box::new(values));
+            st.emit(Event::BecameCopy { object, card });
+            ActionResult::Done
         }
         GameAction::CreateToken {
             token,
             controller,
             tapped,
             counters,
+            copy,
         } => {
             let id = st.alloc_object_id();
             let timestamp = st.alloc_timestamp();
             let card_instance = crate::ids::CardInstanceId(st.next_card_instance);
             st.next_card_instance += 1;
+            // CR 707.8a: a double-faced token copy is the card with both its faces, the
+            // face that was up on the original up.
+            let (token, face) = match &copy {
+                Some(v) if v.faces => {
+                    let card = st.catalog.card_of(v.card);
+                    (card, (v.card.0 - card.0) as u8)
+                }
+                _ => (token, 0),
+            };
             st.objects.insert(
                 id,
                 GameObject {
@@ -351,11 +384,13 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                     deathtouch_damage: false,
                     attached_to: None,
                     last_controller: controller,
-                    face: 0,
+                    face,
                     transforms: 0,
                     adventure: None,
                     cast_with: None,
                     chosen: Vec::new(),
+                    copy: copy.clone(),
+                    spell_copy: false,
                 },
             );
             let o = st.object_mut(id);
@@ -369,6 +404,12 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 card: token,
                 controller,
             });
+            if let Some(values) = copy {
+                st.emit(Event::BecameCopy {
+                    object: id,
+                    card: values.card,
+                });
+            }
             ActionResult::Moved(id)
         }
         GameAction::PutCounters { object, kind, n } => {
@@ -932,6 +973,7 @@ pub fn move_object(
             controller,
             tapped: false,
             counters: Vec::new(),
+            copy: None,
             face: 0,
         },
     ) {
@@ -959,6 +1001,7 @@ pub fn move_object_face(
             tapped: false,
             counters: Vec::new(),
             face,
+            copy: None,
         },
     ) {
         ActionResult::Moved(id) => id,
@@ -1038,7 +1081,9 @@ fn perform_move(
         damage_marked: 0,
         summoning_sick: to == Zone::Battlefield,
         counters: Default::default(),
-        is_token: old.is_token,
+        // CR 608.3f: a copy of a permanent spell becomes a token as it enters, with the
+        // characteristics of the spell it was (CR 111.13).
+        is_token: old.is_token || (old.spell_copy && to == Zone::Battlefield),
         deathtouch_damage: false,
         attached_to: None,
         last_controller: controller,
@@ -1052,6 +1097,12 @@ fn perform_move(
         },
         cast_with,
         chosen: Vec::new(),
+        copy: if old.spell_copy && matches!(to, Zone::Battlefield | Zone::Stack) {
+            old.copy.clone()
+        } else {
+            None
+        },
+        spell_copy: old.spell_copy && to != Zone::Battlefield,
     };
     st.objects.insert(new_id, obj);
     if to == Zone::Stack {

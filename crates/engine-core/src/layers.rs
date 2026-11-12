@@ -198,8 +198,8 @@ pub fn chars(st: &GameState, id: ObjectId) -> Characteristics {
 /// and what a permanent about to enter is checked against (CR 614.12).
 pub fn chars_as(st: &GameState, id: ObjectId, face: u8) -> Characteristics {
     let o = st.object(id);
-    let def = st.catalog.get(st.catalog.face(o.card, face));
-    let mut c = Characteristics::of_face(st, id, face, o.controller);
+    // CR 613.1, 707.10: a copy (of a spell) starts from the values it copied.
+    let mut c = crate::copy::base(st, id, face, o.controller);
     // Inside the layer walk only what is printed is looked at for a card that isn't on
     // the battlefield (its types — never its power or toughness: card-db sees to that), and
     // working out its "*" could need the very view being built.
@@ -207,7 +207,8 @@ pub fn chars_as(st: &GameState, id: ObjectId, face: u8) -> Characteristics {
         return c;
     }
     // CR 604.3: characteristic-defining abilities function in every zone.
-    for a in &def.abilities {
+    let own: Vec<AbilityId> = c.abilities.clone();
+    for a in own.iter().map(|a| st.catalog.ability(*a)) {
         if let AbilityDef::Static {
             affected: Affected::This,
             effects,
@@ -656,10 +657,11 @@ fn layer_of(e: &ContinuousEffect) -> Layer {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Key {
-    /// Printed static ability `index` of `source`.
+    /// Static ability `ability` that `source` has as its copiable values say (printed on
+    /// it, or on what it copied, CR 707.2).
     Static {
         source: ObjectId,
-        index: u16,
+        ability: AbilityId,
     },
     Resolved(u32),
     /// A static ability an object was given in this walk (layer 6), numbered as found.
@@ -1096,13 +1098,15 @@ fn apply_part(c: &mut Characteristics, part: &ContinuousEffect, you: PlayerId) {
 }
 
 fn compute(st: &GameState) -> View {
+    // CR 613.1, 613.2a (layer 1a): every permanent starts from its copiable values — what
+    // is printed on it, or what it copied (crate::copy).
     let mut view: View = st
         .zones
         .battlefield
         .iter()
         .map(|&id| {
             let o = st.object(id);
-            (id, Characteristics::of_face(st, id, o.face, o.controller))
+            (id, crate::copy::base(st, id, o.face, o.controller))
         })
         .collect();
 
@@ -1111,18 +1115,18 @@ fn compute(st: &GameState) -> View {
     let mut effs: Vec<Eff<'_>> = Vec::new();
     for &id in &st.zones.battlefield {
         let o = st.object(id);
-        for (i, a) in st.card_def(id).abilities.iter().enumerate() {
+        for &ability in &view[&id].abilities {
             if let AbilityDef::Static {
                 affected,
                 effects,
                 only_if,
-            } = a
+            } = st.catalog.ability(ability)
             {
                 effs.push(Eff {
                     cond: only_if.as_ref(),
                     key: Key::Static {
                         source: id,
-                        index: i as u16,
+                        ability,
                     },
                     // CR 613.7a: a static ability's effect has its object's timestamp.
                     timestamp: o.timestamp,
@@ -1130,8 +1134,8 @@ fn compute(st: &GameState) -> View {
                     controller: o.controller,
                     parts: effects,
                     affected: Aff::Dynamic(affected),
-                    card: st.face_card(id),
-                    held: Some(AbilityId::printed(st.face_card(id), i as u16)),
+                    card: ability.card,
+                    held: Some(ability),
                 });
             }
         }

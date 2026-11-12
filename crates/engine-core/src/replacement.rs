@@ -74,6 +74,9 @@ pub enum Proposed {
         /// 0 for the default (`actions::GameAction::MoveZone`).
         #[serde(default, skip_serializing_if = "is_zero")]
         face: u8,
+        /// It enters as a copy (CR 707.5, 614.1c): its copiable values.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copy: Option<alloc::boxed::Box<crate::copy::Copiable>>,
     },
     Damage {
         source: ObjectId,
@@ -96,6 +99,9 @@ pub enum Proposed {
         /// Food and a Treasure"), so that further effects see one event (CR 616.1f, D-073).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         more: Vec<(CardDefId, u32)>,
+        /// The tokens are copies (CR 707, 111.12): of what, and what comes with them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copy: Option<alloc::boxed::Box<TokenCopy>>,
     },
     PutCounters {
         object: ObjectId,
@@ -135,6 +141,9 @@ pub enum Proposed {
         controller: PlayerId,
         tapped: bool,
         counters: Vec<(CounterKind, u32)>,
+        /// A token that's a copy (CR 707.2): what it copied, and what comes with it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        copy: Option<alloc::boxed::Box<TokenCopy>>,
     },
     /// CR 701.19a, 614.8: what a regeneration shield makes of the permanent's destruction —
     /// all damage marked on it is removed, its controller taps it, and if it's an
@@ -142,6 +151,23 @@ pub enum Proposed {
     Regenerate {
         object: ObjectId,
     },
+}
+
+/// Tokens created as copies (CR 707.2): their copiable values, and what else the
+/// instruction that creates them says about each of them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenCopy {
+    pub values: crate::copy::Copiable,
+    pub tapped: bool,
+    /// Not copiable (CR 707.2): keywords each token gains for as long as it is on the
+    /// battlefield ("that token gains haste").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gains: Vec<card_model::Keyword>,
+    /// The source of the spell or ability that creates them, its controller, and the card
+    /// its text is written on (CR 611.2).
+    pub source: ObjectId,
+    pub controller: PlayerId,
+    pub card: CardDefId,
 }
 
 impl Proposed {
@@ -158,6 +184,7 @@ impl Proposed {
             shuffle: false,
             attach_to: None,
             face: 0,
+            copy: None,
         }
     }
 }
@@ -294,7 +321,6 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
     if let Proposed::Move {
         object,
         to: Zone::Battlefield,
-        face,
         ..
     } = &p.event
         && st
@@ -302,20 +328,42 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
             .get(object)
             .is_some_and(|o| o.zone != Zone::Battlefield)
     {
-        // The face it will have up there (CR 712.9–712.11).
-        let entry = st
-            .catalog
-            .face(st.object(*object).card, entering_face(st, *object, *face));
-        for (i, a) in st.catalog.get(entry).abilities.iter().enumerate() {
+        // CR 707.5: one that enters as a copy has the copied text's "enters with" and "as
+        // this enters" abilities instead of its own. LIMIT (D-074): a copied "enter as a
+        // copy" ability that is the very ability that applied already — a Clone copying a
+        // Clone that copied nothing: the same `AbilityId` — is not offered again (CR 614.5
+        // read as "the same effect"); one written on another card is (CR 707.9e example).
+        for ability in entering_abilities(st, &p.event) {
             if let AbilityDef::Replacement {
                 replaces: Replaces::ThisEnters,
                 with,
-            } = a
+            } = st.catalog.ability(ability)
                 && !entering_unchanged(st, with, &p.event)
             {
                 out.push(RepKey::Static {
                     source: *object,
-                    ability: AbilityId::printed(entry, i as u16),
+                    ability,
+                    nth: 0,
+                });
+            }
+        }
+    }
+    // CR 707.5, 614.12: a token that's a copy has the copied "enters …" abilities. LIMIT
+    // (D-074): not "if this would enter, you may [discard a land] instead; if you don't,
+    // put it into its owner's graveyard" (`EntersOnlyIfYou`): a token copy of such a
+    // permanent enters with no question asked.
+    if let Proposed::TokenEnters { copy: Some(_), .. } = &p.event {
+        for ability in entering_abilities(st, &p.event) {
+            if let AbilityDef::Replacement {
+                replaces: Replaces::ThisEnters,
+                with,
+            } = st.catalog.ability(ability)
+                && !matches!(with, ReplaceWith::EntersOnlyIfYou(_))
+                && !entering_unchanged(st, with, &p.event)
+            {
+                out.push(RepKey::Static {
+                    source: crate::copy::ENTERING_TOKEN,
+                    ability,
                     nth: 0,
                 });
             }
@@ -409,10 +457,51 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
     out
 }
 
+/// The abilities a permanent entering with `ev` will have as it enters (CR 614.12): its
+/// own, or — if it enters as a copy — the copiable values' (CR 707.5).
+pub fn entering_abilities(st: &GameState, ev: &Proposed) -> Vec<AbilityId> {
+    match ev {
+        Proposed::Move {
+            object, copy, face, ..
+        } => {
+            let Some(o) = st.objects.get(object) else {
+                return Vec::new();
+            };
+            match copy {
+                Some(v) => crate::copy::characteristics(&st.catalog, v, o.owner).abilities,
+                // The face it will have up there (CR 712.9–712.11).
+                None => {
+                    let face = entering_face(st, *object, *face);
+                    crate::copy::base(st, *object, face, o.owner).abilities
+                }
+            }
+        }
+        // A token that's a copy has the copied text's (CR 707.5, 707.8a example): a token's
+        // own definition never has such abilities (card-db).
+        Proposed::TokenEnters {
+            copy: Some(c),
+            controller,
+            ..
+        } => crate::copy::characteristics(&st.catalog, &c.values, *controller).abilities,
+        _ => Vec::new(),
+    }
+}
+
+/// The object entering with this event — the card moved, or [`crate::copy::ENTERING_TOKEN`]
+/// for a token — and whether it enters tapped so far.
+fn entering_object(ev: &Proposed) -> Option<(ObjectId, bool)> {
+    match ev {
+        Proposed::Move { object, tapped, .. } => Some((*object, *tapped)),
+        Proposed::TokenEnters { tapped, .. } => Some((crate::copy::ENTERING_TOKEN, *tapped)),
+        _ => None,
+    }
+}
+
 /// The player a permanent entering with this event will enter under the control of
 /// (CR 110.2, 110.2a): "you" for its own "as this enters" abilities (CR 109.5).
 pub fn entering_controller(st: &GameState, ev: &Proposed) -> Option<PlayerId> {
     match ev {
+        Proposed::TokenEnters { controller, .. } => Some(*controller),
         Proposed::Move {
             object,
             to: Zone::Battlefield,
@@ -432,10 +521,14 @@ fn entering_unchanged(st: &GameState, with: &ReplaceWith, ev: &Proposed) -> bool
     let ReplaceWith::EntersTappedUnless(cond) = with else {
         return false;
     };
-    let (Some(you), Proposed::Move { object, .. }) = (entering_controller(st, ev), ev) else {
+    let Some(you) = entering_controller(st, ev) else {
         return false;
     };
-    crate::triggers::condition_holds(st, Some(cond), you, *object)
+    let object = match ev {
+        Proposed::Move { object, .. } => *object,
+        _ => crate::copy::ENTERING_TOKEN,
+    };
+    crate::triggers::condition_holds(st, Some(cond), you, object)
 }
 
 /// A choice an effect asks for as it is applied (CR 614.12a): "as this enters, you may
@@ -464,6 +557,34 @@ pub fn entry_choice(
             with: ReplaceWith::EntersTappedUnlessYou(act) | ReplaceWith::EntersOnlyIfYou(act),
             ..
         } => act,
+        // CR 707.5, 614.12a: "you may have this enter as a copy of [a permanent]" — any of
+        // those on the battlefield as it is before the permanent enters; "you" is the
+        // player it will enter under the control of.
+        AbilityDef::Replacement {
+            with: ReplaceWith::EntersAsCopy { of, .. },
+            ..
+        } => {
+            let player = entering_controller(st, ev)?;
+            let (object, tapped) = entering_object(ev)?;
+            let mut options: Vec<OptionDesc> = crate::layers::matching(st, of, object, player)
+                .into_iter()
+                .filter(|c| *c != object)
+                .map(|card| OptionDesc::Card { card })
+                .collect();
+            if options.is_empty() {
+                return None;
+            }
+            options.push(OptionDesc::Decline);
+            return Some((
+                player,
+                ChoiceKind::AsEnters {
+                    object: source,
+                    ability,
+                    tapped,
+                },
+                options,
+            ));
+        }
         // "As this enters, choose a creature type / a color" (CR 614.12a): always asked —
         // by the player it will enter under the control of (CR 109.5).
         AbilityDef::Replacement {
@@ -484,9 +605,8 @@ pub fn entry_choice(
         _ => return None,
     };
     let player = entering_controller(st, ev)?;
-    let Proposed::Move { object, tapped, .. } = ev else {
-        return None;
-    };
+    let (object, tapped) = entering_object(ev)?;
+    let (object, tapped) = (&object, &tapped);
     let mut options = match act {
         card_model::AsEnters::PayLife(n) => {
             if st.player(player).life < *n as i32 {
@@ -538,6 +658,41 @@ pub fn apply_chosen(
     else {
         unreachable!("only an ability asks as it applies")
     };
+    // CR 707.5: it enters as a copy of the chosen permanent — with the copiable values
+    // that permanent has now (CR 707.2b), and the exceptions (CR 707.9).
+    if let AbilityDef::Replacement {
+        with: ReplaceWith::EntersAsCopy { except, tapped, .. },
+        ..
+    } = st.catalog.ability(ability).clone()
+    {
+        let mut ev = ev;
+        if let OptionDesc::Card { card } = answer {
+            let values = crate::copy::values(st, *card).with(ability.card, &except);
+            match &mut ev {
+                Proposed::Move {
+                    copy, tapped: t, ..
+                } => {
+                    *copy = Some(alloc::boxed::Box::new(values));
+                    *t |= tapped;
+                }
+                // CR 707.8a example: a token copy of a Clone becomes a copy of what it
+                // chose; what comes with the token stays.
+                Proposed::TokenEnters {
+                    copy: Some(c),
+                    tapped: t,
+                    ..
+                } => {
+                    c.values = values;
+                    *t |= tapped;
+                }
+                _ => {}
+            }
+            if source != crate::copy::ENTERING_TOKEN {
+                st.emit(crate::events::Event::Replaced { source });
+            }
+        }
+        return (ev, Vec::new());
+    }
     let (act, otherwise) = match st.catalog.ability(ability).clone() {
         // The choice itself is kept by the Apply frame until the permanent has entered
         // (`ApplyFrame::chosen`); the event is otherwise unchanged.
@@ -558,7 +713,9 @@ pub fn apply_chosen(
         } => (act.clone(), ReplaceWith::EntersOnlyIfYou(act)),
         _ => unreachable!("only \"as this enters, you may …\" asks"),
     };
-    st.emit(crate::events::Event::Replaced { source });
+    if source != crate::copy::ENTERING_TOKEN {
+        st.emit(crate::events::Event::Replaced { source });
+    }
     let player = entering_controller(st, &ev).expect("an entering permanent");
     match (act, answer) {
         (card_model::AsEnters::PayLife(n), OptionDesc::Accept) => {
@@ -688,11 +845,17 @@ fn applies(st: &GameState, who: Bearer<'_>, replaces: &Replaces, ev: &Proposed) 
                 }
         }
         // CR 614.16: at least one token of the event is of a kind the effect is about.
-        (Replaces::Tokens { token, .. }, ev @ Proposed::CreateTokens { controller, .. }) => {
-            token_kinds(ev)
-                .iter()
-                .any(|&(t, n)| n > 0 && token_hit(st, t, *controller, token, who))
-        }
+        (
+            Replaces::Tokens { token, .. },
+            ev @ Proposed::CreateTokens {
+                controller,
+                token: first,
+                copy,
+                ..
+            },
+        ) => token_kinds(ev).iter().any(|&(t, n)| {
+            n > 0 && token_hit(st, t, *controller, token, who, copy_of(copy, *first, t))
+        }),
         (
             Replaces::Counters { on, kind, .. },
             Proposed::PutCounters {
@@ -776,7 +939,7 @@ fn applies(st: &GameState, who: Bearer<'_>, replaces: &Replaces, ev: &Proposed) 
                 to: Zone::Graveyard,
                 ..
             },
-        ) => st.objects.get(object).is_some_and(|o| !o.is_token),
+        ) => st.objects.get(object).is_some_and(crate::copy::is_card),
         (
             Replaces::ThisDies,
             Proposed::Move {
@@ -883,6 +1046,7 @@ fn as_it_would_exist(
             tapped,
             counters,
             face,
+            copy,
             ..
         } => {
             if st.objects.get(object)?.zone == Zone::Battlefield {
@@ -897,19 +1061,25 @@ fn as_it_would_exist(
                 tapped: *tapped,
                 counters: counters.clone(),
                 face: *face,
+                copy: copy.clone(),
             }
         }
-        // Its characteristics are those its creator defines (CR 111.3).
+        // Its characteristics are those its creator defines (CR 111.3): for a copy, the
+        // copiable values (CR 707.2).
         Proposed::TokenEnters {
             token,
             controller,
             tapped,
             counters,
+            copy,
         } => GameAction::CreateToken {
             token: *token,
             controller: *controller,
             tapped: *tapped,
             counters: counters.clone(),
+            copy: copy
+                .as_ref()
+                .map(|c| alloc::boxed::Box::new(c.values.clone())),
         },
         _ => return None,
     };
@@ -951,8 +1121,13 @@ fn token_hit(
     controller: PlayerId,
     sel: &card_model::Selector,
     who: Bearer<'_>,
+    copy: Option<&crate::copy::Copiable>,
 ) -> bool {
-    let c = crate::layers::Characteristics::printed(token, st.catalog.get(token), controller);
+    // A token that's a copy has the copiable values (CR 707.2).
+    let c = match copy {
+        Some(v) => crate::copy::characteristics(&st.catalog, v, controller),
+        None => crate::layers::Characteristics::printed(token, st.catalog.get(token), controller),
+    };
     crate::layers::matches_parts(
         &crate::chosen::bind_for(st, sel, who.source),
         &c,
@@ -971,6 +1146,15 @@ fn token_hit(
     )
 }
 
+/// The copiable values of the tokens of kind `t` of an event whose first kind is `first`.
+fn copy_of(
+    copy: &Option<alloc::boxed::Box<TokenCopy>>,
+    first: CardDefId,
+    t: CardDefId,
+) -> Option<&crate::copy::Copiable> {
+    copy.as_ref().filter(|_| t == first).map(|c| &c.values)
+}
+
 /// The event after a token replacement effect — about tokens matching `token` — has
 /// modified it. Kinds that end up the same are merged, in first-seen order.
 fn replace_tokens(
@@ -980,11 +1164,18 @@ fn replace_tokens(
     who: Bearer<'_>,
     with: &ReplaceWith,
 ) -> Proposed {
-    let Proposed::CreateTokens { controller, .. } = ev else {
+    let Proposed::CreateTokens {
+        controller,
+        token: first,
+        ref copy,
+        ..
+    } = ev
+    else {
         unreachable!("a token replacement on {ev:?}")
     };
+    let copy = copy.clone();
     let kinds = token_kinds(&ev);
-    let hit = |t: CardDefId| token_hit(st, t, controller, token, who);
+    let hit = |t: CardDefId| token_hit(st, t, controller, token, who, copy_of(&copy, first, t));
     let find = |key: &alloc::string::String| st.catalog.find(key).expect("validated by card-db");
     let mut out: Vec<(CardDefId, u32)> = Vec::new();
     let mut add = |t: CardDefId, n: u32| match out.iter_mut().find(|(k, _)| *k == t) {
@@ -1027,12 +1218,16 @@ fn replace_tokens(
         }
         w => unreachable!("{w:?} doesn't modify tokens"),
     }
+    // The copies (CR 707) stay copies while the kind they are is still the first; a
+    // replacement that substituted them made other tokens.
+    let replaced = matches!(with, ReplaceWith::ReplaceTokens(_)) && hit(first);
     let (token, count) = out.remove(0);
     Proposed::CreateTokens {
         token,
         count,
         controller,
         more: out,
+        copy: copy.filter(|_| token == first && !replaced),
     }
 }
 
@@ -1282,12 +1477,13 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
             let mut with = with.clone();
             // "…for each …": counted now, before the permanent has entered.
             if let ReplaceWith::EntersWithCounted { kind, amount } = &with {
-                let you = match (&ev, st.object(source).zone) {
-                    (_, Zone::Battlefield) => crate::layers::controller_of(st, source),
+                let you = match (&ev, st.objects.get(&source).map(|o| o.zone)) {
+                    (_, Some(Zone::Battlefield)) => crate::layers::controller_of(st, source),
                     // Its own "enters with": whoever will control it.
                     (Proposed::Move { controller, .. }, _) => {
                         controller.unwrap_or(st.object(source).owner)
                     }
+                    (Proposed::TokenEnters { controller, .. }, _) => *controller,
                     _ => st.object(source).owner,
                 };
                 let n = match amount {
@@ -1298,11 +1494,16 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
                 };
                 with = ReplaceWith::EntersWithCounters { kind: *kind, n };
             }
-            // "Enters tapped unless …" whose condition has come to hold meanwhile.
-            if entering_unchanged(st, &with, &ev) {
+            // "Enters tapped unless …" whose condition has come to hold meanwhile; "you may
+            // have this enter as a copy" with nothing on the battlefield to copy.
+            if entering_unchanged(st, &with, &ev)
+                || matches!(with, ReplaceWith::EntersAsCopy { .. })
+            {
                 return Some(ev);
             }
-            st.emit(crate::events::Event::Replaced { source });
+            if source != crate::copy::ENTERING_TOKEN {
+                st.emit(crate::events::Event::Replaced { source });
+            }
             replace(st, ev, with)
         }
     }
@@ -1354,7 +1555,12 @@ fn modify(mut ev: Proposed, with: ReplaceWith) -> Proposed {
         }
         // A token entering (CR 111.6): another permanent's "[these] enter tapped / with
         // counters" (its own "this enters …" can't be on a token: card-db, D-073).
-        (Proposed::TokenEnters { tapped, .. }, ReplaceWith::EntersTapped) => *tapped = true,
+        (
+            Proposed::TokenEnters { tapped, .. },
+            ReplaceWith::EntersTapped
+            | ReplaceWith::EntersTappedUnless(_)
+            | ReplaceWith::EntersTappedUnlessYou(_),
+        ) => *tapped = true,
         (Proposed::TokenEnters { counters, .. }, ReplaceWith::EntersWithCounters { kind, n }) => {
             if *n > 0 {
                 counters.push((*kind, *n))

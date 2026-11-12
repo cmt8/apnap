@@ -662,6 +662,17 @@ impl ResolveFrame {
                     .get(id)
                     .is_some_and(|o| !matches!(o.zone, Zone::Battlefield | Zone::Stack))
             }),
+            // "Equipped / enchanted creature": what the source is attached to now.
+            ObjRef::Host => st
+                .objects
+                .get(&self.source)
+                .filter(|o| o.zone == Zone::Battlefield)
+                .and_then(|o| o.attached_to)
+                .filter(|id| {
+                    st.objects
+                        .get(id)
+                        .is_some_and(|o| o.zone == Zone::Battlefield)
+                }),
             // "It": only while it is still the object that triggered this (CR 400.7).
             ObjRef::Triggering => self.subject.filter(|id| {
                 st.objects
@@ -2178,6 +2189,7 @@ impl ResolveFrame {
                         count,
                         controller,
                         more: Vec::new(),
+                        copy: None,
                     })
                     .collect()
             }
@@ -2386,6 +2398,64 @@ impl ResolveFrame {
                         st,
                         GameAction::NewTimestamp {
                             object: self.source,
+                        },
+                    );
+                }
+                Vec::new()
+            }
+            // CR 707, 111.2: token copies, created by (and so owned and controlled by) the
+            // controller. A copy of something that is gone isn't made (CR 111.12), nor one
+            // of an instant or sorcery (CR 111.5).
+            Effect::CopyPermanent {
+                what,
+                count,
+                except,
+                gains,
+                tapped,
+            } => {
+                let count = self.amount(st, k, &count);
+                let originals: Vec<ObjectId> = match what {
+                    card_model::CopyWhat::Obj(r) => self.obj(st, k, r).into_iter().collect(),
+                    card_model::CopyWhat::Each(sel) => {
+                        crate::layers::matching(st, &sel, self.source, self.controller)
+                    }
+                };
+                let card = self.card;
+                originals
+                    .into_iter()
+                    .filter(|&o| chars(st, o).is_permanent_type())
+                    .map(|o| {
+                        let mut values = crate::copy::values(st, o).with(card, &except);
+                        // CR 707.8a: a token copy of a double-faced permanent is double-faced,
+                        // with the same face up.
+                        values.faces = crate::copy::double_faced(&st.catalog, st.object(o));
+                        Proposed::CreateTokens {
+                            token: values.card,
+                            count,
+                            controller: self.controller,
+                            more: Vec::new(),
+                            copy: Some(Box::new(crate::replacement::TokenCopy {
+                                values,
+                                tapped,
+                                gains: gains.clone(),
+                                source: self.source,
+                                controller: self.controller,
+                                card,
+                            })),
+                        }
+                    })
+                    .collect()
+            }
+            // CR 707.4: this permanent becomes a copy, for good; its other effects stay.
+            Effect::BecomeCopy { what, except } => {
+                let this = self.obj(st, k, ObjRef::This);
+                if let (Some(this), Some(original)) = (this, self.obj(st, k, what)) {
+                    let values = crate::copy::values(st, original).with(self.card, &except);
+                    execute(
+                        st,
+                        GameAction::BecomeCopy {
+                            object: this,
+                            values,
                         },
                     );
                 }
@@ -2973,6 +3043,11 @@ fn can_transform(st: &GameState, object: ObjectId) -> bool {
     let o = st.object(object);
     let card = st.catalog.get(o.card);
     if o.zone != Zone::Battlefield || !card.layout.double_faced() || card.faces.is_empty() {
+        return false;
+    }
+    // CR 712.7: a token copy of a single face (of a copy that isn't double-faced, CR
+    // 707.8a example) isn't a double-faced token.
+    if o.is_token && o.copy.as_ref().is_some_and(|v| !v.faces) {
         return false;
     }
     let other = st

@@ -247,20 +247,30 @@ pub const MAX_TOKENS_AT_ONCE: u32 = 10_000;
 /// One `TokenEnters` event for each token a fully modified `CreateTokens` event creates,
 /// kind by kind, in order (CR 111.2: each token enters the battlefield).
 fn token_entries(ev: &Proposed) -> Vec<Proposed> {
-    let Proposed::CreateTokens { controller, .. } = ev else {
+    let Proposed::CreateTokens {
+        controller,
+        copy,
+        token: first,
+        ..
+    } = ev
+    else {
         return Vec::new();
     };
     let controller = *controller;
     crate::replacement::token_kinds(ev)
         .into_iter()
-        .flat_map(|(token, count)| {
+        .enumerate()
+        .flat_map(|(k, (token, count))| {
+            // The first kind are the copies, if the event makes copies (CR 707.2).
+            let copy = copy.clone().filter(|_| k == 0 && token == *first);
             // A runaway doubling can't make more objects than a game can hold; the harness
             // abandons such a game long before this (D-073).
             (0..count.min(MAX_TOKENS_AT_ONCE)).map(move |_| Proposed::TokenEnters {
                 token,
                 controller,
-                tapped: false,
+                tapped: copy.as_ref().is_some_and(|c| c.tapped),
                 counters: Vec::new(),
+                copy: copy.clone(),
             })
         })
         .collect()
@@ -357,12 +367,19 @@ pub(crate) fn perform(
                 shuffle,
                 attach_to,
                 face,
+                copy,
             } => {
                 let Some(o) = st.objects.get(&object) else {
                     continue; // already gone (e.g. moved earlier in this batch)
                 };
                 // CR 111.8: a token that has left the battlefield can't move again.
                 if o.is_token && o.zone != Zone::Battlefield {
+                    continue;
+                }
+                // CR 704.5e / 707.10a: a copy of a spell put anywhere but onto the
+                // battlefield ceases to exist (it is no card to be put there).
+                if o.spell_copy && to != Zone::Battlefield {
+                    execute(st, GameAction::CeaseToExist { object });
                     continue;
                 }
                 let (owner, was_controller) = (o.owner, o.controller);
@@ -376,6 +393,7 @@ pub(crate) fn perform(
                         tapped,
                         counters,
                         face,
+                        copy,
                     },
                 ) {
                     crate::actions::ActionResult::Moved(id) => id,
@@ -481,6 +499,7 @@ pub(crate) fn perform(
                 controller,
                 tapped,
                 counters,
+                copy,
             } => {
                 // CR 800.4b: no tokens for a player who has left the game.
                 if st.in_game(controller)
@@ -491,10 +510,17 @@ pub(crate) fn perform(
                             controller,
                             tapped,
                             counters,
+                            copy: copy
+                                .as_ref()
+                                .map(|c| alloc::boxed::Box::new(c.values.clone())),
                         },
                     )
                 {
                     give(st, i, new);
+                    // What the instruction says about each token copy it made.
+                    if let Some(c) = &copy {
+                        crate::copy::token_extras(st, c, new);
+                    }
                 }
             }
             Proposed::PutCounters {

@@ -1855,6 +1855,15 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
         if o.damage_marked > 0 {
             now.push(format!("{} damage", o.damage_marked));
         }
+        // CR 707.2: what a copy really is — the picture is the card it copies.
+        if let Some(own) = o.printed {
+            let own = cx.cat.get(own);
+            now.push(if own.token || own.name == cx.cat.get(o.card).name {
+                format!("A token copy of {}", cx.cat.get(o.card).name)
+            } else {
+                format!("{}, a copy of {}", own.name, cx.cat.get(o.card).name)
+            });
+        }
         // CR 607.2d: what was chosen for it as it entered (public).
         for c in &o.chosen {
             now.push(chosen_line(*c));

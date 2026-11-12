@@ -5,10 +5,11 @@
 
 use crate::{
     AbilityDef, ActivationZone, Affected, Amount, AsEnters, Body, Calc, CardDef, CardDest,
-    CardType, CardZone, ChoiceOf, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost,
-    CounterKind, DamageBy, DamagePer, DamageTo, DelayWindow, EachPlayerAction, Effect, Keyword,
-    ManaProduce, Measure, Mode, ObjFilter, ObjRef, OfChosen, PlayerRef, ReplaceWith, Replaces,
-    Selector, Take, TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
+    CardType, CardZone, ChoiceOf, Cmp, Color, CombatRule, Condition, ContinuousEffect, CopyExcept,
+    CopyWhat, Cost, CounterKind, DamageBy, DamagePer, DamageTo, DelayWindow, EachPlayerAction,
+    Effect, Keyword, ManaProduce, Measure, Mode, ObjFilter, ObjRef, OfChosen, PlayerRef,
+    ReplaceWith, Replaces, Selector, Take, TargetFilter, TargetRef, Timing, Trigger, TriggerStep,
+    Who,
 };
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -719,6 +720,58 @@ fn obj(mode: &Mode, r: ObjRef) -> String {
         ObjRef::ThisCard => "this card".into(),
         ObjRef::TriggeringCard => "that card".into(),
         ObjRef::Noted => "those cards".into(),
+        // `rules_text` says "equipped" for an Equipment.
+        ObjRef::Host => "enchanted creature".into(),
+    }
+}
+
+/// ", except it isn't legendary and it has haste" (CR 707.9); empty for none.
+fn copy_except(except: &[CopyExcept]) -> String {
+    let parts: Vec<String> = except
+        .iter()
+        .map(|e| match e {
+            CopyExcept::NotLegendary => "it isn't legendary".to_string(),
+            CopyExcept::AddKeywords(ks) => format!(
+                "it has {}",
+                join(
+                    ks.iter().map(|k| keyword(*k).to_lowercase()).collect(),
+                    "and"
+                )
+            ),
+            CopyExcept::AddTypes {
+                card_types,
+                subtypes,
+            } => {
+                let mut words: Vec<String> = subtypes.clone();
+                words.extend(card_types.iter().map(|t| card_type(*t).to_string()));
+                format!(
+                    "it's {} in addition to its other types",
+                    with_article(&words.join(" "))
+                )
+            }
+            CopyExcept::SetPT { power, toughness } => format!("it's {power}/{toughness}"),
+            CopyExcept::SetColors(cs) if cs.is_empty() => "it's colorless".to_string(),
+            CopyExcept::SetColors(cs) => format!(
+                "it's {}",
+                join(cs.iter().map(|c| color(*c).to_string()).collect(), "and")
+            ),
+            CopyExcept::SetCreatureTypes(ts) => format!("it's {}", with_article(&ts.join(" "))),
+            CopyExcept::HasAbilities(indices) => format!(
+                "it has {}",
+                join(
+                    indices
+                        .iter()
+                        .map(|i| format!("{GRANTED}{i}{GRANTED}"))
+                        .collect(),
+                    "and"
+                )
+            ),
+        })
+        .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(", except {}", join(parts, "and"))
     }
 }
 
@@ -1168,6 +1221,54 @@ fn quote_granted(def: &CardDef, text: &str, top: bool) -> String {
 
 fn effect(mode: &Mode, e: &Effect) -> String {
     match e {
+        Effect::CopyPermanent {
+            what,
+            count,
+            except,
+            gains,
+            tapped,
+        } => {
+            let n = amount(count);
+            let one = n == "1";
+            let tokens = match (one, *tapped) {
+                (true, false) => "a token that's".to_string(),
+                (true, true) => "a tapped token that's".to_string(),
+                (false, false) => format!("{n} tokens that are"),
+                (false, true) => format!("{n} tapped tokens that are"),
+            };
+            let copies = if one { "a copy" } else { "copies" };
+            let except = copy_except(except);
+            let mut out = match what {
+                CopyWhat::Obj(r) => {
+                    format!("you create {tokens} {copies} of {}{except}", obj(mode, *r))
+                }
+                CopyWhat::Each(s) => format!(
+                    "for each {}, you create {tokens} {copies} of that permanent{except}",
+                    selector(s, false)
+                ),
+            };
+            let several = !one || matches!(what, CopyWhat::Each(_));
+            if !gains.is_empty() {
+                out.push_str(&format!(
+                    ". {} {}",
+                    if several {
+                        "Those tokens gain"
+                    } else {
+                        "That token gains"
+                    },
+                    join(
+                        gains.iter().map(|k| keyword(*k).to_lowercase()).collect(),
+                        "and"
+                    )
+                ));
+            }
+            out
+        }
+        Effect::BecomeCopy { what, except } => format!(
+            "this permanent becomes a copy of {}{}",
+            obj(mode, *what),
+            copy_except(except)
+        ),
         // The abilities' texts are filled in by `quote_granted`, which has the card.
         Effect::Lasting {
             abilities,
@@ -3216,6 +3317,31 @@ fn ability(a: &AbilityDef) -> String {
                     };
                     format!("{what} enters with {counters} on it.")
                 }
+                ReplaceWith::EntersAsCopy { of, except, tapped } => format!(
+                    "You may have {} enter{} as a copy of {}{}.",
+                    what.to_lowercase(),
+                    if *tapped { " tapped" } else { "" },
+                    match of.controller {
+                        Who::Any => format!(
+                            "any {} on the battlefield",
+                            selector(
+                                &Selector {
+                                    other: false,
+                                    ..of.clone()
+                                },
+                                false
+                            )
+                        ),
+                        _ => with_article(&selector(
+                            &Selector {
+                                other: false,
+                                ..of.clone()
+                            },
+                            false
+                        )),
+                    },
+                    copy_except(except)
+                ),
                 ReplaceWith::EntersWithCounted { kind, amount: a } => {
                     let extra = if matches!(replaces, Replaces::OtherEnters(_)) {
                         "additional "

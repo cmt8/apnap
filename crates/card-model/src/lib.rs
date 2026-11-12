@@ -1259,6 +1259,62 @@ pub enum ReplaceWith {
     /// chosen as the event is modified, by the player it will enter under the control of;
     /// the permanent has the choice from the moment it is on the battlefield (CR 607.2d).
     Choose(ChoiceOf),
+    /// "You may have this permanent enter [tapped] as a copy of [a permanent matching `of`]
+    /// [, except …]" (CR 614.1c, 707.5): chosen as the event is modified (CR 614.12a) by
+    /// the player it will enter under the control of, among the permanents on the
+    /// battlefield before it enters; `of` is relative to that player. Choosing nothing,
+    /// it enters as itself. `tapped`: it enters tapped if it enters as a copy.
+    EntersAsCopy {
+        of: Selector,
+        #[serde(default)]
+        except: Vec<CopyExcept>,
+        #[serde(default)]
+        tapped: bool,
+    },
+}
+
+/// An exception to the copying process (CR 707.9): it becomes part of the copy's copiable
+/// values, so a copy of the copy has it too (CR 707.3, 707.9a–b).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CopyExcept {
+    /// "except it isn't legendary" (CR 707.9b).
+    NotLegendary,
+    /// "except it has [keywords]" (CR 707.9a).
+    AddKeywords(Vec<Keyword>),
+    /// "except it's a [types] in addition to its other types" (CR 707.9b).
+    AddTypes {
+        #[serde(default)]
+        card_types: Vec<CardType>,
+        #[serde(default)]
+        subtypes: Vec<String>,
+    },
+    /// "except it's [P]/[T]" — base power and toughness (CR 707.9b); a
+    /// characteristic-defining ability of the original that defines them isn't copied
+    /// (CR 707.9d).
+    SetPT { power: i32, toughness: i32 },
+    /// "except it's [colors]" (CR 707.9b, 707.9d: no color indicator or color-defining
+    /// ability of the original is copied). Empty: colorless.
+    SetColors(Vec<Color>),
+    /// "except its creature types are [subtypes]": the creature types are replaced (its
+    /// other subtypes stay).
+    SetCreatureTypes(Vec<String>),
+    /// "except it has [these abilities]" — "this ability", "'At the beginning of …'"
+    /// (CR 707.9a): indices into [`CardDef::granted`] of the card the copy effect is
+    /// written on.
+    HasAbilities(Vec<u16>),
+}
+
+/// What a token copy effect copies.
+// Built once when the catalog loads, then only read: the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CopyWhat {
+    /// One object: "a copy of target creature", "of this creature", "of equipped
+    /// creature", "of that artifact".
+    Obj(ObjRef),
+    /// "For each [permanent matching], create a token that's a copy of it": every
+    /// permanent matching as this resolves (relative to the controller and source).
+    Each(Selector),
 }
 
 /// What a player may do as a permanent enters (CR 614.12a) so that it enters untapped.
@@ -2011,6 +2067,29 @@ pub enum Effect {
     /// instruction — a `Destroy` or `DestroyAll` — causes can't be replaced by
     /// regeneration.
     CantBeRegenerated(Box<Effect>),
+    /// CR 707, 111.12: "create `count` tokens that are copies of [`what`][, except …]"
+    /// under the controller's control. A copy of an object that is gone isn't made.
+    CopyPermanent {
+        what: CopyWhat,
+        count: Amount,
+        /// Part of the tokens' copiable values (CR 707.9).
+        #[serde(default)]
+        except: Vec<CopyExcept>,
+        /// Not copiable: "that token gains haste" — for as long as it is on the
+        /// battlefield (CR 611.2).
+        #[serde(default)]
+        gains: Vec<Keyword>,
+        /// The tokens enter tapped.
+        #[serde(default)]
+        tapped: bool,
+    },
+    /// CR 707.4: "[this permanent] becomes a copy of [`what`][, except …]" — for good.
+    /// Its noncopy effects stay; nothing enters or leaves.
+    BecomeCopy {
+        what: ObjRef,
+        #[serde(default)]
+        except: Vec<CopyExcept>,
+    },
 }
 
 /// When a delayed triggered ability ([`Effect::DelayedTrigger`]) can trigger.
@@ -2104,6 +2183,12 @@ impl Effect {
                 count.selectors_mut(f);
             }
             Effect::MoveAll { cards, .. } => cards.iter_mut().for_each(&mut *f),
+            Effect::CopyPermanent { what, count, .. } => {
+                if let CopyWhat::Each(s) = what {
+                    f(s);
+                }
+                count.selectors_mut(f);
+            }
             // (The delayed ability's own text is an ability of the card: not here.)
             Effect::DelayedTrigger { amount, .. } => {
                 if let Some(a) = amount {
@@ -2138,7 +2223,8 @@ impl Effect {
             | Effect::Shuffle { .. }
             | Effect::Regenerate { .. }
             | Effect::Lasting { .. }
-            | Effect::Choose(_) => {}
+            | Effect::Choose(_)
+            | Effect::BecomeCopy { .. } => {}
         }
     }
 
@@ -2262,6 +2348,9 @@ pub enum ObjRef {
     /// resolution noted ([`Effect::Note`]), while it is still where this resolution put it
     /// — in a public zone (CR 400.7j), or found by a search and not moved.
     Noted,
+    /// The permanent this is attached to: "equipped creature", "enchanted creature"
+    /// (CR 301.5, 303.4).
+    Host,
 }
 
 /// Which object deals the damage of a `DealDamage`.

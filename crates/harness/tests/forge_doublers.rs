@@ -1250,6 +1250,7 @@ fn a_token_enters_in_a_batch_with_an_as_enters_choice() {
                 count: 1,
                 controller: P0,
                 more: Vec::new(),
+                copy: None,
             },
         ],
     );

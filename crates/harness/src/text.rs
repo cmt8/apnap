@@ -984,6 +984,15 @@ impl Narrator {
                 let l = format!("  {} is removed from combat", self.name(*object));
                 self.emit(l, out);
             }
+            // CR 707.4–707.5: what a permanent is now a copy of.
+            Event::BecameCopy { object, card } => {
+                let l = format!(
+                    "  {} becomes a copy of {}",
+                    self.name(*object),
+                    self.catalog.get(*card).name
+                );
+                self.emit(l, out);
+            }
             Event::Transformed { object, face } => {
                 let side = if *face == 0 { "front" } else { "back" };
                 let l = format!("  {} transforms ({side} face up)", self.name(*object));

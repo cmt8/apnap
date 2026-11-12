@@ -49,6 +49,10 @@ pub struct ObjectView {
     /// What was chosen for it as it entered ("chosen type: Elf", CR 607.2d; public).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen: Vec<card_model::Chosen>,
+    /// A copy (CR 707): `card` is then the card it copies (its picture and text), and
+    /// this is the card or token it is itself ("Test Clone"). Public (CR 707.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub printed: Option<card_model::CardDefId>,
 }
 
 /// A commander designation (CR 903.3): public for the whole game, wherever the card is.
@@ -158,7 +162,13 @@ fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
     let mana_value = c.mana_value();
     ObjectView {
         id,
-        card: o.card,
+        // A copy shows the card it copies (CR 707.2).
+        // (A double-faced token copy shows its own two faces, CR 707.8a.)
+        card: o
+            .copy
+            .as_ref()
+            .filter(|v| !v.faces)
+            .map_or(o.card, |v| v.card),
         name: c.name,
         owner: o.owner,
         controller: crate::layers::controller_of(st, id),
@@ -175,8 +185,13 @@ fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
         card_instance: o.card_instance,
         attached_to: o.attached_to,
         granted: c.abilities.iter().copied().filter(|a| a.granted).collect(),
-        face: o.face,
+        face: if o.copy.as_ref().is_some_and(|v| !v.faces) {
+            0
+        } else {
+            o.face
+        },
         chosen: o.chosen.clone(),
+        printed: o.copy.as_ref().map(|_| o.card),
     }
 }
 

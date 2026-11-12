@@ -100,6 +100,12 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
   nothing was chosen (CR 607.5a). Changeling is `Characteristics::all_creature_types`,
   from the printed keyword only. A token's own as-enters choice is not asked yet (comment
   in `replacement::applicable`). Tests: `forge_chosen.rs`.
+- Regeneration (CR 701.19, D-079) is a shield (`effects::Shield::regenerate`) that replaces
+  the next destruction this turn — by a destroy effect, lethal damage or deathtouch, never
+  sacrifice or toughness 0 — with `Proposed::Regenerate`. "It can't be regenerated" on a
+  destroy effect is `Effect::CantBeRegenerated` / `MoveCause::DestroyNoRegen`; as a rule
+  that holds it is `AbilityDef::CantBeRegenerated`, read by `replacement::can_be_regenerated`.
+  Tests: `forge_regen.rs`.
 - The text of a compiled card (`card_model::describe`) is written like a printed card:
   number words, "this creature/land/Equipment", "Then" between instructions, a predefined
   token's reminder text on first mention. The Oracle guard (`oracle_words_missing`) reads
@@ -191,8 +197,8 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-076): 11,071 of 34,463 scripts compile (32.1%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-076: 93% of
+Status (D-079): 11,301 of 34,463 scripts compile (32.8%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-079: 93% of
 the 100 most played Commander cards compile, 61% of the top 1,000, 36% of the top 5,000
 (`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
 the rest. Feature tests live in `crates/harness/tests/forge_features.rs` and, one file per
@@ -227,7 +233,7 @@ for the beginning of a step), counters other than +1/+1 and
 -1/-1, "as this enters, choose …" other than a creature type or a color (D-076; how a permanent enters is otherwise built, D-067:
 `ReplaceWith::EntersTappedUnless…`, the choice asked inside `ApplyFrame` as
 `ChoiceKind::AsEnters`), "sacrifice … instead" lands, "lands enter untapped", "exile it
-instead. When you do, …", regeneration, abilities given to cards that aren't on
+instead. When you do, …", static regeneration and "when it regenerates this way", abilities given to cards that aren't on
 the battlefield, "becomes tapped" and "becomes the target" triggers, protection, Sagas,
 and of Forge's "Effect" objects everything but combat rules and "prevent all damage"
 (`effects::Lasting`, D-065: no triggers, no characteristic changes, nothing about

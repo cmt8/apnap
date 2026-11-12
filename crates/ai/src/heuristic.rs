@@ -99,6 +99,8 @@ fn effect_polarity(e: &Effect) -> Polarity {
             _ => Polarity::Neutral,
         },
         Effect::Untap { .. } | Effect::AttachThis { .. } => Polarity::Help,
+        // A copy of the best thing there is: of yours, or of anyone's.
+        Effect::CopyPermanent { .. } | Effect::BecomeCopy { .. } => Polarity::Help,
         // Putting a permanent into its owner's library or hand: aimed at an opponent's.
         Effect::PutInto { .. } => Polarity::Harm,
         Effect::ChooseCards { .. }
@@ -1215,6 +1217,28 @@ impl HeuristicAgent {
         ) {
             return first(|o| matches!(o, OptionDesc::Card { .. } | OptionDesc::Accept))
                 .unwrap_or(decline);
+        }
+        // "You may have this enter as a copy of …": the most valuable permanent offered
+        // (earliest on a tie) — never nothing, which is usually a 0/0.
+        if matches!(
+            self.catalog.ability(ability),
+            AbilityDef::Replacement {
+                with: ReplaceWith::EntersAsCopy { .. },
+                ..
+            }
+        ) {
+            let mut best: Option<(i64, usize)> = None;
+            for (i, o) in d.options.iter().enumerate() {
+                if let OptionDesc::Card { card } = o
+                    && let Some(ov) = Self::find(v, *card)
+                {
+                    let score = value(ov);
+                    if best.is_none_or(|(b, _)| score > b) {
+                        best = Some((score, i));
+                    }
+                }
+            }
+            return best.map_or(decline, |(_, i)| i);
         }
         if tapped {
             return decline;
