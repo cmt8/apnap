@@ -1499,35 +1499,50 @@ Rules text: docs/rules-notes/608.2c-400.7j-those-cards.md.
   `ConditionDefined$ Remembered`, `ConditionCheckSVar$`/`ConditionSVarCompare$`) are
   compiled for every chain, not only remembering ones: "if you control a Wizard, draw a
   card", "if X is 5 or more, destroy all other creatures".
-- **New Oracle guard** `oracle:under your control`: the compiled card says "under your
-  control" exactly when the card does. It caught Photon, Lady of Light and The Alright
-  Henge (`GainControl$` where the card returns under its owner's control) and blocks
-  Meneldor (harmless there: "a creature you own").
+- **New Oracle guard** `oracle:under your control`: the compiled card puts something onto
+  the battlefield "under your control" exactly when the card returns or puts something "to
+  the battlefield under your control" ("enters the battlefield under your control" is old
+  wording for "you control" and doesn't count). It caught Photon, Lady of Light
+  (`GainControl$` where the card returns it under its owner's control) and blocks Meneldor
+  (harmless there: "a creature you own").
+- **Players of noted cards** (after D-068's `Tx::named_player`): `PlayerRef::NotedControllers`
+  (Forge `RememberedController`) and `PlayerRef::NotNotedControllers`
+  (`NonRememberedController`), each card's controller as it is now on the battlefield or
+  as it last was before it moved (CR 608.2h). Plaguecrafter: "each player who can't
+  [sacrifice] discards a card". card-db refuses them where one player is meant.
 - card-db refuses "those cards" anywhere but a resolving effect, a selector asking about
   them except where the resolving effect filters with it, `Stay` outside a noted search,
   a noted instruction that isn't a single one, noted cards as what an Equipment attaches
   to or a lasting effect is about.
 - AI: an effect that returns noted cards to the battlefield is help (blink your own).
+- With D-067 (how a permanent enters): the moves the resolve frame proposes are looked at
+  when it resumes, after the whole Apply — including its "as this enters" choice and any
+  nested Apply for the price. A noted card entering through such a choice is found where
+  it entered; one a replacement put elsewhere instead (Mox Diamond's graveyard) is not.
+  Tests `a_noted_card_entering_with_a_choice_is_found`,
+  `a_noted_card_put_elsewhere_instead_is_not_found`. With D-068: "its power" of a moved
+  target still comes from `TargetInfo` (`Amount::OfTarget`); only object references
+  (`Defined$ Targeted` as the thing acted on) follow the moved card.
+- Save/load and clone of a game suspended in the middle of a noted resolution continue
+  identically (`a_noted_resolution_saves_loads_and_clones`).
 - State hashes changed (`Selector` gained a field: the catalog is part of the state); all
   15 event logs unchanged. Re-blessed.
-- 9,305 → 9,491 of 34,463 scripts (27.5%); precons 149 → 151 of 275 deck slots. Of the
-  cards named for this batch, Cultivate, Kodama's Reach, Fabled Passage, Ghostly Flicker,
-  Cloudshift, Essence Flux, Displacer Kitten, Teleportation Circle, Flicker of Fate,
-  Fumigate, Bane of Progress, Dark Confidant, Martial Coup, Disciple of Bolas and Reanimate
-  compile. About 230 newly compiled cards with "those cards", a condition or "under your
-  control" were read
-  against their Oracle text.
+- On `04ef403`: 9,305 → 9,491 of 34,463 scripts; precons 149 → 151 of 275 deck slots.
+  Rebased onto D-067/D-068 (`3e37f8d`): 9,776 → 9,974 (28.9%). Of the 9,776 cards main
+  compiled none stops compiling, and the engine text of one changes: Miraculous Recovery
+  (the fix above). Of the cards named for this batch, Cultivate, Kodama's Reach, Fabled
+  Passage, Ghostly Flicker, Cloudshift, Essence Flux, Displacer Kitten, Teleportation
+  Circle, Flicker of Fate, Fumigate, Plaguecrafter, Bane of Progress, Dark Confidant,
+  Martial Coup, Disciple of Bolas and Reanimate compile. All 198 cards that compile only
+  in the combination were read against their Oracle text.
 - **Still blocked, deliberately:** memory that outlives the resolution (handed to an effect
   object, `Effect:remembers Remembered…`: Professional Face-Breaker; linked abilities,
-  CR 607; delayed triggers), `ForgetChanged$` (Nissa's Pilgrimage), players defined by
-  noted cards (`NonRememberedController`: Plaguecrafter; `RememberedController`,
-  `RememberedOwner` — next to the "its controller" work of another batch), Command Beacon
-  (`ChangeZone:no-target` from the command zone, not memory), other `Remember…$` writers
-  (`RememberRevealed`, `RememberDrawn`, `RememberDamaged`, …).
-- **Next:** players of noted cards (`RememberedController`, `NonRememberedController`);
-  `ForgetChanged$`; `ChangeZoneAll` with `RememberChanged$` ("exile all …, then return
-  them"); `Effect:remembers Remembered` (an effect object about noted cards: "exile the top
-  card; you may play it this turn", 188 cards).
+  CR 607; delayed triggers), `ForgetChanged$` (Nissa's Pilgrimage), `RememberedOwner`,
+  Command Beacon (`ChangeZone:no-target` from the command zone, not memory), other
+  `Remember…$` writers (`RememberRevealed`, `RememberDrawn`, `RememberDamaged`, …).
+- **Next:** `ForgetChanged$`; `ChangeZoneAll` with `RememberChanged$` ("exile all …, then
+  return them"); `Effect:remembers Remembered` (an effect object about noted cards: "exile
+  the top card; you may play it this turn", 188 cards).
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
