@@ -3731,6 +3731,7 @@ pub fn type_line(def: &CardDef) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DelayWindow;
     use alloc::boxed::Box;
     use alloc::vec;
 
@@ -4769,6 +4770,64 @@ mod tests {
         assert_eq!(
             look(Amount::Fixed(1)),
             "Look at the top card of your library."
+        );
+    }
+
+    #[test]
+    fn a_delayed_trigger_says_when_and_what_much() {
+        let delayed = AbilityDef::Triggered {
+            when: Trigger::BeginningOf {
+                step: TriggerStep::Upkeep,
+                whose: Who::Any,
+            },
+            intervening_if: None,
+            body: Body::Effect(mode(Effect::Draw {
+                who: PlayerRef::You,
+                amount: Amount::Fixed(1),
+            })),
+        };
+        let def = CardDef {
+            name: "Test Delay".into(),
+            card_types: vec![CardType::Instant],
+            abilities: vec![AbilityDef::Spell(Body::Effect(mode(
+                Effect::DelayedTrigger {
+                    ability: 0,
+                    window: DelayWindow::NextTurn,
+                    player: None,
+                    amount: None,
+                },
+            )))],
+            granted: vec![delayed],
+            ..CardDef::default()
+        };
+        assert_eq!(
+            text(&def),
+            "At the beginning of the next turn's upkeep, draw a card."
+        );
+    }
+
+    #[test]
+    fn a_search_for_cards_that_share_a_land_type() {
+        let basic = Selector {
+            types: vec![CardType::Land],
+            supertypes: vec![crate::Supertype::Basic],
+            ..Selector::default()
+        };
+        let def = spell(mode(Effect::ChooseCards {
+            who: PlayerRef::You,
+            from: CardZone::Library,
+            cards: vec![basic],
+            count: Amount::Fixed(2),
+            must: false,
+            to: CardDest::Battlefield { tapped: true },
+            reveal: false,
+            shuffle: true,
+            optional: false,
+            share_land_type: true,
+        }));
+        assert_eq!(
+            text(&def),
+            "Search your library for up to two basic land cards that share a land type, put them onto the battlefield tapped, then shuffle."
         );
     }
 }
