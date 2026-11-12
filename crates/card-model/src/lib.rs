@@ -810,6 +810,12 @@ pub struct Selector {
     /// (card-db sees to that).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen: Option<OfChosen>,
+    /// "With mana value X or less", where X is worked out as the spell or ability
+    /// resolves (its X, a count): only in the cards a search or a look at the top cards
+    /// chooses among ([`Effect::ChooseCards`], [`Effect::Dig`]), where the resolution turns
+    /// it into `mana_value_max` (card-db sees to that). Serialized only when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_value_at_most: Option<Box<Amount>>,
 }
 
 impl Selector {
@@ -1434,6 +1440,13 @@ pub enum TargetFilter {
     /// noncreature spell", "target instant or sorcery spell". Only the card types,
     /// subtypes and colors of the selector are looked at.
     SpellMatching(Selector),
+    /// A spell — or (`abilities`) a spell or an activated or triggered ability — on the
+    /// stack; with `single_target`, one that has exactly one target ("target spell with a
+    /// single target").
+    OnStack {
+        abilities: bool,
+        single_target: bool,
+    },
 }
 
 impl TargetFilter {
@@ -1920,6 +1933,10 @@ pub enum Effect {
         /// Then those players shuffle their libraries (CR 701.24d: even if nothing moved).
         #[serde(default)]
         shuffle: bool,
+        /// "… onto the battlefield under your control" (CR 110.2a): who controls what
+        /// enters; otherwise each card's owner. Serialized only when set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controller: Option<PlayerRef>,
     },
     /// A spell or a non-mana ability adds mana (CR 106.4, 605.5): "add {R} for each tapped
     /// land your opponents control", "add {G}{G}". `amount` mana of the one type.
@@ -2070,6 +2087,16 @@ pub enum Effect {
     /// removed from combat (a regeneration shield, CR 614.8).
     Regenerate {
         what: ObjRef,
+    },
+    /// CR 115.7: change the targets of the spell or ability in target slot `what`. `single`:
+    /// "change the target of target spell with a single target" (CR 115.7a — to another
+    /// legal target if there is one, else it stays); otherwise "you may choose new targets
+    /// for target spell" (CR 115.7d — each target may be kept or changed to a legal one).
+    /// The new targets are chosen by this spell's controller; legal is as for the changed
+    /// spell or ability and its controller. Modes, X and divisions stay (CR 115.7f).
+    ChangeTargets {
+        what: TargetRef,
+        single: bool,
     },
     /// "[Destroy …]. It can't be regenerated." (CR 701.19c): the destruction this
     /// instruction — a `Destroy` or `DestroyAll` — causes can't be replaced by
@@ -2235,6 +2262,7 @@ impl Effect {
             | Effect::Proliferate
             | Effect::Shuffle { .. }
             | Effect::Regenerate { .. }
+            | Effect::ChangeTargets { .. }
             | Effect::Lasting { .. }
             | Effect::Choose(_)
             | Effect::BecomeCopy { .. }

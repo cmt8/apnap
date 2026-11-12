@@ -60,6 +60,7 @@ pub fn describes(
                     TargetFilter::Opponent => p != controller,
                     TargetFilter::Creature
                     | TargetFilter::Spell
+                    | TargetFilter::OnStack { .. }
                     | TargetFilter::SpellMatching(_)
                     | TargetFilter::Permanent(_)
                     | TargetFilter::CardInGraveyard { .. } => false,
@@ -68,6 +69,17 @@ pub fn describes(
         Target::Object(id) => {
             if Some(id) == this {
                 return false;
+            }
+            // A spell or ability on the stack (abilities aren't objects of `st.objects`).
+            if let TargetFilter::OnStack {
+                abilities,
+                single_target,
+            } = filter
+            {
+                return st.stack_object(id).is_some_and(|s| {
+                    (*abilities || s.kind == StackKind::Spell)
+                        && (!*single_target || s.all_targets().count() == 1)
+                });
             }
             // CR 400.7 / 608.2b: an object that changed zones is a new object, so a missing
             // id means the target left the zone it was in.
@@ -112,7 +124,9 @@ pub fn describes(
                         // "Another target card": not the card the ability is on.
                         && !(cards.other && Some(id) == source)
                 }
-                TargetFilter::Player | TargetFilter::Opponent => false,
+                TargetFilter::Player | TargetFilter::Opponent | TargetFilter::OnStack { .. } => {
+                    false
+                }
             }
         }
     }
@@ -179,7 +193,7 @@ pub fn candidates(
 ) -> Vec<Target> {
     let mut out: Vec<Target> = Vec::new();
     match filter {
-        TargetFilter::Spell | TargetFilter::SpellMatching(_) => {
+        TargetFilter::Spell | TargetFilter::SpellMatching(_) | TargetFilter::OnStack { .. } => {
             out.extend(st.stack.iter().map(|s| Target::Object(s.id)))
         }
         TargetFilter::AnyTarget | TargetFilter::Creature | TargetFilter::Permanent(_) => {

@@ -34,7 +34,9 @@ pub struct Compiled {
 
 /// Parameters that never affect the rules: descriptions shown to players, prompts, and
 /// hints for Forge's AI. (docs/forge/script-format.md, "keys a translator can ignore".)
-const TEXT_ONLY: [&str; 21] = [
+const TEXT_ONLY: [&str; 22] = [
+    // The largest X Forge's AI would announce: never read by forge-game.
+    "AIXMax",
     // A hint for Forge's AI (respond to its own activation): never read by forge-game.
     "AIRespondsToOwnAbility",
     // How the cost reads in the ability's description (`SpellAbility.getDescription`):
@@ -309,6 +311,9 @@ struct Tx<'a> {
     /// The line just compiled means nothing for the rules (only hints for Forge's AI): no
     /// ability, and nothing blocked.
     nothing: bool,
+    /// Reading the cards a search or a look at the top cards chooses among: "with mana
+    /// value X or less" may be counted as it resolves (`Selector::mana_value_at_most`).
+    counted_mana_value: bool,
     /// Compiling a chain whose "remembered" cards are its own (D-069): it remembers, and
     /// its last link forgets. Only there do `Remembered`, `IsRemembered`, `Remembered$…`
     /// mean "those cards".
@@ -1033,6 +1038,19 @@ impl<'a> Tx<'a> {
                     // Mana value ("converted mana cost" in Forge's words).
                     } else if let Some(n) = p.strip_prefix("cmcLE").and_then(|n| n.parse().ok()) {
                         s.mana_value_max = Some(n);
+                    // "With mana value X or less" (X a script variable): where a search or a
+                    // look at the top cards chooses (`counted_mana_value`), worked out as it
+                    // resolves.
+                    } else if let Some(name) = p.strip_prefix("cmcLE")
+                        && self.counted_mana_value
+                        && self.face.svars.contains_key(name)
+                    {
+                        let a = self.expr(name)?;
+                        if !matches!(a, Amount::X) && !a.stands_alone() {
+                            self.block("filter:cmcLE of something that needs the ability");
+                            return None;
+                        }
+                        s.mana_value_at_most = Some(Box::new(a));
                     } else if let Some(n) = p.strip_prefix("cmcGE").and_then(|n| n.parse().ok()) {
                         s.mana_value_min = Some(n);
                     } else if let Some(n) =
@@ -1598,6 +1616,10 @@ impl<'a> Tx<'a> {
                         | TargetFilter::Permanent(_)
                         | TargetFilter::Spell
                         | TargetFilter::SpellMatching(_)
+                        | TargetFilter::OnStack {
+                            abilities: false,
+                            ..
+                        }
                 ) {
                     self.block(format!("defined:{name} of a player or card"));
                     return None;
@@ -2370,6 +2392,49 @@ impl<'a> Tx<'a> {
                     dig
                 }
             }
+            // CR 115.7: "you may choose new targets for target spell [or ability]" (`Optional$`)
+            // or "change the target of target spell with a single target" (`TargetType$
+            // Spell.singleTarget`). Forge's ChangeTargetsEffect; its other forms (one target
+            // of several, a fixed new target, random targets, a restriction on the new
+            // target, another chooser) are not read and block.
+            "ChangeTargets" => {
+                let kind = rd.get("TargetType");
+                let optional = rd.get("Optional").is_some();
+                let valid = rd.get("ValidTgts");
+                let (abilities, single_target) = match kind {
+                    Some("Spell") => (false, false),
+                    Some("Spell.singleTarget") => (false, true),
+                    Some("Spell,Activated,Triggered") => (true, false),
+                    Some("SpellAbility.singleTarget") => (true, true),
+                    other => {
+                        self.block(format!("ChangeTargets:TargetType {}", other.unwrap_or("?")));
+                        return None;
+                    }
+                };
+                if !matches!(valid, Some("Card" | "Card,Emblem" | "Spell")) {
+                    self.block(format!("ChangeTargets:ValidTgts {}", valid.unwrap_or("?")));
+                    return None;
+                }
+                // "You may choose new targets" (115.7d) or "change the target" of a spell
+                // with one (115.7a); not the other two pairings.
+                let single = match (optional, single_target) {
+                    (true, false) => false,
+                    (false, true) => true,
+                    _ => {
+                        self.block("ChangeTargets:Optional with singleTarget");
+                        return None;
+                    }
+                };
+                rd.get("TgtPrompt");
+                chain.targets.push(TargetFilter::OnStack {
+                    abilities,
+                    single_target,
+                });
+                Effect::ChangeTargets {
+                    what: TargetRef::Target(chain.targets.len() as u8 - 1),
+                    single,
+                }
+            }
             // CR 603.7: "at the beginning of the next …, [do something]".
             "DelayedTrigger" => self.delayed_trigger(&rd, chain)?,
             "DestroyAll" => {
@@ -2467,10 +2532,12 @@ impl<'a> Tx<'a> {
                     self.block("Dig:ChangeNum");
                 }
                 let valid = rd.get("ChangeValid");
+                self.counted_mana_value = true;
                 let cards = match valid {
                     None => Some(Vec::new()),
                     Some(f) => self.card_alts(f, true),
                 };
+                self.counted_mana_value = false;
                 // A library position is a literal here, and the bottom is the default.
                 let place = |tx: &mut Self,
                              zone: Option<&str>,
@@ -2642,7 +2709,18 @@ impl<'a> Tx<'a> {
                         self.object(&rd, chain, triggered)?
                     }
                     None => {
-                        self.block("ChangeZone:no-target");
+                        // Named by what it moves, from where to where: the forms differ
+                        // ("this card" from a graveyard by a trigger, a card defined by an
+                        // event, the commander from the command zone…).
+                        self.block(format!(
+                            "ChangeZone:no-target {origin}->{} {}",
+                            dest.unwrap_or("?"),
+                            match (rd.rec.get("Defined"), rd.rec.get("ChangeType")) {
+                                (Some(d), _) => format!("Defined {}", shape(d)),
+                                (None, Some(t)) => format!("ChangeType {}", shape(t)),
+                                (None, None) => "this card".to_string(),
+                            }
+                        ));
                         return None;
                     }
                 };
@@ -2762,6 +2840,110 @@ impl<'a> Tx<'a> {
                             cards,
                             to,
                             shuffle: false,
+                            controller: None,
+                        }
+                    }
+                    // Everything of a kind in graveyards (every player's, or `Defined$` /
+                    // the target player's) or hands: "exile all graveyards", "return all land
+                    // cards from your graveyard to the battlefield tapped", "put all creature
+                    // cards in all graveyards onto the battlefield under your control".
+                    // Forge's ChangeZoneAllEffect: no `Defined$` and no target is everyone's
+                    // zone (and everyone shuffles, with `Shuffle$`).
+                    ((Some(origin @ ("Graveyard" | "Hand")), Some(dest), Some(filter)), slot) => {
+                        let from = if origin == "Graveyard" {
+                            CardZone::Graveyard
+                        } else {
+                            CardZone::Hand
+                        };
+                        let whose = match (slot, rd.get("Defined")) {
+                            (Some(i), None)
+                                if matches!(
+                                    chain.targets[i as usize],
+                                    TargetFilter::Player | TargetFilter::Opponent
+                                ) =>
+                            {
+                                PlayerRef::Target(i)
+                            }
+                            (None, None) => PlayerRef::Each,
+                            (None, Some("You")) => PlayerRef::You,
+                            (None, Some("Player")) => PlayerRef::Each,
+                            _ => {
+                                self.block("ChangeZoneAll:whose");
+                                return None;
+                            }
+                        };
+                        let tapped = rd.get("Tapped").is_some();
+                        let shuffle = rd.get("Shuffle").is_some();
+                        let to = match dest {
+                            "Hand" => CardDest::Hand,
+                            "Exile" => CardDest::Exile,
+                            "Graveyard" if from != CardZone::Graveyard => CardDest::Graveyard,
+                            "Battlefield" => CardDest::Battlefield { tapped },
+                            // Only shuffled in: the order of cards put into a library together
+                            // is otherwise their owners' (CR 401.4), which isn't asked here.
+                            "Library" if shuffle => CardDest::LibraryTop,
+                            _ => {
+                                self.block(format!("ChangeZoneAll:{origin}->{dest}"));
+                                return None;
+                            }
+                        };
+                        if tapped && !matches!(to, CardDest::Battlefield { .. }) {
+                            self.block("param:ChangeZoneAll.Tapped");
+                            return None;
+                        }
+                        if shuffle && to != CardDest::LibraryTop {
+                            self.block("param:ChangeZoneAll.Shuffle");
+                            return None;
+                        }
+                        let controller = match rd.get("GainControl") {
+                            None => None,
+                            Some("True") if matches!(to, CardDest::Battlefield { .. }) => {
+                                Some(PlayerRef::You)
+                            }
+                            Some(_) => {
+                                self.block("param:ChangeZoneAll.GainControl");
+                                return None;
+                            }
+                        };
+                        let cards = if filter == "Card" {
+                            Vec::new()
+                        } else {
+                            self.card_alts(filter, true)?
+                        };
+                        // "Your graveyard" (`Card.YouOwn`/`YouCtrl` off the battlefield is the
+                        // owner): only that player's zone — and only that player shuffles.
+                        // Forge shuffles every player's library here (no `Defined$`), which
+                        // the card doesn't say.
+                        let only =
+                            |w: Who| !cards.is_empty() && cards.iter().all(|s| s.controller == w);
+                        let whose = match whose {
+                            PlayerRef::Each if only(Who::You) => PlayerRef::You,
+                            PlayerRef::Each if only(Who::Opponent) => PlayerRef::EachOpponent,
+                            w => w,
+                        };
+                        // CR 110.2a: put onto the battlefield, a card enters under the control
+                        // of the player told to put it there — the engine's default is its
+                        // owner. Others' cards need the card to say whose control (or "each
+                        // player returns …").
+                        if matches!(to, CardDest::Battlefield { .. })
+                            && controller.is_none()
+                            && whose != PlayerRef::You
+                        {
+                            let o = self.face.oracle.as_deref().unwrap_or("").to_lowercase();
+                            if !(o.contains("owners' control") || o.contains("each player")) {
+                                self.block(
+                                    "ChangeZoneAll:onto the battlefield under whose control",
+                                );
+                                return None;
+                            }
+                        }
+                        Effect::MoveAll {
+                            from,
+                            whose,
+                            cards,
+                            to,
+                            shuffle,
+                            controller,
                         }
                     }
                     _ => {
@@ -3455,6 +3637,10 @@ impl<'a> Tx<'a> {
                         | TargetFilter::Permanent(_)
                         | TargetFilter::Spell
                         | TargetFilter::SpellMatching(_)
+                        | TargetFilter::OnStack {
+                            abilities: false,
+                            ..
+                        }
                 ) {
                     self.block("unless:payer of a player or card");
                     return None;
@@ -3766,10 +3952,12 @@ impl<'a> Tx<'a> {
             Some(name) => self.one_player(name, chain, triggered, "defined:player ")?,
         };
         let filter = rd.get("ChangeType");
+        self.counted_mana_value = true;
         let cards = match filter {
             None => Some(Vec::new()),
             Some(f) => self.card_alts(f, from != CardZone::Battlefield),
         };
+        self.counted_mana_value = false;
         // Choosing among "those cards" (D-069) looks at nothing new.
         if cards
             .as_ref()
@@ -8186,6 +8374,11 @@ fn ability_records(face: &Face) -> Vec<(String, Record)> {
 /// what differs; remove it when the pinned Forge commit has the script corrected.
 const SCRIPT_DIFFERS: &[(&str, &str)] = &[
     (
+        "Manabond",
+        "puts the lands from the hand without revealing it; the card says \"reveal your hand\", \
+         and \"if you do, discard your hand\" whether or not a land was put",
+    ),
+    (
         "Knight of the Mists",
         "destroys target Knight *creature*; the card says \"target Knight\" (a Kindred Knight \
          permanent that isn't a creature is a legal target, CR 308.2)",
@@ -8404,6 +8597,7 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
         player_is_you: BTreeSet::new(),
         took_player_for_you: false,
         nothing: false,
+        counted_mana_value: false,
         memory: false,
         delayed_noted: None,
         in_delayed: false,

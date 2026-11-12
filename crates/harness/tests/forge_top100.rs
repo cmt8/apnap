@@ -369,7 +369,7 @@ fn an_opponents_first_noncreature_spell_each_turn() {
     assert_eq!(
         text,
         [
-            "Whenever an opponent casts their first noncreature spell each turn, X is its power. Then draw a card unless that player pays {X}."
+            "Whenever an opponent casts their first noncreature spell each turn, X is this creature's power. Then draw a card unless that player pays {X}."
         ]
     );
 }

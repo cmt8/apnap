@@ -2743,6 +2743,56 @@ Rules text: docs/rules-notes/603-delayed.md. Tests: `crates/harness/tests/forge_
   and `AtEOT$` in a chain that already notes (Jaxis).
 - Golden: see the commit message.
 
+## D-082 The most played gaps of the EDHREC top 1,000: changing targets, mass moves from graveyards, "mana value X or less" (2026-11-12)
+Rules text: docs/rules-notes/d082-top1000.md. Tests: `crates/harness/tests/forge_top1000.rs`.
+- Text first (from the D-080 review): "X is this creature's power" for the source's power or
+  toughness in "where X is …" (was "its power", which could read as the spell's); 31 cards'
+  text, no meaning.
+- **Changing targets** (CR 115.7, 115.3, 115.5): `TargetFilter::OnStack { abilities,
+  single_target }` (a spell, or a spell or activated/triggered ability, on the stack;
+  "with a single target" = exactly one target in all), `Effect::ChangeTargets { what,
+  single }`, `ChoiceKind::NewTarget`, `GameAction::SetTargets`, `Event::TargetsChanged`
+  (all appended). The changing spell's controller goes through the targets slot by slot:
+  "you may choose new targets" (115.7d) offers the current target first (keep) and every
+  legal one; "change the target of target spell with a single target" (115.7a) only other
+  legal targets, and with none it stays. Legal is as for the changed spell or ability and its
+  controller (`targeting::candidates`, 115.5 included); a slot doesn't offer what another
+  slot of the same "target" has (115.3); the new set is written at once (115.7e). Modes, X
+  and everything else of the spell stay. Forge: `ChangeTargets` with `TargetType$ Spell` /
+  `Spell,Activated,Triggered` + `Optional$` (choose new), `Spell.singleTarget` /
+  `SpellAbility.singleTarget` without it (change the target); `UnlessCost$` works (Divert).
+  **When "becomes the target" triggers are built, they must fire here for the new targets**
+  (Forge's ChangeTargetsEffect runs BecomesTarget for each changed target). Blocked:
+  115.7b/c, a fixed new target (Spellskite, `DefinedMagnet$`), random targets, a restriction
+  on the new target (Meddle), another chooser, a target type of only activated abilities.
+  Deflecting Swat, Redirect, Misdirection, Divert, Deflection, Shunt, Swerve, Imp's Mischief.
+- **Mass moves from graveyards and hands** (CR 400.3, 110.2a, 701.24a): Forge's
+  `ChangeZoneAll` from graveyards or hands is `Effect::MoveAll` (new field `controller`, "under
+  your control", serialized only when set): every player's zone unless `Defined$` or a target
+  player says whose; a filter of "your" cards is your zone only — and then only you shuffle
+  (Forge would shuffle every library, which the cards don't say). Onto the battlefield a card
+  enters under its owner's control (the engine's default) or yours with `GainControl$`;
+  other players' cards are compiled only where the card says whose control ("under their
+  owners' control", "each player returns …"), since by 110.2a "put onto the battlefield" is
+  the instructing player's (`ChangeZoneAll:onto the battlefield under whose control`). Into a
+  library only when shuffled (`ChangeZoneAll:Graveyard->Library`). Manabond is in
+  `SCRIPT_DIFFERS` (its script doesn't reveal the hand, and discards only if a land moved).
+  40 cards: Farewell, Scavenger Grounds, Splendid Reclamation, Rise of the Dark Realms,
+  Replenish, Aftermath Analyst, Morningtide, Mnemonic Nexus, Decree of Annihilation.
+  `ChangeZone:no-target` is now named by its shape; in the top 1,000 the shapes are triggers
+  that return "this card" from a graveyard (they need triggers that work in a graveyard,
+  `trig:zone Graveyard`), "return it … as an enchantment" (`Defined
+  TriggeredNewCardLKICopy` with `StaticEffect$`), the commander from the command zone, and
+  cards remembered across a cost.
+- **"With mana value X or less"** (CR 107.3a, 608.2h): `Selector::mana_value_at_most`
+  (serialized only when set; Forge's `cmcLEX` with X a script variable) — only in the cards a
+  search or a look at the top cards chooses among, worked out as that instruction is reached
+  (`ResolveFrame::fix_mana_values`); card-db refuses it anywhere else. `AIXMax$` is a Forge AI
+  hint. Green Sun's Zenith, Wargate, Genesis Wave, Mind into Matter, Grim Servant, Loot,
+  Mausoleum Secrets. Still blocked: Finale of Devastation (`PumpAll` with a condition), Eldritch
+  Evolution (`Sacrificed$CardManaCost`), Chord of Calling (convoke).
+- Golden: see the commit.
+
 ## D-083 Delayed abilities about targets, attackers and blockers; "at end of combat"; their wording (2026-11-12)
 Rules text: docs/rules-notes/603-delayed.md. Tests: `crates/harness/tests/forge_delayed.rs`.
 - **Wording:** a delayed ability about one object says "it" (`Effect::DelayedTrigger::one`,
