@@ -198,6 +198,10 @@ fn amount(a: &Amount) -> String {
         Amount::Fixed(n) => n.to_string(),
         Amount::X => "X".into(),
         Amount::SourcePower => "its power".into(),
+        // (Permanents are counted, so with nobody named: "on the battlefield".)
+        Amount::Count(s) if s.controller == Who::Any && s.owner == Who::Any => {
+            format!("the number of {} on the battlefield", selector(s, true))
+        }
         Amount::Count(s) => format!("the number of {}", selector(s, true)),
         Amount::TotalPower(s) => format!("the total power of {}", selector(s, true)),
         Amount::TriggeringPower => "its power".into(),
@@ -1192,7 +1196,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             amount: Amount::LifeLostThisWay,
         } => format!(
             "{} life equal to the life lost this way",
-            verb(&player(mode, *who), "gain", "gains"),
+            verb_you(&player(mode, *who), "gain", "gains"),
         ),
         Effect::GainLife { who, amount: a } => {
             format!(

@@ -363,7 +363,11 @@ pub fn paint_proxy(
         // Rules text only where it would be legible.
         let rules_font = FontId::proportional(6.3 * s);
         if rules_font.size >= 9.0 {
-            let text = describe_rules(def, tokens).join("\n");
+            // One line for each bullet of a modal ability.
+            let text = describe_rules(def, tokens)
+                .join("\n")
+                .replace(" • ", "\n• ")
+                .replace("— •", "—\n•");
             let galley = painter.layout(text, rules_font, ink, text_box.width() - 4.0 * s);
             painter.with_clip_rect(text_box).galley(
                 text_box.min + vec2(2.0 * s, 1.5 * s),

@@ -148,3 +148,128 @@ fn render_menu_and_mid_game() {
         shot(&mut h, dir.join("pile.png"));
     }
 }
+
+/// Proxies (cards drawn from their definitions, with generated rules text) of a modal card
+/// and of a card that makes tokens, next to each other: `proxies.png`.
+#[test]
+#[ignore = "needs a renderer; writes PNGs to $APNAP_SHOT_DIR"]
+fn render_proxies() {
+    use card_model::{
+        AbilityDef, Amount, Body, CardCatalog, CardDef, CardType, Cost, Effect, Keyword, ManaCost,
+        ManaProduce, ManaType, Mode, PlayerRef,
+    };
+    let Some(dir) = std::env::var_os("APNAP_SHOT_DIR").map(std::path::PathBuf::from) else {
+        panic!("set APNAP_SHOT_DIR");
+    };
+    std::fs::create_dir_all(&dir).unwrap();
+    let mode = |effect| Mode {
+        targets: Vec::new(),
+        effect,
+        groups: Vec::new(),
+    };
+    let draw = Effect::Draw {
+        who: PlayerRef::You,
+        amount: Amount::Fixed(2),
+    };
+    let gain = Effect::GainLife {
+        who: PlayerRef::You,
+        amount: Amount::Fixed(3),
+    };
+    let make = |key: &str, n: u32| Effect::CreateToken {
+        token: key.into(),
+        count: Amount::Fixed(n),
+        who: PlayerRef::You,
+    };
+    let treasure = CardDef {
+        name: "Treasure Token".into(),
+        key: Some("treasure".into()),
+        token: true,
+        card_types: vec![CardType::Artifact],
+        creature_types: vec!["Treasure".into()],
+        abilities: vec![AbilityDef::Mana {
+            cost: Cost {
+                tap: true,
+                sacrifice_self: true,
+                ..Cost::default()
+            },
+            produce: ManaProduce::AnyColor,
+            only_if: None,
+            spend: None,
+            then: None,
+        }],
+        ..CardDef::default()
+    };
+    let spawn = CardDef {
+        name: "Eldrazi Spawn Token".into(),
+        key: Some("spawn".into()),
+        token: true,
+        card_types: vec![CardType::Creature],
+        creature_types: vec!["Eldrazi".into(), "Spawn".into()],
+        power: Some(0),
+        toughness: Some(1),
+        colors: Some(Vec::new()),
+        abilities: vec![AbilityDef::Mana {
+            cost: Cost {
+                sacrifice_self: true,
+                ..Cost::default()
+            },
+            produce: ManaProduce::One(ManaType::Colorless),
+            only_if: None,
+            spend: None,
+            then: None,
+        }],
+        ..CardDef::default()
+    };
+    let mut cat = CardCatalog::default();
+    cat.add(treasure);
+    cat.add(spawn);
+    let charm = CardDef {
+        name: "Test Charm".into(),
+        mana_cost: ManaCost::parse("{1}{G}{W}").ok(),
+        card_types: vec![CardType::Instant],
+        abilities: vec![AbilityDef::Spell(Body::Modal {
+            min: 1,
+            max: 1,
+            modes: vec![mode(draw), mode(gain), mode(make("treasure", 1))],
+        })],
+        ..CardDef::default()
+    };
+    let maker = CardDef {
+        name: "Test Hatchery".into(),
+        mana_cost: ManaCost::parse("{3}{U}").ok(),
+        card_types: vec![CardType::Creature],
+        creature_types: vec!["Eldrazi".into()],
+        power: Some(2),
+        toughness: Some(3),
+        colors: Some(Vec::new()),
+        keywords: vec![Keyword::Flying],
+        abilities: vec![AbilityDef::Triggered {
+            when: card_model::Trigger::Enters(card_model::ObjFilter::This),
+            intervening_if: None,
+            body: Body::Effect(mode(Effect::Seq(vec![
+                make("spawn", 2),
+                make("treasure", 1),
+            ]))),
+        }],
+        ..CardDef::default()
+    };
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 680.0))
+        .wgpu()
+        .build_ui_state(
+            |ui, (art, cards, cat): &mut (Art, Vec<CardDef>, CardCatalog)| {
+                let r = ui.max_rect();
+                for (i, def) in cards.iter().enumerate() {
+                    let w = 440.0;
+                    let rect = egui::Rect::from_min_size(
+                        r.min + egui::vec2(20.0 + i as f32 * (w + 20.0), 20.0),
+                        egui::vec2(w, w * 1.4),
+                    );
+                    app::cardview::paint_proxy(ui, art, rect, def, Some(cat));
+                }
+            },
+            (Art::disabled(), vec![charm, maker], cat),
+        );
+    h.run_ok();
+    h.render().unwrap().save(dir.join("proxies.png")).unwrap();
+}
