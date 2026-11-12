@@ -1264,6 +1264,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             }
             out
         }
+        Effect::SacrificeIt { what } => format!("you sacrifice {}", obj(mode, *what)),
         Effect::BecomeCopy { what, except } => format!(
             "this permanent becomes a copy of {}{}",
             obj(mode, *what),
@@ -5048,6 +5049,7 @@ mod tests {
                     window: DelayWindow::NextTurn,
                     player: None,
                     amount: None,
+                    objects: None,
                 },
             )))],
             granted: vec![delayed],

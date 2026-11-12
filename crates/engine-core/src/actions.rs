@@ -227,6 +227,8 @@ pub enum GameAction {
         subject: Option<ObjectId>,
         subject_lki: Option<Characteristics>,
         facts: crate::triggers::EventFacts,
+        /// A delayed triggered ability's objects (CR 603.7c).
+        remembered: Vec<ObjectId>,
     },
     /// CR 608.2h: an ability on the stack remembers the triggering object as it last
     /// existed, once that object leaves the battlefield.
@@ -836,6 +838,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             subject,
             subject_lki,
             facts,
+            remembered,
         } => {
             let id = st.alloc_object_id();
             // CR 607.2d: "the chosen type" in the ability is its source's choice.
@@ -845,6 +848,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 .map(|o| o.chosen.clone())
                 .unwrap_or_default();
             st.stack.push(StackObject {
+                remembered,
                 id,
                 controller,
                 kind: StackKind::Ability {
@@ -1107,6 +1111,7 @@ fn perform_move(
     st.objects.insert(new_id, obj);
     if to == Zone::Stack {
         st.stack.push(StackObject {
+            remembered: Vec::new(),
             id: new_id,
             controller,
             kind: StackKind::Spell,

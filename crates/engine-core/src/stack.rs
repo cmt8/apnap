@@ -73,6 +73,10 @@ pub struct StackObject {
     /// it is the same object).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen: Vec<card_model::Chosen>,
+    /// For a delayed triggered ability: the objects it remembers (CR 603.7c), "those
+    /// cards" as it resolves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remembered: Vec<ObjectId>,
 }
 
 impl StackObject {

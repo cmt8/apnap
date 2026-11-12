@@ -78,6 +78,7 @@ impl Scenario {
         );
         if zone == Zone::Stack {
             self.st.stack.push(StackObject {
+                remembered: Vec::new(),
                 id,
                 controller: owner,
                 kind: StackKind::Spell,

@@ -256,6 +256,11 @@ struct Tx<'a> {
     /// its last link forgets. Only there do `Remembered`, `IsRemembered`, `Remembered$…`
     /// mean "those cards".
     memory: bool,
+    /// The zone of the objects the delayed ability being compiled remembers: its chain
+    /// starts with them noted (taken by the chain's first mode).
+    delayed_noted: Option<&'static str>,
+    /// Compiling a delayed ability that remembers objects.
+    in_delayed: bool,
 }
 
 /// The parameters with which a link of a chain remembers cards on the card (Forge's
@@ -1688,18 +1693,65 @@ impl<'a> Tx<'a> {
                 Some(ObjRef::Target(chain.targets.len() as u8 - 1))
             }
             // "Those cards", "that card", "it" (D-069): once the chain has noted some.
-            Some("Remembered") if self.memory && !self.in_effect => match chain.noted_at {
-                Some(_) => Some(ObjRef::Noted),
-                None => {
-                    self.block("remember:read before anything is remembered");
-                    None
+            Some(name) if self.memory && !self.in_effect && self.is_remembered(name) => {
+                match chain.noted_at {
+                    Some(_) => Some(ObjRef::Noted),
+                    None => {
+                        self.block("remember:read before anything is remembered");
+                        None
+                    }
                 }
-            },
+            }
             Some(other) => {
                 self.block(format!("defined:card {other}"));
                 None
             }
         }
+    }
+
+    /// `[instruction]. [Sacrifice / exile] them at the beginning of the next end step`
+    /// (Forge's `AtEOT$`): the instruction is noted, and a delayed triggered ability about
+    /// what it made is created (CR 603.7, 603.7c), its text on the card's `granted` list.
+    fn at_end_of_turn(&mut self, first: Effect, what: &str) -> Effect {
+        let effect = match what {
+            "Sacrifice" => Effect::SacrificeIt {
+                what: ObjRef::Noted,
+            },
+            _ => Effect::Exile {
+                what: ObjRef::Noted,
+            },
+        };
+        let ability = self.granted.len() as u16;
+        self.granted.push(AbilityDef::Triggered {
+            when: Trigger::BeginningOf {
+                step: TriggerStep::EndStep,
+                whose: Who::Any,
+            },
+            intervening_if: None,
+            body: Body::Effect(Mode {
+                targets: Vec::new(),
+                effect,
+                groups: Vec::new(),
+            }),
+        });
+        Effect::Seq(vec![
+            Effect::Note(Box::new(first)),
+            Effect::DelayedTrigger {
+                ability,
+                window: DelayWindow::Next,
+                player: None,
+                amount: None,
+                objects: Some(ObjRef::Noted),
+            },
+        ])
+    }
+
+    /// Does `Defined$ name` mean "those cards" (D-069)? `Remembered`; in a delayed ability
+    /// that remembers objects also `DelayTriggerRemembered[LKI]` (CR 603.7c).
+    fn is_remembered(&self, name: &str) -> bool {
+        name == "Remembered"
+            || (self.in_delayed
+                && matches!(name, "DelayTriggerRemembered" | "DelayTriggerRememberedLKI"))
     }
 
     /// `ValidCards$` of an "all" effect. Forge's default when it is missing differs from
@@ -2516,7 +2568,7 @@ impl<'a> Tx<'a> {
                     // "Return those cards …" (D-069).
                     None if self.memory
                         && !self.in_effect
-                        && rd.rec.get("Defined") == Some("Remembered") =>
+                        && rd.rec.get("Defined").is_some_and(|d| self.is_remembered(d)) =>
                     {
                         self.object(&rd, chain, triggered)?
                     }
@@ -3174,16 +3226,25 @@ impl<'a> Tx<'a> {
                 // "Sacrifice / exile it at the beginning of the next end step": a delayed
                 // triggered ability about the token (CR 603.7c) — delayed triggers that
                 // remember objects aren't built (D-075 has players and amounts only).
-                if rd.get("AtEOT").is_some() || rd.get("AtEOTTrig").is_some() {
-                    self.block("CopyPermanent:AtEOT (a delayed trigger about the token)");
-                    return None;
-                }
-                Effect::CopyPermanent {
+                let copy = Effect::CopyPermanent {
                     what,
                     count: count?,
                     except: except?,
                     gains,
                     tapped,
+                };
+                // "Sacrifice / exile it at the beginning of the next end step": a delayed
+                // triggered ability about the tokens just made (CR 603.7c) — they are
+                // noted (D-069) and handed to it. Not in a chain that notes other things.
+                match rd.get("AtEOT") {
+                    None => copy,
+                    Some(what @ ("Sacrifice" | "Exile")) if !self.memory => {
+                        self.at_end_of_turn(copy, what)
+                    }
+                    Some(what) => {
+                        self.block(format!("CopyPermanent:AtEOT {what}"));
+                        return None;
+                    }
                 }
             }
             // "This permanent becomes a copy of …" for good (docs/forge/effects.md §43):
@@ -3458,7 +3519,7 @@ impl<'a> Tx<'a> {
                         },
                     }
                 }
-                Some("Remembered") if self.memory && !self.in_effect => {
+                Some(name) if self.memory && !self.in_effect && self.is_remembered(name) => {
                     rd.get("ConditionDefined");
                     let cards = self.card_alts(filter, true)?;
                     if cards
@@ -3922,6 +3983,9 @@ impl<'a> Tx<'a> {
         if writes && !local {
             self.block("remember:not forgotten when the chain ends");
         }
+        // A delayed ability's objects are its "those cards" (CR 603.7c), forgotten as it
+        // finishes resolving.
+        let local = local || (self.delayed_noted.is_some() && !writes);
         let was = std::mem::replace(&mut self.memory, local);
         let mode = self.chain_mode(first, triggered, root);
         self.memory = was;
@@ -3929,7 +3993,10 @@ impl<'a> Tx<'a> {
     }
 
     fn chain_mode(&mut self, first: &'a Record, triggered: bool, root: &str) -> Option<Mode> {
-        let mut chain = Chain::default();
+        let mut chain = Chain {
+            noted_at: self.delayed_noted.take(),
+            ..Chain::default()
+        };
         let mut kind = root;
         // A trigger that runs an `AB$` with a cost: "you may pay [cost]. If you do, [the
         // whole ability]" (docs/forge/triggers-statics-replacements-keywords.md).
@@ -4157,8 +4224,25 @@ impl<'a> Tx<'a> {
                 }
             }
         }
+        // The objects it is about (CR 603.7c), and the zone they are in: in the delayed
+        // ability they are "those cards".
+        let mut objects: Option<(ObjRef, &'static str)> = None;
         match rd.get("RememberObjects") {
             None => {}
+            // What this chain has just moved or made (D-069).
+            Some("Remembered" | "RememberedLKI") if self.memory && !self.in_effect => {
+                match chain.noted_at {
+                    Some(at) => objects = Some((ObjRef::Noted, at)),
+                    None => {
+                        self.block("remember:read before anything is remembered");
+                        return None;
+                    }
+                }
+            }
+            // The card a creature that died became ("return that card …").
+            Some("TriggeredNewCardLKICopy") if self.in_trigger && self.trig.died => {
+                objects = Some((ObjRef::TriggeringCard, "Graveyard"));
+            }
             // "Its controller": of the countered spell's target.
             Some("RememberedController") => match chain.countered {
                 Some((slot, true, _)) => player = Some(PlayerRef::ControllerOf(slot)),
@@ -4167,8 +4251,8 @@ impl<'a> Tx<'a> {
                     return None;
                 }
             },
-            Some(_) => {
-                self.block("DelayedTrigger:remembers objects");
+            Some(other) => {
+                self.block(format!("DelayedTrigger:remembers {}", shape(other)));
                 return None;
             }
         }
@@ -4184,6 +4268,9 @@ impl<'a> Tx<'a> {
         self.in_trigger = true;
         self.optional_trigger = false;
         self.memory = false;
+        // Its objects are "those cards" from the start (CR 603.7c).
+        self.delayed_noted = objects.map(|(_, at)| at);
+        let was_delayed = std::mem::replace(&mut self.in_delayed, objects.is_some());
         let mut trig = TrigCtx::of(&when);
         if player.is_some() {
             trig.players = &["DelayTriggerRemembered"];
@@ -4206,6 +4293,8 @@ impl<'a> Tx<'a> {
             self.trig,
             self.memory,
         ) = saved;
+        self.delayed_noted = None;
+        self.in_delayed = was_delayed;
         let index = self.granted.len() as u16;
         self.granted.push(AbilityDef::Triggered {
             when,
@@ -4217,6 +4306,7 @@ impl<'a> Tx<'a> {
             window,
             player,
             amount,
+            objects: objects.map(|(r, _)| r),
         };
         // Forge's CounterEffect remembers the mana value before it tries to counter
         // ("should remember even that spell cannot be countered"): the delayed trigger is
@@ -8187,6 +8277,8 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
         took_player_for_you: false,
         nothing: false,
         memory: false,
+        delayed_noted: None,
+        in_delayed: false,
     };
     let mut def = CardDef {
         name: face.name.clone(),

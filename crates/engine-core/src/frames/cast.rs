@@ -977,6 +977,7 @@ impl CastFrame {
                                     subject: None,
                                     subject_lki: None,
                                     facts: Default::default(),
+                                    remembered: Vec::new(),
                                 },
                             )
                         }
@@ -996,6 +997,7 @@ impl CastFrame {
                                 subject: t.subject,
                                 subject_lki: t.subject_lki.clone(),
                                 facts: t.facts,
+                                remembered: t.remembered.clone(),
                             },
                         ),
                     });
