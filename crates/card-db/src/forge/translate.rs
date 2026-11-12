@@ -671,6 +671,12 @@ impl TrigCtx {
                 it_is_this: *f == ObjFilter::This,
                 ..TrigCtx::default()
             },
+            // Forge's `CounterAdded`: `TriggeredCard` is what the counters were put on —
+            // the Saga itself.
+            Trigger::Chapter(_) => TrigCtx {
+                this: &["TriggeredCard"],
+                ..TrigCtx::NOTHING
+            },
             _ => TrigCtx::default(),
         }
     }
@@ -1339,9 +1345,7 @@ impl<'a> Tx<'a> {
         }
         // "The number of [kind] counters on this permanent" (CR 122).
         if let Some(kind) = v.strip_prefix("Count$CardCounters.") {
-            return self
-                .counter_kind(Some(kind))
-                .map(Amount::CountersOnThis);
+            return self.counter_kind(Some(kind)).map(Amount::CountersOnThis);
         }
         // Another variable, so that it can take a second arithmetic suffix.
         if let Some(name) = v.strip_prefix("SVar$") {
@@ -4743,6 +4747,39 @@ impl<'a> Tx<'a> {
                 None
             }
         }
+    }
+
+    /// `K:Chapter:<N>:<SVar1>,…,<SVarN>` (CR 715.2): a Saga's chapter abilities, the i-th
+    /// SVar being chapter i's effect. "I, II — [effect]" names the same SVar twice: two
+    /// abilities (CR 715.2c), as Forge makes them.
+    fn chapters(&mut self, rest: &str) -> Option<Vec<AbilityDef>> {
+        let (n, names) = rest.split_once(':')?;
+        let names: Vec<&str> = names.split(',').map(str::trim).collect();
+        if n.parse::<usize>().ok() != Some(names.len()) || names.iter().any(|s| s.is_empty()) {
+            self.block("kw:Chapter shape");
+            return None;
+        }
+        let mut out = Vec::new();
+        for (i, name) in names.into_iter().enumerate() {
+            let when = Trigger::Chapter(i as u32 + 1);
+            let rec = self.sub(name)?;
+            self.in_trigger = true;
+            self.optional_trigger = false;
+            self.trig = TrigCtx::of(&when);
+            self.took_it_for_this = false;
+            self.took_player_for_you = false;
+            let body = self.body(rec, true, "DB");
+            self.in_trigger = false;
+            self.trig = TrigCtx::default();
+            self.took_it_for_this = false;
+            self.took_player_for_you = false;
+            out.push(AbilityDef::Triggered {
+                when,
+                intervening_if: None,
+                body: body?,
+            });
+        }
+        Some(out)
     }
 
     /// `K:etbCounter:<type>:<amount>[:<condition>[:<description>]]` — "this permanent
@@ -8263,6 +8300,11 @@ fn ability_records(face: &Face) -> Vec<(String, Record)> {
 /// what differs; remove it when the pinned Forge commit has the script corrected.
 const SCRIPT_DIFFERS: &[(&str, &str)] = &[
     (
+        "Origin of the Avengers",
+        "chapter II puts any Hero card (`Hero.cmcLE3`); the card says \"a Hero *creature* card\" \
+         (a Kindred Hero card that isn't a creature must not be put onto the battlefield)",
+    ),
+    (
         "Knight of the Mists",
         "destroys target Knight *creature*; the card says \"target Knight\" (a Kindred Knight \
          permanent that isn't a creature is a legal target, CR 308.2)",
@@ -8588,6 +8630,20 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
     // Abilities, in the order the engine's own scripts use: as written, line kind by line
     // kind (the order within a kind is the script's).
     let mut abilities: Vec<(usize, AbilityDef)> = Vec::new();
+    // CR 715.3a: "Each Saga without read ahead has the intrinsic ability 'This Saga enters
+    // with a lore counter on it.'" (A Saga with read ahead is blocked by its keyword.)
+    if face.types.iter().any(|t| t == "Saga") && !face.keywords.iter().any(|k| k == "Read ahead") {
+        abilities.push((
+            0,
+            AbilityDef::Replacement {
+                replaces: Replaces::ThisEnters,
+                with: ReplaceWith::EntersWithCounters {
+                    kind: CounterKind::LORE,
+                    n: 1,
+                },
+            },
+        ));
+    }
     // Equip abilities are printed last.
     let mut equips: Vec<AbilityDef> = Vec::new();
     for k in &face.keywords {
@@ -8899,6 +8955,14 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
                     }));
                 }
                 _ => tx.explained(before, "keyword"),
+            }
+            continue;
+        }
+        if let Some(rest) = k.strip_prefix("Chapter:") {
+            let before = tx.blockers.len();
+            match tx.chapters(rest) {
+                Some(v) => abilities.extend(v.into_iter().map(|a| (0, a))),
+                None => tx.explained(before, "keyword"),
             }
             continue;
         }

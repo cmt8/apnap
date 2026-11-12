@@ -151,6 +151,32 @@ fn counters_put_and_removed_as_costs() {
     assert_eq!(n(&s, d, CounterKind::MinusOne), 1);
 }
 
+// CR 122.1 (2026-11-06): "the number of [kind] counters on this" counts that kind only.
+#[test]
+fn an_amount_counts_counters_of_one_kind_on_the_source() {
+    let battery = "Name:Test Battery\nManaCost:2\nTypes:Artifact\n\
+        K:etbCounter:CHARGE:3\n\
+        A:AB$ LoseLife | Cost$ T | ValidTgts$ Player | LifeAmount$ X | SpellDescription$ Text.\n\
+        SVar:X:Count$CardCounters.CHARGE\n\
+        Oracle:This artifact enters with three charge counters on it.\\n{T}: Target player loses life equal to the number of charge counters on this artifact.";
+    let mut sc = scenario(&[battery]);
+    sc.cards(P0, Zone::Battlefield, &["Plains", "Plains"]);
+    sc.card(P0, Zone::Hand, "Test Battery");
+    sc.turn(P0, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Battery").pay().pass_all();
+    let b = s.find(P0, Zone::Battlefield, "Test Battery").unwrap();
+    // A +1/+1 counter is another kind: not counted.
+    s.st.objects
+        .get_mut(&b)
+        .unwrap()
+        .counters
+        .insert(CounterKind::PlusOne, 5);
+    s.activate("Test Battery");
+    s.target_player(P1).pass_all();
+    assert_eq!(s.st.player(P1).life, 37);
+}
+
 #[test]
 fn counter_kinds_with_rules_of_their_own_are_named() {
     for (kind, why) in [

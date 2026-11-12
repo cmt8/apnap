@@ -156,6 +156,33 @@ fn num(n: u32) -> String {
     }
 }
 
+/// A Roman numeral (CR 715.2a: I represents 1, II represents 2, …).
+pub fn roman(mut n: u32) -> String {
+    const DIGITS: [(u32, &str); 13] = [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+    let mut out = String::new();
+    for (value, digits) in DIGITS {
+        while n >= value {
+            out.push_str(digits);
+            n -= value;
+        }
+    }
+    out
+}
+
 /// "second", "third" …
 fn ordinal(n: u32) -> String {
     match n {
@@ -322,7 +349,9 @@ fn amount(a: &Amount) -> String {
             }
         ),
         Amount::LifeLostThisWay => "the life lost this way".into(),
-        Amount::CountersOnThis(k) => format!("the number of {} counters on this permanent", counter(*k)),
+        Amount::CountersOnThis(k) => {
+            format!("the number of {} counters on this permanent", counter(*k))
+        }
     }
 }
 
@@ -2691,6 +2720,11 @@ fn trigger_event(t: &Trigger) -> String {
         ),
         Trigger::Blocks(f) => format!("Whenever {} blocks", obj_filter(f)),
         Trigger::BecomesTapped(f) => format!("Whenever {} becomes tapped", obj_filter(f)),
+        // CR 715.2b.
+        Trigger::Chapter(n) => format!(
+            "When one or more lore counters are put onto this Saga, if the number of lore \
+             counters on it was less than {n} and became at least {n}"
+        ),
         Trigger::BecomesBlocked(f) => format!("Whenever {} becomes blocked", obj_filter(f)),
         Trigger::Unblocked(f) => format!("Whenever {} attacks and isn't blocked", obj_filter(f)),
         Trigger::BlockedBy { attacker, blocker } => format!(
@@ -3150,6 +3184,12 @@ fn ability(a: &AbilityDef) -> String {
                 .as_ref()
                 .map_or(String::new(), |c| format!(", {}", condition(c)));
             let text = body(b);
+            // CR 715.2a: a chapter symbol, "III — [effect]".
+            if let Trigger::Chapter(n) = when
+                && intervening_if.is_none()
+            {
+                return format!("{} — {text}", roman(*n));
+            }
             let mut lower = text.clone();
             // ("X is its power": X stays a capital.)
             if !text.starts_with("X ")

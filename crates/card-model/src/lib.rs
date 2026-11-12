@@ -929,6 +929,10 @@ pub enum Trigger {
     /// tapped, whatever taps it (a cost, an effect, attacking). Entering tapped isn't
     /// becoming tapped. "It" is the permanent.
     BecomesTapped(ObjFilter),
+    /// CR 715.2b: a chapter ability, "{rN} — [effect]": "When one or more lore counters are
+    /// put onto this Saga, if the number of lore counters on it was less than N and became
+    /// at least N, [effect]." Counters it enters with count (CR 122.6).
+    Chapter(u32),
 }
 
 /// What a damage trigger's damage was dealt to.
@@ -1359,8 +1363,30 @@ pub struct CounterName {
     bytes: [u8; CounterName::MAX],
 }
 
+impl CounterKind {
+    /// Lore counters, which Sagas use to track their progress (CR 715.3).
+    pub const LORE: CounterKind = CounterKind::Named(CounterName::constant("lore"));
+}
+
 impl CounterName {
     pub const MAX: usize = 24;
+
+    /// A name known when the program is written (lower case letters only).
+    const fn constant(name: &str) -> Self {
+        let b = name.as_bytes();
+        assert!(!b.is_empty() && b.len() <= Self::MAX);
+        let mut bytes = [0u8; Self::MAX];
+        let mut i = 0;
+        while i < b.len() {
+            assert!(b[i].is_ascii_lowercase());
+            bytes[i] = b[i];
+            i += 1;
+        }
+        CounterName {
+            len: b.len() as u8,
+            bytes,
+        }
+    }
 
     /// `None` if the name is empty, too long, or not plain ASCII letters, digits, spaces or
     /// hyphens.

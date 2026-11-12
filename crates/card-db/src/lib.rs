@@ -428,6 +428,30 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                 format!("ability {i}: {m}")
             }
         };
+        // CR 715.2: a chapter ability is printed on a Saga — which enters with its lore
+        // counter (CR 715.3a; read ahead isn't built). One given to something else would
+        // be a Saga's only by a type-changing effect, which isn't built either.
+        if let AbilityDef::Triggered { when, .. } = a
+            && when
+                .events()
+                .iter()
+                .any(|t| matches!(t, card_model::Trigger::Chapter(_)))
+        {
+            let saga = c.creature_types.iter().any(|t| t == "Saga");
+            let lore = c.abilities.iter().any(|a| {
+                matches!(a, AbilityDef::Replacement {
+                    replaces: card_model::Replaces::ThisEnters,
+                    with: card_model::ReplaceWith::EntersWithCounters { kind, n: 1 },
+                } if *kind == card_model::CounterKind::LORE)
+            });
+            let alone = matches!(a, AbilityDef::Triggered { when: card_model::Trigger::Chapter(n), .. } if *n > 0);
+            if granted || !saga || !lore || !alone {
+                p.push(at(
+                    "a chapter ability (numbered from I) is printed on a Saga that enters with a lore counter"
+                        .into(),
+                ));
+            }
+        }
         // What a lasting effect carries works on no object: rules about combat and
         // prevention so far. Only there does anything mean "what the effect is about".
         // A delayed triggered ability: "at the beginning of [step]" so far, about nothing

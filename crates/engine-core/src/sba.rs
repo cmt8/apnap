@@ -7,7 +7,7 @@
 //! checked during resolution: only when a player would receive priority (CR 117.5) and in
 //! the cleanup step (CR 514.3a).
 //!
-//! Implemented: 704.5a, b, d, f, g, h, j, q. (704.5i and 704.5m–p need planeswalkers and
+//! Implemented: 704.5a, b, d, f, g, h, j, q, s. (704.5i and 704.5m–p need planeswalkers and
 //! attachments: D-023.)
 
 use crate::actions::{GameAction, execute};
@@ -167,6 +167,8 @@ pub(crate) fn gather(st: &mut GameState) -> Gathered {
             }
         }
     }
+    // CR 704.5s: a Saga past its final chapter is sacrificed.
+    g.events.extend(crate::sagas::sacrifices(st));
     for id in dt_flags {
         st.object_mut(id).deathtouch_damage = false;
     }
