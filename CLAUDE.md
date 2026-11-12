@@ -30,7 +30,8 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
 14. Replaceable events (zone moves incl. dying/destroy/discard/ETB, damage, draws, tokens,
     counters, life) are `replacement::Proposed` events pushed as `Frame::Apply` — never
     `execute`d directly from frame code (D-024). Triggers are detected only from what an
-    Apply batch performed (D-025).
+    Apply batch performed (D-025) — except "becomes tapped" (D-080): tapping is not a
+    replaceable event, so `GameAction::Tap` itself calls `triggers::detect_tapped`.
 12. Illegal responses are rejected before any mutation (state hash unchanged).
 13. No Wizards/Scryfall assets in the repo (card data/images are fetched at runtime into the
     XDG cache). Test cards are invented ("Test …"). The project is GPL-3.0-or-later (D-046):
@@ -115,6 +116,11 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
   doublers double them. A token copy of a double-faced permanent is double-faced (707.8a).
   Not built: copies of spells and abilities, "until end of turn" copies, Populate, Myriad.
   Tests: `forge_copies.rs`.
+- "This ability costs {1} less to activate for each …" is `AbilityDef::Activated::reduce`
+  (generic mana only, counted as the total cost is determined; D-080). "Their first/second
+  spell each turn" is `Trigger::Cast::nth` over `PlayerState::cast_this_turn` (each spell as
+  it was when cast). An unless-cost of {X} is the X the resolution worked out.
+  Tests: `forge_top100.rs`.
 - The text of a compiled card (`card_model::describe`) is written like a printed card:
   number words, "this creature/land/Equipment", "Then" between instructions, a predefined
   token's reminder text on first mention. The Oracle guard (`oracle_words_missing`) reads
@@ -206,9 +212,10 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-074): 11,353 of 34,463 scripts compile (32.9%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-074: 93% of
-the 100 most played Commander cards compile, 62% of the top 1,000, 37% of the top 5,000
+Status (D-080): 11,441 of 34,463 scripts compile (33.2%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-080: 97% of
+the 100 most played Commander cards compile (missing: Deflecting Swat, Path of Ancestry,
+The One Ring), 62% of the top 1,000, 37% of the top 5,000
 (`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
 the rest. Feature tests live in `crates/harness/tests/forge_features.rs` and, one file per
 feature area since D-066, `forge_<area>.rs` next to it: invented cards written
@@ -235,7 +242,7 @@ Not built yet: the full generated-text-vs-Oracle round trip (a word-level guard 
 flip, meld, prepare and specialize cards, Fuse, Aftermath, Rooms, day/night, disturb,
 craft, "enters/cast transformed" and "when this transforms" triggers (modal double-faced,
 transforming, Adventure, Omen and split cards are built, D-071), searching another player's library, "X target creatures", changing a spell's targets, delve/convoke/improvise, flashback
-given to other cards, Channel cost reductions, draw and mana replacement effects, effects that change life
+given to other cards, draw and mana replacement effects, effects that change life
 loss, memory that outlives a resolution (effect objects remembering
 cards, linked abilities per CR 607, delayed triggers that remember objects or don't wait
 for the beginning of a step), counters other than +1/+1 and
@@ -243,7 +250,7 @@ for the beginning of a step), counters other than +1/+1 and
 `ReplaceWith::EntersTappedUnless…`, the choice asked inside `ApplyFrame` as
 `ChoiceKind::AsEnters`), "sacrifice … instead" lands, "lands enter untapped", "exile it
 instead. When you do, …", static regeneration and "when it regenerates this way", abilities given to cards that aren't on
-the battlefield, "becomes tapped" and "becomes the target" triggers, protection, Sagas,
+the battlefield, "becomes the target" triggers, protection, Sagas,
 and of Forge's "Effect" objects everything but combat rules and "prevent all damage"
 (`effects::Lasting`, D-065: no triggers, no characteristic changes, nothing about
 players yet). `forge-coverage --families` ranks what is left by kind of feature.
