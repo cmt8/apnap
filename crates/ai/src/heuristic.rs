@@ -119,7 +119,8 @@ fn effect_polarity(e: &Effect) -> Polarity {
         },
         Effect::Apply { effects, .. } => continuous_polarity(effects),
         // What it does is in abilities written elsewhere on the card: no preference.
-        Effect::Lasting { .. } => Polarity::Neutral,
+        Effect::Lasting { .. } | Effect::DelayedTrigger { .. } => Polarity::Neutral,
+        Effect::DrawUpTo { .. } => Polarity::Neutral,
         // Its own permanent turning over: no target to judge.
         Effect::Transform { .. } => Polarity::Neutral,
         Effect::May(inner) => effect_polarity(inner),
@@ -1370,6 +1371,8 @@ impl Agent for HeuristicAgent {
                     .take(*max)
                     .collect(),
             ),
+            // "Draw up to N cards": all of them.
+            (ChoiceKind::DrawUpTo, Primitive::PickNumber { max, .. }) => Response::Number(*max),
             // "Untap up to N lands": its own permanents, as many as allowed.
             (ChoiceKind::Untap, Primitive::PickN { max, .. }) => Response::Pick(
                 d.options

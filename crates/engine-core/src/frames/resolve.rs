@@ -146,6 +146,8 @@ pub enum Work {
     },
     /// CR 701.34a: the controller proliferates.
     Proliferate,
+    /// `player` chooses how many cards, up to `max`, to draw; then draws them.
+    DrawUpTo { player: PlayerId, max: u32 },
 }
 
 /// One of "those cards" (D-069): a card an instruction of this resolution moved, or a
@@ -999,6 +1001,30 @@ impl ResolveFrame {
                         );
                     }
                 }
+                Work::DrawUpTo { player, max } => {
+                    let n = match input.take() {
+                        Some(inp) => match inp.response {
+                            crate::decision::Response::Number(n) => n,
+                            ref r => unreachable!("not a number: {r:?}"),
+                        },
+                        None if st.in_game(player) && max > 0 => {
+                            self.work.push(Work::DrawUpTo { player, max });
+                            return Flow::ask(
+                                Frame::Resolve(Box::new(self)),
+                                player,
+                                ChoiceKind::DrawUpTo,
+                                Primitive::PickNumber { min: 0, max },
+                                Vec::new(),
+                            );
+                        }
+                        None => 0,
+                    };
+                    if n > 0 {
+                        let events = (0..n).map(|_| Proposed::Draw { player }).collect();
+                        let apply = self.apply(st, events);
+                        return Flow::Continue(vec![Frame::Resolve(Box::new(self)), apply]);
+                    }
+                }
                 Work::Proliferate => {
                     if let Some(inp) = input.take() {
                         // One event: another counter of each kind on each one, at once.
@@ -1019,11 +1045,8 @@ impl ResolveFrame {
                             })
                             .collect();
                         if !events.is_empty() {
-                            let apply = ApplyFrame::new(st, events);
-                            return Flow::Continue(vec![
-                                Frame::Resolve(Box::new(self)),
-                                Frame::Apply(apply),
-                            ]);
+                            let apply = self.apply(st, events);
+                            return Flow::Continue(vec![Frame::Resolve(Box::new(self)), apply]);
                         }
                         continue;
                     }
@@ -2368,6 +2391,52 @@ impl ResolveFrame {
             }
             Effect::Proliferate => {
                 self.work.push(Work::Proliferate);
+                Vec::new()
+            }
+            Effect::DrawUpTo { who, amount } => {
+                let max = self.amount(st, k, &amount);
+                if let Some(player) = self.player(st, k, who) {
+                    self.work.push(Work::DrawUpTo { player, max });
+                }
+                Vec::new()
+            }
+            // CR 603.7: what it remembers is fixed now (603.7c).
+            Effect::DelayedTrigger {
+                ability,
+                window,
+                player,
+                amount,
+            } => {
+                let turn = st.turn.turn_number;
+                let facts = crate::triggers::EventFacts {
+                    player: player.and_then(|p| self.player(st, k, p)),
+                    amount: amount.map_or(0, |a| self.amount(st, k, &a)),
+                    moved: None,
+                };
+                // A "that player" who is gone: nothing for it to refer to.
+                if player.is_none() || facts.player.is_some() {
+                    let (from_turn, until_turn) = match window {
+                        card_model::DelayWindow::Next => (turn, None),
+                        card_model::DelayWindow::ThisTurn => (turn, Some(turn)),
+                        card_model::DelayWindow::NextTurn => (turn + 1, Some(turn + 1)),
+                    };
+                    let delayed = crate::effects::Delayed {
+                        id: 0,
+                        ability: card_model::AbilityId {
+                            card: self.card,
+                            index: ability,
+                            granted: true,
+                        },
+                        source: self.source,
+                        source_card: self.card,
+                        source_lki: self.source_chars(st),
+                        controller: self.controller,
+                        facts,
+                        from_turn,
+                        until_turn,
+                    };
+                    execute(st, GameAction::AddDelayed { delayed });
+                }
                 Vec::new()
             }
             Effect::UntapChosen { what, count } => {

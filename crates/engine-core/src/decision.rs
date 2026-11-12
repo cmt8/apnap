@@ -131,6 +131,8 @@ pub enum ChoiceKind {
     /// CR 701.34a: proliferate — choose any number of the permanents that have a counter
     /// (PickN over `OptionDesc::Card`).
     Proliferate,
+    /// "Draw up to N cards": how many (PickNumber).
+    DrawUpTo,
 }
 
 /// A structured description of one option. Frames read the chosen option back from the

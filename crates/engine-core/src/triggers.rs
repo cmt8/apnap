@@ -441,17 +441,7 @@ pub(crate) fn detect_step(st: &mut GameState, step: Step) {
                 let Trigger::BeginningOf { step: ts, whose } = t else {
                     continue;
                 };
-                let step_matches = matches!(
-                    (ts, step),
-                    (TriggerStep::Upkeep, Step::Upkeep)
-                        | (TriggerStep::DrawStep, Step::Draw)
-                        | (TriggerStep::EndStep, Step::End)
-                        | (TriggerStep::BeginCombat, Step::BeginningOfCombat)
-                        | (TriggerStep::EndCombat, Step::EndOfCombat)
-                        | (TriggerStep::PrecombatMain, Step::PrecombatMain)
-                        | (TriggerStep::PostcombatMain, Step::PostcombatMain)
-                );
-                if step_matches && who_matches(*whose, active, src.controller) {
+                if step_matches(*ts, step) && who_matches(*whose, active, src.controller) {
                     found.push(PendingTrigger {
                         controller: src.controller,
                         source: src.id,
@@ -471,7 +461,62 @@ pub(crate) fn detect_step(st: &mut GameState, step: Step) {
             }
         }
     }
+    // CR 603.7: delayed triggered abilities waiting for this step. Each triggers once
+    // (603.7c); one whose controller has left the game never does (CR 800.4a).
+    let turn = st.turn.turn_number;
+    let mut fired = Vec::new();
+    for d in &st.delayed {
+        if d.from_turn > turn || !st.in_game(d.controller) {
+            continue;
+        }
+        let AbilityDef::Triggered { when, .. } = st.catalog.ability(d.ability) else {
+            continue;
+        };
+        let hit = when.events().into_iter().any(|t| {
+            matches!(t, Trigger::BeginningOf { step: ts, whose }
+                if step_matches(*ts, step) && who_matches(*whose, active, d.controller))
+        });
+        if hit {
+            fired.push(d.id);
+            found.push(PendingTrigger {
+                controller: d.controller,
+                source: d.source,
+                source_card: d.source_card,
+                ability: d.ability,
+                source_lki: if st.objects.contains_key(&d.source) {
+                    None
+                } else {
+                    d.source_lki.clone()
+                },
+                subject: None,
+                subject_lki: None,
+                // "That player": the one it remembers, else the player whose step it is.
+                facts: EventFacts {
+                    player: d.facts.player.or(Some(active)),
+                    ..d.facts
+                },
+            });
+            conds.push(None);
+        }
+    }
+    for id in fired {
+        crate::actions::execute(st, crate::actions::GameAction::RemoveDelayed { id });
+    }
     queue_matching(st, found, conds);
+}
+
+/// Does a trigger's step name this step?
+fn step_matches(ts: TriggerStep, step: Step) -> bool {
+    matches!(
+        (ts, step),
+        (TriggerStep::Upkeep, Step::Upkeep)
+            | (TriggerStep::DrawStep, Step::Draw)
+            | (TriggerStep::EndStep, Step::End)
+            | (TriggerStep::BeginCombat, Step::BeginningOfCombat)
+            | (TriggerStep::EndCombat, Step::EndOfCombat)
+            | (TriggerStep::PrecombatMain, Step::PrecombatMain)
+            | (TriggerStep::PostcombatMain, Step::PostcombatMain)
+    )
 }
 
 /// CR 508.1m: "whenever [a creature] attacks" triggers, as attackers are declared.
