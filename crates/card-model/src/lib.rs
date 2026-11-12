@@ -1434,6 +1434,13 @@ pub enum TargetFilter {
     /// noncreature spell", "target instant or sorcery spell". Only the card types,
     /// subtypes and colors of the selector are looked at.
     SpellMatching(Selector),
+    /// A spell — or (`abilities`) a spell or an activated or triggered ability — on the
+    /// stack; with `single_target`, one that has exactly one target ("target spell with a
+    /// single target").
+    OnStack {
+        abilities: bool,
+        single_target: bool,
+    },
 }
 
 impl TargetFilter {
@@ -2063,6 +2070,16 @@ pub enum Effect {
     Regenerate {
         what: ObjRef,
     },
+    /// CR 115.7: change the targets of the spell or ability in target slot `what`. `single`:
+    /// "change the target of target spell with a single target" (CR 115.7a — to another
+    /// legal target if there is one, else it stays); otherwise "you may choose new targets
+    /// for target spell" (CR 115.7d — each target may be kept or changed to a legal one).
+    /// The new targets are chosen by this spell's controller; legal is as for the changed
+    /// spell or ability and its controller. Modes, X and divisions stay (CR 115.7f).
+    ChangeTargets {
+        what: TargetRef,
+        single: bool,
+    },
     /// "[Destroy …]. It can't be regenerated." (CR 701.19c): the destruction this
     /// instruction — a `Destroy` or `DestroyAll` — causes can't be replaced by
     /// regeneration.
@@ -2222,6 +2239,7 @@ impl Effect {
             | Effect::Proliferate
             | Effect::Shuffle { .. }
             | Effect::Regenerate { .. }
+            | Effect::ChangeTargets { .. }
             | Effect::Lasting { .. }
             | Effect::Choose(_)
             | Effect::BecomeCopy { .. } => {}

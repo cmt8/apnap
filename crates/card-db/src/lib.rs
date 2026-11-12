@@ -1653,6 +1653,15 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             other => p(format!("Counter needs a Spell target slot, got {other:?}")),
         },
         Effect::EachPlayer(_) => {}
+        // CR 115.7: a spell or ability on the stack, as a target.
+        Effect::ChangeTargets { what, .. } => match slot(what) {
+            Some(
+                TargetFilter::Spell | TargetFilter::SpellMatching(_) | TargetFilter::OnStack { .. },
+            ) => {}
+            other => p(format!(
+                "ChangeTargets needs a target on the stack, got {other:?}"
+            )),
+        },
         Effect::DamageEachPlayer { amount: a } => amount(a, p),
         Effect::Destroy { what } | Effect::ReturnToHand { what } | Effect::Apply { what, .. } => {
             obj(what, p)

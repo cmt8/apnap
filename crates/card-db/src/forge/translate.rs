@@ -1536,6 +1536,10 @@ impl<'a> Tx<'a> {
                         | TargetFilter::Permanent(_)
                         | TargetFilter::Spell
                         | TargetFilter::SpellMatching(_)
+                        | TargetFilter::OnStack {
+                            abilities: false,
+                            ..
+                        }
                 ) {
                     self.block(format!("defined:{name} of a player or card"));
                     return None;
@@ -2247,6 +2251,49 @@ impl<'a> Tx<'a> {
                     Effect::Seq(vec![dig, Effect::May(Box::new(Effect::Shuffle { who }))])
                 } else {
                     dig
+                }
+            }
+            // CR 115.7: "you may choose new targets for target spell [or ability]" (`Optional$`)
+            // or "change the target of target spell with a single target" (`TargetType$
+            // Spell.singleTarget`). Forge's ChangeTargetsEffect; its other forms (one target
+            // of several, a fixed new target, random targets, a restriction on the new
+            // target, another chooser) are not read and block.
+            "ChangeTargets" => {
+                let kind = rd.get("TargetType");
+                let optional = rd.get("Optional").is_some();
+                let valid = rd.get("ValidTgts");
+                let (abilities, single_target) = match kind {
+                    Some("Spell") => (false, false),
+                    Some("Spell.singleTarget") => (false, true),
+                    Some("Spell,Activated,Triggered") => (true, false),
+                    Some("SpellAbility.singleTarget") => (true, true),
+                    other => {
+                        self.block(format!("ChangeTargets:TargetType {}", other.unwrap_or("?")));
+                        return None;
+                    }
+                };
+                if !matches!(valid, Some("Card" | "Card,Emblem" | "Spell")) {
+                    self.block(format!("ChangeTargets:ValidTgts {}", valid.unwrap_or("?")));
+                    return None;
+                }
+                // "You may choose new targets" (115.7d) or "change the target" of a spell
+                // with one (115.7a); not the other two pairings.
+                let single = match (optional, single_target) {
+                    (true, false) => false,
+                    (false, true) => true,
+                    _ => {
+                        self.block("ChangeTargets:Optional with singleTarget");
+                        return None;
+                    }
+                };
+                rd.get("TgtPrompt");
+                chain.targets.push(TargetFilter::OnStack {
+                    abilities,
+                    single_target,
+                });
+                Effect::ChangeTargets {
+                    what: TargetRef::Target(chain.targets.len() as u8 - 1),
+                    single,
                 }
             }
             // CR 603.7: "at the beginning of the next …, [do something]".
@@ -3324,6 +3371,10 @@ impl<'a> Tx<'a> {
                         | TargetFilter::Permanent(_)
                         | TargetFilter::Spell
                         | TargetFilter::SpellMatching(_)
+                        | TargetFilter::OnStack {
+                            abilities: false,
+                            ..
+                        }
                 ) {
                     self.block("unless:payer of a player or card");
                     return None;

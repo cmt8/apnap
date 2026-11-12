@@ -143,6 +143,13 @@ pub enum ChoiceKind {
         object: ObjectId,
         ability: Option<AbilityId>,
     },
+    /// CR 115.7: a new target for target `slot` (counted over all the modes) of the spell
+    /// or ability `object` (`Target` options). Under "choose new targets" (115.7d) its
+    /// current target is offered first, to keep it.
+    NewTarget {
+        object: ObjectId,
+        slot: u8,
+    },
 }
 
 /// A structured description of one option. Frames read the chosen option back from the

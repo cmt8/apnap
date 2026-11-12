@@ -281,6 +281,11 @@ pub enum GameAction {
         object: ObjectId,
         power: u32,
     },
+    /// CR 115.7: the spell or ability `object` on the stack now has these targets.
+    SetTargets {
+        object: ObjectId,
+        targets: Vec<Vec<crate::stack::Target>>,
+    },
     /// CR 506.4: an attacking or blocking creature that stopped being a creature is
     /// removed from combat.
     RemoveFromCombat {
@@ -744,6 +749,13 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             let mana = r.mana;
             pl.mana_pool.add(mana, amount);
             pl.restricted_mana.retain(|r| r.amount > 0);
+            ActionResult::Done
+        }
+        GameAction::SetTargets { object, targets } => {
+            if let Some(so) = st.stack.iter_mut().find(|s| s.id == object) {
+                so.targets = targets;
+            }
+            st.emit(Event::TargetsChanged { object });
             ActionResult::Done
         }
         GameAction::SetSacrificedPower { object, power } => {

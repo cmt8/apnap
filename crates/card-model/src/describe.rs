@@ -354,6 +354,14 @@ fn target_filter_plural(f: &TargetFilter, plain: bool) -> String {
         TargetFilter::Player => "target players".to_string(),
         TargetFilter::Opponent => "target opponents".to_string(),
         TargetFilter::Spell => target("spells".to_string()),
+        TargetFilter::OnStack { abilities, .. } => target(
+            if *abilities {
+                "spells or abilities"
+            } else {
+                "spells"
+            }
+            .to_string(),
+        ),
         TargetFilter::SpellMatching(s) => target(format!("{} spells", spell_kind(s))),
         TargetFilter::Permanent(selectors) => {
             let parts: Vec<String> = selectors.iter().map(|s| selector(s, true)).collect();
@@ -424,6 +432,18 @@ fn target_filter_words(f: &TargetFilter) -> String {
         TargetFilter::Player => "target player".into(),
         TargetFilter::Opponent => "target opponent".into(),
         TargetFilter::Spell => "target spell".into(),
+        TargetFilter::OnStack {
+            abilities,
+            single_target,
+        } => format!(
+            "target spell{}{}",
+            if *abilities { " or ability" } else { "" },
+            if *single_target {
+                " with a single target"
+            } else {
+                ""
+            }
+        ),
         TargetFilter::SpellMatching(s) => {
             format!("target {} spell{}", spell_kind(s), of_chosen(s, false))
         }
@@ -628,6 +648,12 @@ fn later_mention(mode: &Mode, i: usize) -> Option<String> {
             TargetFilter::Creature => "that creature".to_string(),
             TargetFilter::Player | TargetFilter::Opponent => "that player".to_string(),
             TargetFilter::Spell | TargetFilter::SpellMatching(_) => "that spell".to_string(),
+            TargetFilter::OnStack {
+                abilities: false, ..
+            } => "that spell".to_string(),
+            TargetFilter::OnStack {
+                abilities: true, ..
+            } => "it".to_string(),
             TargetFilter::AnyTarget => "it".to_string(),
             TargetFilter::CardInGraveyard { .. } => "that card".to_string(),
             TargetFilter::Permanent(sels) => match sels.as_slice() {
@@ -1597,6 +1623,13 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             format!("{}. If you do, {}", effect(mode, first), effect(mode, then))
         }
         Effect::Proliferate => "proliferate".to_string(),
+        Effect::ChangeTargets { what, single } => {
+            if *single {
+                format!("change the target of {}", target(mode, *what))
+            } else {
+                format!("you may choose new targets for {}", target(mode, *what))
+            }
+        }
         Effect::Regenerate { what } => format!("regenerate {}", obj(mode, *what)),
         Effect::CantBeRegenerated(inner) => format!(
             "{}. {} can't be regenerated",

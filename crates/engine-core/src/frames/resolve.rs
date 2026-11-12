@@ -148,6 +148,14 @@ pub enum Work {
     Proliferate,
     /// `player` chooses how many cards, up to `max`, to draw; then draws them.
     DrawUpTo { player: PlayerId, max: u32 },
+    /// CR 115.7: the controller chooses new targets for the spell or ability `object`, slot
+    /// by slot (`chosen` so far, all its targets in order); `single`: "change the target"
+    /// (115.7a), else "choose new targets" (115.7d).
+    ChangeTargets {
+        object: ObjectId,
+        single: bool,
+        chosen: Vec<Target>,
+    },
     /// "Choose a creature type." (CR 608.2c): the controller chooses now; the instructions
     /// after it read the choice (`ResolveFrame::chosen`).
     Choose { what: card_model::ChoiceOf },
@@ -1050,6 +1058,119 @@ impl ResolveFrame {
                             Primitive::PickN { min: 0, max },
                             options,
                         );
+                    }
+                }
+                Work::ChangeTargets {
+                    object,
+                    single,
+                    mut chosen,
+                } => {
+                    let Some(so) = st.stack_object(object).cloned() else {
+                        continue;
+                    };
+                    let Some((filters, groups)) = stack_target_rules(st, &so) else {
+                        continue;
+                    };
+                    let old: Vec<Target> = so.all_targets().copied().collect();
+                    if let Some(inp) = input.take() {
+                        match inp.picked_one() {
+                            Some(OptionDesc::Target { target }) => chosen.push(*target),
+                            o => unreachable!("not a target: {o:?}"),
+                        }
+                    }
+                    let this = Some(so.id);
+                    let source = match &so.kind {
+                        StackKind::Ability { source, .. } => Some(*source),
+                        StackKind::Spell => None,
+                    };
+                    // The slots in order: (mode index, slot).
+                    let slots: Vec<(usize, usize)> = filters
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(k, fs)| (0..fs.len()).map(move |i| (k, i)))
+                        .filter(|(k, i)| so.targets.get(*k).is_some_and(|t| *i < t.len()))
+                        .collect();
+                    if let Some(&(k, i)) = slots.get(chosen.len()) {
+                        let current = so.targets[k][i];
+                        // CR 115.3: one instance of "target" names each object once — not
+                        // the targets the other slots of its group have (new or kept).
+                        let same_group = |a: usize, b: usize| {
+                            groups[k].iter().any(|g| {
+                                let r = g.first as usize..(g.first + g.count) as usize;
+                                r.contains(&a) && r.contains(&b)
+                            })
+                        };
+                        let taken: Vec<Target> = slots
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, (k2, i2))| *k2 == k && *i2 != i && same_group(i, *i2))
+                            .map(|(n, (k2, i2))| {
+                                chosen.get(n).copied().unwrap_or(so.targets[*k2][*i2])
+                            })
+                            .collect();
+                        let legal: Vec<Target> = crate::targeting::candidates(
+                            st,
+                            &filters[k][i],
+                            so.controller,
+                            this,
+                            source,
+                        )
+                        .into_iter()
+                        .filter(|t| *t != current && !taken.contains(t))
+                        .collect();
+                        let mut options: Vec<OptionDesc> = Vec::new();
+                        // CR 115.7d: any target may be left unchanged, even an illegal one.
+                        // CR 115.7a: "change the target" — to another legal one, if any.
+                        if !single || legal.is_empty() {
+                            options.push(OptionDesc::Target { target: current });
+                        }
+                        options.extend(
+                            legal
+                                .into_iter()
+                                .map(|target| OptionDesc::Target { target }),
+                        );
+                        // Nothing to decide: the one choice there is.
+                        if options.len() == 1 || !st.in_game(self.controller) {
+                            chosen.push(match options.first() {
+                                Some(OptionDesc::Target { target })
+                                    if st.in_game(self.controller) =>
+                                {
+                                    *target
+                                }
+                                _ => current,
+                            });
+                            self.work.push(Work::ChangeTargets {
+                                object,
+                                single,
+                                chosen,
+                            });
+                            continue;
+                        }
+                        let controller = self.controller;
+                        let slot = chosen.len() as u8;
+                        self.work.push(Work::ChangeTargets {
+                            object,
+                            single,
+                            chosen,
+                        });
+                        return Flow::ask_one(
+                            Frame::Resolve(Box::new(self)),
+                            controller,
+                            ChoiceKind::NewTarget { object, slot },
+                            options,
+                        );
+                    }
+                    // Every slot answered: the new set, if anything changed (CR 115.7e: only
+                    // the final set is judged — each pick was legal given the others).
+                    if chosen != old {
+                        let mut targets = so.targets.clone();
+                        let mut it = chosen.into_iter();
+                        for t in targets.iter_mut().flatten() {
+                            if let Some(n) = it.next() {
+                                *t = n;
+                            }
+                        }
+                        execute(st, GameAction::SetTargets { object, targets });
                     }
                 }
                 Work::DrawUpTo { player, max } => {
@@ -2554,6 +2675,19 @@ impl ResolveFrame {
                 self.work.push(Work::Shuffle { players });
                 Vec::new()
             }
+            // CR 115.7: the spell or ability in that target slot, if still legal.
+            Effect::ChangeTargets { what, single } => {
+                if let Some(Target::Object(object)) = self.target(st, k, what)
+                    && st.stack_object(object).is_some()
+                {
+                    self.work.push(Work::ChangeTargets {
+                        object,
+                        single,
+                        chosen: Vec::new(),
+                    });
+                }
+                Vec::new()
+            }
             Effect::DrawUpTo { who, amount } => {
                 let max = self.amount(st, k, &amount);
                 if let Some(player) = self.player(st, k, who) {
@@ -2865,6 +2999,40 @@ impl ResolveFrame {
             None => Flow::done(),
         }
     }
+}
+
+/// Per chosen mode: each target slot's filter, and the groups of slots.
+type TargetRules = (Vec<Vec<TargetFilter>>, Vec<Vec<card_model::TargetGroup>>);
+
+/// The target rules of a spell or ability on the stack, per chosen mode: each slot's filter,
+/// and the groups of slots that are one instance of "target" (CR 115.3). An Aura spell has
+/// one: what it may enchant (CR 303.4a).
+fn stack_target_rules(
+    st: &GameState,
+    so: &crate::stack::StackObject,
+) -> Option<TargetRules> {
+    let body = match &so.kind {
+        StackKind::Spell => match super::altcost::spell_body(st, so.id) {
+            Some(b) => b,
+            None => {
+                let enchant = st.card_def(so.id).enchant()?;
+                return Some((vec![vec![enchant]], vec![Vec::new()]));
+            }
+        },
+        StackKind::Ability { ability, .. } => match st.catalog.ability(*ability) {
+            AbilityDef::Activated { body, .. } | AbilityDef::Triggered { body, .. } => body.clone(),
+            _ => return None,
+        },
+    };
+    let modes: Vec<&card_model::Mode> = so
+        .modes
+        .iter()
+        .filter_map(|&m| body.modes().get(m as usize))
+        .collect();
+    Some((
+        modes.iter().map(|m| m.targets.clone()).collect(),
+        modes.iter().map(|m| m.groups.clone()).collect(),
+    ))
 }
 
 /// CR 205.3i: do the two cards have a land type in common (a basic land type, or another
