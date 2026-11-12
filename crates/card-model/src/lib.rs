@@ -512,6 +512,14 @@ pub enum Keyword {
     /// (CR 604.3): it works in every zone and is applied first in layer 4 (CR 613.3), so an
     /// object that loses it later in the walk (layer 6) is still every creature type.
     Changeling,
+    /// CR 702.51a: "For each colored mana in this spell's total cost, you may tap an
+    /// untapped creature of that color you control rather than pay that mana. For each
+    /// generic mana in this spell's total cost, you may tap an untapped creature you
+    /// control rather than pay that mana."
+    Convoke,
+    /// CR 702.126a: "For each generic mana in this spell's total cost, you may tap an
+    /// untapped artifact you control rather than pay that mana."
+    Improvise,
 }
 
 /// One ability printed on a card (CR 113).
@@ -1608,6 +1616,15 @@ pub struct Cost {
     /// modify putting counters apply).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub add_counters: Option<(CounterKind, u32)>,
+    /// "Tap N untapped [permanents] you control" (Forge's `tapXType`): chosen as the cost
+    /// is paid (CR 601.2h). Not `{T}`: a creature tapped this way needn't have been under
+    /// its controller's control since their turn began (CR 302.6 is about `{T}` abilities).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap_others: Option<CostChoice>,
+    /// CR 702.122a: "Crew N" — tap any number of other untapped creatures you control with
+    /// total power N or greater.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crew: Option<u32>,
 }
 
 impl Cost {
@@ -1635,6 +1652,8 @@ impl Cost {
             life_x: self.life_x || other.life_x,
             remove_counters: one(&self.remove_counters, &other.remove_counters)?,
             add_counters: one(&self.add_counters, &other.add_counters)?,
+            tap_others: one(&self.tap_others, &other.tap_others)?,
+            crew: one(&self.crew, &other.crew)?,
         })
     }
 }

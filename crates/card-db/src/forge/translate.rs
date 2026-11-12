@@ -5560,6 +5560,12 @@ impl<'a> Tx<'a> {
             return None;
         };
         let (cost, only_if, spend, then) = (cost?, only_if?, spend?, then?);
+        // Tapping other permanents in a mana ability's cost (Springleaf Drum): the payment
+        // planner doesn't know such abilities yet.
+        if cost.tap_others.is_some() {
+            self.block("Mana:cost tapXType");
+            return None;
+        }
         // D-066: `{T}` or a sacrifice, maybe mana and life; one permanent sacrificed.
         let uses_up = cost.tap || cost.sacrifice_self || cost.sacrifice.is_some();
         let other = cost.discard.is_some() || cost.discard_self || cost.exile_self;
@@ -5763,6 +5769,32 @@ impl<'a> Tx<'a> {
                         return None;
                     }
                     *slot = Some(CostChoice { count, what });
+                }
+                // "Tap N untapped [permanents] you control" (`tapXType<N/Type>`; Forge's
+                // CostTapType: untapped permanents the activator controls matching the
+                // type, the ability's source included unless the type says `Other`).
+                ("tapXType", true) => {
+                    let (Some(count), Some(types)) = (count.filter(|n| *n > 0), args.get(1)) else {
+                        self.block("cost:tapXType-amount");
+                        return None;
+                    };
+                    let mut what = Vec::new();
+                    for alt in types.split(';') {
+                        match self.alt(alt.trim())? {
+                            Alt::Sel(s) if s.controller == Who::Any && s.owner == Who::Any => {
+                                what.push(s)
+                            }
+                            _ => {
+                                self.block("cost:tapXType-filter");
+                                return None;
+                            }
+                        }
+                    }
+                    if cost.tap_others.is_some() {
+                        self.block("cost:tapXType-twice");
+                        return None;
+                    }
+                    cost.tap_others = Some(CostChoice { count, what });
                 }
                 ("PayLife", true) => match count {
                     Some(n) if cost.life == 0 && n > 0 => cost.life = n,
@@ -9391,6 +9423,54 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
             def.keywords.push(Keyword::Changeling);
             continue;
         }
+        // CR 702.51, 702.126: printed on the spell (one given by another effect isn't
+        // known: `keyword` doesn't name them).
+        if k == "Convoke" || k == "Improvise" {
+            def.keywords.push(if k == "Convoke" {
+                Keyword::Convoke
+            } else {
+                Keyword::Improvise
+            });
+            continue;
+        }
+        // CR 702.122a: "Crew N" means "Tap any number of other untapped creatures you
+        // control with total power N or greater: This permanent becomes an artifact
+        // creature until end of turn."
+        if let Some(n) = k.strip_prefix("Crew:") {
+            match n.trim().parse::<u32>() {
+                Ok(n) if n > 0 => {
+                    abilities.push((
+                        0,
+                        AbilityDef::Activated {
+                            cost: Cost {
+                                crew: Some(n),
+                                ..Cost::default()
+                            },
+                            timing: Timing::Instant,
+                            only_if: None,
+                            body: Body::Effect(Mode {
+                                targets: Vec::new(),
+                                effect: Effect::Apply {
+                                    what: ObjRef::This,
+                                    effects: vec![ContinuousEffect::AddTypes {
+                                        card_types: vec![CardType::Artifact, CardType::Creature],
+                                        subtypes: Vec::new(),
+                                        land_types: Vec::new(),
+                                    }],
+                                    until_end_of_turn: true,
+                                },
+                                groups: Vec::new(),
+                            }),
+                            from: ActivationZone::Battlefield,
+                            cycling: false,
+                            reduce: None,
+                        },
+                    ));
+                }
+                _ => tx.block(format!("kw:Crew {}", shape(n))),
+            }
+            continue;
+        }
         match keyword(k) {
             Some(k) => def.keywords.push(k),
             None => {
@@ -9636,6 +9716,13 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
         };
         if sentences(plain, &["copy", "except"]) > 0 && !has_word(compiled, "except") {
             missing.push("says except");
+        }
+        // "Tap two other untapped creatures you control": a script may let the source
+        // itself be tapped (Tidal Terror). (With `{T}` in the same cost it can't be.)
+        let other_untapped =
+            |t: &str| t.contains("other untapped") || t.contains("another untapped");
+        if other_untapped(plain) && !other_untapped(compiled) && !compiled.contains("{t}, tap ") {
+            missing.push("says other untapped");
         }
         // "You may choose new targets for the copy": some scripts allow it where the card
         // doesn't (Reflections of Littjara).
@@ -10020,6 +10107,38 @@ mod tests {
             vec![],
         ));
         assert!(has_word(&t, "damage") && t.contains("it deals"), "{t}");
+        // "other untapped" (a cost that taps other permanents than its source)
+        let t = text(&CardDef {
+            name: "Test".into(),
+            card_types: vec![CardType::Creature],
+            power: Some(1),
+            toughness: Some(1),
+            abilities: vec![AbilityDef::Activated {
+                cost: Cost {
+                    tap_others: Some(card_model::CostChoice {
+                        count: 2,
+                        what: vec![Selector {
+                            types: vec![CardType::Creature],
+                            other: true,
+                            ..Selector::default()
+                        }],
+                    }),
+                    ..Cost::default()
+                },
+                timing: card_model::Timing::Instant,
+                only_if: None,
+                body: Body::Effect(Mode {
+                    targets: vec![],
+                    effect: draw.clone(),
+                    groups: vec![],
+                }),
+                from: card_model::ActivationZone::Battlefield,
+                cycling: false,
+                reduce: None,
+            }],
+            ..CardDef::default()
+        });
+        assert!(t.contains("other untapped"), "{t}");
         // "you may choose new targets for the copy"
         let t = text(&spell(
             vec![TargetFilter::Spell],

@@ -38,6 +38,8 @@ pub fn keyword(k: Keyword) -> &'static str {
         Keyword::Horsemanship => "Horsemanship",
         Keyword::Flanking => "Flanking",
         Keyword::Changeling => "Changeling",
+        Keyword::Convoke => "Convoke",
+        Keyword::Improvise => "Improvise",
         Keyword::Landwalk(crate::BasicLandType::Plains) => "Plainswalk",
         Keyword::Landwalk(crate::BasicLandType::Island) => "Islandwalk",
         Keyword::Landwalk(crate::BasicLandType::Swamp) => "Swampwalk",
@@ -2722,6 +2724,32 @@ fn cost_parts(c: &Cost) -> Vec<String> {
             format!("Exile {} {what}s from your hand", number_word(e.count))
         });
     }
+    if let Some(t) = &c.tap_others {
+        // "Tap another untapped Citizen you control".
+        let other = t.what.iter().all(|s| s.other);
+        let what: Vec<String> = t
+            .what
+            .iter()
+            .map(|s| {
+                let mut s = s.clone();
+                s.controller = Who::You;
+                s.other = false;
+                selector(&s, t.count != 1)
+            })
+            .collect();
+        let what = join(what, "or");
+        parts.push(match (t.count, other) {
+            (1, false) => format!("Tap an untapped {what}"),
+            (1, true) => format!("Tap another untapped {what}"),
+            (n, false) => format!("Tap {} untapped {what}", num(n)),
+            (n, true) => format!("Tap {} other untapped {what}", num(n)),
+        });
+    }
+    if let Some(n) = c.crew {
+        parts.push(format!(
+            "Tap any number of other untapped creatures you control with total power {n} or greater"
+        ));
+    }
     if let Some(r) = &c.return_to_hand {
         let mut what: Vec<String> = Vec::new();
         for s in &r.what {
@@ -3238,6 +3266,38 @@ fn ability(a: &AbilityDef) -> String {
             } else {
                 format!("Cycling—{rest}")
             }
+        }
+        // CR 702.122a: "Crew N" means "Tap any number of other untapped creatures you
+        // control with total power N or greater: This permanent becomes an artifact creature
+        // until end of turn."
+        AbilityDef::Activated {
+            cost: Cost { crew: Some(n), .. },
+            body:
+                Body::Effect(Mode {
+                    effect:
+                        Effect::Apply {
+                            what: ObjRef::This,
+                            effects,
+                            until_end_of_turn: true,
+                        },
+                    targets,
+                    ..
+                }),
+            timing: Timing::Instant,
+            only_if: None,
+            from: ActivationZone::Battlefield,
+            reduce: None,
+            ..
+        } if targets.is_empty()
+            && matches!(effects.as_slice(), [ContinuousEffect::AddTypes {
+                card_types,
+                subtypes,
+                land_types,
+            }] if subtypes.is_empty()
+                && land_types.is_empty()
+                && card_types.as_slice() == [CardType::Artifact, CardType::Creature]) =>
+        {
+            format!("Crew {n}")
         }
         AbilityDef::Activated {
             cost: c,

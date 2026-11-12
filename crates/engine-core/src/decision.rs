@@ -150,6 +150,9 @@ pub enum ChoiceKind {
         object: ObjectId,
         slot: u8,
     },
+    /// CR 601.2h: the permanents to tap for a cost ("tap two untapped artifacts you
+    /// control"; crew, one creature at a time, `Decline` once enough power is tapped).
+    TapForCost,
 }
 
 /// A structured description of one option. Frames read the chosen option back from the
@@ -266,6 +269,12 @@ pub enum OptionDesc {
     /// A color to choose (CR 105.4).
     Color {
         color: card_model::Color,
+    },
+    /// CR 702.51a, 702.126a: tap this untapped creature or artifact to pay one mana of the
+    /// spell's total cost — a mana of `mana`'s color, or (`None`) one generic mana.
+    TapToPay {
+        source: ObjectId,
+        mana: Option<crate::mana::ManaType>,
     },
 }
 

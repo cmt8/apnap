@@ -391,6 +391,7 @@ pub fn prompt(kind: ChoiceKind) -> &'static str {
         ChoiceKind::ExileFromHand => "Exile from your hand to pay the cost",
         ChoiceKind::ReturnToHand => "Return to its owner's hand to pay the cost",
         ChoiceKind::DrawUpTo => "How many cards do you draw?",
+        ChoiceKind::TapForCost => "Choose what to tap for the cost",
         ChoiceKind::NewTarget { .. } => {
             "Choose a new target (the first option keeps the current one)"
         }
@@ -421,6 +422,7 @@ pub fn anchor(o: &OptionDesc) -> Option<Anchor> {
         | OptionDesc::Card { card } => Anchor::Obj(*card),
         OptionDesc::ActivateAbility { source, .. }
         | OptionDesc::TapForMana { source, .. }
+        | OptionDesc::TapToPay { source, .. }
         | OptionDesc::Replacement { source, .. }
         | OptionDesc::Trigger { source, .. } => Anchor::Obj(*source),
         OptionDesc::DamageRecipient { object } => Anchor::Obj(*object),
@@ -527,7 +529,10 @@ pub fn option_label(
         },
         OptionDesc::Color { color } => format!("{color:?}"),
         OptionDesc::Accept => "Yes".into(),
+        OptionDesc::Decline if d.kind == ChoiceKind::TapForCost => "Tap no more".into(),
         OptionDesc::Decline => "No".into(),
+        OptionDesc::TapToPay { mana: Some(m), .. } => format!("Tap to pay one {m:?} mana"),
+        OptionDesc::TapToPay { mana: None, .. } => "Tap to pay {1}".into(),
         OptionDesc::Pass if d.kind == ChoiceKind::Priority => "Pass priority".into(),
         OptionDesc::TapForMana {
             source,

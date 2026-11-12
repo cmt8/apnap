@@ -21,7 +21,8 @@
 //! is rebuilt from it — exactly what the next step will see.
 
 use super::cast::{
-    Payee, can_tap_for_ability, identity_mask, may_spend, sacrifice_candidates, usable_pool,
+    Payee, can_tap_for_ability, identity_mask, may_spend, sacrifice_candidates, tap_candidates,
+    usable_pool,
 };
 use super::resolve::ResolveFrame;
 use super::{ApplyFrame, Flow, Frame, Input};
@@ -42,6 +43,10 @@ use serde::{Deserialize, Serialize};
 
 /// Every mana type.
 const ALL: ManaMask = 0b11_1111;
+/// A unit that pays only generic mana: a creature or artifact tapped for convoke or
+/// improvise pays `{1}` (or a mana of its color), never `{C}` (CR 702.51a, 702.126a).
+/// Every generic unit wanted accepts it.
+const GENERIC: ManaMask = 1 << 6;
 
 /// What one activation makes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +103,10 @@ pub(crate) struct ManaWay {
     /// Nothing but `{T}` (and maybe "sacrifice this") for mana of one chosen type: done
     /// in one step (`tap_for_mana`), as before D-066.
     pub simple: bool,
+    /// Not a mana ability: tapping the creature or artifact pays one mana of the spell's
+    /// cost itself (convoke, improvise: CR 702.51a, 702.126a). Offered as
+    /// `OptionDesc::TapToPay`.
+    pub pays: bool,
 }
 
 impl ManaWay {
@@ -326,6 +335,7 @@ pub(crate) fn mana_ways(
                         ManaProduce::Counted { .. } | ManaProduce::Reflected { .. }
                     ),
                 simple,
+                pays: false,
             });
         }
         if plain != 0 {
@@ -347,6 +357,7 @@ pub(crate) fn mana_ways(
                     restricted: false,
                     dependent: false,
                     simple: true,
+                    pays: false,
                 },
             );
         }
@@ -373,6 +384,9 @@ pub(crate) struct PlanInput {
     pub life_cost: u32,
     /// "Sacrifice N [permanents]" in the cost itself: how many, and the candidates.
     pub sac: Option<(u32, Vec<ObjectId>)>,
+    /// "Tap N untapped [permanents] you control" in the cost itself: how many, and the
+    /// candidates (none of them can be tapped for mana as well).
+    pub tap: Option<(u32, Vec<ObjectId>)>,
 }
 
 /// A unit of mana wanted: its acceptable types, and whether it is part of a mana
@@ -432,7 +446,7 @@ fn wants(req: &ManaRequirement, for_cost: bool, times: u32, out: &mut Vec<Want>)
             out.push((m, for_cost));
         }
         for _ in 0..req.generic {
-            out.push((ALL, for_cost));
+            out.push((ALL | GENERIC, for_cost));
         }
     }
 }
@@ -597,8 +611,9 @@ impl Ctx<'_> {
             .filter(|(w, k)| **k > 0 && (w.tap || w.sac_self))
             .map(|(w, _)| w.id)
             .collect();
-        // The cost's own sacrifice needs its permanents too (chosen after the mana).
-        if let Some((n, cands)) = &inp.sac {
+        // The cost's own taps and sacrifices need their permanents too (chosen after the
+        // mana).
+        for (n, cands) in inp.sac.iter().chain(inp.tap.iter()) {
             let left: Vec<ObjectId> = cands
                 .iter()
                 .copied()
@@ -643,7 +658,9 @@ impl Ctx<'_> {
         // be chosen for it are limited, so that enough remain.
         let mut limit_max = usize::MAX;
         let mut cost_cands: Vec<ObjectId> = Vec::new();
-        if let Some((n, cands)) = &inp.sac {
+        // (A cost that both taps and sacrifices chosen permanents is refused by card-db.)
+        let tapping = inp.tap.is_some();
+        if let Some((n, cands)) = inp.tap.as_ref().or(inp.sac.as_ref()) {
             cost_cands = cands
                 .iter()
                 .copied()
@@ -670,7 +687,9 @@ impl Ctx<'_> {
                 continue;
             }
             let g = Group { ways: simple };
-            if g.ways.iter().any(|w| w.sac_self) && cost_cands.contains(&id) {
+            // A permanent the cost may tap is used up by any way of making mana with it;
+            // one the cost may sacrifice only by sacrificing it for mana.
+            if cost_cands.contains(&id) && (tapping || g.ways.iter().any(|w| w.sac_self)) {
                 limited.push(g);
             } else {
                 groups.push(g);
@@ -875,11 +894,79 @@ pub struct PayGoal {
     pub sac_source: ObjectId,
     /// Life the cost asks for.
     pub life: u32,
+    /// "Tap N untapped [permanents] you control" in the cost, relative to `sac_source`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap_cost: Option<CostChoice>,
+    /// What may be tapped to pay the spell's mana (convoke, improvise).
+    #[serde(default, skip_serializing_if = "TapPays::is_none")]
+    pub tap_pays: TapPays,
+}
+
+/// CR 702.51, 702.126: the permanents a spell's mana may be paid with by tapping them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TapPays {
+    /// Convoke: untapped creatures (each for `{1}` or a mana of its color).
+    pub creatures: bool,
+    /// Improvise: untapped artifacts (each for `{1}`).
+    pub artifacts: bool,
+}
+
+impl TapPays {
+    fn is_none(&self) -> bool {
+        !self.creatures && !self.artifacts
+    }
+}
+
+/// CR 702.51a, 702.126a: one unit for each untapped creature (convoke) or artifact
+/// (improvise) `p` controls — not a mana ability, so a creature needn't have been under
+/// their control since the turn began (CR 302.6) — next to that permanent's mana ways.
+fn add_pays(st: &GameState, p: PlayerId, goal: &PayGoal, ways: &mut Vec<ManaWay>) {
+    if goal.tap_pays.is_none() {
+        return;
+    }
+    for &id in &st.zones.battlefield {
+        if Some(id) == goal.tap || st.object(id).tapped || controller_of(st, id) != p {
+            continue;
+        }
+        let c = chars(st, id);
+        let creature = goal.tap_pays.creatures && c.is(CardType::Creature);
+        let artifact = goal.tap_pays.artifacts && c.is(CardType::Artifact);
+        if !creature && !artifact {
+            continue;
+        }
+        let mut mask = GENERIC;
+        if creature {
+            for col in &c.colors {
+                mask |= 1 << ManaType::from_color(*col).index();
+            }
+        }
+        let way = ManaWay {
+            id,
+            ability: None,
+            tap: true,
+            sac_self: false,
+            cost: ManaRequirement::default(),
+            life: 0,
+            risk: 0,
+            sac: None,
+            yields: Yield::One { mask, count: 1 },
+            // It pays the spell, never a mana ability's cost.
+            restricted: true,
+            dependent: false,
+            simple: true,
+            pays: true,
+        };
+        match ways.iter().rposition(|w| w.id == id) {
+            Some(i) => ways.insert(i + 1, way),
+            None => ways.push(way),
+        }
+    }
 }
 
 /// The planner's input for `goal`, as the game is now.
 pub(crate) fn plan_input(st: &GameState, p: PlayerId, goal: &PayGoal) -> PlanInput {
     let mut ways = mana_ways(st, p, goal.tap, goal.payee);
+    add_pays(st, p, goal, &mut ways);
     // "Sacrifice this" in the cost being paid: it can't be sacrificed for mana as well,
     // nor be sacrificed by a mana ability; neither can the permanent the cost taps, nor
     // the source of what is being paid for (D-066, conservative: its last known
@@ -910,6 +997,12 @@ pub(crate) fn plan_input(st: &GameState, p: PlayerId, goal: &PayGoal) -> PlanInp
             (
                 ch.count,
                 sacrifice_candidates(st, p, ch, goal.sac_source, goal.sacrifice),
+            )
+        }),
+        tap: goal.tap_cost.as_ref().map(|ch| {
+            (
+                ch.count,
+                tap_candidates(st, p, ch, goal.sac_source, goal.tap),
             )
         }),
     }
@@ -1103,6 +1196,10 @@ fn option_keeps(
         {
             cands.retain(|c| *c != w.id);
         }
+        // Tapped (or gone): no longer one the cost could tap.
+        if let Some((_, cands)) = &mut next.tap {
+            cands.retain(|c| *c != w.id);
+        }
         let Yield::One { count, .. } = w.yields else {
             unreachable!("a simple way makes one type")
         };
@@ -1164,6 +1261,34 @@ pub(crate) fn pay_options(st: &GameState, p: PlayerId, goal: &PayGoal) -> Vec<Op
     let inp = plan_input(st, p, goal);
     let mut options = Vec::new();
     for w in &inp.ways {
+        // Convoke / improvise: tapping it pays one mana of the cost — a mana of its color,
+        // or one generic mana — if the rest stays payable.
+        if w.pays {
+            let mask = w.yields.first();
+            let mut paying: Vec<Option<ManaType>> = types_in(mask)
+                .into_iter()
+                .filter(|t| inp.req.specific[t.index()] > 0)
+                .map(Some)
+                .collect();
+            if mask & GENERIC != 0 && inp.req.generic > 0 {
+                paying.push(None);
+            }
+            for mana in paying {
+                let mut next = inp.clone();
+                next.ways.retain(|x| x.id != w.id);
+                if let Some((_, cands)) = &mut next.tap {
+                    cands.retain(|c| *c != w.id);
+                }
+                match mana {
+                    Some(t) => next.req.specific[t.index()] -= 1,
+                    None => next.req.generic -= 1,
+                }
+                if plan(&next) {
+                    options.push(OptionDesc::TapToPay { source: w.id, mana });
+                }
+            }
+            continue;
+        }
         // Its own mana cost is paid from the pool (CR 605.3a: tap for that first).
         if !w.cost.payable_from(&inp.pool) {
             continue;
