@@ -4054,6 +4054,7 @@ mod tests {
             reveal,
             shuffle,
             optional: false,
+            share_land_type: false,
         }))
     }
 
@@ -4701,6 +4702,52 @@ mod tests {
         assert_eq!(
             text(&spell(m)),
             "You may have target player lose 3 life. If you do, put three +1/+1 counters on this spell."
+        );
+    }
+
+    #[test]
+    fn shuffling_and_drawing_up_to_and_looking_at_the_top() {
+        let text_of = |e| text(&spell(mode(e)));
+        assert_eq!(
+            text_of(Effect::Shuffle {
+                who: PlayerRef::You
+            }),
+            "Shuffle your library."
+        );
+        assert_eq!(
+            text_of(Effect::DrawUpTo {
+                who: PlayerRef::You,
+                amount: Amount::Fixed(2)
+            }),
+            "You may draw up to two cards."
+        );
+        assert_eq!(
+            text_of(Effect::DrawUpTo {
+                who: PlayerRef::You,
+                amount: Amount::Fixed(1)
+            }),
+            "You may draw up to one card."
+        );
+        let look = |count| {
+            text_of(Effect::Dig {
+                who: PlayerRef::You,
+                count,
+                reveal: false,
+                take: Take::Exactly(0),
+                cards: Vec::new(),
+                to: CardDest::Hand,
+                reveal_taken: false,
+                rest: CardDest::LibraryTop,
+                rest_random: false,
+            })
+        };
+        assert_eq!(
+            look(Amount::Fixed(3)),
+            "Look at the top three cards of your library, then put them back in any order."
+        );
+        assert_eq!(
+            look(Amount::Fixed(1)),
+            "Look at the top card of your library."
         );
     }
 }
