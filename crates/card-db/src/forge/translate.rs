@@ -14,9 +14,9 @@ use card_model::{
     AbilityDef, ActivationZone, Affected, Amount, AsEnters, BasicLandType, Body, Calc, CardDef,
     CardDest, CardType, CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost,
     CostChoice, CounterKind, DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword,
-    ManaCost, ManaProduce, ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef, PlayerRef,
-    ReplaceWith, Replaces, Selector, Signed, Supertype, Take, TargetFilter, TargetGroup, TargetRef,
-    Timing, Trigger, TriggerStep, Who,
+    ManaCost, ManaProduce, ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef, PlayZone,
+    PlayerRef, PlayerRule, ReplaceWith, Replaces, Selector, Signed, Supertype, Take, TargetFilter,
+    TargetGroup, TargetRef, Timing, Trigger, TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -181,6 +181,9 @@ struct Tx<'a> {
     player_is_you: BTreeSet<String>,
     /// The body being compiled took "that player" for "you".
     took_player_for_you: bool,
+    /// The line just compiled means nothing for the rules (only hints for Forge's AI): no
+    /// ability, and nothing blocked.
+    nothing: bool,
 }
 
 /// The kinds of ability a script gives to other objects.
@@ -582,6 +585,42 @@ fn cost_tokens(text: &str) -> Vec<&str> {
     out
 }
 
+/// CR 205.3i (2026-11-06): the land types.
+const LAND_TYPES: [&str; 17] = [
+    "Cave",
+    "Desert",
+    "Forest",
+    "Gate",
+    "Island",
+    "Lair",
+    "Locus",
+    "Mine",
+    "Mountain",
+    "Plains",
+    "Planet",
+    "Power-Plant",
+    "Sphere",
+    "Swamp",
+    "Tower",
+    "Town",
+    "Urza's",
+];
+
+/// A `Mode$ Continuous` line with nothing but whom it affects and hints for Forge's AI.
+fn only_ai_hints(rec: &Record) -> bool {
+    rec.params.iter().all(|(k, _)| {
+        matches!(
+            k.as_str(),
+            "Mode" | "Affected" | "AffectedDefined" | "AddSVar" | "Description"
+        )
+    })
+}
+
+/// A word of a filter that names players, not cards (`You`, `Player.Opponent`).
+fn player_word(head: &str) -> bool {
+    matches!(head, "You" | "Player" | "Opponent")
+}
+
 fn card_type(word: &str) -> Option<CardType> {
     CARD_TYPES.iter().find(|(n, _)| *n == word).map(|(_, t)| *t)
 }
@@ -707,6 +746,16 @@ impl<'a> Tx<'a> {
                 "Basic" => s.supertypes.push(Supertype::Basic),
                 "Legendary" => s.supertypes.push(Supertype::Legendary),
                 "Snow" => s.supertypes.push(Supertype::Snow),
+                // Colorless (CR 105.2c): none of the five colors.
+                "Colorless" => {
+                    s.not_colors = vec![
+                        Color::White,
+                        Color::Blue,
+                        Color::Black,
+                        Color::Red,
+                        Color::Green,
+                    ]
+                }
                 "tapped" => s.tapped = Some(true),
                 "untapped" => s.tapped = Some(false),
                 "attacking" => s.attacking = Some(true),
@@ -1140,6 +1189,17 @@ impl<'a> Tx<'a> {
         }
         if let Some(c) = v.strip_prefix("Count$Devotion.").and_then(color) {
             return Some(Amount::Devotion(vec![c]));
+        }
+        // CR 700.5: "devotion to [color 1] and [color 2]".
+        if let Some((a, b)) = v
+            .strip_prefix("Count$DevotionDual.")
+            .and_then(|r| r.split_once('.'))
+            && let (Some(a), Some(b)) = (color(a), color(b))
+            && a != b
+        {
+            let mut cs = vec![a, b];
+            cs.sort();
+            return Some(Amount::Devotion(cs));
         }
         // `Count$Compare <variable> GE<n>.<then>.<otherwise>`.
         if let Some(rest) = v.strip_prefix("Count$Compare ") {
@@ -2803,6 +2863,14 @@ impl<'a> Tx<'a> {
                 "Swamp" => land_types.push(BasicLandType::Swamp),
                 "Mountain" => land_types.push(BasicLandType::Mountain),
                 "Forest" => land_types.push(BasicLandType::Forest),
+                // "Every basic land type" (CR 205.3i).
+                "AllBasicLandType" => land_types.extend([
+                    BasicLandType::Plains,
+                    BasicLandType::Island,
+                    BasicLandType::Swamp,
+                    BasicLandType::Mountain,
+                    BasicLandType::Forest,
+                ]),
                 w if self.known.subtypes.contains(w) => subtypes.push(w.to_string()),
                 w => {
                     self.block(format!("type added:{}", shape(w)));
@@ -4202,9 +4270,12 @@ impl<'a> Tx<'a> {
     }
 
     fn static_ability(&mut self, rec: &'a Record) -> Option<AbilityDef> {
+        self.nothing = false;
         let mode = rec.get("Mode").unwrap_or("?");
         let rd = Rd::new(rec, format!("static {mode}"));
         let out = match mode {
+            // Rules about players, and about where cards may be played from.
+            "Continuous" if Self::is_player_static(&rd) => self.player_static(&rd),
             "Continuous" => {
                 let affected = match (rd.get("AffectedDefined"), rd.get("Affected")) {
                     (None, Some("Card.Self")) | (Some("Self"), None | Some("Card.Self")) => {
@@ -4243,6 +4314,23 @@ impl<'a> Tx<'a> {
                         None
                     }
                 };
+                // Where the ability works: on the battlefield (Forge's default), or — for
+                // what an effect object carries — the command zone.
+                let mut from_graveyard = false;
+                if rd.rec.get("CharacteristicDefining").is_none() {
+                    match rd.get("EffectZone") {
+                        None | Some("Battlefield") => {}
+                        Some("Command") if self.in_effect => {}
+                        // "As long as this card is in your graveyard, …" (CR 113.6b).
+                        Some("Graveyard") if !self.in_effect && self.granting == 0 => {
+                            from_graveyard = true;
+                        }
+                        Some(z) => {
+                            self.block(format!("static:works from {}", shape(z)));
+                            return None;
+                        }
+                    }
+                }
                 let int = |t: Option<&str>| {
                     t.map_or(Some(0), |t| t.trim_start_matches('+').parse::<i32>().ok())
                 };
@@ -4313,6 +4401,24 @@ impl<'a> Tx<'a> {
                 // Layer 4: "are [types] in addition to their other types".
                 if let Some(types) = rd.get("AddType") {
                     effects.insert(0, self.added_types(types.split('&'))?);
+                }
+                // Layer 4: "isn't a creature" (card types only; the subtypes stay).
+                if let Some(types) = rd.get("RemoveType") {
+                    let mut ts = Vec::new();
+                    for t in types.split('&').map(str::trim) {
+                        match card_type(t) {
+                            Some(t) => ts.push(t),
+                            None => {
+                                self.block(format!("static:RemoveType {}", shape(t)));
+                                return None;
+                            }
+                        }
+                    }
+                    let at = effects
+                        .iter()
+                        .position(|e| !matches!(e, ContinuousEffect::AddTypes { .. }))
+                        .unwrap_or(effects.len());
+                    effects.insert(at, ContinuousEffect::RemoveTypes(ts));
                 }
                 // Layer 5: "is [color]" (not "in addition").
                 if let Some(colors) = rd.get("SetColor") {
@@ -4424,6 +4530,18 @@ impl<'a> Tx<'a> {
                     }
                 }
                 if effects.is_empty() && rules.is_empty() {
+                    // Name what wasn't understood: the parameters that weren't read.
+                    let before = self.blockers.len();
+                    rd.finish(&mut self.blockers);
+                    if self.blockers.len() > before {
+                        return None;
+                    }
+                    // A line that only copies hints for Forge's AI to what it affects
+                    // (`AddSVar$`, checked above) says nothing about the rules.
+                    if rd.rec.get("AddSVar").is_some() && only_ai_hints(rd.rec) {
+                        self.nothing = true;
+                        return None;
+                    }
                     self.block("static:Continuous-nothing");
                     return None;
                 }
@@ -4450,6 +4568,20 @@ impl<'a> Tx<'a> {
                             return None;
                         }
                     }
+                }
+                // A static ability of a card in a graveyard: about permanents only (its own
+                // card isn't one), one ability.
+                if from_graveyard {
+                    let about_permanents = matches!(affected, Affected::All(_));
+                    if out.len() != 1 || !about_permanents {
+                        self.block("static:from the graveyard about the card itself");
+                        return None;
+                    }
+                    let a = out.remove(0);
+                    return Some(AbilityDef::FromZone {
+                        zone: ActivationZone::Graveyard,
+                        ability: Box::new(a),
+                    });
                 }
                 let first = out.remove(0);
                 self.additional.extend(out);
@@ -4569,6 +4701,347 @@ impl<'a> Tx<'a> {
         };
         rd.finish(&mut self.blockers);
         out
+    }
+
+    /// Is this `Mode$ Continuous` line (also) a rule about players or about where cards may
+    /// be played from? Forge applies these keys to the affected *players* (`Affected$ You`)
+    /// or lets the affected *cards* be played from their zone (`MayPlay$`).
+    fn is_player_static(rd: &Rd<'a>) -> bool {
+        const KEYS: [&str; 5] = [
+            "SetMaxHandSize",
+            "RaiseMaxHandSize",
+            "AdjustLandPlays",
+            "MayPlay",
+            "MayLookAt",
+        ];
+        KEYS.iter().any(|k| rd.rec.get(k).is_some())
+            || rd.rec.get("Affected").is_some_and(|a| {
+                a.split(',')
+                    .any(|alt| player_word(alt.trim().split('.').next().unwrap_or("")))
+            })
+    }
+
+    /// A `Mode$ Continuous` line about players (`Affected$ You | SetMaxHandSize$ Unlimited`)
+    /// or about cards that may be played from a zone (`Affected$ Land.YouOwn | MayPlay$ True
+    /// | AffectedZone$ Graveyard`), compiled to [`AbilityDef::PlayerRule`]s. Card
+    /// alternatives of the same line that are given keywords ("you and creatures you
+    /// control have hexproof") become static abilities of their own. The first ability is
+    /// returned, the rest go to `self.additional`.
+    fn player_static(&mut self, rd: &Rd<'a>) -> Option<AbilityDef> {
+        // (Looked at below; read here so that an early failure names only what failed.)
+        for key in ["MayPlay", "MayLookAt", "AffectedZone", "EffectZone"] {
+            rd.get(key);
+        }
+        if rd.get("AffectedDefined").is_some() {
+            self.block("static:player rule AffectedDefined");
+            return None;
+        }
+        let Some(affected) = rd.get("Affected") else {
+            self.block("static:player rule without Affected");
+            return None;
+        };
+        let mut players: Vec<Who> = Vec::new();
+        let mut cards: Vec<&'a str> = Vec::new();
+        for alt in affected.split(',').map(str::trim) {
+            match alt {
+                "You" => players.push(Who::You),
+                "Player" => players.push(Who::Any),
+                "Opponent" | "Player.Opponent" => players.push(Who::Opponent),
+                _ if player_word(alt.split('.').next().unwrap_or("")) => {
+                    self.block(format!("filter:player {}", shape(alt)));
+                    return None;
+                }
+                _ => cards.push(alt),
+            }
+        }
+        if players.len() > 1 {
+            self.block("filter:several kinds of player");
+            return None;
+        }
+        let only_if = self.static_condition(rd)?;
+        let mut out: Vec<AbilityDef> = Vec::new();
+        let rule = |who: Who, rule: PlayerRule| AbilityDef::PlayerRule {
+            who,
+            rule,
+            only_if: only_if.clone(),
+        };
+        // Keywords: players have hexproof or shroud; permanents any keyword.
+        let mut keywords: Vec<&'a str> = Vec::new();
+        if let Some(kw) = rd.get("AddKeyword") {
+            keywords = kw.split('&').map(str::trim).collect();
+        }
+        if let Some(&who) = players.first() {
+            // A player's maximum hand size (CR 402.2).
+            match rd.get("SetMaxHandSize") {
+                None => {}
+                Some("Unlimited") => out.push(rule(who, PlayerRule::NoMaximumHandSize)),
+                Some(n) => match n.parse::<u32>() {
+                    Ok(n) => out.push(rule(who, PlayerRule::MaximumHandSize(n))),
+                    Err(_) => {
+                        self.block("static:SetMaxHandSize variable");
+                        return None;
+                    }
+                },
+            }
+            if let Some(n) = rd.get("RaiseMaxHandSize") {
+                match n.trim_start_matches('+').parse::<i32>() {
+                    Ok(n) => out.push(rule(who, PlayerRule::MaximumHandSizeBy(n))),
+                    Err(_) => {
+                        self.block("static:RaiseMaxHandSize variable");
+                        return None;
+                    }
+                }
+            }
+            // Land plays (CR 305.2).
+            match rd.get("AdjustLandPlays") {
+                None => {}
+                Some("Unlimited") => out.push(rule(who, PlayerRule::AnyNumberOfLandPlays)),
+                Some(n) => match n.parse::<u32>() {
+                    Ok(n) if n > 0 => out.push(rule(who, PlayerRule::AdditionalLandPlays(n))),
+                    _ => {
+                        self.block("static:AdjustLandPlays variable");
+                        return None;
+                    }
+                },
+            }
+            for k in &keywords {
+                match *k {
+                    "Hexproof" => out.push(rule(who, PlayerRule::Hexproof)),
+                    "Shroud" => out.push(rule(who, PlayerRule::Shroud)),
+                    other => {
+                        self.block(format!("player keyword:{}", shape(other)));
+                        return None;
+                    }
+                }
+            }
+            if out.is_empty() {
+                self.block("static:player rule-nothing");
+                return None;
+            }
+        } else {
+            // Only cards: what the line says about players means nothing for them.
+            for key in ["SetMaxHandSize", "RaiseMaxHandSize", "AdjustLandPlays"] {
+                if rd.get(key).is_some() {
+                    self.block(format!("static:{key} for cards"));
+                    return None;
+                }
+            }
+        }
+        if !cards.is_empty() {
+            let may_play = rd.get("MayPlay");
+            let may_look = rd.get("MayLookAt");
+            if may_play.is_some() || may_look.is_some() {
+                if !keywords.is_empty() {
+                    self.block("static:MayPlay with keywords");
+                    return None;
+                }
+                out.extend(self.play_from(rd, &cards, may_play, may_look, &only_if)?);
+            } else if !keywords.is_empty() {
+                // Each alternative is its own static ability: keywords given twice are
+                // given once (CR 702: these keywords are redundant).
+                let mut ks = Vec::new();
+                for k in &keywords {
+                    match keyword(k) {
+                        Some(k) => ks.push(k),
+                        None => {
+                            self.block(format!("kw:{k}"));
+                            return None;
+                        }
+                    }
+                }
+                // Only on the battlefield.
+                if rd.get("AffectedZone").is_some_and(|z| z != "Battlefield") {
+                    self.block("static:player rule AffectedZone");
+                    return None;
+                }
+                if rd.get("EffectZone").is_some_and(|z| z != "Battlefield") {
+                    self.block("static:player rule EffectZone");
+                    return None;
+                }
+                for alt in &cards {
+                    let affected = self.affected(alt)?;
+                    out.push(AbilityDef::Static {
+                        affected,
+                        effects: vec![ContinuousEffect::AddKeywords(ks.clone())],
+                        only_if: only_if.clone(),
+                    });
+                }
+            } else {
+                self.block("static:player rule with cards");
+                return None;
+            }
+        } else if rd.get("MayPlay").is_some() || rd.get("MayLookAt").is_some() {
+            self.block("static:MayPlay for players");
+            return None;
+        }
+        if cards.is_empty() || !players.is_empty() {
+            // A rule about players works where the permanent is.
+            if rd.get("AffectedZone").is_some() {
+                self.block("static:player rule AffectedZone");
+                return None;
+            }
+        }
+        if out.is_empty() {
+            self.block("static:player rule-nothing");
+            return None;
+        }
+        let first = out.remove(0);
+        self.additional.extend(out);
+        Some(first)
+    }
+
+    /// `MayPlay$ True` / `MayLookAt$ …` for the cards `alts` of a static ability: which
+    /// cards of which zone the controller may play (CR 601.3, 116.2a) or look at (CR
+    /// 401.5).
+    fn play_from(
+        &mut self,
+        rd: &Rd<'a>,
+        alts: &[&'a str],
+        may_play: Option<&'a str>,
+        may_look: Option<&'a str>,
+        only_if: &Option<Condition>,
+    ) -> Option<Vec<AbilityDef>> {
+        let rule = |rule: PlayerRule| AbilityDef::PlayerRule {
+            who: Who::You,
+            rule,
+            only_if: only_if.clone(),
+        };
+        if may_play.is_some_and(|v| v != "True") {
+            self.block("static:MayPlay value");
+            return None;
+        }
+        let mut zones: Vec<PlayZone> = Vec::new();
+        let affected_zone = rd.get("AffectedZone");
+        for z in affected_zone
+            .unwrap_or("Battlefield")
+            .split(',')
+            .map(str::trim)
+        {
+            zones.push(match z {
+                "Graveyard" => PlayZone::Graveyard,
+                "Library" => PlayZone::LibraryTop,
+                "Exile" => PlayZone::Exile,
+                other => {
+                    self.block(format!("static:MayPlay from {other}"));
+                    return None;
+                }
+            });
+        }
+        let effect_zone = rd.get("EffectZone");
+        let mut out = Vec::new();
+        // "You may cast this card from your graveyard": the card's own ability, working
+        // from the zones it may be cast from (Forge: `EffectZone$` = `AffectedZone$`).
+        if alts == ["Card.Self"] {
+            if may_look.is_some() {
+                self.block("static:MayLookAt Self");
+                return None;
+            }
+            let same = effect_zone.is_some_and(|e| {
+                let mut a: Vec<&str> = e.split(',').map(str::trim).collect();
+                let mut b: Vec<&str> = affected_zone
+                    .unwrap_or("")
+                    .split(',')
+                    .map(str::trim)
+                    .collect();
+                a.sort_unstable();
+                b.sort_unstable();
+                a == b
+            });
+            if !same {
+                self.block("static:MayPlay Self from another zone");
+                return None;
+            }
+            if self.face.types.iter().any(|t| t == "Land") {
+                self.block("static:MayPlay Self land");
+                return None;
+            }
+            if zones.contains(&PlayZone::LibraryTop) {
+                self.block("static:MayPlay Self from library");
+                return None;
+            }
+            out.push(rule(PlayerRule::PlayThisFrom(zones)));
+            return Some(out);
+        }
+        // Otherwise a permanent's ability, about the controller's own cards.
+        if effect_zone.is_some_and(|z| z != "Battlefield") {
+            self.block("static:MayPlay EffectZone");
+            return None;
+        }
+        let mut sels = Vec::new();
+        for alt in alts {
+            let (head, props) = alt.split_once('.').unwrap_or((alt, ""));
+            let mut kept: Vec<&str> = Vec::new();
+            let (mut top, mut yours) = (false, false);
+            for p in props.split('+').map(str::trim).filter(|p| !p.is_empty()) {
+                match p {
+                    "TopLibrary" => top = true,
+                    // A card in a library or graveyard is controlled by its owner.
+                    "YouCtrl" | "YouOwn" => yours = true,
+                    // "You may play that card this turn": cards an effect remembers.
+                    "IsRemembered" => {
+                        self.block("static:MayPlay remembered cards");
+                        return None;
+                    }
+                    other => kept.push(other),
+                }
+            }
+            if !yours {
+                self.block("static:MayPlay from every player's zone");
+                return None;
+            }
+            if top != (zones == [PlayZone::LibraryTop]) {
+                self.block("static:MayPlay library card not on top");
+                return None;
+            }
+            let text = if kept.is_empty() {
+                head.to_string()
+            } else {
+                format!("{head}.{}", kept.join("+"))
+            };
+            let mut s = self.card_selector(&text)?;
+            if s != owned(s.clone()) || s.controller != Who::Any || s.other {
+                self.block("static:MayPlay filter");
+                return None;
+            }
+            // "Cast creature spells from the top of your library": a kind of card that
+            // isn't a land is cast, never played as a land — not even a land that is also
+            // that kind (a land creature). Only "cards" (`Card`), "permanent cards"
+            // (`Permanent`) and lands by type (CR 205.3i) take in lands, as Oracle's "play
+            // lands and cast spells" does.
+            let land_kind = matches!(head, "Card" | "Permanent")
+                || s.types.contains(&CardType::Land)
+                || (s.types.is_empty()
+                    && s.subtypes.iter().any(|t| LAND_TYPES.contains(&t.as_str())));
+            if !land_kind && !s.not_types.contains(&CardType::Land) {
+                s.not_types.push(CardType::Land);
+            }
+            sels.push(s);
+        }
+        // CR 401.5: the top card of the library, revealed or looked at.
+        if let Some(look) = may_look {
+            let all = sels.iter().all(|s| *s == Selector::default());
+            if zones != [PlayZone::LibraryTop] || !all {
+                self.block("static:MayLookAt shape");
+                return None;
+            }
+            match (look, may_play) {
+                ("Player", _) => out.push(rule(PlayerRule::TopCardRevealed)),
+                ("You", _) | ("True", Some(_)) => out.push(rule(PlayerRule::LookAtTopCard)),
+                (other, _) => {
+                    self.block(format!("static:MayLookAt {other}"));
+                    return None;
+                }
+            }
+        }
+        if may_play.is_some() {
+            for zone in zones {
+                out.push(rule(PlayerRule::PlayFrom {
+                    zone,
+                    cards: sels.clone(),
+                }));
+            }
+        }
+        Some(out)
     }
 
     /// Who a static rule is about: the card itself, what it is attached to, or everything
@@ -5142,11 +5615,18 @@ fn ability_records(face: &Face) -> Vec<(String, Record)> {
 /// other than the card does. The compiler can't see that, so they are named here and
 /// never compile (invariant 8: a wrong card is worse than a missing one). Each entry says
 /// what differs; remove it when the pinned Forge commit has the script corrected.
-const SCRIPT_DIFFERS: &[(&str, &str)] = &[(
-    "Swarmyard Massacre",
-    "counts Insects, Rats, Spiders and Squirrels you control; the card counts *creatures* \
-     you control of those types (a noncreature permanent of such a type must not count)",
-)];
+const SCRIPT_DIFFERS: &[(&str, &str)] = &[
+    (
+        "Swarmyard Massacre",
+        "counts Insects, Rats, Spiders and Squirrels you control; the card counts *creatures* \
+         you control of those types (a noncreature permanent of such a type must not count)",
+    ),
+    (
+        "Clash of Realities",
+        "gives its trigger to Spirit *creatures*; the card says \"all Spirits\" (a noncreature \
+         Kindred Spirit must get it too)",
+    ),
+];
 
 /// Compile a script. `Err` lists every blocker found (not just the first).
 pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
@@ -5186,6 +5666,7 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
         took_it_for_this: false,
         player_is_you: BTreeSet::new(),
         took_player_for_you: false,
+        nothing: false,
     };
     let mut def = CardDef {
         name: face.name.clone(),
@@ -5616,6 +6097,7 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
                     abilities.push((order.statics[i], extra));
                 }
             }
+            None if std::mem::take(&mut tx.nothing) && tx.blockers.len() == before => {}
             None => tx.explained(before, "static"),
         }
     }

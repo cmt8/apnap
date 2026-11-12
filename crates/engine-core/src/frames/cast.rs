@@ -773,9 +773,12 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
     match &source {
         CastSource::Card(card) => {
             let o = st.object(*card);
-            // From your hand, or your commander from the command zone (CR 903.8).
+            // From your hand, or your commander from the command zone (CR 903.8), or from
+            // where a rule lets you (CR 601.3: "you may cast … from your graveyard").
             let from_ok = o.owner == p
-                && (o.zone == Zone::Hand || (o.zone == Zone::Command && st.is_commander(*card)));
+                && (o.zone == Zone::Hand
+                    || (o.zone == Zone::Command && st.is_commander(*card))
+                    || crate::players::may_play_from(st, p, *card));
             let c = chars(st, *card);
             if !from_ok || c.is(CardType::Land) {
                 return false;

@@ -1463,6 +1463,117 @@ Rules text: docs/rules-notes/608.2h-its-controller-that-player.md. Tests:
     player's library onto the battlefield in which you choose is not compiled
     (`Dig:another player's cards onto the battlefield, chosen by you`; none compiled).
 
+## D-070 Rules about players; playing cards from other zones; Theros gods (2026-11-10)
+Rules text: docs/rules-notes/402-305-401.5-rules-about-players.md.
+- **`AbilityDef::PlayerRule { who, rule, only_if }`**: a static ability that changes a rule
+  for players rather than an object (CR 613.10, 613.11). `PlayerRule`: no maximum hand size,
+  a maximum hand size / ±N (402.2), additional land plays / any number (305.2), hexproof and
+  shroud on a player (702.11c, 702.18a), the top card of the library revealed / looked at
+  (401.5), "you may play lands and cast [cards] from [your graveyard / the top of your
+  library / exile]" (`PlayFrom`, 601.3, 116.2a), and "you may cast this card from your
+  graveyard / from exile" (`PlayThisFrom`, the card's own ability, 113.6f).
+- **Nothing is stored.** `engine_core::players` reads the rules in force off the abilities
+  permanents have now (`layers::abilities`, CLAUDE.md invariant 4) and off lasting effects
+  (`effects::lasting_abilities`) on every question, in timestamp order. A lasting effect may
+  now carry a player rule: "you may play an additional land this turn" (Explore, Urban
+  Evolution, Summer Bloom, Scale the Heights) is Forge's `Effect` with an `AdjustLandPlays`
+  static, i.e. a rule until end of turn (611.2c).
+- **Where the engine asked the hard-coded rule, it asks `players`:** the cleanup discard
+  (`max_hand_size`), the land play (`land_play_left`: played < 1 + additional; a land from the
+  graveyard or the top of the library is a land play), the zones the priority frame offers
+  (`playable_elsewhere`) and `cast::can_begin` (`may_play_from`), targeting a player
+  (`targeting::is_legal`: shroud; hexproof against an opponent's spell or ability — also on
+  resolution, 608.2b). The cast itself is unchanged: timing, costs, commander tax.
+- **What players see:** `PlayerPublic::library_top` — the top card, for every viewer when it
+  is revealed, for its owner when they may look at it (the AI sees it through its
+  `PlayerView`). A card a decision offers to play from a hidden zone is in the decider's
+  `revealed`. `PlayerPublic::rules` lists the rules about each player. While a spell is being
+  cast or an ability activated no top card is shown at all: CR 401.5 hides a *new* top card
+  until the cast is complete, and the engine doesn't remember which card was on top when it
+  began (deliberately less than the rules show for that moment, never more).
+- **The app** shows a revealed / looked-at top card beside the library count (hover to
+  enlarge, click to play it), labels "play X from your graveyard / from the top of your
+  library", and lists the rules about a player behind an ⓘ next to their counts. The
+  heuristic agent plays every land it is offered, so it uses extra land plays and lands
+  from the graveyard or the top of its library.
+- **Compiler:** a `Mode$ Continuous` line is a player rule when it has `SetMaxHandSize`,
+  `RaiseMaxHandSize`, `AdjustLandPlays`, `MayPlay` or `MayLookAt`, or names a player in
+  `Affected$` (`You`, `Player`, `Opponent`, `Player.Opponent`). Card alternatives of the same
+  line given keywords ("you, planeswalkers you control and other creatures you control have
+  hexproof", Shalai) become one static ability per alternative (the keywords are redundant
+  where they overlap). `MayPlay` needs the card to be its controller's own (`YouOwn` /
+  `YouCtrl`), and `TopLibrary` exactly when the zone is the library. **Choice made:** a
+  `MayPlay` filter of a kind of card that isn't a land (`Creature`, `Merfolk`, `Instant`)
+  is read as Oracle's "cast [kind] spells" — such a card is never played as a land, not even
+  a land creature (Forge would let Dryad Arbor be played by Emperor Mihail's "Merfolk"
+  if it were one); `Card`, `Permanent` and land types include lands ("play lands and cast
+  spells"). `Colorless` is now a filter property (none of the five colors).
+- **Theros gods:** `ContinuousEffect::RemoveTypes` (layer 4, "isn't a creature"; subtypes
+  stay: a God that isn't a creature is still a God), `Count$DevotionDual`. CR 208.3: a
+  permanent that isn't a creature has no power or toughness — now true of every layered
+  view. CR 506.4: an attacking or blocking creature that stops being a creature is removed
+  from combat (`GameAction::RemoveFromCombat`, `Event::RemovedFromCombat`, checked with
+  the control sync after every step).
+- **Static abilities that work from the graveyard** (CR 113.6b): `AbilityDef::FromZone
+  { zone, ability }` — "as long as this card is in your graveyard [and you control a
+  Mountain], creatures you control have haste" (Anger, Wonder, Brawn, Filth, Valor,
+  Riftstone Portal). The layer walk takes them from the graveyards (`Key::FromZone`; "you"
+  is the card's owner; off the battlefield a card has only its printed abilities, so no
+  "has the ability" check is needed, only the condition). `EffectZone$ Battlefield` (the
+  default, written out) is accepted on any `Mode$ Continuous` line; any other zone is named
+  (`static:works from Stack`, `…Command`).
+- `AddType$ AllBasicLandType` ("every basic land type in addition", Dryad of the Ilysian
+  Grove, Prismatic Omen, Nylea's Presence).
+- **A `Mode$ Continuous` line that only copies Forge AI hints** (`AddSVar$` of `AITapDown`,
+  `HasAttackEffect`…) is no ability at all; such a line no longer blocks a card.
+- **Blocker names:** `static:Continuous-nothing` is gone — a line from which nothing was
+  compiled now names its unread parameters (`param:static Continuous.CanBlockAny`,
+  `…GainsAbilitiesOf`, `…AddAllCreatureTypes`, `…RemoveCardTypes`, `…EffectZone`).
+- **Deliberately still blocked:** alternative costs (`MayPlayWithoutManaCost` — Omniscience,
+  One with the Multiverse, Dracogenesis; `MayPlayAltManaCost` — Bolas's Citadel) because
+  paying them touches the cast frame's payment code another branch is reworking;
+  `MayPlayLimit` (Muldrotha: once each turn per permanent type), `MayPlayDontGrantZone
+  Permissions`, `MayPlayIgnoreType/Color`, `MayPlayPlayer`, `MayPlayWithFlash`; cards an
+  effect remembers (`static:MayPlay remembered cards` — impulse draw); another player's
+  zones (`static:MayPlay from every player's zone`); hand sizes and land plays that are
+  counted (`static:SetMaxHandSize variable`, `static:AdjustLandPlays variable`); player
+  keywords other than hexproof and shroud (`player keyword:…`: protection, `UntapAdjust`,
+  `CantSearchLibrary`…); players chosen by a property (`filter:player …`); "has all
+  activated abilities of …" (`…GainsAbilitiesOf`: Conspicuous Snoop, Necrotic Ooze);
+  "every creature type" off the battlefield (`…AddAllCreatureTypes`, Maskwood Nexus);
+  "can block any number / an additional creature" (`…CanBlockAny`, `…CanBlockAmount`);
+  "loses all other card types and creature types" (`…RemoveCardTypes`,
+  `…RemoveCreatureTypes`: Kenrith's Transformation, Darksteel Mutation).
+- Golden hashes: one game changed (cmd-4p seed 1) — by CR 506.4: an animated land was
+  attacking when the player whose permanent animated it left the game; it now leaves
+  combat and deals no combat damage (one new event). The other 14 games: unchanged event
+  logs and states. Re-blessed.
+- 9,305 → 9,412 of 34,463 scripts (27.3%); precons 149 → 152 of 275 deck slots. All 107
+  newly compiled cards were read against their Oracle text; famous ones now compiling:
+  Reliquary Tower, Thought Vessel, Decanter of Endless Water, Exploration, Explore, Azusa,
+  Oracle of Mul Daya, Crucible of Worlds, Ramunap Excavator, Mystic Forge, Courser of
+  Kruphix, Gravecrawler, Shalai, Purphoros, Heliod Sun-Crowned, Anger, Wonder, Dryad of the
+  Ilysian Grove. Text fixes found by reading them (no behaviour change): "colorless" was
+  missing from spell kinds ("Spend this mana only to cast  spells"), and cost reductions
+  read "Creature with power 4 or greater spells you cast" (now "Creature spells you cast
+  with power 4 or greater").
+- **Merged onto D-067/D-068** (main at 3e37f8d): 9,776 → 9,891 of 34,463 scripts (28.7%);
+  precons 156 of 275 deck slots. No card of main's stopped compiling. Nine cards compile
+  only in the combination, all read against their Oracle text (Anvil of Bogardan, Price of
+  Knowledge, Rites of Flourishing, Mogis, Marang River Prowler, Infernal Reckoning,
+  Leeching Sliver, Stoneshaker Shaman); the ninth, Clash of Realities, gives its trigger
+  to Spirit *creatures* where the card says "all Spirits" and went into `SCRIPT_DIFFERS`.
+  Tests of the combination: a land played from the graveyard or the top of the library
+  is asked "as this enters" (D-067); additional land plays with lands that enter tapped;
+  "its controller loses 2 life" reaches a player with hexproof or shroud (CR 115.10a: the
+  player isn't targeted). The golden re-bless is unchanged on top of main: only cmd-4p
+  seed 1, one `RemovedFromCombat` event more.
+- **Next:** alternative costs on a permission (Omniscience, One with the Multiverse,
+  Bolas's Citadel) once the cast frame's payment rework lands; `MayPlayLimit` (Muldrotha,
+  a once-per-turn permission counted per static ability); impulse draw ("you may play
+  that card this turn", effects that remember the cards they exiled); protection on
+  players.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…
