@@ -1,5 +1,6 @@
 //! Headless game running. Not part of the pure engine: may use std, files, threads.
 
+pub mod ranked;
 pub mod script;
 pub mod text;
 
