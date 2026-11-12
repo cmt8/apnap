@@ -2417,9 +2417,15 @@ Rules text: docs/rules-notes/614.12a-607.2d-chosen-type-color.md. Tests:
   hasher marks each field skipped by `skip_serializing_if` (`hash.rs`, `skip_field`) and the
   catalog's selectors now have one more such field (`Selector::chosen`), as do objects, stack
   objects and frames. Re-blessed.
-- **Numbers** (on main 0b956d9: 10,914 of 34,463): 10,993 compile (31.9%), +79, none lost.
-  By EDHREC rank: top 300 212 → 217, top 1,000 578 → 593, top 2,000 945 → 965, top 5,000
-  1,733 → 1,768. Among them: Plague Engineer, Patchwork Banner, Unclaimed Territory,
+- **Hidden information:** the order of the type options comes from the chooser's own cards,
+  hand and library included; only the chooser sees the decision (`PlayerView::decision`),
+  and the events tell everyone only the value chosen (tested).
+- **A delayed triggered ability** that refers to the chosen type would read its source's
+  choice when it triggers, not the one fixed as it was created (CR 603.7c); no card that
+  otherwise compiles needs it: `chosen:in a delayed trigger`.
+- **Numbers** (on main 6cc8595: 10,991 of 34,463): 11,071 compile (32.1%), +80, none lost.
+  By EDHREC rank: top 300 219 → 224, top 1,000 586 → 601, top 2,000 957 → 977, top 5,000
+  1,747 → 1,782. Among them: Doom Cannon, Plague Engineer, Patchwork Banner, Unclaimed Territory,
   Secluded Courtyard, Three Tree City, Vanquisher's Banner, Kindred Discovery, Urza's
   Incubator, Metallic Mimic, Adaptive Automaton, Icon of Ancestry, Pillar of Origins,
   Realmwalker, Kindred Dominance, Kindred Judgment, Distant Melody, Crippling Fear, Raise the
