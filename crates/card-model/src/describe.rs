@@ -1974,7 +1974,15 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 }
                 join(parts, "and")
             };
-            if nothing(paid) {
+            // "… It can't be regenerated" must not read as what the payment avoids.
+            if nothing(paid) && matches!(**unpaid, Effect::CantBeRegenerated(_)) {
+                let dont = if you { "you don't" } else { "they don't" };
+                format!(
+                    "{who} may {}. If {dont}, {}",
+                    action(false),
+                    effect(mode, unpaid)
+                )
+            } else if nothing(paid) {
                 format!("{} unless {who} {}", effect(mode, unpaid), action(!you))
             } else {
                 let does = if you { "you do" } else { "they do" };
@@ -2107,6 +2115,19 @@ fn dest(to: CardDest, whose: &str) -> String {
 /// Cards in a hand, library or graveyard: "basic land card", "creature cards with mana
 /// value 3 or less", "card named Test Elf", "artifact or enchantment cards".
 fn card_list(cards: &[Selector], plural: bool) -> String {
+    // "A land card with a basic land type" (CR 205.3i): any of the five.
+    card_list_words(cards, plural)
+        .replace(
+            "Plains or Island or Swamp or Mountain or Forest land cards",
+            "land cards with a basic land type",
+        )
+        .replace(
+            "Plains or Island or Swamp or Mountain or Forest land card",
+            "land card with a basic land type",
+        )
+}
+
+fn card_list_words(cards: &[Selector], plural: bool) -> String {
     let noun = if plural { "cards" } else { "card" };
     if cards.is_empty() {
         return noun.to_string();
@@ -2609,6 +2630,7 @@ fn trigger_event(t: &Trigger) -> String {
             obj_filter(what)
         ),
         Trigger::Blocks(f) => format!("Whenever {} blocks", obj_filter(f)),
+        Trigger::BecomesTapped(f) => format!("Whenever {} becomes tapped", obj_filter(f)),
         Trigger::BecomesBlocked(f) => format!("Whenever {} becomes blocked", obj_filter(f)),
         Trigger::Unblocked(f) => format!("Whenever {} attacks and isn't blocked", obj_filter(f)),
         Trigger::BlockedBy { attacker, blocker } => format!(
@@ -2720,6 +2742,7 @@ fn trigger_event(t: &Trigger) -> String {
             by,
             types: ts,
             spells,
+            nth,
         } => {
             // "a creature or artifact spell", "a noncreature spell", "a Spirit spell".
             let mut kinds: Vec<String> = Vec::new();
@@ -2735,15 +2758,32 @@ fn trigger_event(t: &Trigger) -> String {
                 _ if ts.is_empty() => join(kinds, "or"),
                 _ => format!("{} spell or {}", kinds[0], join(kinds[1..].to_vec(), "or")),
             };
-            format!(
-                "Whenever {} {}",
-                match by {
-                    Who::Any => "a player casts",
-                    Who::You => "you cast",
-                    Who::Opponent => "an opponent casts",
-                },
-                with_article(&what)
-            )
+            match nth {
+                None => format!(
+                    "Whenever {} {}",
+                    match by {
+                        Who::Any => "a player casts",
+                        Who::You => "you cast",
+                        Who::Opponent => "an opponent casts",
+                    },
+                    with_article(&what)
+                ),
+                // "Whenever an opponent casts their first noncreature spell each turn".
+                Some(n) => format!(
+                    "Whenever {} {} {what} each turn",
+                    match by {
+                        Who::Any => "a player casts their",
+                        Who::You => "you cast your",
+                        Who::Opponent => "an opponent casts their",
+                    },
+                    match n {
+                        1 => "first".to_string(),
+                        2 => "second".to_string(),
+                        3 => "third".to_string(),
+                        n => format!("{n}th"),
+                    }
+                ),
+            }
         }
     }
 }
@@ -2900,8 +2940,9 @@ fn ability(a: &AbilityDef) -> String {
             body: b,
             from,
             cycling: _,
+            reduce,
         } => format!(
-            "{}: {}{}{}",
+            "{}: {}{}{}{}",
             cost(c),
             // Where the ability works from, unless its cost already says (CR 113.6).
             match from {
@@ -2924,7 +2965,22 @@ fn ability(a: &AbilityDef) -> String {
             only_if.as_ref().map_or(String::new(), |c| format!(
                 " Activate only {}.",
                 condition(c)
-            ))
+            )),
+            // CR 602.2b, 601.2f: "This ability costs {1} less to activate for each …".
+            match reduce {
+                None => String::new(),
+                Some(Amount::Count(s)) => {
+                    let each = selector(s, false);
+                    let each = each
+                        .strip_prefix("another ")
+                        .map_or(each.clone(), |rest| format!("other {rest}"));
+                    format!(" This ability costs {{1}} less to activate for each {each}.")
+                }
+                Some(a) => format!(
+                    " This ability costs {{X}} less to activate, where X is {}.",
+                    amount(a)
+                ),
+            }
         ),
         AbilityDef::Mana {
             cost: c,
@@ -4246,6 +4302,7 @@ mod tests {
                     by: Who::You,
                     types: Vec::new(),
                     spells: vec![spell_with(4), spell_with(5), spell_with(6)],
+                    nth: None,
                 },
                 intervening_if: None,
                 body: Body::Effect(mode(Effect::Draw {

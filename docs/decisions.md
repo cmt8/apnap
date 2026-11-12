@@ -2652,6 +2652,52 @@ Rules text: docs/rules-notes/707-copies.md. Tests: `crates/harness/tests/forge_c
   copiers), copies of spells and abilities with "you may choose new targets" (CR 707.10c)
   and storm, "except it has this ability".
 
+## D-080 The last gaps in the EDHREC top 100: Channel lands, "becomes tapped", "first … each turn" (2026-11-12)
+Rules text: docs/rules-notes/d080-top100.md. Tests: `crates/harness/tests/forge_top100.rs`.
+- **D-079 follow-ups:** regeneration from combat damage is tested (a regenerated blocker or
+  attacker leaves combat in the first-strike step and deals no damage in the regular step;
+  the attacker stays blocked: CR 506.4, 509.1h, 510.4) — nothing needed fixing. Knight of the
+  Mists is in `SCRIPT_DIFFERS` (its script destroys target Knight *creature*; a Kindred
+  Knight is a Knight too, CR 308.2). "You may pay {U}. If you don't, destroy … It can't be
+  regenerated." now reads that way, not as "… can't be regenerated unless you pay".
+- **Abilities that cost less to activate** (CR 602.2b, 601.2f, 118.7a):
+  `AbilityDef::Activated::reduce` (serialized only when set) — this much less generic mana,
+  counted for the controller as the total cost is determined (`cast::ability_reduction`;
+  offered only when the reduced cost can be paid). Forge's `ReduceCost$` (CostAdjustment);
+  with `ReduceAmount$` (other mana) it blocks. The Channel lands (Boseiju, Otawara, Eiganjo,
+  Takenuma-style), Voldaren Estate, Mirror of Galadriel, Jodah's Codex. A discarded source
+  deals its damage as it last existed (113.7a, tested). **Filter:** `hasABasicLandType` is
+  any of the five basic land types (CR 205.3i); text "land card with a basic land type".
+- **"Whenever this becomes tapped"** (CR 603.2e, 701.26a): `Trigger::BecomesTapped(ObjFilter)`
+  (appended). Tapping is no replaceable event, so the tap action itself detects it
+  (`triggers::detect_tapped`, called from `GameAction::Tap`) — a mana ability's cost included
+  (the trigger waits for the spell being cast, 603.3), an effect, attacking. Only untapped
+  permanents are tapped, and entering tapped isn't becoming tapped (tested). Forge's
+  `Mode$ Taps` (`ValidCard$`; `Attacker$`, `ValidCause$`, `FirstTime$`, `Teamwork$` block).
+  City of Brass and 55 more (Auras that punish tapping, Pilots, Merfolk).
+- **"Their first noncreature spell each turn"** (CR 601.2i): `PlayerState::cast_this_turn`
+  (each spell as it was when cast, `GameAction::NoteCast`; serialized only when not empty;
+  cleared as a turn begins) and `Trigger::Cast::nth` (Forge's `ActivatorThisTurnCast$ EQn`;
+  other comparisons block). **"Unless that player pays {X}, where X is …"** (CR 118.12,
+  107.3): an unless-cost `{X}` is paid as the X the resolution worked out (`UnlessCost$ X`),
+  also the announced X of "counter target spell unless its controller pays {X}". Esper
+  Sentinel, Monologue Tax, Tuvasa, Rodeo Pyromancers, Valeria Richards, Clash of Wills,
+  Spell Rupture, Thassa's Rebuff, Mindswipe, Overrule.
+- Not in this batch, and what each needs: **Deflecting Swat** — changing a spell's or
+  ability's targets (`api:ChangeTargets`: re-choosing each target slot with "keep" offered,
+  CR 115.7) and targeting abilities on the stack. **Path of Ancestry** — mana that carries a
+  trigger ("when that mana is spent to cast …", `Mana.TriggersWhenSpent`): the payment
+  planner must let the player choose which mana pays (CR 601.2h) and remember which unit
+  was spent on what, plus "shares a creature type with your commander". **The One Ring** —
+  protection from everything (CR 702.16), burden counters (counter kinds beyond +1/+1 and
+  -1/-1, CR 122), "if you cast it" (`wasCastByYou`), and a trigger with no stated zone.
+- Golden: state hashes re-blessed — the new `reduce` field of every activated ability in
+  the catalog and `PlayerState::cast_this_turn` are written as skipped fields by the stable
+  hasher; event logs unchanged (see the commit).
+- Against main `d718b5b` by a card-by-card diff of `forge-coverage --sample 1`: 89 cards
+  newly compile, one stops compiling (Knight of the Mists, on purpose), no existing text
+  changed. All 89 were read against their Oracle text.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

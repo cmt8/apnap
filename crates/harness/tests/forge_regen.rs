@@ -343,3 +343,132 @@ fn cant_be_regenerated_this_turn_is_a_lasting_rule() {
         forge_test_blockers(&mending)
     );
 }
+
+fn striker(name: &str) -> String {
+    card(
+        name,
+        "2 R",
+        "Creature Human Knight\nPT:3/3",
+        "K:First Strike",
+    )
+}
+
+/// Answer the least until `done`, but declare `attackers` and the `blocks` (blocker,
+/// attacker) when asked.
+fn fight(
+    s: &mut Script,
+    attackers: &[ObjectId],
+    blocks: &[(ObjectId, ObjectId)],
+    done: impl Fn(&Script) -> bool,
+) {
+    for _ in 0..5_000 {
+        if s.next.is_none() || done(s) {
+            return;
+        }
+        let pick = match s.kind() {
+            ChoiceKind::DeclareAttackers => s.options().iter().position(
+                |o| matches!(o, OptionDesc::Attack { attacker, .. } if attackers.contains(attacker)),
+            ),
+            ChoiceKind::DeclareBlockers => s.options().iter().position(|o| {
+                matches!(o, OptionDesc::Block { blocker, attacker } if blocks.contains(&(*blocker, *attacker)))
+            }),
+            _ => None,
+        };
+        let r = match (pick, &s.decision().prim) {
+            (Some(i), _) => Response::Pick(vec![i]),
+            (None, Primitive::PickN { min, .. }) => Response::Pick((0..*min).collect()),
+            (None, Primitive::PickNumber { min, .. }) => Response::Number(*min),
+            (None, Primitive::Allocate { per_min, .. }) => Response::Allocate(per_min.clone()),
+            (None, Primitive::Order) => Response::Order((0..s.options().len()).collect()),
+        };
+        s.respond(r);
+    }
+    panic!("fight did not converge");
+}
+
+// CR 701.19a (2026-11-06): "If it's an attacking or blocking creature, remove it from
+// combat." CR 506.4: "A creature that's removed from combat stops being an attacking,
+// blocking, blocked, and/or unblocked creature." CR 510.4 / 510.1: only creatures still in
+// combat deal combat damage in the second combat damage step. A blocker with a shield takes
+// lethal first-strike damage: it regenerates (tapped, no damage, out of combat) and deals no
+// damage in the regular step; the attacker stays blocked (CR 509.1h), so the defending
+// player takes nothing.
+#[test]
+fn a_regenerated_blocker_leaves_combat_and_deals_no_damage() {
+    let mut sc = scenario(&[&troll(), &striker("Test Lancer")]);
+    sc.cards(P0, Zone::Battlefield, &["Forest"]);
+    let t = sc.card(P0, Zone::Battlefield, "Test Troll");
+    let lancer = sc.card(P1, Zone::Battlefield, "Test Lancer");
+    sc.turn(P1, Step::BeginningOfCombat);
+    let mut s = Script::new(sc.build());
+    s.pass();
+    // P0 makes the shield at the beginning of combat.
+    shield(&mut s);
+    fight(&mut s, &[lancer], &[(t, lancer)], |s| {
+        s.st.turn.step == Step::EndOfCombat
+    });
+    assert!(s.st.objects.contains_key(&t), "it regenerated");
+    assert_eq!(regenerated(&s, t), 1);
+    assert!(s.st.object(t).tapped);
+    assert_eq!(s.st.object(t).damage_marked, 0);
+    assert_eq!(
+        s.st.object(lancer).damage_marked,
+        0,
+        "the blocker dealt no damage"
+    );
+    assert_eq!(s.st.player(P0).life, 40, "the attacker stayed blocked");
+}
+
+// The same for an attacker: blocked by a first striker, it regenerates in the first-strike
+// step, is no longer attacking, and deals no damage in the regular step.
+#[test]
+fn a_regenerated_attacker_leaves_combat_and_deals_no_damage() {
+    let mut sc = scenario(&[&troll(), &striker("Test Lancer")]);
+    sc.cards(P0, Zone::Battlefield, &["Forest"]);
+    let t = sc.card(P0, Zone::Battlefield, "Test Troll");
+    let lancer = sc.card(P1, Zone::Battlefield, "Test Lancer");
+    sc.turn(P0, Step::BeginningOfCombat);
+    let mut s = Script::new(sc.build());
+    shield(&mut s);
+    fight(&mut s, &[t], &[(lancer, t)], |s| {
+        s.st.turn.step == Step::EndOfCombat
+    });
+    assert!(s.st.objects.contains_key(&t));
+    assert_eq!(regenerated(&s, t), 1);
+    assert_eq!(s.st.object(t).damage_marked, 0);
+    assert_eq!(
+        s.st.object(lancer).damage_marked,
+        0,
+        "the attacker dealt no damage"
+    );
+    assert_eq!(s.st.player(P1).life, 40);
+    let attacking =
+        s.st.combat
+            .as_ref()
+            .is_some_and(|c| c.attackers.iter().any(|a| a.attacker == t));
+    assert!(!attacking, "no longer attacking");
+}
+
+// CR 118.12 with CR 701.19c: "you may pay {U}. If you don't, destroy target creature. It
+// can't be regenerated." The rider is part of what happens if nothing is paid; the text must
+// not read as though paying avoided the rider. Forge: `NoRegen$ True | UnlessCost$ U |
+// UnlessPayer$ You`.
+#[test]
+fn a_rider_inside_an_unless_cost_reads_as_part_of_the_unpaid_instruction() {
+    let mist = card(
+        "Test Mist Rider",
+        "2 U",
+        "Creature Human Knight\nPT:2/2",
+        "T:Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield | ValidCard$ Card.Self | Execute$ TrigDestroy | TriggerDescription$ Text.\n\
+         SVar:TrigDestroy:DB$ Destroy | ValidTgts$ Creature | NoRegen$ True | UnlessCost$ U | UnlessPayer$ You",
+    );
+    let cat = forge_test_catalog(&[&mist], &[]);
+    let def = cat.get(cat.find("Test Mist Rider").unwrap());
+    let text = card_model::describe::rules_text(def).join(" ");
+    assert!(
+        text.contains(
+            "you may pay {U}. If you don't, destroy target creature. It can't be regenerated."
+        ),
+        "{text}"
+    );
+}
