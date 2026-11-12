@@ -2117,6 +2117,18 @@ fn ability(a: &AbilityDef) -> String {
             };
             match with {
                 ReplaceWith::Twice => format!("{what}, it does so twice as many instead."),
+                // "If you would gain life, you gain twice that much life instead."
+                ReplaceWith::Scale(c) if matches!(replaces, Replaces::GainLife(_)) => {
+                    let gain = match replaces {
+                        Replaces::GainLife(Who::You) => "you gain",
+                        _ => "that player gains",
+                    };
+                    let much = match c {
+                        Calc::Plus(n) => format!("that much life plus {n}"),
+                        c => format!("{} life", scaled(*c, "that much")),
+                    };
+                    format!("{what}, {gain} {much} instead.")
+                }
                 ReplaceWith::Scale(c) => {
                     let noun = match replaces {
                         Replaces::Tokens { .. } => "of those tokens are created",

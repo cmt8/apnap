@@ -912,6 +912,13 @@ fn cant_be_countered_forms_left_blocked() {
         let b = forge_test_blockers(card);
         assert!(b.iter().any(|x| x.contains(what)), "{what}: {b:?}");
     };
+    // The Oracle guard: a card that says it can't be countered, whose script doesn't.
+    blocked(
+        "Name:Test Forgetful\nManaCost:G\nTypes:Instant\n\
+         A:SP$ GainLife | LifeAmount$ 3 | SpellDescription$ Text.\n\
+         Oracle:This spell can't be countered.\\nYou gain 3 life.",
+        "oracle:says can't be countered",
+    );
     // Only by some spells.
     blocked(
         "Name:Test Choosy\nManaCost:G\nTypes:Enchantment\n\

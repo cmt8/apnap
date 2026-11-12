@@ -7749,6 +7749,17 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
     {
         missing.push("under your control");
     }
+    // Rules a script may leave out where Forge handles them elsewhere (D-073): "this spell
+    // can't be countered", "… triggers an additional time".
+    for phrase in ["can't be countered", "an additional time"] {
+        if plain.contains(phrase) && !compiled.contains(phrase) {
+            missing.push(if phrase == "an additional time" {
+                "says an additional time"
+            } else {
+                "says can't be countered"
+            });
+        }
+    }
     // "Is put into your graveyard from the battlefield" is about whose card it is; the
     // script may say whose creature it was.
     for (says, has, word) in [

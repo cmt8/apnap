@@ -2119,6 +2119,42 @@ Rules text: docs/rules-notes/614-doublers-603.2d-additional-triggers.md (with
   Blocked: `RedSource` and other `…Source` properties (`filter:.RedSource`, Torbran),
   prevention with a `ReplaceWith` (`PreventionEffect$`, shields that count), redirection
   (`DamageTarget$`), `inZoneBattlefield` on a source (Gratuitous Violence).
+- **Life gain:** `Replaces::GainLife(Who)` + `Scale` (Rhox Faithmender, Boon Reflection,
+  The Wind Crystal, Angel of Vitality, Heron of Hope, Honor Troll, Knight of Dawn's Light,
+  Pest Rescuer). CR 120.4c: lifelink's gain is a result of the damage that replacement
+  effects modify — `apply::perform` returns it, when an effect would modify it, as a batch
+  of its own that runs right after the damage batch (before anything else; triggers of
+  both are put on the stack together); without such an effect it is gained with the
+  damage as before, so no game without one changes. A doubler with "whenever you gain
+  life, you gain 1 life" is a real loop.
+- **Oracle guards:** a card whose Oracle text says "can't be countered" or "an additional
+  time" and whose compiled text doesn't is blocked (`oracle:says can't be countered`,
+  `oracle:says an additional time`). No compiled card is caught by them now.
+- **Deliberately still blocked:** "you may" token replacements (`param:repl
+  CreateToken.Optional`: Flitwing, Jinnie Fay), tokens of a chosen permanent (`repl:
+  CreateToken:chosen token`), tokens under another player's control (`…Type
+  ReplaceController`), conditions on these effects (`…CheckSVar`, `…IsPresent`,
+  `…PlayerTurn`), counters on players (`repl:AddCounter:counters on players`: Winding
+  Constrictor), "if you would put counters" (`param:repl AddCounter.ValidSource`: Halving
+  Season), draw replacements (`repl:Draw`: one draw replaced by several, or by winning —
+  needs an event that becomes several; Alhammarret's Archive, Notion Thief, Laboratory
+  Maniac), mana replacements (`repl:ProduceMana`: for D-066's `frames/mana.rs`), "lose
+  life" replacements, prevention that counts or redirects (`PreventionEffect$`,
+  `DamageTarget$`). A token that is a copy (D-074) or a double-faced token is out of
+  scope here: its own "enters" effects would need the copy's characteristics.
+- **"Those cards" (D-069):** tokens are created by `GameAction::CreateToken` and reported
+  as `TokenCreated`; the moves an Apply performs don't include them, so Forge's
+  `RememberTokens$` stays blocked.
+- Golden hashes: unchanged (no golden setup has any of these effects; lifelink's gain only
+  moves to a batch of its own when an effect would modify it).
+- 10,524 → 10,610 of 34,463 scripts (main at ef30f04 → this branch); EDHREC tiers: top 100
+  83.2% (79 of 95, unchanged), top 300 67.1%, top 1,000 53.8% → 55.9%, top 5,000 33.2%.
+  Every newly compiled card was read against its Oracle text (86 cards).
+- **Next:** draw replacements (an event that becomes several: "draw two instead",
+  "exile the top card instead", "you win instead"; "except the first one you draw in each
+  of your draw steps"); mana doubling in `frames/mana.rs` (Nyxbloom Ancient, Mana
+  Reflection); Torbran (`RedSource`); "you may" token replacements; Winding Constrictor
+  once players have counters.
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
