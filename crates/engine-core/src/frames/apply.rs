@@ -313,6 +313,7 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
                 counters,
                 shuffle,
                 attach_to,
+                face,
             } => {
                 let Some(o) = st.objects.get(&object) else {
                     continue; // already gone (e.g. moved earlier in this batch)
@@ -331,6 +332,7 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
                         controller,
                         tapped,
                         counters,
+                        face,
                     },
                 ) {
                     crate::actions::ActionResult::Moved(id) => id,

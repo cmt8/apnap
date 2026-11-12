@@ -1214,6 +1214,321 @@ fn additional_trigger_forms_left_blocked() {
     );
 }
 
+// CR 616.1g, 614.12a (2026-11-06): one batch in which a land asks its "as this enters"
+// choice (D-067) and a token is created: the choice is asked while the token's entering
+// waits in the same batch; then the token enters with the Dragon counter, and both are put
+// onto the battlefield together.
+#[test]
+fn a_token_enters_in_a_batch_with_an_as_enters_choice() {
+    use engine_core::frames::{ApplyFrame, Frame};
+    use engine_core::replacement::{MoveCause, Proposed};
+    let mut cards = token_entry_cards(&[globe()]);
+    cards.push(
+        "Name:Test Shockland\nManaCost:no cost\nTypes:Land Island Swamp\n\
+         R:Event$ Moved | ValidCard$ Card.Self | Destination$ Battlefield | ReplaceWith$ DBTap | ReplacementResult$ Updated | Description$ Text.\n\
+         SVar:DBTap:DB$ Tap | ETB$ True | Defined$ Self | UnlessCost$ PayLife<2> | UnlessPayer$ You\nOracle:Text."
+            .to_string(),
+    );
+    let mut sc = scenario_n(2, &cards);
+    sc.cards(P0, Zone::Battlefield, &["Test Globe"]);
+    let land = sc.card(P0, Zone::Hand, "Test Shockland");
+    let mut st = sc.build();
+    let dragon = st.catalog.find("r_5_5_test_dragon").expect("token");
+    let batch = ApplyFrame::new(
+        &st,
+        vec![
+            Proposed::moving(land, Zone::Battlefield, MoveCause::Rule),
+            Proposed::CreateTokens {
+                token: dragon,
+                count: 1,
+                controller: P0,
+                more: Vec::new(),
+            },
+        ],
+    );
+    st.frames.push(Frame::Apply(batch));
+    let mut s = Script::new(st);
+    assert!(
+        matches!(s.kind(), ChoiceKind::AsEnters { .. }),
+        "{:?}",
+        s.kind()
+    );
+    assert!(dragons(&s, P0).is_empty(), "nothing has entered yet");
+    s.pick("pay", |_, o| *o == OptionDesc::Accept);
+    let d = dragons(&s, P0);
+    assert_eq!(d.len(), 1);
+    assert_eq!(counters(&s, d[0], PlusOne), 1);
+    let shock = s
+        .find(P0, Zone::Battlefield, "Test Shockland")
+        .expect("entered");
+    assert!(!s.st.object(shock).tapped);
+    assert_eq!(s.st.player(P0).life, 38);
+}
+
+// CR 603.6a, 616.1g (2026-11-06): doubled tokens each enter — "whenever a permanent
+// enters" triggers once for each of them.
+#[test]
+fn doubled_tokens_each_trigger_on_entering() {
+    let mut cards = token_entry_cards(&[season()]);
+    cards.push(watcher(
+        "Test Arrival Watch",
+        "Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield | ValidCard$ Permanent",
+    ));
+    let mut sc = scenario_n(2, &cards);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Test Season", "Test Arrival Watch", "Plains"],
+    );
+    sc.card(P0, Zone::Hand, "Test Hatch");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Hatch").pay().pass_all();
+    order_triggers(&mut s);
+    assert_eq!(dragons(&s, P0).len(), 2);
+    assert_eq!(
+        s.count(|e| matches!(e, engine_core::Event::Triggered { .. })),
+        2
+    );
+    resolve_all(&mut s);
+    assert_eq!(s.st.player(P0).life, 42);
+}
+
+// ---------------------------------------------------------------------------------------
+// Damage that is doubled or increased (CR 614.1a, 120.4b, 616.1)
+
+fn damage_effect(name: &str, params: &str, math: &str) -> String {
+    card(
+        name,
+        "Enchantment",
+        &format!(
+            "R:Event$ DamageDone | ActiveZones$ Battlefield | {params} | ReplaceWith$ Dmg | Description$ Text.\n\
+             SVar:Dmg:DB$ ReplaceEffect | VarName$ DamageAmount | VarValue$ X\n\
+             SVar:X:ReplaceCount$DamageAmount/{math}"
+        ),
+    )
+}
+
+fn twin_gods() -> String {
+    damage_effect(
+        "Test Twin Gods",
+        "ValidSource$ Card.YouCtrl,Emblem.YouCtrl | ValidTarget$ Permanent,Player",
+        "Twice",
+    )
+}
+
+fn thane() -> String {
+    damage_effect(
+        "Test Thane",
+        "ValidSource$ Card.YouCtrl,Emblem.YouCtrl | ValidTarget$ Player.Opponent,Permanent.OppCtrl",
+        "Plus.2",
+    )
+}
+
+fn damage_cards(extra: &[String]) -> Vec<String> {
+    let mut v = extra.to_vec();
+    v.push(
+        "Name:Test Bolt\nManaCost:R\nTypes:Instant\n\
+         A:SP$ DealDamage | ValidTgts$ Any | NumDmg$ 3 | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+    );
+    v.push(
+        "Name:Test Lifelinker\nManaCost:W\nTypes:Creature Cleric\nPT:1/1\nK:Lifelink\n\
+         A:AB$ DealDamage | Cost$ T | ValidTgts$ Any | NumDmg$ 1 | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+    );
+    v.push(
+        "Name:Test Aegis\nManaCost:W\nTypes:Enchantment\n\
+         R:Event$ DamageDone | ActiveZones$ Battlefield | ValidTarget$ You | Prevent$ True | Description$ Text.\nOracle:Text."
+            .to_string(),
+    );
+    v
+}
+
+fn damage(s: &Script, id: ObjectId) -> u32 {
+    s.st.object(id).damage_marked
+}
+
+// CR 614.1a, 120.4b (2026-11-06): "if a source you control would deal damage to a
+// permanent or player, it deals double that damage instead" — to a player and to a
+// permanent; not damage from an opponent's source.
+#[test]
+fn double_damage_from_your_sources() {
+    let mut sc = scenario_n(2, &damage_cards(&[twin_gods()]));
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Test Twin Gods", "Mountain", "Mountain"],
+    );
+    let golem = sc.card(P1, Zone::Battlefield, "Test Golem");
+    sc.cards(P0, Zone::Hand, &["Test Bolt", "Test Bolt"]);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Bolt").target_player(P1).pay().pass_all();
+    assert_eq!(life(&s, P1), 34);
+    s.cast("Test Bolt").target_object(golem).pay().pass_all();
+    // (6 is lethal for the 2/3: it died.)
+    assert!(
+        s.st.objects
+            .get(&golem)
+            .is_none_or(|o| o.zone != Zone::Battlefield)
+    );
+    let text = card_model::describe::rules_text(
+        s.st.card_def(s.find(P0, Zone::Battlefield, "Test Twin Gods").unwrap()),
+    )
+    .join(" ");
+    assert!(text.contains("double that damage"), "{text}");
+
+    // The opponent's Bolt isn't doubled.
+    let mut sc = scenario_n(2, &damage_cards(&[twin_gods()]));
+    sc.cards(P0, Zone::Battlefield, &["Test Twin Gods"]);
+    sc.cards(P1, Zone::Battlefield, &["Mountain"]);
+    sc.turn(P1, engine_core::turn::Step::PrecombatMain);
+    sc.card(P1, Zone::Hand, "Test Bolt");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Bolt").target_player(P0).pay().pass_all();
+    assert_eq!(life(&s, P0), 37);
+}
+
+// "To an opponent or a permanent an opponent controls … that much damage plus 2" — not to
+// its controller's own permanents.
+#[test]
+fn plus_two_to_opponents_and_their_permanents() {
+    let mut sc = scenario_n(2, &damage_cards(&[thane()]));
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Test Thane", "Mountain", "Mountain"],
+    );
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Golem");
+    let mine = sc.card(P0, Zone::Battlefield, "Test Golem");
+    sc.cards(P0, Zone::Hand, &["Test Bolt", "Test Bolt"]);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Bolt").target_player(P1).pay().pass_all();
+    assert_eq!(life(&s, P1), 35);
+    let _ = theirs;
+    s.cast("Test Bolt").target_object(mine).pay().pass_all();
+    assert!(
+        s.st.objects
+            .get(&mine)
+            .is_none_or(|o| o.zone != Zone::Battlefield)
+    );
+    // 3 damage: lethal for the 2/3 either way; the other Golem is untouched.
+    assert_eq!(damage(&s, theirs), 0);
+}
+
+// CR 616.1, 614.5 (2026-11-06): the player dealt damage chooses the order — plus 2 then
+// double is 10, double then plus 2 is 8 — and the heuristic AI picks the smaller.
+#[test]
+fn cr_616_1_the_damaged_player_orders_them() {
+    for (first, dealt) in [("Test Thane", 10), ("Test Twin Gods", 8)] {
+        let mut sc = scenario_n(2, &damage_cards(&[twin_gods(), thane()]));
+        sc.cards(
+            P0,
+            Zone::Battlefield,
+            &["Test Twin Gods", "Test Thane", "Mountain"],
+        );
+        sc.card(P0, Zone::Hand, "Test Bolt");
+        let mut s = Script::new(sc.build());
+        s.cast("Test Bolt").target_player(P1).pay().pass_all();
+        assert_eq!(s.who(), P1, "the damaged player chooses");
+        choose(&mut s, first);
+        assert_eq!(life(&s, P1), 40 - dealt, "{first} first");
+    }
+    use engine_core::Agent;
+    let mut sc = scenario_n(2, &damage_cards(&[twin_gods(), thane()]));
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Test Thane", "Test Twin Gods", "Mountain"],
+    );
+    sc.card(P0, Zone::Hand, "Test Bolt");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Bolt").target_player(P1).pay().pass_all();
+    let mut ai = ai::HeuristicAgent::new(1, s.st.catalog.clone());
+    let view = engine_core::player_view(&s.st, P1);
+    let r = ai.decide(&view, s.decision());
+    s.respond(r);
+    assert_eq!(life(&s, P1), 32);
+}
+
+// CR 615.1a, 615.6: prevented damage isn't dealt, doubled or not; CR 702.15b: lifelink
+// gains the damage actually dealt — doubled.
+#[test]
+fn prevention_and_lifelink_with_doubling() {
+    let mut sc = scenario_n(2, &damage_cards(&[twin_gods()]));
+    sc.cards(P0, Zone::Battlefield, &["Test Twin Gods", "Mountain"]);
+    sc.cards(P1, Zone::Battlefield, &["Test Aegis"]);
+    sc.card(P0, Zone::Hand, "Test Bolt");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Bolt").target_player(P1).pay().pass();
+    if s.kind() == ChoiceKind::ChooseReplacement {
+        // Either order: nothing is dealt.
+        s.respond(engine_core::Response::Pick(vec![0]));
+    }
+    s.pass_all();
+    if s.kind() == ChoiceKind::ChooseReplacement {
+        s.respond(engine_core::Response::Pick(vec![0]));
+    }
+    assert_eq!(life(&s, P1), 40);
+    assert_eq!(
+        s.count(|e| matches!(e, engine_core::Event::DamageDealt { .. })),
+        0
+    );
+
+    let mut sc = scenario_n(2, &damage_cards(&[twin_gods()]));
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Test Twin Gods", "Test Lifelinker"],
+    );
+    let mut s = Script::new(sc.build());
+    s.activate("Test Lifelinker").target_player(P1).pass_all();
+    assert_eq!(life(&s, P1), 38);
+    assert_eq!(life(&s, P0), 42);
+}
+
+// In a three-player game, "to an opponent" is to each of its controller's opponents, each
+// its own event; damage to its controller isn't increased.
+#[test]
+fn three_players_damage_to_each_opponent() {
+    let sweep = "Name:Test Searing Wind\nManaCost:R\nTypes:Sorcery\n\
+        A:SP$ DamageAll | NumDmg$ 1 | ValidPlayers$ Player | SpellDescription$ Text.\nOracle:Text.";
+    let mut cards = damage_cards(&[thane()]);
+    cards.push(sweep.to_string());
+    let mut sc = scenario_n(3, &cards);
+    sc.cards(P0, Zone::Battlefield, &["Test Thane", "Mountain"]);
+    sc.card(P0, Zone::Hand, "Test Searing Wind");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Searing Wind").pay().pass_all();
+    assert_eq!((life(&s, P0), life(&s, P1), life(&s, P2)), (39, 37, 37));
+}
+
+#[test]
+fn damage_forms_left_blocked() {
+    let blocked = |card: &str, what: &str| {
+        let b = forge_test_blockers(card);
+        assert!(b.iter().any(|x| x.contains(what)), "{what}: {b:?}");
+    };
+    // An emblem alternative with no card alternative like it.
+    blocked(
+        &damage_effect(
+            "Test Emblem Only",
+            "ValidSource$ Emblem.YouCtrl | ValidTarget$ Player",
+            "Twice",
+        ),
+        "repl:DamageDone source",
+    );
+    // Redirection.
+    blocked(
+        &card(
+            "Test Redirector",
+            "Enchantment",
+            "R:Event$ DamageDone | ActiveZones$ Battlefield | ValidTarget$ You | ReplaceWith$ Dmg | DamageTarget$ Self | Description$ Text.\n\
+             SVar:Dmg:DB$ ReplaceSplitDamage | DamageTarget$ Self",
+        ),
+        "repl:DamageDone",
+    );
+}
+
 // ---------------------------------------------------------------------------------------
 // What doesn't compile.
 

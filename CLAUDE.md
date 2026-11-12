@@ -56,6 +56,16 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
   combat damage this turn") is an `effects::Lasting`, never an ability given to the
   creature (CR 113.12). Whatever reads abilities of permanents for combat rules or
   replacement effects reads `effects::lasting_abilities(st)` too.
+- A rule about a player ("no maximum hand size", extra land plays, "you have hexproof",
+  "play with the top card of your library revealed", "you may play lands from your
+  graveyard") is an `AbilityDef::PlayerRule`, read through `engine_core::players` (D-070),
+  never a flag written into `GameState`.
+- A card with several faces (D-071) is one `CardDef` with `faces` and a `Layout`; each face
+  is also a catalog entry (`catalog.face(card, n)`, `CardDef::face_of`). In every zone but
+  the battlefield and the stack a card has its front face's characteristics (CR 712.8a);
+  which face a permanent or spell shows is `GameObject::face`, read through
+  `layers::chars` / `chars_as`. A permission to play or cast from a zone is judged by the
+  face played (`players::may_play_face_from`, CR 601.3e). Tests: `forge_faces.rs`.
 - New dependency in engine-core/card-model ⇒ add to `PURE_ALLOWLIST` in `crates/xtask` AND
   log a decision. Must be `no_std`-capable with `default-features = false`.
 
@@ -81,6 +91,7 @@ cargo run -p harness -- fetch-cards                       # printed data for the
 cargo run -p harness -- coverage [--verbose]              # which precon cards are scripted/verified
 cargo run --release -p harness -- fetch-forge             # Forge's card scripts (pinned commit) -> ~/.cache/apnap/forge (git, network)
 cargo run --release -p harness -- forge-coverage [--top N] [--families] [--sample N [--with TEXT]] [--why TEXT [--all]]   # how many of ALL cards compile; what blocks the rest (--families: by kind of feature); --why lists the cards behind a blocker
+cargo run --release -p harness -- forge-coverage --top 0 --ranked [N]   # compile rate by EDHREC rank tiers; blockers and most played blocked cards in the top N (default 1000); needs the bulk file (fetch-bulk)
 cargo run --release -p harness -- fuzz --setup forge-4p --games 400 --threads 8      # random decks drawn from EVERY compiled card (finds what precon decks never reach)
 APNAP_TRACE=1 cargo run --release -p harness -- run --seed N --setup forge-4p        # a game that doesn't end: where it is, every 2,000 decisions
 ```
@@ -124,7 +135,9 @@ APNAP_TRACE=1 cargo run --release -p harness -- run --seed N --setup forge-4p   
   place), `frames/cast.rs` (601.2/602.2, and putting triggers on the stack), `frames/resolve.rs`
   (work list; last known information about targets in `TargetInfo`, D-068), `replacement.rs` + `frames/apply.rs` (614–616 pipeline), `triggers.rs` +
   `frames/put_triggers.rs` (603), `frames/check.rs` (117.5/704.3), `effects.rs` (resolved
-  continuous effects, shields), `testing.rs` (feature `test-support`: scenario builder, D-022).
+  continuous effects, shields), `frames/mana.rs` (mana abilities: what a permanent can make, their costs,
+  the payment planner; D-066), `players.rs` (rules about players: hand size, land plays,
+  hexproof, the top card of the library, playing from other zones; D-070), `testing.rs` (feature `test-support`: scenario builder, D-022).
 
 ## Direction (2026-11-09, D-046): every real card, by compiling Forge's scripts
 The user's goal is "every non-silver bordered card ever printed, for the most part,
@@ -138,10 +151,10 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-068): 9,776 of 34,463 scripts compile (28.4%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-067: 60% of
-the 100 most played Commander cards compile, 39% of the top 1,000, 26% of the top 5,000 (`edhrec_rank` in the Scryfall bulk file in the cache, joined to
-`forge-coverage --why "" --all`). Precons: `harness coverage --verbose` lists what blocks
+Status (D-071): 10,300 of 34,463 scripts compile (29.9%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-071: 78% of
+the 100 most played Commander cards compile, 52% of the top 1,000, 31% of the top 5,000
+(`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
 the rest. Feature tests live in `crates/harness/tests/forge_features.rs` and, one file per
 feature area since D-066, `forge_<area>.rs` next to it: invented cards written
 in Forge's format, compiled by `harness::forge_test_catalog` and played (`forge_test_blockers`
@@ -159,8 +172,9 @@ feature: Forge's defaults are often not what the key names suggest (flags are te
 presence, `Defined$ Targeted` means every target of the chain, a trigger that runs an
 `AB$` with a cost is "you may pay", triggers without `TriggerZones$` work from any zone).
 Not built yet: the full generated-text-vs-Oracle round trip (a word-level guard exists),
-multi-face cards, searching another player's library, "X target creatures", mana abilities
-that cost mana (signets) or make different mana at once, counters other than +1/+1 and
+flip, meld, prepare and specialize cards, Fuse, Aftermath, Rooms, day/night, disturb,
+craft, "enters/cast transformed" and "when this transforms" triggers (modal double-faced,
+transforming, Adventure, Omen and split cards are built, D-071), searching another player's library, "X target creatures", counters other than +1/+1 and
 -1/-1, "as this enters, choose …" (how a permanent enters is otherwise built, D-067:
 `ReplaceWith::EntersTappedUnless…`, the choice asked inside `ApplyFrame` as
 `ChoiceKind::AsEnters`), "sacrifice … instead" lands, "lands enter untapped", "exile it

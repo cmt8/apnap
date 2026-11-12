@@ -60,6 +60,14 @@ pub struct Characteristics {
     /// give it (CR 305.6: an ability it has, though no text says so).
     #[serde(default)]
     pub land_abilities_lost: bool,
+    /// The mana cost its mana value is calculated from when that isn't its own: the front
+    /// face's, for the back face of a nonmodal double-faced card (CR 202.3b, 712.6d).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_value_from: Option<ManaCost>,
+    /// It has an Adventure (CR 716.2a, 716.2b: part of its copiable values), whether or
+    /// not it uses those characteristics now.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub has_adventure: bool,
 }
 
 impl Characteristics {
@@ -81,7 +89,33 @@ impl Characteristics {
             power: d.power,
             toughness: d.toughness,
             land_abilities_lost: false,
+            mana_value_from: None,
+            // A catalog entry of a face carries its card's layout.
+            has_adventure: d.layout == card_model::Layout::Adventure,
         }
+    }
+
+    /// The printed characteristics of the face of `id` that is up (CR 712.6), or with
+    /// `face` the ones it would have with that face up.
+    pub fn of_face(st: &GameState, id: ObjectId, face: u8, controller: PlayerId) -> Self {
+        let o = st.object(id);
+        let entry = st.catalog.face(o.card, face);
+        let mut c = Characteristics::printed(entry, st.catalog.get(entry), controller);
+        // CR 202.3b: the back face of a nonmodal double-faced card has the mana value of
+        // its front face's mana cost.
+        if face != 0 && st.catalog.get(o.card).layout == card_model::Layout::Transform {
+            c.mana_value_from = Some(st.catalog.get(o.card).mana_cost.clone().unwrap_or_default());
+        }
+        c
+    }
+
+    /// Mana value (CR 202.3): no mana cost is 0; {X} counts as 0 (CR 202.3e: the value of
+    /// X on the stack is the spell's business).
+    pub fn mana_value(&self) -> u32 {
+        self.mana_value_from
+            .as_ref()
+            .or(self.mana_cost.as_ref())
+            .map_or(0, |m| m.mana_value())
     }
 
     pub fn is(&self, t: CardType) -> bool {
@@ -136,6 +170,13 @@ impl fmt::Debug for LayerCache {
     }
 }
 
+impl LayerCache {
+    /// Forget the memoized view (it is worked out again when next asked for).
+    pub(crate) fn invalidate(&self) {
+        *self.0.borrow_mut() = None;
+    }
+}
+
 /// The current characteristics of object `id` (CLAUDE.md invariant 3).
 pub fn chars(st: &GameState, id: ObjectId) -> Characteristics {
     if st.object(id).zone == Zone::Battlefield
@@ -143,9 +184,16 @@ pub fn chars(st: &GameState, id: ObjectId) -> Characteristics {
     {
         return c.clone();
     }
+    chars_as(st, id, st.object(id).face)
+}
+
+/// The characteristics `id`, which is not on the battlefield, would have with face `face`
+/// up: what is evaluated to see whether a face can be cast or played (CR 712.8c, 712.9),
+/// and what a permanent about to enter is checked against (CR 614.12).
+pub fn chars_as(st: &GameState, id: ObjectId, face: u8) -> Characteristics {
     let o = st.object(id);
-    let def = st.card_def(id);
-    let mut c = Characteristics::printed(o.card, def, o.controller);
+    let def = st.catalog.get(st.catalog.face(o.card, face));
+    let mut c = Characteristics::of_face(st, id, face, o.controller);
     // Inside the layer walk only what is printed is looked at for a card that isn't on
     // the battlefield (its types — never its power or toughness: card-db sees to that), and
     // working out its "*" could need the very view being built.
@@ -346,7 +394,7 @@ pub fn count_amount(
                     let c = if by_pt || o.zone == Zone::Battlefield {
                         chars(st, *id)
                     } else {
-                        Characteristics::printed(o.card, st.card_def(*id), o.owner)
+                        Characteristics::of_face(st, *id, o.face, o.owner)
                     };
                     cards
                         .iter()
@@ -429,9 +477,7 @@ pub fn count_amount(
                 match what {
                     card_model::Measure::Power => c.power.unwrap_or(0).max(0) as u32,
                     card_model::Measure::Toughness => c.toughness.unwrap_or(0).max(0) as u32,
-                    card_model::Measure::ManaValue => {
-                        c.mana_cost.as_ref().map_or(0, |m| m.mana_value())
-                    }
+                    card_model::Measure::ManaValue => c.mana_value(),
                 }
             })
             .max()
@@ -460,7 +506,9 @@ pub fn count_amount(
         | Amount::TriggeringAmount
         | Amount::SacrificedPower
         | Amount::OfTarget { .. }
-        | Amount::HandOf(_) => 0,
+        | Amount::HandOf(_)
+        | Amount::Noted(_)
+        | Amount::NotedTotal(_) => 0,
     }
 }
 
@@ -531,9 +579,10 @@ pub fn matches_parts(
         }
         && !(sel.other && id == source)
         && sel.token.is_none_or(|t| is_token == t)
+        && sel.has_adventure.is_none_or(|b| c.has_adventure == b)
         && {
             // CR 202.3: no mana cost is mana value 0.
-            let mv = c.mana_cost.as_ref().map_or(0, |m| m.mana_value());
+            let mv = c.mana_value();
             sel.mana_value_min.is_none_or(|n| mv >= n) && sel.mana_value_max.is_none_or(|n| mv <= n)
         }
         && (sel.names.is_empty() || sel.names.contains(&c.name))
@@ -1006,10 +1055,7 @@ fn compute(st: &GameState) -> View {
         .iter()
         .map(|&id| {
             let o = st.object(id);
-            (
-                id,
-                Characteristics::printed(o.card, st.card_def(id), o.controller),
-            )
+            (id, Characteristics::of_face(st, id, o.face, o.controller))
         })
         .collect();
 
@@ -1037,8 +1083,8 @@ fn compute(st: &GameState) -> View {
                     controller: o.controller,
                     parts: effects,
                     affected: Aff::Dynamic(affected),
-                    card: o.card,
-                    held: Some(AbilityId::printed(o.card, i as u16)),
+                    card: st.face_card(id),
+                    held: Some(AbilityId::printed(st.face_card(id), i as u16)),
                 });
             }
         }

@@ -286,4 +286,10 @@ pub enum Event {
     RemovedFromCombat {
         object: ObjectId,
     },
+    /// CR 701.27a: the permanent turned over; `face` is the face now up. It is the same
+    /// object (CR 701.27c).
+    Transformed {
+        object: ObjectId,
+        face: u8,
+    },
 }

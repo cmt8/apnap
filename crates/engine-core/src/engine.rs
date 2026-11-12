@@ -137,7 +137,8 @@ pub fn new_game_with_commanders(
             .into_iter()
             .chain(deck.iter().map(|&c| (c, Zone::Library)));
         for (card, zone) in entries {
-            if card.0 as usize >= st.catalog.defs.len() {
+            // The entry of a back face is not a card of its own (CardDef::face_of).
+            if card.0 as usize >= st.catalog.defs.len() || st.catalog.get(card).face_of.is_some() {
                 return Err(SetupError::UnknownCard(card));
             }
             let id = st.alloc_object_id();
@@ -162,6 +163,9 @@ pub fn new_game_with_commanders(
                     deathtouch_damage: false,
                     attached_to: None,
                     last_controller: owner,
+                    face: 0,
+                    transforms: 0,
+                    adventure: None,
                 },
             );
             if zone == Zone::Command {
