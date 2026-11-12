@@ -236,3 +236,11 @@
 
 > 607.2a If an object has an activated or triggered ability printed on it that instructs a player to exile one or more cards and an ability printed on it that refers either to “the exiled cards” or to cards “exiled with [this object],” these abilities are linked. The second ability refers only to cards in the exile zone that were put there as a result of an instruction to exile them in the first ability.
 
+
+## How the engine reads these (D-074)
+
+- 707.2 / 613.2a: `copy::Copiable` on `GameObject::copy`; `copy::base` is where layer 1a starts. Counters, status, other effects and choices are not part of it.
+- 707.2b / 707.3 / 707.9a-b: fixed when the copy effect begins; a copy of a copy copies the exceptions.
+- 707.5 / 707.6 / 614.12a: "enter as a copy" is a choice in the replacement pipeline; afterwards the copied "enters" abilities (counters, tapped, pay life, choose a creature type) apply, and the copy makes its own as-enters choices.
+- 707.8: a double-faced permanent is copied as the face that is up (a face is a catalog entry). Not built: a token copy of a double-faced permanent being double-faced (707.8a).
+- 707.10 (copies of spells and abilities), 702.40 (storm) and 603.7c (delayed triggers about objects) are quoted for the next step; not built yet.

@@ -3252,12 +3252,12 @@ fn ability(a: &AbilityDef) -> String {
                     format!("{what} enters with {counters} on it.")
                 }
                 ReplaceWith::EntersAsCopy { of, except, tapped } => format!(
-                    "You may have {} enter{} as a copy of {} on the battlefield{}.",
+                    "You may have {} enter{} as a copy of {}{}.",
                     what.to_lowercase(),
                     if *tapped { " tapped" } else { "" },
                     match of.controller {
                         Who::Any => format!(
-                            "any {}",
+                            "any {} on the battlefield",
                             selector(
                                 &Selector {
                                     other: false,
