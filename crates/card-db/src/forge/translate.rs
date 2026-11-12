@@ -527,6 +527,12 @@ impl TrigCtx {
                 it: &["TriggeredBlocker"],
                 ..TrigCtx::NOTHING
             },
+            // Forge's `Taps`: `TriggeredCard` is the permanent that became tapped.
+            Trigger::BecomesTapped(f) => TrigCtx {
+                it: &["TriggeredCard"],
+                it_is_this: *f == ObjFilter::This,
+                ..TrigCtx::NOTHING
+            },
             // Forge's `AttackerBlocked` / `AttackerUnblocked`: `TriggeredDefendingPlayer` is
             // the player the attacker attacks.
             Trigger::BecomesBlocked(f) | Trigger::Unblocked(f) => TrigCtx {
@@ -5236,6 +5242,13 @@ impl<'a> Tx<'a> {
                 })
             }
             // Blockers being declared (CR 509.1h).
+            // CR 603.2e, 701.26a: "whenever [a permanent] becomes tapped" (Forge's
+            // TriggerTaps: `ValidCard$`; `Attacker$`, `ValidCause$`, `FirstTime$` … are not
+            // read and block).
+            "Taps" => rd
+                .get("ValidCard")
+                .and_then(|f| self.obj_filter(f))
+                .map(Trigger::BecomesTapped),
             "Blocks" => {
                 let blocker = rd.get("ValidCard").and_then(|f| self.obj_filter(f));
                 match rd.get("ValidBlocked") {
@@ -5348,6 +5361,12 @@ impl<'a> Tx<'a> {
                 }
                 // An attacking creature is on the battlefield.
                 (Some("Attacks"), _) => rec.get("ValidCard") == Some("Card.Self"),
+                // Only a permanent becomes tapped; and the Aura or Equipment attached to it
+                // is on the battlefield too.
+                (Some("Taps"), _) => matches!(
+                    rec.get("ValidCard"),
+                    Some("Card.Self" | "Card.AttachedBy" | "Creature.AttachedBy")
+                ),
                 // "When you cycle this card": from wherever the card went.
                 (Some("Cycled"), _) => rec.get("ValidCard") == Some("Card.Self"),
                 // A creature that blocks or is blocked is on the battlefield.

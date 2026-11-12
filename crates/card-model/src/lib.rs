@@ -920,6 +920,10 @@ pub enum Trigger {
         attacker: ObjFilter,
         blocker: ObjFilter,
     },
+    /// CR 603.2e, 701.26a: "Whenever [filter] becomes tapped" — an untapped permanent is
+    /// tapped, whatever taps it (a cost, an effect, attacking). Entering tapped isn't
+    /// becoming tapped. "It" is the permanent.
+    BecomesTapped(ObjFilter),
 }
 
 /// What a damage trigger's damage was dealt to.

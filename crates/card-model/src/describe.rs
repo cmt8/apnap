@@ -2529,6 +2529,7 @@ fn trigger_event(t: &Trigger) -> String {
             obj_filter(what)
         ),
         Trigger::Blocks(f) => format!("Whenever {} blocks", obj_filter(f)),
+        Trigger::BecomesTapped(f) => format!("Whenever {} becomes tapped", obj_filter(f)),
         Trigger::BecomesBlocked(f) => format!("Whenever {} becomes blocked", obj_filter(f)),
         Trigger::Unblocked(f) => format!("Whenever {} attacks and isn't blocked", obj_filter(f)),
         Trigger::BlockedBy { attacker, blocker } => format!(

@@ -182,3 +182,108 @@ fn a_discarded_source_deals_damage_and_a_land_with_a_basic_land_type_is_found() 
         forge_test_blockers("Name:x"),
     );
 }
+
+fn brass() -> String {
+    card(
+        "Test Brass Gate",
+        "no cost",
+        "Land",
+        "A:AB$ Mana | Cost$ T | Produced$ R | SpellDescription$ Text.\n\
+         T:Mode$ Taps | ValidCard$ Card.Self | Execute$ TrigDamage | TriggerZones$ Battlefield | TriggerDescription$ Text.\n\
+         SVar:TrigDamage:DB$ DealDamage | Defined$ You | NumDmg$ 1",
+    )
+}
+
+fn life(s: &Script, p: PlayerId) -> i32 {
+    s.st.player(p).life
+}
+
+// CR 603.2e (2026-11-06): "An ability that triggers when a permanent 'becomes tapped' …
+// doesn't trigger if the permanent enters the battlefield in that state." CR 701.26a: "Only
+// untapped permanents can be tapped." The trigger event is the tapping, whatever taps it:
+// a mana ability's cost (the trigger waits for the spell being cast, CR 603.3), or another
+// player's effect. Forge: `T:Mode$ Taps | ValidCard$ Card.Self`.
+#[test]
+fn becomes_tapped_triggers_on_every_tapping_and_never_on_a_tapped_permanent() {
+    let bolt = card(
+        "Test Ember Flick",
+        "R",
+        "Instant",
+        "A:SP$ DealDamage | ValidTgts$ Player | NumDmg$ 1 | SpellDescription$ Text.",
+    );
+    let freeze = card(
+        "Test Hoarfrost Grip",
+        "U",
+        "Instant",
+        "A:SP$ Tap | ValidTgts$ Permanent | SpellDescription$ Text.",
+    );
+    let mut sc = scenario(&[&brass(), &bolt, &freeze]);
+    let gate = sc.card(P0, Zone::Battlefield, "Test Brass Gate");
+    sc.card(P0, Zone::Hand, "Test Ember Flick");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Ember Flick").target_player(P1).pay();
+    // Tapped for mana while casting: the trigger goes on the stack above the spell.
+    assert_eq!(s.st.stack.len(), 2);
+    s.pass_all();
+    assert_eq!(
+        life(&s, P0),
+        39,
+        "the land dealt 1 damage to its controller"
+    );
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+    });
+    assert_eq!(life(&s, P1), 39);
+    // Tapping it again does nothing: it is tapped (CR 701.26a), so nothing triggers.
+    let mut sc = scenario(&[&brass(), &freeze]);
+    let gate2 = sc.card(P0, Zone::Battlefield, "Test Brass Gate");
+    sc.tapped(gate2);
+    sc.card(P0, Zone::Battlefield, "Island");
+    sc.card(P0, Zone::Hand, "Test Hoarfrost Grip");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Hoarfrost Grip").target_object(gate2).pay().pass_all();
+    assert_eq!(life(&s, P0), 40);
+    assert_eq!(s.count(|e| matches!(e, Event::Triggered { .. })), 0);
+    // An opponent's effect taps it: it triggers, and its controller is dealt the damage.
+    let mut sc = scenario(&[&brass(), &freeze]);
+    let gate3 = sc.card(P0, Zone::Battlefield, "Test Brass Gate");
+    sc.card(P1, Zone::Battlefield, "Island");
+    sc.card(P1, Zone::Hand, "Test Hoarfrost Grip");
+    let mut s = Script::new(sc.build());
+    s.pass();
+    s.cast("Test Hoarfrost Grip").target_object(gate3).pay().pass_all();
+    drive_until(&mut s, |s| {
+        s.st.stack.is_empty() && s.kind() == ChoiceKind::Priority
+    });
+    assert_eq!(life(&s, P0), 39);
+    let _ = gate;
+}
+
+// CR 603.2e: entering the battlefield tapped is not becoming tapped.
+#[test]
+fn entering_tapped_is_not_becoming_tapped() {
+    let slow = card(
+        "Test Slow Brass",
+        "no cost",
+        "Land",
+        "R:Event$ Moved | ValidCard$ Card.Self | Destination$ Battlefield | ReplacementResult$ Updated | ReplaceWith$ ETBTapped | Description$ Text.\n\
+         SVar:ETBTapped:DB$ Tap | Defined$ Self | ETB$ True\n\
+         T:Mode$ Taps | ValidCard$ Card.Self | Execute$ TrigDamage | TriggerZones$ Battlefield | TriggerDescription$ Text.\n\
+         SVar:TrigDamage:DB$ DealDamage | Defined$ You | NumDmg$ 1",
+    );
+    let mut sc = scenario(&[&slow]);
+    sc.card(P0, Zone::Hand, "Test Slow Brass");
+    let mut s = Script::new(sc.build());
+    s.pick(
+        "play",
+        |s, o| matches!(o, OptionDesc::PlayLand { card } if s.name(*card) == "Test Slow Brass"),
+    );
+    let land = s.find(P0, Zone::Battlefield, "Test Slow Brass").unwrap();
+    assert!(s.st.object(land).tapped);
+    assert_eq!(s.count(|e| matches!(e, Event::Triggered { .. })), 0);
+    let text = card_model::describe::rules_text(s.st.card_def(land));
+    assert_eq!(
+        text[1],
+        "Whenever this land becomes tapped, this land deals 1 damage to you."
+    );
+}

@@ -632,6 +632,8 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             debug_assert!(!o.tapped, "tapping a tapped permanent");
             o.tapped = true;
             st.emit(Event::Tapped { object });
+            // CR 603.2e: "becomes tapped" triggers (D-080).
+            crate::triggers::detect_tapped(st, object);
             ActionResult::Done
         }
         GameAction::Untap { object } => {

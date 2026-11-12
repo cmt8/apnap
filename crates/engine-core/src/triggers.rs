@@ -795,6 +795,20 @@ pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
     detect_player_attacks(st, attackers);
 }
 
+/// CR 603.2e, 701.26a: "whenever [a permanent] becomes tapped" — `object` has just been
+/// tapped (it was untapped). Called by the tap action itself: tapping is no replaceable
+/// event (no `Apply` batch), and whatever taps a permanent — a cost, an effect, attacking —
+/// is the event.
+pub(crate) fn detect_tapped(st: &mut GameState, object: ObjectId) {
+    let none = BTreeMap::new();
+    detect_with(st, |st, src, t| match t {
+        Trigger::BecomesTapped(f) if object_hit(st, &none, f, object, src) => {
+            alloc::vec![(Some(object), EventFacts::default(), None)]
+        }
+        _ => Vec::new(),
+    });
+}
+
 /// One occurrence of a trigger event: its object ("it"), what else it carries, and the
 /// object as it last existed if it is gone.
 type Hit = (Option<ObjectId>, EventFacts, Option<Characteristics>);
