@@ -672,3 +672,35 @@ fn a_delayed_trigger_for_this_turn_ends_at_cleanup() {
         forge_test_blockers(&returns).contains(&"DelayedTrigger:remembers objects".to_string())
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Text only
+
+// Forge's `CostDesc$` is how the cost reads in the ability's description
+// (`SpellAbility.getDescription`); the cost is `Cost$`. A card compiles the same with or
+// without it, and the discard is still an additional cost (CR 601.2b, 601.2h).
+#[test]
+fn a_cost_description_is_text_only() {
+    let with = |desc: &str| {
+        card(
+            "Test Score",
+            "3 R",
+            "Instant",
+            &format!(
+                "A:SP$ Draw | Cost$ 3 R Discard<1/Card/card> {desc}| NumCards$ 2 | Defined$ You | SpellDescription$ Text."
+            ),
+        )
+    };
+    let a = forge_test_catalog(
+        &[&with("| CostDesc$ As an additional cost, discard a card. ")],
+        &[],
+    );
+    let b = forge_test_catalog(&[&with("")], &[]);
+    let def = |c: &card_model::CardCatalog| c.get(c.find("Test Score").unwrap()).clone();
+    assert_eq!(def(&a), def(&b));
+    assert!(
+        card_model::describe::rules_text(&def(&a))
+            .join(" ")
+            .contains("discard a card")
+    );
+}

@@ -111,3 +111,12 @@ an amount ("that spell's mana value"). Remembering objects is not compiled yet.
 | `a_delayed_trigger_adds_mana_equal_to_the_countered_spells_mana_value` | 603.7a–c, 202.3e |
 | `delayed_triggers_of_the_next_turn_remember_a_player` | 603.7c–d |
 | `a_delayed_trigger_for_this_turn_ends_at_cleanup` | 603.7b, 514.2 |
+
+## Text only: `CostDesc$`
+
+How a cost reads in the ability's description (Forge's `SpellAbility.getDescription`); the
+cost is `Cost$`. No rule involved.
+
+| Test | Rule |
+|---|---|
+| `a_cost_description_is_text_only` | 601.2b (the additional cost is still compiled from `Cost$`) |

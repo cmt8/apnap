@@ -34,7 +34,10 @@ pub struct Compiled {
 
 /// Parameters that never affect the rules: descriptions shown to players, prompts, and
 /// hints for Forge's AI. (docs/forge/script-format.md, "keys a translator can ignore".)
-const TEXT_ONLY: [&str; 19] = [
+const TEXT_ONLY: [&str; 20] = [
+    // How the cost reads in the ability's description (`SpellAbility.getDescription`):
+    // the cost itself is `Cost$`.
+    "CostDesc",
     "ValidTgtsDesc",
     "UnlessAI",
     "ChangeTypeDesc",
