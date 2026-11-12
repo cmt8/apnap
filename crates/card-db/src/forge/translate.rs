@@ -3931,7 +3931,6 @@ impl<'a> Tx<'a> {
         // What it remembers, fixed as it is created (CR 603.7c).
         let mut player = None;
         let mut amount = None;
-        let mut counter_first = false;
         if rd.get("RememberNumber").is_some() {
             match chain.countered {
                 // "That spell's mana value": as it last was on the stack (CR 608.2h).
@@ -3940,7 +3939,6 @@ impl<'a> Tx<'a> {
                         slot,
                         what: Measure::ManaValue,
                     });
-                    counter_first = true;
                 }
                 _ => {
                     self.block("DelayedTrigger:RememberNumber of something else");
@@ -4009,19 +4007,11 @@ impl<'a> Tx<'a> {
             player,
             amount,
         };
-        // Forge remembers the mana value only of a spell that was countered: with
-        // nothing countered there is nothing to add (the delayed ability does nothing),
-        // so it is made only if the counter happened.
-        if counter_first && let Some(first) = chain.effects.pop() {
-            if !matches!(first, Effect::Counter { .. }) {
-                self.block("DelayedTrigger:RememberNumber not right after the counter");
-                return None;
-            }
-            return Some(Effect::IfDone {
-                first: Box::new(first),
-                then: Box::new(delayed),
-            });
-        }
+        // Forge's CounterEffect remembers the mana value before it tries to counter
+        // ("should remember even that spell cannot be countered"): the delayed trigger is
+        // made whether or not the spell was countered, with its mana value as it last was
+        // on the stack (`OfTarget`, X included). A target illegal on resolution makes the
+        // whole spell do nothing (CR 608.2b).
         Some(delayed)
     }
 

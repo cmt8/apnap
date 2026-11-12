@@ -2349,9 +2349,12 @@ Rules text: docs/rules-notes/d075-commander-staples.md (sections 205.3i, 603.7, 
   carries the source as it was). What it remembers is fixed as it is created (603.7c): a
   player — "its controller" of a countered spell (`RememberObjects$ RememberedController`
   after `RememberTargets$`) — or an amount — that spell's mana value on the stack, X
-  included (`RememberNumber$` after `RememberCounteredCMC$`). Forge remembers the mana value
-  only of a spell that was countered; with nothing countered the delayed ability would add
-  nothing, so it is created only if the counter happened (`Effect::IfDone`). Compiled:
+  included (`RememberNumber$` after `RememberCounteredCMC$`). The delayed trigger is created
+  whether or not the spell was countered — Forge's CounterEffect remembers the mana value
+  before trying to counter ("should remember even that spell cannot be countered"), and a
+  Mana Drain aimed at a spell that can't be countered still gives the mana. (Corrected after
+  the merge: it was first compiled as "if you do", from a claim about Forge not checked
+  against its Java. Mana Drain's text now says "that spell's mana value".) Compiled:
   `Mode$ Phase` only (`DelayedTrigger:mode …` otherwise); remembering objects is not
   (`DelayedTrigger:remembers objects`: 195 cards in all — "exile it, return it at the beginning of the
   next end step" needs D-069's memory to outlive the resolution); "this turn" over two steps

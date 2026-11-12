@@ -776,3 +776,116 @@ fn look_at_the_top_cards_put_them_back_in_any_order_then_maybe_shuffle() {
         1
     );
 }
+
+fn siphon() -> String {
+    card(
+        "Test Siphon",
+        "U U",
+        "Instant",
+        "A:SP$ Counter | TargetType$ Spell | RememberCounteredCMC$ True | ValidTgts$ Card | SubAbility$ DBDelTrig | SpellDescription$ Text.\n\
+         SVar:DBDelTrig:DB$ DelayedTrigger | Mode$ Phase | Phase$ Main1,Main2 | ValidPlayer$ You | Execute$ AddMana | RememberNumber$ True | SubAbility$ DBCleanup\n\
+         SVar:DBCleanup:DB$ Cleanup | ClearRemembered$ True\n\
+         SVar:AddMana:DB$ Mana | Produced$ C | Amount$ X\n\
+         SVar:X:Count$TriggerRememberAmount",
+    )
+}
+
+const SURE: &str = "Name:Test Sure Idea\nManaCost:X G\nTypes:Sorcery\n\
+    R:Event$ Counter | ValidCard$ Card.Self | ValidSA$ Spell | Layer$ CantHappen | Description$ Text.\n\
+    A:SP$ Draw | NumCards$ 1 | SpellDescription$ Text.\nSVar:X:Count$xPaid\nOracle:Text.";
+
+// CR 101.2, 701.6a (2026-11-06) with CR 603.7c: a spell that can't be countered isn't
+// countered, but the rest of the countering spell still happens — the delayed trigger is
+// created with the spell's mana value (Forge's CounterEffect remembers it before trying to
+// counter: "should remember even that spell cannot be countered").
+#[test]
+fn the_mana_value_is_remembered_even_if_the_spell_cant_be_countered() {
+    let mut sc = scenario(&[&siphon(), SURE]);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Forest", "Forest", "Forest", "Island", "Island"],
+    );
+    sc.cards(P0, Zone::Hand, &["Test Sure Idea", "Test Siphon"]);
+    sc.turn(P0, engine_core::turn::Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Sure Idea").x(2).pay();
+    s.cast("Test Siphon").target("Test Sure Idea").pay();
+    s.pass_all();
+    // The Siphon resolved and made its delayed trigger; the Idea is still on the stack.
+    assert_eq!(s.st.delayed.len(), 1);
+    assert!(s.find(P0, Zone::Graveyard, "Test Sure Idea").is_none());
+    s.pass_all();
+    assert!(
+        s.find(P0, Zone::Graveyard, "Test Sure Idea").is_some(),
+        "it resolved"
+    );
+    drive_to(&mut s, P0, engine_core::turn::Step::PostcombatMain);
+    assert_eq!(s.st.player(P0).mana_pool.total(), 3);
+    let text = card_model::describe::rules_text(
+        s.st.card_def(s.find(P0, Zone::Graveyard, "Test Siphon").unwrap()),
+    )
+    .join(" ");
+    assert!(
+        text.contains("where X is that spell's mana value"),
+        "{text}"
+    );
+    assert!(!text.contains("If you do"), "{text}");
+}
+
+// CR 608.2b: a spell whose only target is illegal as it resolves doesn't resolve — none of
+// it happens, so no delayed trigger is created.
+#[test]
+fn no_delayed_trigger_if_the_countered_spell_is_already_gone() {
+    let mut sc = scenario(&[&siphon(), BIG]);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Forest", "Forest", "Island", "Island", "Island", "Island"],
+    );
+    sc.cards(
+        P0,
+        Zone::Hand,
+        &["Test Big Idea", "Test Siphon", "Test Siphon"],
+    );
+    sc.turn(P0, engine_core::turn::Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Big Idea").x(1).pay();
+    s.cast("Test Siphon").target("Test Big Idea").pay();
+    s.cast("Test Siphon").target("Test Big Idea").pay();
+    // The second Siphon counters it; the first then has no legal target.
+    s.pass_all();
+    assert_eq!(s.st.delayed.len(), 1);
+    s.pass_all();
+    assert_eq!(s.st.delayed.len(), 1, "the first Siphon did nothing");
+}
+
+// CR 603.7 with CR 101.2: "its controller may draw up to two cards at the beginning of the
+// next turn's upkeep" and "you draw a card …" happen whether or not the spell was countered
+// (Forge remembers the target before trying to counter it).
+#[test]
+fn delayed_draws_are_created_even_if_the_spell_cant_be_countered() {
+    let denial = card(
+        "Test Refusal",
+        "1 U",
+        "Instant",
+        "A:SP$ Counter | TargetType$ Spell | RememberTargets$ True | ValidTgts$ Card | SubAbility$ DelTrigSlowtrip | SpellDescription$ Text.\n\
+         SVar:DelTrigSlowtrip:DB$ DelayedTrigger | NextTurn$ True | Mode$ Phase | Phase$ Upkeep | ValidPlayer$ Player | Execute$ DrawSlowtrip | SubAbility$ DelTrigDrawTwo\n\
+         SVar:DrawSlowtrip:DB$ Draw | Defined$ You\n\
+         SVar:DelTrigDrawTwo:DB$ DelayedTrigger | NextTurn$ True | Mode$ Phase | Phase$ Upkeep | ValidPlayer$ Player | RememberObjects$ RememberedController | Execute$ DrawTwo | SubAbility$ DBCleanup\n\
+         SVar:DrawTwo:DB$ Draw | NumCards$ 2 | Defined$ DelayTriggerRemembered | Upto$ True\n\
+         SVar:DBCleanup:DB$ Cleanup | ClearRemembered$ True",
+    );
+    let mut sc = scenario(&[&denial, SURE]);
+    sc.cards(P0, Zone::Battlefield, &["Forest", "Forest"]);
+    sc.card(P0, Zone::Hand, "Test Sure Idea");
+    sc.cards(P1, Zone::Battlefield, &["Island", "Island"]);
+    sc.card(P1, Zone::Hand, "Test Refusal");
+    sc.turn(P0, engine_core::turn::Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Sure Idea").x(1).pay().pass();
+    s.cast("Test Refusal").target("Test Sure Idea").pay();
+    s.pass_all();
+    assert_eq!(s.st.delayed.len(), 2);
+    assert!(s.st.delayed.iter().any(|d| d.facts.player == Some(P0)));
+}
