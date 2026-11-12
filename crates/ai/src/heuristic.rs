@@ -109,7 +109,9 @@ fn effect_polarity(e: &Effect) -> Polarity {
         Effect::TapAll(_)
         | Effect::UntapAll(_)
         | Effect::SacrificeThis
-        | Effect::ControllerSacrificesThis => Polarity::Neutral,
+        | Effect::ControllerSacrificesThis
+        | Effect::UntapChosen { .. }
+        | Effect::Proliferate => Polarity::Neutral,
         Effect::PutCountersAll { .. } | Effect::ThisSpellTo { .. } => Polarity::Neutral,
         Effect::PutCounters { kind, .. } => match kind {
             CounterKind::PlusOne => Polarity::Help,
@@ -207,6 +209,39 @@ fn kw_value(k: Keyword) -> i64 {
 }
 
 /// A rough value of a permanent (higher = more important).
+/// Which of several replacement effects on one event the affected player applies first
+/// (CR 616.1; lower first). Tokens and +1/+1 counters are good to have: add before
+/// multiplying, shrink last. Damage and -1/-1 counters are bad: prevent, shrink and
+/// multiply before adding (D-073).
+fn replacement_rank(a: &AbilityDef) -> u8 {
+    use card_model::{Calc, Replaces};
+    let AbilityDef::Replacement { replaces, with } = a else {
+        return 5;
+    };
+    let good = match replaces {
+        Replaces::Tokens { .. } | Replaces::CreateTokens | Replaces::GainLife(_) => Some(true),
+        Replaces::Counters { kind, .. } => Some(*kind != Some(CounterKind::MinusOne)),
+        Replaces::PutCountersOnYourPermanents => Some(true),
+        Replaces::Damage { .. } => Some(false),
+        _ => None,
+    };
+    // 0 adds, 1 multiplies, 2 anything else, 3 shrinks, 4 prevents.
+    let kind = match with {
+        ReplaceWith::Scale(Calc::Plus(_)) | ReplaceWith::AddTokens { .. } => 0,
+        ReplaceWith::Scale(Calc::Times(_)) | ReplaceWith::Twice => 1,
+        ReplaceWith::Scale(
+            Calc::Minus(_) | Calc::HalfDown | Calc::HalfUp | Calc::AtMost(_) | Calc::From(_),
+        ) => 3,
+        ReplaceWith::Prevent => 4,
+        _ => 2,
+    };
+    match good {
+        Some(true) => kind,
+        Some(false) => 4 - kind,
+        None => 2,
+    }
+}
+
 fn value(o: &ObjectView) -> i64 {
     let p = i64::from(o.power.unwrap_or(0));
     let t = i64::from(o.toughness.unwrap_or(0));
@@ -1272,6 +1307,22 @@ impl Agent for HeuristicAgent {
                     per_max,
                 },
             ) => self.allocate_damage(v, d, *total, per_min, per_max),
+            // Several effects that change how much (D-073): the order that gives the most of
+            // what is good for us, the least of what is bad.
+            (ChoiceKind::ChooseReplacement, _) if !d.options.contains(&OptionDesc::Accept) => {
+                let rank = |o: &OptionDesc| match o {
+                    OptionDesc::Replacement { ability, .. } => {
+                        replacement_rank(self.catalog.ability(*ability))
+                    }
+                    // A prevention shield: prevent first.
+                    OptionDesc::Shield { .. } => 0,
+                    _ => 5,
+                };
+                let best = (0..d.options.len())
+                    .min_by_key(|&i| rank(&d.options[i]))
+                    .unwrap_or(0);
+                Response::Pick(vec![best])
+            }
             // Prefer keeping the commander; otherwise the first offered effect.
             (ChoiceKind::ChooseReplacement | ChoiceKind::CommanderToCommandZone, _) => {
                 Response::Pick(vec![
@@ -1345,6 +1396,44 @@ impl Agent for HeuristicAgent {
                 },
                 _,
             ) => Response::Pick(vec![self.as_enters(v, d, ability, tapped)]),
+            // Proliferate: its own permanents with +1/+1 counters, others' with -1/-1
+            // counters (and none with both).
+            (ChoiceKind::Proliferate, Primitive::PickN { max, .. }) => Response::Pick(
+                d.options
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, o)| match o {
+                        OptionDesc::Card { card } => Self::find(v, *card).is_some_and(|c| {
+                            let has = |k| c.counters.iter().any(|(kind, n)| *kind == k && *n > 0);
+                            let (plus, minus) =
+                                (has(CounterKind::PlusOne), has(CounterKind::MinusOne));
+                            if c.controller == v.viewer {
+                                plus && !minus
+                            } else {
+                                minus && !plus
+                            }
+                        }),
+                        _ => false,
+                    })
+                    .map(|(i, _)| i)
+                    .take(*max)
+                    .collect(),
+            ),
+            // "Untap up to N lands": its own permanents, as many as allowed.
+            (ChoiceKind::Untap, Primitive::PickN { max, .. }) => Response::Pick(
+                d.options
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, o)| match o {
+                        OptionDesc::Card { card } => {
+                            Self::find(v, *card).is_some_and(|c| c.controller == v.viewer)
+                        }
+                        _ => false,
+                    })
+                    .map(|(i, _)| i)
+                    .take(*max)
+                    .collect(),
+            ),
             _ => return self.fallback.decide(v, d),
         };
         if d.validate(&r).is_ok() {

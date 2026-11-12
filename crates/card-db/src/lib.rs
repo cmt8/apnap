@@ -196,6 +196,16 @@ fn token_names(def: &CardDef) -> Vec<String> {
             walk(&m.effect, &mut out);
         }
     }
+    // "… plus a Food token", "… that many Angels instead" (D-073).
+    for a in def.abilities.iter().chain(&def.granted) {
+        if let AbilityDef::Replacement {
+            with: ReplaceWith::AddTokens { tokens, .. } | ReplaceWith::ReplaceTokens(tokens),
+            ..
+        } = a
+        {
+            out.extend(tokens.iter().cloned());
+        }
+    }
     out
 }
 
@@ -379,7 +389,8 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                     *affected != card_model::Affected::Enchanted
                 }
                 AbilityDef::Replacement { replaces, with } => {
-                    matches!(replaces, Replaces::Damage { .. }) && *with == ReplaceWith::Prevent
+                    matches!(replaces, Replaces::Damage { .. })
+                        && matches!(with, ReplaceWith::Prevent | ReplaceWith::Scale(_))
                 }
                 // "You may play an additional land this turn" (CR 611.2c: a rule).
                 AbilityDef::PlayerRule { rule, .. } => {
@@ -432,7 +443,10 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                 AbilityDef::Replacement { replaces, .. } => *replaces != Replaces::ThisEnters,
                 AbilityDef::Mana { .. }
                 | AbilityDef::Triggered { .. }
-                | AbilityDef::CostReduction { .. } => true,
+                | AbilityDef::CostReduction { .. }
+                | AbilityDef::AdditionalTrigger { .. } => true,
+                // "This spell can't be countered" is about the card itself.
+                AbilityDef::CantBeCountered { spells } => spells.is_some(),
                 // "This card" may be cast from a zone: only its own, printed ability.
                 AbilityDef::PlayerRule { rule, .. } => {
                     !matches!(rule, card_model::PlayerRule::PlayThisFrom(_))
@@ -681,6 +695,12 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                     p.push(at("mana that can be spent on nothing".into()));
                 }
             }
+            AbilityDef::AdditionalTrigger { .. } => {}
+            AbilityDef::CantBeCountered { spells } => {
+                if spells.is_none() && c.card_types.iter().all(|t| *t == CardType::Land) {
+                    p.push(at("a land is never a spell (CR 305.1)".into()));
+                }
+            }
             AbilityDef::FromZone { zone, ability } => {
                 let fits = *zone == ActivationZone::Graveyard
                     && !granted
@@ -905,9 +925,28 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                 }
             }
             AbilityDef::Replacement { replaces, with } => {
+                // A token enters as it is created (CR 111.2), with no object yet for its
+                // own "this enters …" effect to belong to (D-073).
+                if c.token && *replaces == Replaces::ThisEnters {
+                    p.push(at(
+                        "a token's own \"enters\" replacement effect isn't supported".into(),
+                    ));
+                }
                 let ok = matches!(
                     (replaces, with),
                     (Replaces::CreateTokens, ReplaceWith::Twice)
+                        | (
+                            Replaces::Tokens { .. },
+                            ReplaceWith::Scale(_)
+                                | ReplaceWith::AddTokens { .. }
+                                | ReplaceWith::ReplaceTokens(_)
+                        )
+                        | (
+                            Replaces::Counters { .. }
+                                | Replaces::Damage { .. }
+                                | Replaces::GainLife(_),
+                            ReplaceWith::Scale(_)
+                        )
                         | (Replaces::Damage { .. }, ReplaceWith::Prevent)
                         | (Replaces::PutCountersOnYourPermanents, ReplaceWith::Twice)
                         | (Replaces::CardToGraveyard, ReplaceWith::Exile)
@@ -1405,6 +1444,11 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         }
         Effect::Tap { what } | Effect::Untap { what } | Effect::Transform { what } => obj(what, p),
         Effect::TapAll(s) | Effect::UntapAll(s) => selector(s, p),
+        Effect::Proliferate => {}
+        Effect::UntapChosen { what, count } => {
+            selector(what, p);
+            amount(count, p);
+        }
         Effect::Discard { who, amount: a } => {
             player(who, p);
             amount(a, p);

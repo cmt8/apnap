@@ -2138,6 +2138,200 @@ Rules text: docs/rules-notes/118.9-alternative-costs.md. Tests:
   the same size), then delve/convoke/improvise in the planner, then the channel lands'
   `ReduceCost`.
 
+## D-075 The most played Commander cards no feature family covers, part 1 (2026-11-12)
+Rules text: docs/rules-notes/d075-commander-staples.md. Tests:
+`crates/harness/tests/forge_staples.rs`. Each feature is general (every card using it), in
+EDHREC order.
+- **"The life lost this way"** (CR 119.3, 608.2c): `Amount::LifeLostThisWay` (appended) —
+  what the players' life totals actually went down by in the "lose life" instruction just
+  before it (`Work::LifeLost` snapshots the totals; `ResolveFrame::life_lost`, serialized
+  only when set). Forge's `AFLifeLost`, compiled only right after a `LoseLife` in the same
+  chain (`expr:AFLifeLost not after a life loss` otherwise). D-078's guard on `AF…`
+  variables stays for every other use (its test now uses another `AF` name); D-075 adds
+  `SET_WHILE_RESOLVING`, the other variables Forge's code writes as it resolves
+  (`PreventedDamage`, `AffectedX` — counted per affected card in a static —, `Votes`,
+  die-roll results…): never read by their written value (`expr:set while resolving …`).
+  Scholar of Athreos, which D-078 found and blocked, compiles again, now right; with it
+  Exsanguinate, Gray Merchant of Asphodel, Kokusho, Blood Tithe, Agent of Masks,
+  Subversion, Debt to the Deathless.
+- **"In any order"** (CR 401.4): `Reorder$` on a `ChangeZone` to a library (Brainstorm,
+  Brainsurge, Brainstone, Riverwise Augur, Congregation at Dawn, Dwarven Recruiter, Scouting
+  Trek). The engine already has cards put on a library ordered by their owner; elsewhere
+  `param:ChangeZone.Reorder not to a library`.
+- **"Untap up to N lands"** (CR 701.26b): `Effect::UntapChosen { what, count }` and
+  `ChoiceKind::Untap` (both appended) — anyone's permanents matching (Forge's `UntapType$`
+  is not limited to yours), chosen as it resolves, not targets; only tapped ones are
+  offered. Chosen by another player: `param:Untap.UntapUpTo by another player`. Frantic
+  Search, Snap, Peregrine Drake, Palinchron, Great Whale, Treachery, Rewind, Unwind, Cloud
+  of Faeries, Pore Over the Pages. The heuristic agent untaps its own permanents; the app
+  titles the choice "Choose what to untap".
+- **Proliferate** (CR 701.34a): `Effect::Proliferate`, `ChoiceKind::Proliferate`
+  (appended): any number of permanents that have a counter, each gets one more of each
+  kind, all in one replaceable event. Players have no counters in this engine (every card
+  that gives poison, energy or experience is blocked), so only permanents are offered —
+  when player counters arrive, proliferate must offer players too. `Amount$ N` is N
+  proliferates in a row (a non-number is `param:Proliferate.Amount not a number`). 40
+  cards: Atraxa, Karn's Bastion, Evolution Sage, Flux Channeler, Inexorable Tide… The
+  heuristic agent picks its own permanents with +1/+1 counters and others' with -1/-1.
+- Golden hashes unchanged (state and event logs).
+- 9,891 → 9,968 of 34,463 scripts on base `0365ace`; merged with main `b2647ec` (D-072):
+  10,827 (main alone: 10,758; +69, none lost, no engine text changed — a card-by-card diff
+  of `forge-coverage --sample 1` against main's build). Top 100 by EDHREC rank 86 of 95
+  (main: 84), top 1,000 56.1% (main: 55.0%), top 5,000 33.9% (33.2%). Every newly compiled
+  card was read against its Oracle text.
+- With D-072: a flashback spell's "you gain life equal to the life lost this way" counts a
+  loss that takes an opponent below 0 in full (CR 119.3: an opponent at 1 life who loses 3
+  has lost 3 — the Gray Merchant ruling); a land returned to hand to pay an alternative
+  cost isn't offered to "untap up to N lands".
+- **Next (in the coordinator's order):** Path of Ancestry, Myriad Landscape, delayed
+  triggers (Arcane Denial, Mana Drain), pay X life, Ponder / Sensei's Divining Top
+  (`api:RearrangeTopOfLibrary`), Channel lands, Esper Sentinel, City of Brass (`trig:Taps`),
+  cumulative upkeep, variable charm counts, attack costs (Propaganda), Big Score, Mana
+  Vault, regeneration / "can't be regenerated" (CR 701.19).
+
+## D-073 Replacement effects that change how much; tokens enter the battlefield (2026-11-12)
+Rules text: docs/rules-notes/614-doublers-603.2d-additional-triggers.md (with
+614-616-replacement-prevention.md).
+- **Tokens.** `Replaces::Tokens { token, effect_only }`: "if [an effect would create] one
+  or more [creature] tokens [under your control]" — each kind of token of the event is
+  matched as it would be created (its definition's characteristics, CR 111.3; controlled
+  by its creator, 111.2). With `ReplaceWith::Scale(Calc)` ("twice that many"),
+  `AddTokens { tokens, n }` ("those tokens plus a Food" / "plus that many Squirrels") and
+  `ReplaceTokens(tokens)` ("that many 4/4 Angels instead", "instead create one of each").
+  Only the kinds the effect applies to are scaled or replaced. A replacement can make one
+  event create several kinds of token: `Proposed::CreateTokens.more` (serde default, not
+  serialized when empty) keeps them one event, so a later "plus an additional Food" adds
+  one Food (CR 614.5, 616.1f). `effect_only` only changes the text: every token in this
+  engine is created by an effect.
+- **Counters.** `Replaces::Counters { on, kind, effect_only }`: "if one or more [+1/+1]
+  counters would be put on [a creature you control]" with `ReplaceWith::Scale` ("twice
+  that many", "that many plus one", "minus one"); counters a permanent enters with count
+  (CR 122.6, 614.16), matched as it would exist on the battlefield. Counters on players
+  are blocked (`repl:AddCounter:counters on players`: the engine has none).
+- **Order (CR 616.1):** unchanged pipeline — each effect applies once per event (614.5)
+  and the affected player chooses among those that apply (`ChooseReplacement`), so "plus
+  one" then "twice" gives 4 and the other order 3. The heuristic AI orders them by what
+  they do: for what is good for it (its tokens, +1/+1 counters) add, then multiply, then
+  shrink; for what is bad (damage, -1/-1 counters) prevent, shrink, multiply, then add.
+- **Tokens enter the battlefield (a rules error on main, fixed here).** A created token
+  skipped every effect that modifies how a permanent enters ("each Dragon you control
+  enters with an additional +1/+1 counter", "creatures your opponents control enter
+  tapped"). Now a `CreateTokens` event, once its own replacement effects are applied,
+  becomes one `Proposed::TokenEnters { token, controller, tapped, counters }` per token
+  (CR 616.1g: entering is contained in creating, so doublers are chosen first); those are
+  modified like a card moved onto the battlefield (CR 111.6, 614.1c–d) — other
+  permanents' `OtherEnters` and `Counters`/`PutCountersOnYourPermanents` effects, and the
+  counters a token would enter with are doubled after an effect gives them (616.2). Each
+  token is its own event, so its controller orders effects per token. `GameAction::
+  CreateToken` carries `tapped` and `counters` (entering tapped is not becoming tapped).
+  A token definition can't carry its own "this enters …" replacement (card-db rejects it;
+  no Forge token script has one) — copy tokens of permanents that have one are the copy
+  branch's to handle.
+- **"As it would exist on the battlefield" (CR 614.12)** is now worked out on a copy of the
+  game in which the entering has happened (`replacement::as_it_would_exist`): the permanent
+  with the counters and tapped state the event has so far, its own static abilities and
+  every continuous effect that would apply ("creatures you control are Dragons"). Used for
+  tokens and for cards moved onto the battlefield (`OtherEnters`, `Counters`); before, a
+  moving card was judged by its printed characteristics.
+- **Numbers saturate:** `Calc` was already saturating; counts on objects, damage marked,
+  commander damage and life changes now saturate (`actions.rs`: `life_amount` caps a
+  damage/life amount at `i32::MAX`, `change_life` adds saturating; `layers.rs`: counters
+  to P/T saturate), and one event creates at most `MAX_TOKENS_AT_ONCE` = 10,000 tokens of
+  a kind (`frames/apply.rs`) — a deliberate limit far above any board a game is played to
+  (the harness abandons a game at 1,000 permanents).
+- **Triggering an additional time (CR 603.2d)** is not a replacement effect:
+  `AbilityDef::AdditionalTrigger { sources, cause }` with `TriggerCause::{Enters, Dies,
+  Attacks}` (Forge's `Mode$ Panharmonicon`). Counted where a trigger is queued
+  (`triggers::queue_caused`): each detector says what made the ability trigger
+  (`Cause::{Entered, Died, Attacked, Other}`); every such ability of a permanent on the
+  battlefield whose `sources` matches the trigger's source and whose cause matches adds one
+  instance — two effects give three instances, each put on the stack on its own (own
+  targets, own order). For a look-back trigger of a dying permanent, the effects of
+  permanents that left in the same batch count as they last existed (Teysa dying with the
+  others). Compiled: no `ValidMode` (any trigger of matching sources: Annie Joins Up,
+  Delney, Katara, Twinflame Travelers); `ChangesZone[,ChangesZoneAll]` + `ValidCause` +
+  `Destination$ Battlefield` (Panharmonicon, Yarok, Ancient Greenwarden, Naban) or `Origin$
+  Battlefield | Destination$ Graveyard` (Teysa); `Attacks[,AttackersDeclared…]` + `ValidCause`
+  (Isshin). Blocked: other modes (`static:Panharmonicon mode …`: life gained, damage,
+  cast, becomes target, turned face up, rooms), `ValidZone`, `ValidPlayer`, conditions.
+- **"Can't be countered" (CR 101.2, 614.17)** is not a replacement effect either:
+  `AbilityDef::CantBeCountered { spells }` — `None`: the spell's own ability (Forge's
+  `R:Event$ Counter | ValidCard$ Card.Self | ValidSA$ Spell | Layer$ CantHappen`); `Some`:
+  a permanent's "[creature] spells you control can't be countered" (`ValidSA$
+  Spell.<filter>` or `ValidCard$ <filter>`). `Effect::Counter` does nothing to such a
+  spell (`replacement::cant_be_countered`); the countering spell resolves and does the rest
+  of what it does. Blocked: `ValidCause` (only by some spells), abilities that can't be
+  countered (`repl:Counter:ValidSA …`), conditions (`CheckSVar`, `IsPresent`), effects
+  (`repl:Counter:shape`).
+- **Damage that is doubled or increased:** `Replaces::Damage { by, to, combat }` (D-065)
+  now also takes `ReplaceWith::Scale` — Forge's `DB$ ReplaceEffect | VarName$ DamageAmount |
+  VarValue$ ReplaceCount$DamageAmount/<math>` (Twice, Thrice, Plus.N, Minus.N, HalfDown):
+  Dictate of the Twin Gods, Furnace of Rath, Angrath's Marauders, Fiery Emancipation,
+  Twinflame Tyrant, Thor, Tomik, Calamity Bearer, Goldnight Castigator, Inquisitor's
+  Flail, Lashknife Barrier, Ghosts of the Innocent. Each damage event is one source to one
+  recipient, so doubling applies per recipient; combat damage is assigned (trample)
+  before; lifelink gains what is dealt; the damaged player (or the damaged permanent's
+  controller) orders several effects (CR 616.1). `DamageTo::Either { player, permanent }`
+  is "an opponent or a permanent an opponent controls" (also in triggers). Sources:
+  `Card,Emblem` is any source and `Card.X,Emblem.X` a source that is X — **an emblem
+  alternative is read only where it mirrors a card alternative**, because the engine has
+  no emblems (when emblems arrive, `Replaces::Damage.by` must include them). The same
+  reading of sources and recipients now serves "prevent all damage" too (four more
+  prevention cards compile: Blessed Sanctuary, Endure, Light of Sanction, Safe Passage).
+  Blocked: `RedSource` and other `…Source` properties (`filter:.RedSource`, Torbran),
+  prevention with a `ReplaceWith` (`PreventionEffect$`, shields that count), redirection
+  (`DamageTarget$`), `inZoneBattlefield` on a source (Gratuitous Violence).
+- **Life gain:** `Replaces::GainLife(Who)` + `Scale` (Rhox Faithmender, Boon Reflection,
+  The Wind Crystal, Angel of Vitality, Heron of Hope, Honor Troll, Knight of Dawn's Light,
+  Pest Rescuer). CR 120.4c: lifelink's gain is a result of the damage that replacement
+  effects modify — `apply::perform` returns it, when an effect would modify it, as a batch
+  of its own that runs right after the damage batch (before anything else; triggers of
+  both are put on the stack together); without such an effect it is gained with the
+  damage as before, so no game without one changes. A doubler with "whenever you gain
+  life, you gain 1 life" is a real loop.
+- **Oracle guards:** a card whose Oracle text says "can't be countered" or "an additional
+  time" and whose compiled text doesn't is blocked (`oracle:says can't be countered`,
+  `oracle:says an additional time`). No compiled card is caught by them now.
+- **Deliberately still blocked:** "you may" token replacements (`param:repl
+  CreateToken.Optional`: Flitwing, Jinnie Fay), tokens of a chosen permanent (`repl:
+  CreateToken:chosen token`), tokens under another player's control (`…Type
+  ReplaceController`), conditions on these effects (`…CheckSVar`, `…IsPresent`,
+  `…PlayerTurn`), counters on players (`repl:AddCounter:counters on players`: Winding
+  Constrictor), "if you would put counters" (`param:repl AddCounter.ValidSource`: Halving
+  Season), draw replacements (`repl:Draw`: one draw replaced by several, or by winning —
+  needs an event that becomes several; Alhammarret's Archive, Notion Thief, Laboratory
+  Maniac), mana replacements (`repl:ProduceMana`: for D-066's `frames/mana.rs`), "lose
+  life" replacements, prevention that counts or redirects (`PreventionEffect$`,
+  `DamageTarget$`). A token that is a copy (D-074) or a double-faced token is out of
+  scope here: its own "enters" effects would need the copy's characteristics.
+- **"Those cards" (D-069):** tokens are created by `GameAction::CreateToken` and reported
+  as `TokenCreated`; the moves an Apply performs don't include them, so Forge's
+  `RememberTokens$` stays blocked.
+- Golden hashes: unchanged (no golden setup has any of these effects; lifelink's gain only
+  moves to a batch of its own when an effect would modify it).
+- 10,524 → 10,610 of 34,463 scripts on main ef30f04 (86 cards, every one read against its
+  Oracle text, none lost); merged onto main 12504fd (D-072): 10,758 → 10,845. EDHREC tiers
+  on 12504fd → this branch: top 100 88.4% (84 of 95, unchanged), top 300 69.8%, top 1,000
+  55.0% → 57.2% (546 → 567), top 5,000 34.1%. Soaks: forge-4p 300 random-agent games and
+  200 heuristic games (one abandoned at 1,000 permanents: Horn of Gondor's Human Soldiers),
+  precon-4p 100 games, no failures.
+- **Merged onto main 3fc33f1 (D-075 part 1):** 10,827 → 10,914 scripts (87; no card lost,
+  no compiled text changed; Pearl Lake Ancient compiles only in the combination). Tiers
+  3fc33f1 → this branch: top 100 90.5% (unchanged), top 300 70.2% → 71.9%, top 1,000
+  56.1% → 58.3% (557 → 578), top 5,000 33.9% → 34.7%. Proliferate puts its counters as
+  `Proposed::PutCounters` through `Frame::Apply`, so counter doublers apply to it (tested);
+  "you gain life equal to the life lost this way" is doubled by a life-gain doubler, the
+  loss isn't (tested; effects on losing life aren't built).
+- **Order with flashback (D-072):** main's "exiled instead" for a flashback spell is about
+  a spell leaving the stack; the effects here are about tokens being created, a permanent
+  entering, counters, damage and life — never the same event, so they never compete under
+  CR 616.1. "Can't be countered" holds for a spell cast with flashback too (tested).
+- **Next:** draw replacements (an event that becomes several: "draw two instead",
+  "exile the top card instead", "you win instead"; "except the first one you draw in each
+  of your draw steps"); mana doubling in `frames/mana.rs` (Nyxbloom Ancient, Mana
+  Reflection); Torbran (`RedSource`); "you may" token replacements; Winding Constrictor
+  once players have counters.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…
