@@ -758,7 +758,7 @@ fn look_at_the_top_cards_put_them_back_in_any_order_then_maybe_shuffle() {
     assert_eq!(
         text,
         [
-            "You look at the top 3 cards of your library, then put them back in any order. Then you may shuffle your library. Then you draw a card."
+            "Look at the top three cards of your library, then put them back in any order. Then you may shuffle your library. Then draw a card."
         ]
     );
     // Accepting shuffles it.
