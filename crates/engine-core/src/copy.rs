@@ -44,6 +44,11 @@ pub struct Copiable {
     pub card: CardDefId,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub except: Vec<Exception>,
+    /// The copy is double-faced (CR 707.8a: a token copy of a double-faced permanent has
+    /// both faces): its values are those of the face its object has up — of the card
+    /// `card` is a face of — each with the exceptions.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub faces: bool,
 }
 
 impl Copiable {
@@ -65,21 +70,50 @@ pub fn values(st: &GameState, id: ObjectId) -> Copiable {
     of_object(&st.catalog, st.object(id))
 }
 
-/// [`values`] of an object at hand.
+/// [`values`] of an object at hand: those of the face it has up (CR 707.8).
 pub fn of_object(catalog: &CardCatalog, o: &GameObject) -> Copiable {
     match &o.copy {
-        Some(c) => (**c).clone(),
+        Some(c) => at_face(catalog, c, o.face),
         None => Copiable {
             card: catalog.face(o.card, o.face),
             except: Vec::new(),
+            faces: false,
         },
+    }
+}
+
+/// Copiable values as they are with face `face` up: for a double-faced copy (CR 707.8a),
+/// that face's, with the exceptions.
+pub fn at_face(catalog: &CardCatalog, v: &Copiable, face: u8) -> Copiable {
+    if !v.faces {
+        return v.clone();
+    }
+    Copiable {
+        card: catalog.face(catalog.card_of(v.card), face),
+        except: v.except.clone(),
+        faces: false,
+    }
+}
+
+/// Is `o` a double-faced permanent (CR 707.8a): a double-faced card that copies nothing,
+/// or a double-faced token copy?
+pub fn double_faced(catalog: &CardCatalog, o: &GameObject) -> bool {
+    match &o.copy {
+        None => {
+            let d = catalog.get(o.card);
+            d.layout.double_faced() && !d.faces.is_empty()
+        }
+        Some(c) => c.faces,
     }
 }
 
 /// The card (face) whose printed text `id` has: for a copy, the card it copies.
 pub fn text_card(st: &GameState, id: ObjectId) -> CardDefId {
     let o = st.object(id);
-    o.copy.as_ref().map_or_else(|| st.face_card(id), |c| c.card)
+    o.copy.as_ref().map_or_else(
+        || st.face_card(id),
+        |c| at_face(&st.catalog, c, o.face).card,
+    )
 }
 
 /// [`text_card`]'s definition.
@@ -95,7 +129,7 @@ pub fn base(st: &GameState, id: ObjectId, face: u8, controller: PlayerId) -> Cha
     let o = st.object(id);
     match &o.copy {
         None => Characteristics::of_face(st, id, face, controller),
-        Some(c) => characteristics(&st.catalog, c, controller),
+        Some(c) => characteristics(&st.catalog, &at_face(&st.catalog, c, face), controller),
     }
 }
 

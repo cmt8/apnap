@@ -641,6 +641,10 @@ pub enum AbilityDef {
     /// ability's source and controller). Not a replacement effect (CR 614.17): a spell or
     /// ability that would counter it does nothing to it (D-073).
     CantBeCountered { spells: Option<Selector> },
+    /// CR 701.19c: "[the affected permanents] can't be regenerated" — regeneration shields
+    /// aren't applied to them (they may still be made). A static ability, or a rule a
+    /// lasting effect carries ("target creature can't be regenerated this turn").
+    CantBeRegenerated(Affected),
 }
 
 /// What made a triggered ability trigger, for [`AbilityDef::AdditionalTrigger`].
@@ -2039,6 +2043,16 @@ pub enum Effect {
     /// "Choose a creature type / a color.": the controller chooses as this resolves (CR
     /// 608.2c); "the chosen type" in the instructions after it is that choice (CR 607.2d).
     Choose(ChoiceOf),
+    /// CR 701.19a: "regenerate [permanent]" — the next time it would be destroyed this
+    /// turn, instead all damage is removed from it, its controller taps it, and it is
+    /// removed from combat (a regeneration shield, CR 614.8).
+    Regenerate {
+        what: ObjRef,
+    },
+    /// "[Destroy …]. It can't be regenerated." (CR 701.19c): the destruction this
+    /// instruction — a `Destroy` or `DestroyAll` — causes can't be replaced by
+    /// regeneration.
+    CantBeRegenerated(Box<Effect>),
     /// CR 707, 111.12: "create `count` tokens that are copies of [`what`][, except …]"
     /// under the controller's control. A copy of an object that is gone isn't made.
     CopyPermanent {
@@ -2095,9 +2109,10 @@ impl Effect {
         };
         match self {
             Effect::Seq(v) | Effect::Together(v) => v.iter_mut().for_each(|e| e.selectors_mut(f)),
-            Effect::May(e) | Effect::PlayerMay { effect: e, .. } | Effect::Note(e) => {
-                e.selectors_mut(f)
-            }
+            Effect::May(e)
+            | Effect::PlayerMay { effect: e, .. }
+            | Effect::Note(e)
+            | Effect::CantBeRegenerated(e) => e.selectors_mut(f),
             Effect::If { test, then } => {
                 test.selectors_mut(f);
                 then.selectors_mut(f);
@@ -2192,6 +2207,7 @@ impl Effect {
             | Effect::ControllerSacrificesThis
             | Effect::Proliferate
             | Effect::Shuffle { .. }
+            | Effect::Regenerate { .. }
             | Effect::Lasting { .. }
             | Effect::Choose(_)
             | Effect::BecomeCopy { .. } => {}

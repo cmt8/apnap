@@ -86,7 +86,7 @@ impl<'a> Rd<'a> {
     }
 
     /// Report every parameter that wasn't read.
-    fn finish(&self, blockers: &mut Blockers) {
+    fn finish(&self, blockers: &mut Raised) {
         let seen = self.seen.borrow();
         for (i, (k, _)) in self.rec.params.iter().enumerate() {
             let k = k.as_str();
@@ -169,9 +169,35 @@ struct Chain {
     countered: Option<(u8, bool, bool)>,
 }
 
+/// The blockers raised while one card is compiled: each name once, and a count of every
+/// raise — so "did this line raise anything?" (`len` before and after) holds even when a
+/// later line raises a name an earlier one already did (two abilities with the same
+/// unsupported parameter are both explained).
+#[derive(Clone, Debug, Default)]
+struct Raised {
+    set: Blockers,
+    raised: usize,
+}
+
+impl Raised {
+    fn insert(&mut self, b: String) -> bool {
+        self.raised += 1;
+        self.set.insert(b)
+    }
+
+    /// How many raises so far (not how many names).
+    fn len(&self) -> usize {
+        self.raised
+    }
+
+    fn is_empty(&self) -> bool {
+        self.set.is_empty()
+    }
+}
+
 struct Tx<'a> {
     face: &'a Face,
-    blockers: Blockers,
+    blockers: Raised,
     used_svars: BTreeSet<String>,
     tokens: BTreeSet<String>,
     has_x_cost: bool,
@@ -2009,7 +2035,24 @@ impl<'a> Tx<'a> {
                     Some(slot) => Some(ObjRef::Target(slot)),
                     None => self.object(&rd, chain, triggered),
                 };
-                Effect::Destroy { what: what? }
+                let destroy = Effect::Destroy { what: what? };
+                // "It can't be regenerated" (CR 701.19c): Forge tests `NoRegen$` for
+                // presence (DestroyEffect).
+                if rd.get("NoRegen").is_some() {
+                    Effect::CantBeRegenerated(Box::new(destroy))
+                } else {
+                    destroy
+                }
+            }
+            // CR 701.19a: "regenerate [permanent]" — a regeneration shield (Forge's
+            // RegenerateEffect: `Defined$` / `ValidTgts$`, the host by default).
+            "Regenerate" => {
+                let what = match self.target(&rd, chain, false) {
+                    Some(slot) => Some(ObjRef::Target(slot)),
+                    None if rd.rec.get("Defined").is_none() => Some(ObjRef::This),
+                    None => self.object(&rd, chain, triggered),
+                };
+                Effect::Regenerate { what: what? }
             }
             // CR 701.34a. `Amount$ N`: "proliferate N times" — one after the other, each
             // its own choice (Forge's loop).
@@ -2199,7 +2242,13 @@ impl<'a> Tx<'a> {
                     return None;
                 }
                 let sel = self.valid_cards(&rd, api);
-                Effect::DestroyAll(sel?)
+                let destroy = Effect::DestroyAll(sel?);
+                // "They can't be regenerated" (CR 701.19c).
+                if rd.get("NoRegen").is_some() {
+                    Effect::CantBeRegenerated(Box::new(destroy))
+                } else {
+                    destroy
+                }
             }
             // "Choose a creature type. [Instructions about the chosen type.]" (CR 608.2c).
             // Forge keeps the choice on the card; the engine keeps it for the resolution
@@ -2874,6 +2923,7 @@ impl<'a> Tx<'a> {
                                         | "CantAttack"
                                         | "CantBlock"
                                         | "CantAttack,CantBlock"
+                                        | "CantRegenerate"
                                         // (Only one whose "keywords" are rules: see below.)
                                         | "Continuous"
                                 )
@@ -6131,6 +6181,15 @@ impl<'a> Tx<'a> {
                     rule: first,
                 })
             }
+            // CR 701.19c: "[these] can't be regenerated".
+            "CantRegenerate" => {
+                let affected = rd.get("ValidCard").and_then(|f| self.affected(f));
+                let affected = affected.or_else(|| {
+                    self.block("static:CantRegenerate-who");
+                    None
+                })?;
+                Some(AbilityDef::CantBeRegenerated(affected))
+            }
             "CantBlockBy" => {
                 let (attacker, blocker) = (rd.get("ValidAttacker"), rd.get("ValidBlocker"));
                 let is_self = |f: &str| matches!(f, "Card.Self" | "Creature.Self");
@@ -8007,7 +8066,10 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
     let parsed = ability_records(face);
     let mut tx = Tx {
         face,
-        blockers: early,
+        blockers: Raised {
+            raised: early.len(),
+            set: early,
+        },
         used_svars: BTreeSet::new(),
         tokens: BTreeSet::new(),
         has_x_cost: false,
@@ -8566,7 +8628,7 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
             tokens: tx.tokens,
         })
     } else {
-        Err(tx.blockers)
+        Err(tx.blockers.set)
     }
 }
 

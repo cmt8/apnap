@@ -125,7 +125,9 @@ fn effect_polarity(e: &Effect) -> Polarity {
         Effect::DrawUpTo { .. } | Effect::Shuffle { .. } => Polarity::Neutral,
         // Its own permanent turning over: no target to judge.
         Effect::Transform { .. } => Polarity::Neutral,
-        Effect::May(inner) => effect_polarity(inner),
+        Effect::May(inner) | Effect::CantBeRegenerated(inner) => effect_polarity(inner),
+        // A regeneration shield is for one's own permanent.
+        Effect::Regenerate { .. } => Polarity::Help,
         // What happens either way: paying, or not paying.
         Effect::Pay { paid, unpaid, .. } => match effect_polarity(unpaid) {
             Polarity::Neutral => effect_polarity(paid),

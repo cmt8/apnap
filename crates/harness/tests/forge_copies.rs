@@ -607,6 +607,16 @@ fn copy_forms_not_compiled_are_named() {
         forge_test_blockers(twin)
             .contains(&"CopyPermanent:AtEOT (a delayed trigger about the token)".to_string())
     );
+    // Two abilities blocked by the same name: both are explained (the second isn't
+    // `unexplained:` because the name was already raised).
+    let twice = "Name:Test Twice\nManaCost:R\nTypes:Creature Human\nPT:1/1\n\
+        A:AB$ CopyPermanent | Cost$ T | ValidTgts$ Creature | AtEOT$ Sacrifice | SpellDescription$ Text.\n\
+        A:AB$ CopyPermanent | Cost$ 1 T | ValidTgts$ Creature | NumCopies$ 2 | AtEOT$ Sacrifice | SpellDescription$ Text.\n\
+        Oracle:Text.";
+    assert_eq!(
+        forge_test_blockers(twice),
+        ["CopyPermanent:AtEOT (a delayed trigger about the token)"]
+    );
     // "Becomes a copy … until end of turn".
     let mirror = "Name:Test Mirror\nManaCost:2\nTypes:Artifact\n\
         A:AB$ Clone | Cost$ 2 | ValidTgts$ Artifact | Duration$ UntilEndOfTurn | SpellDescription$ Text.\nOracle:Text.";
@@ -773,4 +783,133 @@ fn save_load_and_clone_with_copies_replay_identically() {
         assert_eq!(st.state_hash(), s.st.state_hash());
         assert_eq!(st.log_hash, s.st.log_hash);
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// Double-faced permanents (CR 707.8, 707.8a) and regeneration (D-079).
+
+const LARVA: &str = "Name:Test Larva\n\
+    ManaCost:G\n\
+    Types:Creature Insect\n\
+    PT:2/2\n\
+    A:AB$ SetState | Cost$ W | Defined$ Self | Mode$ Transform | SpellDescription$ Transform CARDNAME.\n\
+    AlternateMode:DoubleFaced\n\
+    Oracle:{W}: Transform Test Larva.\n\
+    \n\
+    ALTERNATE\n\
+    \n\
+    Name:Test Imago\n\
+    ManaCost:no cost\n\
+    Colors:white\n\
+    Types:Creature Insect\n\
+    PT:4/4\n\
+    K:Flying\n\
+    Oracle:Flying";
+
+const SKETCH: &str = "Name:Test Sketching\nManaCost:W\nTypes:Sorcery\n\
+    A:SP$ CopyPermanent | ValidTgts$ Creature | TgtPrompt$ Select target creature | SpellDescription$ Text.\n\
+    Oracle:Create a token that's a copy of target creature.";
+
+// CR 707.8a (2026-11-06): "If an effect creates a token that is a copy of a double-faced
+// permanent …, the resulting token is a double-faced token that has both a front face and
+// a back face. … If the token is a copy of a double-faced permanent with its back face up,
+// the token enters the battlefield with its back face up." CR 712.7: a double-faced token
+// can transform. CR 707.8: a Clone isn't double-faced — it copies the face that is up.
+#[test]
+fn cr_707_8a_a_token_copy_of_a_double_faced_permanent_has_both_faces() {
+    let clone = test_clone();
+    let mut sc = scenario(&[LARVA, SKETCH, &clone]);
+    sc.cards(P0, Zone::Battlefield, &["Plains"; 4]);
+    let orig = sc.card(P0, Zone::Battlefield, "Test Larva");
+    sc.cards(
+        P0,
+        Zone::Hand,
+        &["Test Sketching", "Test Sketching", "Test Clone"],
+    );
+    sc.turn(P0, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Sketching");
+    s.target_object(orig).pay().pass_all();
+    let token = *named(&s, "Test Larva")
+        .iter()
+        .find(|&&id| id != orig)
+        .unwrap();
+    assert_eq!(looks(&s, token), ("Test Larva".into(), Some(2), Some(2)));
+    // It transforms, and then is its back face.
+    s.pick(
+        "transform the token",
+        |_, o| matches!(o, OptionDesc::ActivateAbility { source, .. } if *source == token),
+    );
+    s.pay().pass_all();
+    assert_eq!(looks(&s, token), ("Test Imago".into(), Some(4), Some(4)));
+    assert!(chars(&s.st, token).has(card_model::Keyword::Flying));
+    let v = engine_core::player_view(&s.st, P0);
+    let ov = v.battlefield.iter().find(|o| o.id == token).unwrap();
+    assert_eq!(
+        (ov.card, ov.face),
+        (s.st.object(orig).card, 1),
+        "both faces shown"
+    );
+    // A copy of it with its back face up enters with its back face up.
+    s.cast("Test Sketching");
+    s.target_object(token).pay().pass_all();
+    let second = *named(&s, "Test Imago")
+        .iter()
+        .find(|&&id| id != token)
+        .unwrap();
+    assert_eq!(s.st.object(second).face, 1);
+    assert_eq!(looks(&s, second), ("Test Imago".into(), Some(4), Some(4)));
+    // A Clone copying the back face is that face only: not double-faced (CR 707.8).
+    s.cast("Test Clone").pay().pass_all();
+    choose_copy(&mut s, token);
+    let c = s.find(P0, Zone::Battlefield, "Test Clone").unwrap();
+    assert_eq!(chars(&s.st, c).name, "Test Imago");
+    assert_eq!(
+        chars(&s.st, c).mana_value(),
+        0,
+        "a copy of a back face: CR 202.3b"
+    );
+}
+
+// D-079, CR 701.19a, 707.2 (2026-11-06): a copy has the copied "{W}: Regenerate this
+// creature" — it regenerates itself; the shield is the object's (a status of the copy, not
+// a copiable value): destroyed, the copy is tapped instead and stays.
+#[test]
+fn a_copy_regenerates_with_the_copied_ability() {
+    let regen = creature(
+        "Test Troll",
+        "1 W",
+        "Creature Troll",
+        "2/2",
+        "A:AB$ Regenerate | Cost$ W | SpellDescription$ Regenerate CARDNAME.\n\
+         Oracle:{W}: Regenerate Test Troll.",
+    );
+    let smite = "Name:Test Smiting\nManaCost:W\nTypes:Instant\n\
+        A:SP$ Destroy | ValidTgts$ Creature | SpellDescription$ Text.\nOracle:Destroy target creature.";
+    let clone = test_clone();
+    let mut sc = scenario(&[&regen, smite, &clone]);
+    sc.cards(P0, Zone::Battlefield, &["Plains"; 3]);
+    let orig = sc.card(P1, Zone::Battlefield, "Test Troll");
+    sc.cards(P0, Zone::Hand, &["Test Clone", "Test Smiting"]);
+    sc.turn(P0, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Clone").pay().pass_all();
+    choose_copy(&mut s, orig);
+    let copy = s.find(P0, Zone::Battlefield, "Test Clone").unwrap();
+    s.pick(
+        "regenerate the copy",
+        |_, o| matches!(o, OptionDesc::ActivateAbility { source, .. } if *source == copy),
+    );
+    s.pay().pass_all();
+    s.cast("Test Smiting");
+    s.target_object(copy).pay().pass_all();
+    assert!(
+        s.st.objects.contains_key(&copy),
+        "regenerated, not destroyed"
+    );
+    assert!(s.st.object(copy).tapped);
+    assert_eq!(
+        s.count(|e| matches!(e, Event::Regenerated { object } if *object == copy)),
+        1
+    );
 }

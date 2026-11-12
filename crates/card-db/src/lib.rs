@@ -454,6 +454,10 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                 AbilityDef::PlayerRule { rule, .. } => {
                     !matches!(rule, card_model::PlayerRule::PlayThisFrom(_))
                 }
+                // "Target creature can't be regenerated this turn" (CR 701.19c).
+                AbilityDef::CantBeRegenerated(affected) => {
+                    *affected == card_model::Affected::Remembered
+                }
                 _ => false,
             };
             if !fits {
@@ -505,6 +509,9 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                 | AbilityDef::AdditionalTrigger { .. } => true,
                 // "This spell can't be countered" is about the card itself.
                 AbilityDef::CantBeCountered { spells } => spells.is_some(),
+                AbilityDef::CantBeRegenerated(affected) => {
+                    *affected != card_model::Affected::Enchanted
+                }
                 // "This card" may be cast from a zone: only its own, printed ability.
                 AbilityDef::PlayerRule { rule, .. } => {
                     !matches!(rule, card_model::PlayerRule::PlayThisFrom(_))
@@ -754,6 +761,11 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                 }
             }
             AbilityDef::AdditionalTrigger { .. } => {}
+            AbilityDef::CantBeRegenerated(affected) => {
+                if let card_model::Affected::All(s) = affected {
+                    selector(s, &mut |m| p.push(at(m)));
+                }
+            }
             AbilityDef::CantBeCountered { spells } => {
                 if spells.is_none() && c.card_types.iter().all(|t| *t == CardType::Land) {
                     p.push(at("a land is never a spell (CR 305.1)".into()));
@@ -1253,6 +1265,7 @@ fn noted_selectors(e: &Effect) -> usize {
         Effect::May(x)
         | Effect::Note(x)
         | Effect::If { then: x, .. }
+        | Effect::CantBeRegenerated(x)
         | Effect::PlayerMay { effect: x, .. } => noted_selectors(x),
         Effect::Pay { paid, unpaid, .. }
         | Effect::IfDone {
@@ -1475,6 +1488,14 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             )),
         },
         Effect::DestroyAll(s) => selector(s, p),
+        Effect::Regenerate { what } => obj(what, p),
+        // CR 701.19c: about the destruction of one instruction.
+        Effect::CantBeRegenerated(inner) => {
+            if !matches!(**inner, Effect::Destroy { .. } | Effect::DestroyAll(_)) {
+                p("\"can't be regenerated\" is about a destroy instruction".into());
+            }
+            check_effect(inner, mode, has_x, p);
+        }
         Effect::DamageEach { each, amount: a } => {
             selector(each, p);
             amount(a, p);

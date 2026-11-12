@@ -242,5 +242,15 @@
 - 707.2 / 613.2a: `copy::Copiable` on `GameObject::copy`; `copy::base` is where layer 1a starts. Counters, status, other effects and choices are not part of it.
 - 707.2b / 707.3 / 707.9a-b: fixed when the copy effect begins; a copy of a copy copies the exceptions.
 - 707.5 / 707.6 / 614.12a: "enter as a copy" is a choice in the replacement pipeline; afterwards the copied "enters" abilities (counters, tapped, pay life, choose a creature type) apply, and the copy makes its own as-enters choices.
-- 707.8: a double-faced permanent is copied as the face that is up (a face is a catalog entry). Not built: a token copy of a double-faced permanent being double-faced (707.8a).
+- 707.8 / 707.8a / 712.7: a permanent that enters or becomes a copy of a double-faced permanent copies the face that is up; a token copy of one is itself double-faced (modal or not — 707.8a makes no exception), with the same face up, and can transform (`Copiable::faces`).
 - 707.10 (copies of spells and abilities), 702.40 (storm) and 603.7c (delayed triggers about objects) are quoted for the next step; not built yet.
+> 202.3b The mana value of the back face of a nonmodal double-faced permanent or spell’s back face is calculated as though it had the mana cost of its front face. If a permanent or spell is a copy of the back face of a nonmodal double-faced object (even if the card representing that copy is itself a double-faced card), the mana value of the copy is 0. (See rule 712, “Double-Faced Cards.”)
+
+> 712.6d While a nonmodal double-faced permanent has its back face up, it has only the characteristics of its back face. However, its mana value is calculated using the mana cost of its front face. If a permanent is copying the back face of a nonmodal double-faced permanent (even if the object representing that copy is itself a double-faced permanent), the mana value of that permanent is 0. See rule 202.3b.
+
+> 712.7. Only permanents represented by double-faced tokens and double-faced cards can transform or convert. (See rules 701.27d and 701.28d.)
+
+> 614.5. A replacement effect doesn’t invoke itself repeatedly; it gets only one opportunity to affect an event or any modified events that may replace that event.
+
+> 701.19a If the effect of a resolving spell or ability regenerates a permanent, it creates a replacement effect that protects the permanent the next time it would be destroyed this turn. In this case, “Regenerate [permanent]” means “The next time [permanent] would be destroyed this turn, instead remove all damage marked on it and its controller taps it. If it’s an attacking or blocking creature, remove it from combat.”
+

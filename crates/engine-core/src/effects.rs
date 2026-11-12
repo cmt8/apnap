@@ -32,6 +32,10 @@ pub struct Shield {
     pub timestamp: Timestamp,
     pub target: Target,
     pub remaining: u32,
+    /// CR 701.19a: a regeneration shield on the permanent `target` (used up once), not a
+    /// prevention shield. Serialized only when set.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub regenerate: bool,
 }
 
 /// What a resolved spell or ability leaves behind that isn't a change of characteristics

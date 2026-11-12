@@ -49,8 +49,8 @@ impl ApplyFrame {
             // CR 702.12b: a permanent with indestructible can't be destroyed — the event
             // doesn't happen (CR 614.17), so nothing can replace it either.
             .filter(|event| {
-                !matches!(event, Proposed::Move { object, cause: MoveCause::Destroy, .. }
-                    if crate::layers::chars(st, *object).has(card_model::Keyword::Indestructible))
+                !matches!(event, Proposed::Move { object, cause, .. } if cause.destroys()
+                    && crate::layers::chars(st, *object).has(card_model::Keyword::Indestructible))
             })
             .map(|event| {
                 (
@@ -563,6 +563,15 @@ pub(crate) fn perform(
             Proposed::CeaseToExist { object } => {
                 if st.objects.contains_key(&object) {
                     execute(st, GameAction::CeaseToExist { object });
+                }
+            }
+            Proposed::Regenerate { object } => {
+                if st
+                    .objects
+                    .get(&object)
+                    .is_some_and(|o| o.zone == Zone::Battlefield)
+                {
+                    execute(st, GameAction::Regenerate { object });
                 }
             }
         }

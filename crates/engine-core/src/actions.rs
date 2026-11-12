@@ -86,6 +86,15 @@ pub enum GameAction {
         target: Target,
         amount: u32,
     },
+    /// CR 701.19a: create a regeneration shield on a permanent ("regenerate it").
+    AddRegenerationShield {
+        object: ObjectId,
+    },
+    /// CR 701.19a, 614.8: the permanent regenerates — all damage is removed from it, it is
+    /// tapped, and it is removed from combat.
+    Regenerate {
+        object: ObjectId,
+    },
     /// CR 611.2: abilities begin to work for a while on no object.
     AddLasting {
         source: ObjectId,
@@ -342,6 +351,15 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             let timestamp = st.alloc_timestamp();
             let card_instance = crate::ids::CardInstanceId(st.next_card_instance);
             st.next_card_instance += 1;
+            // CR 707.8a: a double-faced token copy is the card with both its faces, the
+            // face that was up on the original up.
+            let (token, face) = match &copy {
+                Some(v) if v.faces => {
+                    let card = st.catalog.card_of(v.card);
+                    (card, (v.card.0 - card.0) as u8)
+                }
+                _ => (token, 0),
+            };
             st.objects.insert(
                 id,
                 GameObject {
@@ -360,7 +378,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                     deathtouch_damage: false,
                     attached_to: None,
                     last_controller: controller,
-                    face: 0,
+                    face,
                     transforms: 0,
                     adventure: None,
                     cast_with: None,
@@ -478,7 +496,39 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 timestamp,
                 target,
                 remaining: amount,
+                regenerate: false,
             });
+            ActionResult::Done
+        }
+        GameAction::AddRegenerationShield { object } => {
+            let id = st.next_effect_id;
+            st.next_effect_id += 1;
+            let timestamp = st.alloc_timestamp();
+            st.shields.push(Shield {
+                id,
+                timestamp,
+                target: Target::Object(object),
+                remaining: 1,
+                regenerate: true,
+            });
+            ActionResult::Done
+        }
+        GameAction::Regenerate { object } => {
+            if st.objects.get(&object).is_some_and(|o| o.damage_marked > 0) {
+                execute(st, GameAction::RemoveDamage { object });
+            }
+            if !st.object(object).tapped {
+                execute(st, GameAction::Tap { object });
+            }
+            let in_combat = st.combat.as_ref().is_some_and(|c| {
+                c.attackers
+                    .iter()
+                    .any(|a| a.attacker == object || a.blockers.contains(&object))
+            });
+            if in_combat {
+                execute(st, GameAction::RemoveFromCombat { object });
+            }
+            st.emit(Event::Regenerated { object });
             ActionResult::Done
         }
         GameAction::ConsumeShield { id, n } => {

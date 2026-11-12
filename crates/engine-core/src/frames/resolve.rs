@@ -2425,7 +2425,10 @@ impl ResolveFrame {
                     .into_iter()
                     .filter(|&o| chars(st, o).is_permanent_type())
                     .map(|o| {
-                        let values = crate::copy::values(st, o).with(card, &except);
+                        let mut values = crate::copy::values(st, o).with(card, &except);
+                        // CR 707.8a: a token copy of a double-faced permanent is double-faced,
+                        // with the same face up.
+                        values.faces = crate::copy::double_faced(&st.catalog, st.object(o));
                         Proposed::CreateTokens {
                             token: values.card,
                             count,
@@ -2525,6 +2528,26 @@ impl ResolveFrame {
                 self.work.push(Work::Proliferate);
                 Vec::new()
             }
+            // CR 701.19a: a regeneration shield on the permanent, if it is still there.
+            Effect::Regenerate { what } => {
+                if let Some(object) = self.obj(st, k, what) {
+                    execute(st, GameAction::AddRegenerationShield { object });
+                }
+                Vec::new()
+            }
+            // CR 701.19c: this destruction can't be replaced by regeneration.
+            Effect::CantBeRegenerated(inner) => self
+                .eval(st, k, *inner)
+                .into_iter()
+                .map(|mut e| {
+                    if let Proposed::Move { cause, .. } = &mut e
+                        && *cause == MoveCause::Destroy
+                    {
+                        *cause = MoveCause::DestroyNoRegen;
+                    }
+                    e
+                })
+                .collect(),
             // CR 701.24a.
             Effect::Shuffle { who } => {
                 let players = self.players_apnap(st, k, who);
@@ -3011,6 +3034,11 @@ fn can_transform(st: &GameState, object: ObjectId) -> bool {
     let o = st.object(object);
     let card = st.catalog.get(o.card);
     if o.zone != Zone::Battlefield || !card.layout.double_faced() || card.faces.is_empty() {
+        return false;
+    }
+    // CR 712.7: a token copy of a single face (of a copy that isn't double-faced, CR
+    // 707.8a example) isn't a double-faced token.
+    if o.is_token && o.copy.as_ref().is_some_and(|v| !v.faces) {
         return false;
     }
     let other = st

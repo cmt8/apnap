@@ -91,6 +91,15 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
 - A new top-level `GameState` field changes every golden state hash even while it is empty
   (the stable hasher writes a tag for skipped fields): re-bless, and check that the event
   logs did not change.
+- A choice made as a permanent enters or while a spell resolves (D-076: a creature type, a
+  color) lives on the object (`GameObject::chosen`), is copied onto an ability on the
+  stack (`StackObject::chosen`), or stays in the resolve frame — never on a card. "Of the
+  chosen type" is `Selector::chosen`, bound with `engine_core::chosen::bind`/`bind_for`
+  before it is matched: any new place that matches a selector directly must bind first,
+  and new `Effect`/`Amount` variants need an arm in `Effect::selectors_mut`. Unbound means
+  nothing was chosen (CR 607.5a). Changeling is `Characteristics::all_creature_types`,
+  from the printed keyword only. A token's own as-enters choice is not asked yet (comment
+  in `replacement::applicable`). Tests: `forge_chosen.rs`.
 - The text of a compiled card (`card_model::describe`) is written like a printed card:
   number words, "this creature/land/Equipment", "Then" between instructions, a predefined
   token's reminder text on first mention. The Oracle guard (`oracle_words_missing`) reads
@@ -182,9 +191,9 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-075): 10,991 of 34,463 scripts compile (31.9%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-075: 93% of
-the 100 most played Commander cards compile, 59% of the top 1,000, 35% of the top 5,000
+Status (D-076): 11,071 of 34,463 scripts compile (32.1%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-076: 93% of
+the 100 most played Commander cards compile, 61% of the top 1,000, 36% of the top 5,000
 (`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
 the rest. Feature tests live in `crates/harness/tests/forge_features.rs` and, one file per
 feature area since D-066, `forge_<area>.rs` next to it: invented cards written
@@ -215,7 +224,7 @@ given to other cards, Channel cost reductions, draw and mana replacement effects
 loss, memory that outlives a resolution (effect objects remembering
 cards, linked abilities per CR 607, delayed triggers that remember objects or don't wait
 for the beginning of a step), counters other than +1/+1 and
--1/-1, "as this enters, choose …" (how a permanent enters is otherwise built, D-067:
+-1/-1, "as this enters, choose …" other than a creature type or a color (D-076; how a permanent enters is otherwise built, D-067:
 `ReplaceWith::EntersTappedUnless…`, the choice asked inside `ApplyFrame` as
 `ChoiceKind::AsEnters`), "sacrifice … instead" lands, "lands enter untapped", "exile it
 instead. When you do, …", regeneration, abilities given to cards that aren't on

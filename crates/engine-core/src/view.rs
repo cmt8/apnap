@@ -163,7 +163,12 @@ fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
     ObjectView {
         id,
         // A copy shows the card it copies (CR 707.2).
-        card: o.copy.as_ref().map_or(o.card, |v| v.card),
+        // (A double-faced token copy shows its own two faces, CR 707.8a.)
+        card: o
+            .copy
+            .as_ref()
+            .filter(|v| !v.faces)
+            .map_or(o.card, |v| v.card),
         name: c.name,
         owner: o.owner,
         controller: crate::layers::controller_of(st, id),
@@ -180,7 +185,11 @@ fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
         card_instance: o.card_instance,
         attached_to: o.attached_to,
         granted: c.abilities.iter().copied().filter(|a| a.granted).collect(),
-        face: if o.copy.is_some() { 0 } else { o.face },
+        face: if o.copy.as_ref().is_some_and(|v| !v.faces) {
+            0
+        } else {
+            o.face
+        },
         chosen: o.chosen.clone(),
         printed: o.copy.as_ref().map(|_| o.card),
     }

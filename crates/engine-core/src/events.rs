@@ -299,6 +299,11 @@ pub enum Event {
         object: ObjectId,
         chosen: card_model::Chosen,
     },
+    /// CR 701.19a: the permanent regenerated instead of being destroyed (damage removed,
+    /// tapped, removed from combat: those have their own events before this one).
+    Regenerated {
+        object: ObjectId,
+    },
     /// CR 707.4 / 707.5: `object` is now a copy of `card` (it became one, or entered or was
     /// created as one).
     BecameCopy {

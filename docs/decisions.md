@@ -2510,6 +2510,50 @@ Rules text: docs/rules-notes/d075-commander-staples.md (sections 205.3i, 603.7, 
 - **Next:** regeneration with "can't be regenerated" (`api:Regenerate` alone blocks 185
   cards, `NoRegen` 61), the Channel lands, Esper Sentinel, City of Brass, cumulative upkeep.
 
+## D-079 Regeneration and "can't be regenerated" (2026-11-12)
+Rules text: docs/rules-notes/701-regenerate.md (CR 701.19, 614.8, 701.8, 704.5f–h, 702.2b,
+701.21a, 506.4). Tests: `crates/harness/tests/forge_regen.rs`.
+- **A regeneration shield** (CR 701.19a): `Effect::Regenerate { what }` makes one as the
+  spell or ability resolves (`GameAction::AddRegenerationShield`), on a permanent still
+  there. It is an `effects::Shield` with `regenerate` set (serialized only when set),
+  used up once, and gone at cleanup with the prevention shields ("this turn", 514.2).
+- **A destruction-replacement effect** (CR 614.8, invariant 14): in `replacement::applicable`
+  a regeneration shield applies to a `Proposed::Move` to the graveyard with
+  `MoveCause::Destroy` of a permanent on the battlefield — destroy effects and the
+  state-based actions for lethal damage and deathtouch (701.8b, 704.5g–h) — and turns it
+  into `Proposed::Regenerate` (appended), performed as `GameAction::Regenerate`: all damage
+  removed, tapped by its controller, removed from combat if attacking or blocking (506.4),
+  then `Event::Regenerated` (appended; narrated). Sacrifice (701.21a), toughness 0 (704.5f)
+  and other moves to the graveyard are not destruction and are never replaced. Prevention
+  shields ignore regeneration shields and vice versa. Several applicable shields are chosen
+  among by the affected player like any replacement effects (616.1).
+- **"It can't be regenerated"** (CR 701.19c), as a rider: `Effect::CantBeRegenerated(Box<Effect>)`
+  around a `Destroy` / `DestroyAll` (Forge's `NoRegen$`, tested for presence by
+  DestroyEffect/DestroyAllEffect) makes its destruction `MoveCause::DestroyNoRegen`
+  (appended; `MoveCause::destroys()` covers both for indestructible). As a rule:
+  `AbilityDef::CantBeRegenerated(Affected)` (appended; Forge's `Mode$ CantRegenerate`),
+  a static ability of a permanent or carried by a lasting effect ("target creature can't be
+  regenerated this turn"); read by `replacement::can_be_regenerated`. Shields can still be
+  made; they just aren't applied.
+- **Blocked, by name:** "when it regenerates this way" (`param:Regenerate.RegenerationAbility`,
+  4 cards), static regeneration (CR 701.19b, Forge `R:Event$ Destroy | Regeneration$ True`:
+  `repl:Destroy`, 3), "can't be regenerated" about creatures dealt damage this turn
+  (`static:CantRegenerate-who`: `Creature.DamagedBy`), regenerating the enchanted creature
+  (`defined:card Enchanted`, a blocker of many effects, 17 Regenerate cards among them).
+- The heuristic agent counts regenerating as help (aimed at its own permanents).
+- **Golden: one state hash re-blessed (cmd-2p seed 1), all 15 event logs unchanged.** That
+  game ends with a prevention shield in force, and the stable hasher writes a tag for the
+  skipped `Shield::regenerate` field (`hash.rs`, `skip_field`).
+- Against main `6410af8`/`6252f08` by a card-by-card diff of `forge-coverage --sample 1`:
+  230 cards newly compile, none stops compiling, no engine text changes. All 230 were read
+  against their Oracle text. Among them Pongify, Rapid Hybridization, Terminate, Putrefy,
+  Damnation, Terror, Vendetta, Jokulhaups, Obliterate, Plague Wind, Thrun, Lotleth Troll,
+  Masticore, Sedge Sliver, the Slivers that give regeneration. Text left as it is: Knight of
+  the Mists reads "destroy target Knight creature. It can't be regenerated unless you pay
+  {U}" (the meaning is right — unless you pay, it is destroyed and can't be regenerated —
+  the word order isn't).
+- 11,071 → 11,301 of 34,463 scripts (32.8%); top 1,000 60.6% → 61.4%, top 5,000 35.7% →
+  36.1%.
 ## D-074 Copies of permanents: enter as a copy, become a copy, token copies (2026-11-12)
 Rules text: docs/rules-notes/707-copies.md. Tests: `crates/harness/tests/forge_copies.rs`.
 - **Copiable values** (CR 707.2) are `copy::Copiable { card, except }`: one catalog entry
@@ -2577,9 +2621,26 @@ Rules text: docs/rules-notes/707-copies.md. Tests: `crates/harness/tests/forge_c
   `kw:Storm`, Replicate, Casualty, Conspire) are not built: the engine has the groundwork
   (`GameObject::spell_copy`, a copy of a spell ceases to exist off the stack, CR 704.5e;
   a permanent spell copy becomes a token, CR 608.3f) but no effect creates one.
-- **Limits:** a token copy of a double-faced permanent is not double-faced (CR 707.8a says
-  it is) and can't transform; "if this would enter, you may … instead" is not applied to a
-  token copy; a copied "creature types are …" replaces all non-land subtypes.
+- **Double-faced permanents** (CR 707.8, 707.8a — the text covers every double-faced
+  permanent, modal ones included: the token copy has both faces): a token copy of one is
+  double-faced (`Copiable::faces`; the token is the card with the original's face up, its
+  values follow its own face, exceptions applied to each), so it transforms; a copy of one
+  with its back face up enters back face up. A permanent that enters or becomes a copy is
+  not double-faced: it copies the face that is up (mana value 0 for a back face, CR 202.3b).
+- **Regeneration (D-079):** the shield is the object's, not a copiable value; a copy has the
+  copied "{W}: Regenerate this creature" and regenerates itself (tested).
+- **Blocker bookkeeping:** `Tx::blockers` counts every raise (`Raised`), so a second ability
+  blocked by a name an earlier one raised is no longer reported `unexplained:` (Orthion).
+- **Limits:** (1) "if this would enter, you may [discard a land] instead; if you don't, put
+  it into its owner's graveyard" is not applied to a token copy: it enters with no question
+  (comment in `replacement::applicable`). (2) A Clone copying a Clone that copied nothing:
+  CR 707.5 says the copied "enters" replacement abilities "will take effect", and the 707.9e
+  example has Altered Ego choose again through the Clone ability it copied. Here a copied
+  enter-as-a-copy ability that is written on *another* card is offered (as in that
+  example), but the very ability that already applied — Clone copying Clone, the same
+  `AbilityId` — is not offered a second time (CR 614.5 read as "the same effect"): the
+  second Clone enters as a 0/0 Clone and dies, where a reading of 707.5 by analogy would let
+  it choose again. (3) A copied "creature types are …" replaces all non-land subtypes.
 - Golden hashes: all 15 event logs unchanged; state hashes moved (the stable hasher writes
   a tag for each skipped `GameObject` field). Re-blessed.
 - 11,071 → 11,123 of 34,463 scripts (52 newly compiled, none lost, no existing text
