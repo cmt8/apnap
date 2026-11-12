@@ -618,16 +618,85 @@ fn copy_forms_not_compiled_are_named() {
     assert!(
         forge_test_blockers(works).contains(&"CopyPermanent:copy of what it last was".to_string())
     );
-    // "As this enters, choose a color" is not entering as a copy.
-    let banner = "Name:Test Banner\nManaCost:3\nTypes:Artifact\nK:ETBReplacement:Other:ChooseColor\n\
-        SVar:ChooseColor:DB$ ChooseColor | Defined$ You | SpellDescription$ Text.\nOracle:Text.";
-    assert_eq!(
-        forge_test_blockers(banner),
-        ["kw:ETBReplacement as this enters, choose (ChooseColor)"]
-    );
     // A script that drops "except" from the card.
     let dropped = "Name:Test Dropped\nManaCost:W\nTypes:Sorcery\n\
         A:SP$ CopyPermanent | ValidTgts$ Creature | SpellDescription$ Text.\n\
         Oracle:Create a token that's a copy of target creature, except it has flying.";
     assert!(forge_test_blockers(dropped).contains(&"oracle:says except".to_string()));
+}
+
+// ---------------------------------------------------------------------------------------
+// Copies of a permanent with an "as this enters, choose …" ability (D-076).
+
+const CHOOSE_CT: &str = "K:ETBReplacement:Other:ChooseCT\n\
+    SVar:ChooseCT:DB$ ChooseType | Defined$ You | Type$ Creature | SpellDescription$ As CARDNAME enters, choose a creature type.";
+
+fn kin_banner() -> String {
+    format!(
+        "Name:Test Kin Banner\nManaCost:3\nTypes:Artifact\n{CHOOSE_CT}\n\
+         S:Mode$ Continuous | Affected$ Creature.ChosenType+YouCtrl | AddPower$ 1 | AddToughness$ 1 | Description$ Text.\n\
+         Oracle:As this artifact enters, choose a creature type.\\nCreatures you control of the chosen type get +1/+1."
+    )
+}
+
+fn pick_type(s: &mut Script, ty: &str) {
+    assert!(
+        matches!(s.kind(), ChoiceKind::Choose { .. }),
+        "asked to choose: {:?}",
+        s.kind()
+    );
+    let ty = ty.to_string();
+    s.pick(
+        &format!("choose {ty}"),
+        move |_, o| matches!(o, OptionDesc::CreatureType { name } if name.name() == ty),
+    );
+}
+
+fn chosen_type(s: &Script, id: ObjectId) -> Option<&'static str> {
+    s.st.object(id).chosen.iter().find_map(|c| match c {
+        card_model::Chosen::CreatureType(t) => Some(t.name()),
+        card_model::Chosen::Color(_) => None,
+    })
+}
+
+// CR 707.6 (2026-11-06): "any choices that have been made for that permanent aren't
+// copied. Instead, if an object enters the battlefield as a copy of another permanent, the
+// object's controller will get to make any 'as [this] enters the battlefield' choices for
+// it." The copy choice comes first (CR 614.12a), then the copied one.
+#[test]
+fn cr_707_6_a_copy_makes_its_own_as_enters_choice() {
+    let banner = kin_banner();
+    let mimic = "Name:Test Mimic Artifact\nManaCost:1\nTypes:Artifact\n\
+        K:ETBReplacement:Copy:DBCopy:Optional\n\
+        SVar:DBCopy:DB$ Clone | Choices$ Artifact.Other | SpellDescription$ Text.\n\
+        Oracle:You may have this artifact enter as a copy of any artifact on the battlefield.";
+    let sketch = "Name:Test Sketching\nManaCost:W\nTypes:Sorcery\n\
+        A:SP$ CopyPermanent | ValidTgts$ Artifact | TgtPrompt$ Select target artifact | SpellDescription$ Text.\n\
+        Oracle:Create a token that's a copy of target artifact.";
+    let mut sc = scenario(&[&banner, mimic, sketch]);
+    sc.cards(P0, Zone::Battlefield, &["Plains", "Plains", "Plains"]);
+    sc.card(P1, Zone::Battlefield, "Plains");
+    let orig = sc.card(P1, Zone::Battlefield, "Test Kin Banner");
+    sc.cards(P0, Zone::Hand, &["Test Mimic Artifact", "Test Sketching"]);
+    sc.turn(P0, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Mimic Artifact").pay().pass_all();
+    choose_copy(&mut s, orig);
+    assert_eq!(s.who(), P0);
+    pick_type(&mut s, "Goblin");
+    let copy = s
+        .find(P0, Zone::Battlefield, "Test Mimic Artifact")
+        .unwrap();
+    assert_eq!(chars(&s.st, copy).name, "Test Kin Banner");
+    assert_eq!(chosen_type(&s, copy), Some("Goblin"));
+    // A token copy is asked too (CR 707.5, 614.12).
+    s.cast("Test Sketching");
+    s.target_object(orig).pay().pass_all();
+    pick_type(&mut s, "Elf");
+    let token = *named(&s, "Test Kin Banner")
+        .iter()
+        .find(|&&id| id != orig && id != copy)
+        .unwrap();
+    assert!(s.st.object(token).is_token);
+    assert_eq!(chosen_type(&s, token), Some("Elf"));
 }

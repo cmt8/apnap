@@ -2331,6 +2331,184 @@ Rules text: docs/rules-notes/614-doublers-603.2d-additional-triggers.md (with
   of your draw steps"); mana doubling in `frames/mana.rs` (Nyxbloom Ancient, Mana
   Reflection); Torbran (`RedSource`); "you may" token replacements; Winding Constrictor
   once players have counters.
+## D-076 "As this enters, choose a creature type / a color"; "the chosen type"; changeling (2026-11-12)
+Rules text: docs/rules-notes/614.12a-607.2d-chosen-type-color.md. Tests:
+`crates/harness/tests/forge_chosen.rs`, `crates/app/tests/chosen.rs`.
+- **Vocabulary** (appended): `ReplaceWith::Choose(ChoiceOf)` ("as this enters, choose …",
+  with `Replaces::ThisEnters`), `Effect::Choose(ChoiceOf)` ("choose a creature type." while a
+  spell resolves), `Selector::chosen: Option<OfChosen>` ("of the chosen type" / "that
+  aren't of the chosen type" / "of the chosen color"), `ContinuousEffect::AddChosenType`
+  (layer 4), `Keyword::Changeling`, `AbilityDef::CostReduction::anyone` ("creature spells of
+  the chosen type cost {2} less": anyone's spells). `card_model::chosen` holds CR 205.3m's
+  creature types (`CREATURE_TYPES`, sorted; `CreatureType` is an index serialized as its
+  name), `ChoiceOf { CreatureType, Color }`, `Chosen { CreatureType, Color }`.
+- **The choice is made in D-067's place:** `replacement::entry_choice` asks it for a
+  `ReplaceWith::Choose` (always — there is always something to choose), as the new
+  `ChoiceKind::Choose { what, object, ability }` over `OptionDesc::CreatureType` /
+  `OptionDesc::Color`, of the player the permanent will enter under the control of (also
+  when an effect puts it there). `ApplyFrame::chosen` keeps the answer, by the entering
+  object, until the batch is performed; `perform` then gives it to the new object
+  (`GameAction::SetChosen`, `Event::Chose`) — only if it did enter the battlefield. No
+  stack, no priority (CR 603.6d); enters-triggers see the choice (it is set before triggers
+  are looked for).
+- **Where a choice lives:** a permanent's on the object (`GameObject::chosen`, a new object
+  has none, CR 400.7; public: `ObjectView::chosen`, the app's enlarged card shows "Chosen
+  type: Elf", the log "P0 chooses Elf for X"); an ability's on its stack object
+  (`StackObject::chosen`, copied from its source when it is put on the stack — the same value
+  once the source has left, CR 608.2h); a resolving spell's own choice in its resolve frame
+  (`ResolveFrame::chosen`, CR 608.2c: no object keeps it). Mana restricted to "a creature
+  spell of the chosen type" keeps the value it was made with (`RestrictedMana::chosen`; two
+  units are alike only if that is too).
+- **One way to read it:** a selector that refers to a choice is *bound* before it is matched
+  (`chosen::bind`): the reference becomes the chosen subtype or color itself, so layers,
+  triggers, replacement effects, costs, targets, player rules and resolution all compare the
+  same way. `layers::matches` binds with the choice of the ability's source; the places that
+  match without it bind first (trigger filters and cast triggers, damage/dies/enters
+  replacement filters, cost reductions, graveyard and spell targets, "may cast from the top
+  of your library" rules, conditions, mana restrictions with the mana's own value); a
+  resolving instruction is bound from the frame (its own choice first, else its source's).
+  A reference left unbound means nothing was chosen (CR 607.5a): "of the chosen type"
+  matches nothing, "not of the chosen type" everything (as Forge).
+- **Linked abilities (CR 607.2d):** an object keeps one choice of each kind, read by the
+  abilities of the same object. card-db refuses a card that refers to a choice none of its
+  abilities makes (`invalid:`), and the compiler names what isn't read: a dies/leaves trigger
+  of the source that refers to it (`chosen:in a trigger on its source leaving`), a static
+  ability that works from another zone, abilities given to other objects, discard costs,
+  mana restrictions of "not the chosen type", of several kinds at once or on an ability that
+  sacrifices its source (`chosen:…`), a choosing ability of a permanent (Forge keeps the
+  last choice on the card for its other abilities: `ChooseType:in an ability of a
+  permanent`), `Animate:Types ChosenType`.
+- **The options** (CR 205.3m: any creature type may be chosen): every type, those among the
+  chooser's own cards first — counted over all their cards, library included (their own
+  deck is known to them) — most common first, then the rest alphabetically. Colors: the five,
+  WUBRG (CR 105.4). The app shows a search field and the first 24 matches in that order
+  (Enter takes the first); the heuristic agent picks the type (or color) most common among
+  its own creatures and creature cards it can see, ties and nothing seen to the engine's
+  order. The random agent picks any of the 367.
+- **"Is the chosen type in addition"** (`AddChosenType`, layer 4): only a creature or kindred
+  gains it (CR 205.3d).
+- **Changeling** (CR 702.73a): `Characteristics::all_creature_types`, set from the printed
+  keyword (so in every zone, and before anything else in layer 4, CR 613.3: losing all
+  abilities later doesn't undo it); `has_subtype` answers yes for every creature type of
+  205.3m. Only the printed keyword is compiled: changeling given by another effect wouldn't
+  be a characteristic-defining ability (CR 604.3a).
+- **Compiler:** `K:ETBReplacement:Other:<SVar>` with `DB$ ChooseType | Type$ Creature` or
+  `DB$ ChooseColor` (`Defined$ You` or none; `ETB$ True` accepted); `SP$`/`DB$ ChooseType` and
+  `ChooseColor` in a spell; filter properties `ChosenType`, `IsNotChosenType`, `ChosenColor`
+  (alone: with a subtype or color beside them → `filter:.ChosenType with another`);
+  `AddType$ ChosenType`; `K:Changeling`; `ReduceCost` with no `Activator$` (Forge: any
+  player); `DestroyAll | Zone$ Battlefield` (Forge reads nothing else); a `ChangesZone`
+  trigger without `TriggerZones$` whose filter needs the chosen type (only a permanent has a
+  choice, so it can only trigger there). `ETBReplacement` forms are now named by their API:
+  `kw:ETBReplacement:Copy` (D-074's), `kw:ETBReplacement:ChoosePlayer`, `…:ChooseNumber`,
+  `…:GenericChoice`, `…:<api>+SubAbility`; `ChooseType:Card`, `ChooseType:Basic Land`,
+  `param:ETBReplacement ChooseColor.Exclude` (Thriving lands), `…ChooseType.ValidTypes`.
+- **New Oracle guard** `oracle:says chosen`: the card says "chosen type", "chosen color" or
+  "choose a creature type" ("of that type" read as "of the chosen type") where the compiled
+  card doesn't, or the reverse.
+- **Text:** "As this permanent enters, choose a creature type.", "… you control of the
+  chosen type", "creatures that aren't of the chosen type", "spells of the chosen type cost
+  {2} less" (anyone's). Fixed while reading: "Each another creature you control enters
+  with …" → "Each other …" (four cards, text only).
+- **Read against the Oracle text:** all newly compiled cards. `For the Ancestors` takes
+  *creature* cards of the chosen type where the card says "cards of the chosen type" (a
+  Kindred card of that type): `SCRIPT_DIFFERS`.
+- **Golden hashes:** all 15 event logs unchanged; every state hash moved, because the stable
+  hasher marks each field skipped by `skip_serializing_if` (`hash.rs`, `skip_field`) and the
+  catalog's selectors now have one more such field (`Selector::chosen`), as do objects, stack
+  objects and frames. Re-blessed.
+- **Hidden information:** the order of the type options comes from the chooser's own cards,
+  hand and library included; only the chooser sees the decision (`PlayerView::decision`),
+  and the events tell everyone only the value chosen (tested).
+- **A delayed triggered ability** that refers to the chosen type would read its source's
+  choice when it triggers, not the one fixed as it was created (CR 603.7c); no card that
+  otherwise compiles needs it: `chosen:in a delayed trigger`.
+- **Numbers** (on main 6cc8595: 10,991 of 34,463): 11,071 compile (32.1%), +80, none lost.
+  By EDHREC rank: top 300 219 → 224, top 1,000 586 → 601, top 2,000 957 → 977, top 5,000
+  1,747 → 1,782. Among them: Doom Cannon, Plague Engineer, Patchwork Banner, Unclaimed Territory,
+  Secluded Courtyard, Three Tree City, Vanquisher's Banner, Kindred Discovery, Urza's
+  Incubator, Metallic Mimic, Adaptive Automaton, Icon of Ancestry, Pillar of Origins,
+  Realmwalker, Kindred Dominance, Kindred Judgment, Distant Melody, Crippling Fear, Raise the
+  Palisade, Cover of Darkness, Chronicle of Victory, Etchings of the Chosen, Bloodline
+  Pretender, Species Specialist, Belbe's Portal, Engineered Plague, Xenograft, Hall of
+  Triumph, the changelings (Changeling Outcast, Taurean Mauler, Universal Automaton, Crib
+  Swap…), cards that make changeling tokens (Black Market Connections, Irregular Cohort,
+  Personify), Helm of Awakening and Arcane Melee (anyone's cost reduction). Precon deck
+  slots: not measured.
+- **Tokens and copies (D-073, D-074):** `ApplyFrame::chosen` keeps a choice by the place of
+  its event in the batch, and `perform` gives it to the permanent a `Move` *or* a
+  `TokenEnters` puts onto the battlefield. But `replacement::applicable` offers a
+  permanent's own "as this enters" abilities only for a `Move` (from the face the card
+  enters with): a token entering (`TokenEnters`, no object yet) is not asked today, so a
+  token copy of a permanent with an as-enters choice would enter with no choice (its "of the
+  chosen type" then means nothing, CR 607.5a). For copies, `applicable` would have to read
+  the entering object's copiable abilities (layer 1) rather than its card.
+- **Still blocked, by name:** Cavern of Souls (`param:Mana.AddsNoCounter`: "that spell can't
+  be countered" as a property of the mana; the restriction half is built and tested), Roaming
+  Throne (only `kw:Ward` left: its additional trigger of the chosen type is built and
+  tested), Utopia Sprawl / Caged Sun / Gauntlet of Power / Heraldic Banner (`Mana:produced`
+  "of the chosen color" and mana triggers), Herald's Horn (`api:PeekAndReveal`), Door of
+  Destinies (charge counters), Path of Ancestry (`param:Mana.TriggersWhenSpent`), Kindred
+  Summons (`api:DigUntil`), Kindred Charge (`api:CopyPermanent`), Coat of Arms
+  (`expr:set while resolving AffectedX`), Arcane Adaptation (`…AffectedZone`), Stuffy Doll
+  (choose a player), Nykthos / Nyx Lotus (a permanent's ability choosing a color, devotion to
+  it), Thriving lands (a color other than one), Cloud Key / Serra's Emissary (a card type),
+  Multiversal Passage / Banner of Kinship (`R:Event$ Moved` with a choice and more).
+
+## D-075 part 2: share a land type, delayed triggers, "draw up to", look and rearrange (2026-11-12)
+Rules text: docs/rules-notes/d075-commander-staples.md (sections 205.3i, 603.7, 401.4 /
+701.24a). Tests: `crates/harness/tests/forge_staples.rs`.
+- **Cards that share a land type** (CR 205.3i): `Effect::ChooseCards::share_land_type`
+  (serialized only when set; `Work::ChooseCards::partial` likewise). The cards are chosen one
+  at a time, each further one sharing a land type with each chosen before it — Forge's rule
+  (for two cards the same as having one in common). Myriad Landscape.
+- **Delayed triggered abilities** (CR 603.7): `Effect::DelayedTrigger { ability, window,
+  player, amount }` (the ability is an entry of `CardDef::granted`; `DelayWindow::{Next,
+  ThisTurn, NextTurn}`), `GameState::delayed` (`effects::Delayed`, serialized only when not
+  empty), `GameAction::{AddDelayed, RemoveDelayed}`. Detected with the step triggers
+  (`triggers::detect_step`); each triggers once and is removed (603.7b); "this turn" ones
+  that didn't trigger end at cleanup (514.2); "next turn" ones can't trigger before it. Its
+  source is the spell's or ability's source (603.7d–e; a spell's is gone by then, so it
+  carries the source as it was). What it remembers is fixed as it is created (603.7c): a
+  player — "its controller" of a countered spell (`RememberObjects$ RememberedController`
+  after `RememberTargets$`) — or an amount — that spell's mana value on the stack, X
+  included (`RememberNumber$` after `RememberCounteredCMC$`). The delayed trigger is created
+  whether or not the spell was countered — Forge's CounterEffect remembers the mana value
+  before trying to counter ("should remember even that spell cannot be countered"), and a
+  Mana Drain aimed at a spell that can't be countered still gives the mana. (Corrected after
+  the merge: it was first compiled as "if you do", from a claim about Forge not checked
+  against its Java. Mana Drain's text now says "that spell's mana value".) Compiled:
+  `Mode$ Phase` only (`DelayedTrigger:mode …` otherwise); remembering objects is not
+  (`DelayedTrigger:remembers objects`: 195 cards in all — "exile it, return it at the beginning of the
+  next end step" needs D-069's memory to outlive the resolution); "this turn" over two steps
+  unless the card says "next" (603.7b would make it trigger at each:
+  `DelayedTrigger:this turn, more than once`).
+- **"Draw up to N cards"** (Forge's `Draw | Upto$`): `Effect::DrawUpTo`, `ChoiceKind::DrawUpTo`
+  (PickNumber; the drawer chooses). The heuristic agent draws all; the app asks "How many cards
+  do you draw?".
+- **Look at the top N cards and put them back in any order; shuffle** (CR 401.4, 701.24a):
+  Forge's `RearrangeTopOfLibrary` compiles to a "look at the top N" that takes none and puts
+  the rest on top in the controller's order; `MayShuffle$` to `May(Effect::Shuffle)`
+  (appended; "you may have that player shuffle"). `AIRespondsToOwnAbility$` is a Forge AI
+  hint. Ponder, Sensei's Divining Top, Index, Natural Selection, Portent, Halimar Depths.
+- **`CostDesc$` is text only** (how the cost reads in Forge's description; the cost is
+  `Cost$`). Big Score, Unexpected Windfall, Tormenting Voice, Cathartic Reunion.
+- **Golden state hashes re-blessed; all 15 event logs unchanged.** The stable hasher writes a
+  tag for a field that `skip_serializing_if` skips (`hash.rs`, `skip_field`), so a new
+  top-level `GameState` field changes every state hash even while it is empty
+  (`GameState::delayed`). Fields skipped inside frames (`ResolveFrame::life_lost`,
+  `ChooseSpec::share_land_type`) only show while a resolution is suspended.
+- Against main `0b956d9` (D-073 merged), by a card-by-card diff of `forge-coverage --sample 1`:
+  77 cards newly compile, none stops compiling, no engine text changes. All 77 were read
+  against their Oracle text. Among the most played: Arcane Denial, Mana Drain, Ponder,
+  Sensei's Divining Top, Myriad Landscape, Big Score, Unexpected Windfall.
+- **Deliberately not done here:** Path of Ancestry (`Mana.TriggersWhenSpent`: mana that
+  remembers a trigger needs the player to choose which mana pays — CR 601.2h — inside the
+  payment planner, and "shares a creature type with your commander"; left until the cast
+  frame is quiet); War Room (pay life equal to a count, `ActivationGameTypes$`,
+  `Count$ColorsColorIdentity`).
+- **Next:** regeneration with "can't be regenerated" (`api:Regenerate` alone blocks 185
+  cards, `NoRegen` 61), the Channel lands, Esper Sentinel, City of Brass, cumulative upkeep.
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may

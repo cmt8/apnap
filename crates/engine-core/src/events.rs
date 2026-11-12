@@ -292,17 +292,17 @@ pub enum Event {
         object: ObjectId,
         face: u8,
     },
+    /// `player` chose `chosen` for `object`: as the permanent entered (CR 614.12a), or for
+    /// the spell or ability `object` while it resolved (CR 608.2c). Public.
+    Chose {
+        player: PlayerId,
+        object: ObjectId,
+        chosen: card_model::Chosen,
+    },
     /// CR 707.4 / 707.5: `object` is now a copy of `card` (it became one, or entered or was
     /// created as one).
     BecameCopy {
         object: ObjectId,
         card: card_model::CardDefId,
-    },
-    /// CR 707.10: `copy`, a copy of spell or ability `of`, was put on the stack under
-    /// `controller`'s control (it wasn't cast or activated).
-    StackObjectCopied {
-        copy: ObjectId,
-        of: ObjectId,
-        controller: PlayerId,
     },
 }

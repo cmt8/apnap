@@ -71,6 +71,7 @@ impl Scenario {
                 transforms: 0,
                 adventure: None,
                 cast_with: None,
+                chosen: Vec::new(),
                 copy: None,
                 spell_copy: false,
             },
@@ -90,6 +91,7 @@ impl Scenario {
                 facts: Default::default(),
                 source_transforms: None,
                 alt: None,
+                chosen: Vec::new(),
             });
         } else {
             self.st.zones.list_mut(zone, owner).push(id);

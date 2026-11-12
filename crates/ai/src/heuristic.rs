@@ -121,7 +121,8 @@ fn effect_polarity(e: &Effect) -> Polarity {
         },
         Effect::Apply { effects, .. } => continuous_polarity(effects),
         // What it does is in abilities written elsewhere on the card: no preference.
-        Effect::Lasting { .. } => Polarity::Neutral,
+        Effect::Lasting { .. } | Effect::DelayedTrigger { .. } => Polarity::Neutral,
+        Effect::DrawUpTo { .. } | Effect::Shuffle { .. } => Polarity::Neutral,
         // Its own permanent turning over: no target to judge.
         Effect::Transform { .. } => Polarity::Neutral,
         Effect::May(inner) => effect_polarity(inner),
@@ -144,7 +145,8 @@ fn effect_polarity(e: &Effect) -> Polarity {
         | Effect::DamageEach { .. }
         | Effect::ApplyAll { .. }
         | Effect::Mill { .. }
-        | Effect::SetX(_) => Polarity::Neutral,
+        | Effect::SetX(_)
+        | Effect::Choose(_) => Polarity::Neutral,
     }
 }
 
@@ -183,7 +185,8 @@ fn continuous_polarity(effects: &[ContinuousEffect]) -> Polarity {
             ContinuousEffect::SetColors(_)
             | ContinuousEffect::SwitchPT
             | ContinuousEffect::SetPTBy { .. }
-            | ContinuousEffect::RemoveTypes(_) => {}
+            | ContinuousEffect::RemoveTypes(_)
+            | ContinuousEffect::AddChosenType => {}
         }
     }
     Polarity::Neutral
@@ -206,6 +209,7 @@ fn kw_value(k: Keyword) -> i64 {
         | Keyword::Reach
         | Keyword::Flash
         | Keyword::Flanking => 1,
+        Keyword::Changeling => 0,
         Keyword::Defender => -1,
     }
 }
@@ -1145,6 +1149,48 @@ impl HeuristicAgent {
     /// is wanted now — on its own turn, a card in hand or the command zone that it could
     /// cast only with this land untapped — with life to spare, and not for a permanent
     /// that enters tapped anyway.
+    /// "Choose a creature type / a color": the one most common among its own creatures and
+    /// creature cards it can see (battlefield, hand, graveyard, command zone) — the colors
+    /// of its own cards for a color. Ties, and nothing seen, go to the engine's order (its
+    /// own deck's types first).
+    fn choose_value(&self, v: &PlayerView, d: &PendingDecision) -> usize {
+        let me = Self::me(v);
+        let mine: Vec<&ObjectView> = v
+            .battlefield
+            .iter()
+            .filter(|o| o.controller == me)
+            .chain(&v.hand)
+            .chain(v.command.iter().filter(|o| o.owner == me))
+            .chain(
+                v.players
+                    .iter()
+                    .filter(|p| p.id == me)
+                    .flat_map(|p| &p.graveyard),
+            )
+            .collect();
+        let score = |o: &OptionDesc| -> usize {
+            mine.iter()
+                .map(|x| self.catalog.get(x.card))
+                .filter(|def| match o {
+                    OptionDesc::CreatureType { name } => {
+                        def.has_type(CardType::Creature)
+                            && def.creature_types.iter().any(|t| t == name.name())
+                    }
+                    OptionDesc::Color { color } => def.printed_colors().contains(color),
+                    _ => false,
+                })
+                .count()
+        };
+        let mut best = (0, 0);
+        for (i, o) in d.options.iter().enumerate() {
+            let s = score(o);
+            if s > best.1 {
+                best = (i, s);
+            }
+        }
+        best.0
+    }
+
     fn as_enters(
         &self,
         v: &PlayerView,
@@ -1421,6 +1467,8 @@ impl Agent for HeuristicAgent {
                     .take(*max)
                     .collect(),
             ),
+            // "Draw up to N cards": all of them.
+            (ChoiceKind::DrawUpTo, Primitive::PickNumber { max, .. }) => Response::Number(*max),
             // "Untap up to N lands": its own permanents, as many as allowed.
             (ChoiceKind::Untap, Primitive::PickN { max, .. }) => Response::Pick(
                 d.options
@@ -1436,6 +1484,7 @@ impl Agent for HeuristicAgent {
                     .take(*max)
                     .collect(),
             ),
+            (ChoiceKind::Choose { .. }, _) => Response::Pick(vec![self.choose_value(v, d)]),
             _ => return self.fallback.decide(v, d),
         };
         if d.validate(&r).is_ok() {

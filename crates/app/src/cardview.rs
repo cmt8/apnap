@@ -7,7 +7,7 @@
 //! counters, combat) is drawn as small badges in the corners.
 
 use crate::art::{Art, Seg, segments};
-use card_model::{CardDef, CardType, Color, describe};
+use card_model::{CardCatalog, CardDef, CardType, Color, describe};
 use eframe::egui::emath::GuiRounding as _;
 use eframe::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, Response, Sense, Stroke, StrokeKind, TextureHandle,
@@ -219,6 +219,8 @@ pub struct CardLook<'a> {
     pub motion: Option<egui::Id>,
     /// Can be dragged onto something (a player to attack, a creature to block).
     pub draggable: bool,
+    /// Where the tokens its rules text creates are defined (their descriptions).
+    pub tokens: Option<&'a CardCatalog>,
 }
 
 /// How long a card takes to turn or step forward, in seconds.
@@ -244,9 +246,23 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(f(a.r(), b.r()), f(a.g(), b.g()), f(a.b(), b.b()))
 }
 
+/// A card's rules text, with the tokens it creates described from `tokens`.
+pub fn describe_rules(def: &CardDef, tokens: Option<&CardCatalog>) -> Vec<String> {
+    match tokens {
+        Some(cat) => describe::rules_text_in(def, &|key| cat.find(key).map(|id| cat.get(id))),
+        None => describe::rules_text(def),
+    }
+}
+
 /// Draw a card from its definition (no image): name, cost, type line, rules text where it
 /// fits, power/toughness. `rect` may be upright or sideways.
-pub fn paint_proxy(ui: &egui::Ui, art: &mut Art, rect: Rect, def: &CardDef) {
+pub fn paint_proxy(
+    ui: &egui::Ui,
+    art: &mut Art,
+    rect: Rect,
+    def: &CardDef,
+    tokens: Option<&CardCatalog>,
+) {
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
     let sideways = rect.width() > rect.height();
     // One unit = 1% of the card's width.
@@ -347,7 +363,11 @@ pub fn paint_proxy(ui: &egui::Ui, art: &mut Art, rect: Rect, def: &CardDef) {
         // Rules text only where it would be legible.
         let rules_font = FontId::proportional(6.3 * s);
         if rules_font.size >= 9.0 {
-            let text = describe::rules_text(def).join("\n");
+            // One line for each bullet of a modal ability.
+            let text = describe_rules(def, tokens)
+                .join("\n")
+                .replace(" • ", "\n• ")
+                .replace("— •", "—\n•");
             let galley = painter.layout(text, rules_font, ink, text_box.width() - 4.0 * s);
             painter.with_clip_rect(text_box).galley(
                 text_box.min + vec2(2.0 * s, 1.5 * s),
@@ -547,7 +567,7 @@ pub fn card_widget(ui: &mut egui::Ui, art: &mut Art, look: &CardLook<'_>) -> Res
         let r = front.translate(vec2(i as f32 * step, 0.0));
         match &tex {
             Some(tex) => paint_image_turned(ui.painter(), tex, r, turn),
-            None => paint_proxy(ui, art, r, look.def),
+            None => paint_proxy(ui, art, r, look.def, look.tokens),
         }
     }
     let radius = upright.x * 0.048;
@@ -581,7 +601,13 @@ pub fn card_widget(ui: &mut egui::Ui, art: &mut Art, look: &CardLook<'_>) -> Res
 
 /// The enlarged view of a card, about `height` points tall: its image, or a proxy with the
 /// full rules text.
-pub fn card_large(ui: &mut egui::Ui, art: &mut Art, def: &CardDef, height: f32) -> Response {
+pub fn card_large(
+    ui: &mut egui::Ui,
+    art: &mut Art,
+    def: &CardDef,
+    height: f32,
+    tokens: Option<&CardCatalog>,
+) -> Response {
     let (size, width_px) = card_size(height, ui.pixels_per_point());
     let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
     resp.widget_info(|| {
@@ -595,7 +621,7 @@ pub fn card_large(ui: &mut egui::Ui, art: &mut Art, def: &CardDef, height: f32) 
         };
         match tex {
             Some(tex) => paint_image(ui.painter(), &tex, rect, false),
-            None => paint_proxy(ui, art, rect, def),
+            None => paint_proxy(ui, art, rect, def, tokens),
         }
     }
     resp

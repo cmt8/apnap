@@ -68,6 +68,10 @@ pub struct Characteristics {
     /// not it uses those characteristics now.
     #[serde(default, skip_serializing_if = "core::ops::Not::not")]
     pub has_adventure: bool,
+    /// It is every creature type (CR 702.73a, changeling): a characteristic-defining
+    /// ability, applied before anything else in layer 4 (CR 613.3), in every zone.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub all_creature_types: bool,
 }
 
 impl Characteristics {
@@ -92,6 +96,7 @@ impl Characteristics {
             mana_value_from: None,
             // A catalog entry of a face carries its card's layout.
             has_adventure: d.layout == card_model::Layout::Adventure,
+            all_creature_types: d.has_keyword(Keyword::Changeling),
         }
     }
 
@@ -130,6 +135,7 @@ impl Characteristics {
     /// you control" counts every land with the type Mountain.
     pub fn has_subtype(&self, name: &str) -> bool {
         self.subtypes.iter().any(|s| s == name)
+            || (self.all_creature_types && card_model::is_creature_type(name))
             || self.land_types.iter().any(|t| {
                 name == match t {
                     BasicLandType::Plains => "Plains",
@@ -321,7 +327,9 @@ pub fn matches(
         attacking,
         blocking,
     };
-    matches_parts(sel, c, facts, source, controller)
+    // "Of the chosen type": the choice of the ability's source (CR 607.2d).
+    let sel = crate::chosen::bind_for(st, sel, source);
+    matches_parts(&sel, c, facts, source, controller)
 }
 
 /// Is `id` an attacking creature / a blocking creature right now (CR 506.4)?
@@ -593,6 +601,12 @@ pub fn matches_parts(
         && sel
             .toughness_max
             .is_none_or(|n| c.toughness.is_some_and(|t| t <= n))
+        // A reference to a choice still here wasn't bound (`chosen::bind`): nothing was
+        // chosen (CR 607.5a) — "of the chosen type" is nothing, "not of it" everything.
+        && match sel.chosen {
+            None | Some(card_model::OfChosen::NotType) => true,
+            Some(card_model::OfChosen::Type | card_model::OfChosen::Color) => false,
+        }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -637,7 +651,7 @@ fn layer_of(e: &ContinuousEffect) -> Layer {
         ContinuousEffect::SetPT(..) => Layer::L7b,
         ContinuousEffect::ModifyPT(..) | ContinuousEffect::ModifyPTBy { .. } => Layer::L7c,
         ContinuousEffect::SwitchPT => Layer::L7d,
-        ContinuousEffect::RemoveTypes(_) => Layer::L4,
+        ContinuousEffect::RemoveTypes(_) | ContinuousEffect::AddChosenType => Layer::L4,
     }
 }
 
@@ -734,7 +748,10 @@ impl Walk<'_> {
                     .zones
                     .list(Zone::Graveyard, you)
                     .iter()
-                    .filter(|&&id| crate::targeting::card_matches(self.st, id, cards))
+                    .filter(|&&id| {
+                        let cards = crate::chosen::bind_for(self.st, cards, e.source);
+                        crate::targeting::card_matches(self.st, id, &cards)
+                    })
                     .count()
                     >= *at_least as usize
             }
@@ -914,6 +931,25 @@ impl Walk<'_> {
                     }
                     continue;
                 }
+                // CR 607.2d: the type chosen for the effect's source; nothing if none was
+                // (CR 607.5a). CR 205.3d: only a creature or kindred can gain it.
+                ContinuousEffect::AddChosenType => {
+                    let chosen = crate::chosen::of_source(self.st, e.source);
+                    if let Some(t) = chosen.iter().find_map(|c| match c {
+                        card_model::Chosen::CreatureType(t) => Some(t.name()),
+                        card_model::Chosen::Color(_) => None,
+                    }) {
+                        for id in set {
+                            if let Some(c) = view.get_mut(id)
+                                && (c.is(CardType::Creature) || c.is(CardType::Kindred))
+                                && !c.subtypes.iter().any(|s| s == t)
+                            {
+                                c.subtypes.push(t.into());
+                            }
+                        }
+                    }
+                    continue;
+                }
                 ContinuousEffect::ModifyPTBy { power, toughness } => {
                     let value = |s: &card_model::Signed| {
                         let n = self.amount(&s.amount, e, view);
@@ -962,7 +998,9 @@ impl Walk<'_> {
         };
         b.parts.iter().filter(|p| layer_of(p) == layer).any(|p| {
             [affected, counted].into_iter().flatten().any(|s| match p {
-                ContinuousEffect::AddTypes { .. } | ContinuousEffect::RemoveTypes(_) => true,
+                ContinuousEffect::AddTypes { .. }
+                | ContinuousEffect::RemoveTypes(_)
+                | ContinuousEffect::AddChosenType => true,
                 ContinuousEffect::SetColors(_) => !s.colors.is_empty(),
                 ContinuousEffect::AddKeywords(_) | ContinuousEffect::LoseKeywords(_) => {
                     !s.keywords.is_empty() || !s.not_keywords.is_empty()
@@ -1044,8 +1082,9 @@ fn apply_part(c: &mut Characteristics, part: &ContinuousEffect, you: PlayerId) {
         ContinuousEffect::ModifyPTBy { .. } => {}
         // Counted by the walk (`Walk::apply`).
         ContinuousEffect::SetPTBy { .. } => {}
-        // Done by the walk, which knows the card the abilities are written on.
-        ContinuousEffect::GrantAbilities(_) => {}
+        // Done by the walk, which knows the card the abilities are written on — and the
+        // effect's source, whose choice it is.
+        ContinuousEffect::GrantAbilities(_) | ContinuousEffect::AddChosenType => {}
         // CR 205.1: a type-removing effect; subtypes are kept (a God that isn't a
         // creature is still a God).
         ContinuousEffect::RemoveTypes(ts) => c.card_types.retain(|t| !ts.contains(t)),

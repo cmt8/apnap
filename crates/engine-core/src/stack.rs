@@ -67,6 +67,12 @@ pub struct StackObject {
     /// 702.34a) and what its text is (overload, CR 702.96a).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alt: Option<AbilityId>,
+    /// For abilities: what was chosen for the source as it entered, as it was when the
+    /// ability was put on the stack — "the chosen type" in the ability's text (CR 607.2d),
+    /// also once the source has left (CR 608.2h: a permanent's choice never changes while
+    /// it is the same object).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen: Vec<card_model::Chosen>,
 }
 
 impl StackObject {

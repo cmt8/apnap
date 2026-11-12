@@ -46,6 +46,9 @@ pub struct ObjectView {
     /// those of `catalog.face(card, face)`. Players may look at both faces (CR 712.4).
     #[serde(default)]
     pub face: u8,
+    /// What was chosen for it as it entered ("chosen type: Elf", CR 607.2d; public).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen: Vec<card_model::Chosen>,
 }
 
 /// A commander designation (CR 903.3): public for the whole game, wherever the card is.
@@ -173,6 +176,7 @@ fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
         attached_to: o.attached_to,
         granted: c.abilities.iter().copied().filter(|a| a.granted).collect(),
         face: o.face,
+        chosen: o.chosen.clone(),
     }
 }
 

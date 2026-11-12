@@ -297,6 +297,10 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
     }
     // CR 614.12: an entering permanent's own "enters …" replacement effects apply too,
     // checked against the permanent as it would exist on the battlefield.
+    // (Only for a `Move`: a token's own ones — a `TokenEnters`, no object yet — are not
+    // offered, so a token with "as this enters, choose …" would enter with no choice, though
+    // `ApplyFrame::chosen` / `perform` would give it one. No token any compiled card makes
+    // has such an ability (D-076); token copies are D-074's.)
     if let Proposed::Move {
         object,
         to: Zone::Battlefield,
@@ -539,6 +543,23 @@ pub fn entry_choice(
                 options,
             ));
         }
+        // "As this enters, choose a creature type / a color" (CR 614.12a): always asked —
+        // by the player it will enter under the control of (CR 109.5).
+        AbilityDef::Replacement {
+            with: ReplaceWith::Choose(what),
+            ..
+        } => {
+            let player = entering_controller(st, ev)?;
+            return Some((
+                player,
+                ChoiceKind::Choose {
+                    what: *what,
+                    object: source,
+                    ability: Some(ability),
+                },
+                crate::chosen::options(st, player, *what),
+            ));
+        }
         _ => return None,
     };
     let player = entering_controller(st, ev)?;
@@ -631,6 +652,15 @@ pub fn apply_chosen(
         return (ev, Vec::new());
     }
     let (act, otherwise) = match st.catalog.ability(ability).clone() {
+        // The choice itself is kept by the Apply frame until the permanent has entered
+        // (`ApplyFrame::chosen`); the event is otherwise unchanged.
+        AbilityDef::Replacement {
+            with: ReplaceWith::Choose(_),
+            ..
+        } => {
+            st.emit(crate::events::Event::Replaced { source });
+            return (ev, Vec::new());
+        }
         AbilityDef::Replacement {
             with: ReplaceWith::EntersTappedUnlessYou(act),
             ..
@@ -715,7 +745,8 @@ fn damage_object_hit(st: &GameState, filter: &ObjFilter, id: ObjectId, who: Bear
             (c, facts)
         }
     };
-    crate::layers::matches_parts(sel, &c, facts, who.source, who.controller)
+    let sel = crate::chosen::bind_for(st, sel, who.source);
+    crate::layers::matches_parts(&sel, &c, facts, who.source, who.controller)
 }
 
 fn applies(st: &GameState, who: Bearer<'_>, replaces: &Replaces, ev: &Proposed) -> bool {
@@ -797,7 +828,7 @@ fn applies(st: &GameState, who: Bearer<'_>, replaces: &Replaces, ev: &Proposed) 
                     o.zone == Zone::Battlefield && {
                         let (attacking, blocking) = crate::layers::combat_role(st, *object);
                         crate::layers::matches_parts(
-                            on,
+                            &crate::chosen::bind_for(st, on, source),
                             &crate::layers::chars(st, *object),
                             crate::layers::Facts {
                                 id: *object,
@@ -888,7 +919,7 @@ fn applies(st: &GameState, who: Bearer<'_>, replaces: &Replaces, ev: &Proposed) 
             o.zone == Zone::Battlefield && {
                 let (attacking, blocking) = crate::layers::combat_role(st, *object);
                 crate::layers::matches_parts(
-                    sel,
+                    &crate::chosen::bind_for(st, sel, source),
                     &crate::layers::chars(st, *object),
                     crate::layers::Facts {
                         id: *object,
@@ -946,8 +977,11 @@ fn entering_matches(
 ) -> bool {
     match ev {
         Proposed::Move { object, .. } if *object == source => false,
-        _ => as_it_would_exist(st, ev)
-            .is_some_and(|(c, facts)| crate::layers::matches_parts(sel, &c, facts, source, you)),
+        _ => as_it_would_exist(st, ev).is_some_and(|(c, facts)| {
+            // "Of the chosen type": this ability's source's choice (CR 607.2d).
+            let sel = crate::chosen::bind_for(st, sel, source);
+            crate::layers::matches_parts(&sel, &c, facts, source, you)
+        }),
     }
 }
 
@@ -1053,7 +1087,7 @@ fn token_hit(
         None => crate::layers::Characteristics::printed(token, st.catalog.get(token), controller),
     };
     crate::layers::matches_parts(
-        sel,
+        &crate::chosen::bind_for(st, sel, who.source),
         &c,
         crate::layers::Facts {
             // Not an object yet: never the ability's source.
@@ -1479,6 +1513,8 @@ fn modify(mut ev: Proposed, with: ReplaceWith) -> Proposed {
             | ReplaceWith::EntersTappedUnless(_)
             | ReplaceWith::EntersTappedUnlessYou(_),
         ) => *tapped = true,
+        // The choice is kept by the Apply frame (`entry_choice`, `apply_chosen`).
+        (Proposed::Move { .. }, ReplaceWith::Choose(_)) => {}
         (Proposed::Move { counters, .. }, ReplaceWith::EntersWithCounters { kind, n }) => {
             if *n > 0 {
                 counters.push((*kind, *n))
@@ -1514,8 +1550,9 @@ pub fn cant_be_countered(st: &GameState, spell: ObjectId) -> bool {
                 return false;
             };
             let c = crate::layers::chars(st, spell);
+            // "Creature spells of the chosen type can't be countered" (CR 607.2d).
             crate::layers::matches_parts(
-                sel,
+                &crate::chosen::bind_for(st, sel, source),
                 &c,
                 crate::layers::Facts {
                     id: spell,

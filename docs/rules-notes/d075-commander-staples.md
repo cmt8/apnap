@@ -60,3 +60,77 @@ all at once (one event, replaceable). `Amount$ 2` is "proliferate twice": two ch
 | Test | Rule |
 |---|---|
 | `proliferate_gives_each_chosen_permanent_another_counter_of_each_kind` | 701.34a |
+
+## Cards that share a land type (205.3i)
+
+> 205.3i Lands have their own unique set of subtypes; these subtypes are called land types.
+> The land types are Cave, Desert, Forest, Gate, Island, Lair, Locus, Mine, Mountain, Plains,
+> Planet, Power-Plant, Sphere, Swamp, Tower, Town, and Urza’s. Of that list, Forest, Island,
+> Mountain, Plains, and Swamp are the basic land types. See rule 305.6.
+
+> 701.23b If a player is searching a hidden zone for cards with a stated quality, such as a
+> card with a certain card type or color, that player isn’t required to find some or all of
+> those cards even if they’re present in that zone.
+
+"Search for up to two basic land cards that share a land type" (Myriad Landscape): the
+cards are chosen one at a time, each further card sharing a land type with each card chosen
+before it (Forge's rule; for two cards the same as having one in common).
+
+| Test | Rule |
+|---|---|
+| `search_for_lands_that_share_a_land_type` | 205.3i, 701.23b |
+
+## Delayed triggered abilities (603.7)
+
+> 603.7a Delayed triggered abilities are created during the resolution of spells or
+> abilities, as the result of a replacement effect being applied, or as a result of a static
+> ability that allows a player to take an action. A delayed triggered ability won’t trigger
+> until it has actually been created, even if its trigger event occurred just beforehand.
+
+> 603.7b A delayed triggered ability will trigger only once—the next time its trigger event
+> occurs—unless it has a stated duration, such as “this turn.” …
+
+> 603.7c A delayed triggered ability that refers to a particular object still affects it even
+> if the object changes characteristics. However, if that object is no longer in the zone
+> it’s expected to be in at the time the delayed triggered ability resolves, the ability
+> won’t affect it. …
+
+> 603.7d If a spell creates a delayed triggered ability, the source of that delayed triggered
+> ability is that spell. The controller of that delayed triggered ability is the player who
+> controlled that spell as it resolved.
+
+> 603.7e If an activated or triggered ability creates a delayed triggered ability, the source
+> of that delayed triggered ability is the same as the source of that other ability. …
+
+So far: "at the beginning of [step]" events only, triggering once; "this turn" ones end at
+cleanup (514.2). What one remembers is fixed as it is created: a player ("its controller"),
+an amount ("that spell's mana value"). Remembering objects is not compiled yet.
+
+| Test | Rule |
+|---|---|
+| `a_delayed_trigger_adds_mana_equal_to_the_countered_spells_mana_value` | 603.7a–c, 202.3e |
+| `delayed_triggers_of_the_next_turn_remember_a_player` | 603.7c–d |
+| `a_delayed_trigger_for_this_turn_ends_at_cleanup` | 603.7b, 514.2 |
+
+## Text only: `CostDesc$`
+
+How a cost reads in the ability's description (Forge's `SpellAbility.getDescription`); the
+cost is `Cost$`. No rule involved.
+
+| Test | Rule |
+|---|---|
+| `a_cost_description_is_text_only` | 601.2b (the additional cost is still compiled from `Cost$`) |
+
+## Look at the top N cards, put them back in any order; shuffle (401.4, 701.24a)
+
+> 701.24a To shuffle a library or a face-down pile of cards, randomize the cards within it so
+> that no player knows their order.
+
+Forge's `RearrangeTopOfLibrary`: the effect's controller looks at the top N cards of a
+library and puts them back in an order they choose (Ponder, Sensei's Divining Top, Index);
+`MayShuffle$`: then the controller may have that library shuffled (`Effect::Shuffle` in a
+"may"). Compiled as a "look at the top N" that takes none and puts the rest on top.
+
+| Test | Rule |
+|---|---|
+| `look_at_the_top_cards_put_them_back_in_any_order_then_maybe_shuffle` | 401.4, 701.24a |

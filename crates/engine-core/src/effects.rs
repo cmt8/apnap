@@ -68,6 +68,26 @@ impl Lasting {
     }
 }
 
+/// CR 603.7: a delayed triggered ability, waiting for its event. It triggers once and is
+/// then gone (603.7c); `controller` controls it (603.7d) and `source` is its source (603.7e)
+/// — which may have left its zone meanwhile (`source_lki` is it as the ability was made).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Delayed {
+    pub id: u32,
+    pub ability: card_model::AbilityId,
+    pub source: ObjectId,
+    pub source_card: card_model::CardDefId,
+    pub source_lki: Option<crate::layers::Characteristics>,
+    pub controller: PlayerId,
+    /// "That player", "that much": fixed as it was made.
+    pub facts: crate::triggers::EventFacts,
+    /// It can trigger from the beginning of this turn on ("at the beginning of the next
+    /// turn's upkeep" can't trigger this turn).
+    pub from_turn: u32,
+    /// It ends at the cleanup step of this turn (CR 514.2), if it hasn't triggered.
+    pub until_turn: Option<u32>,
+}
+
 /// Who an ability is being read for: an object that has it, or a lasting effect that
 /// carries it.
 #[derive(Clone, Copy, Debug)]

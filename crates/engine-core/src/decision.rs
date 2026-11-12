@@ -131,6 +131,18 @@ pub enum ChoiceKind {
     /// CR 701.34a: proliferate — choose any number of the permanents that have a counter
     /// (PickN over `OptionDesc::Card`).
     Proliferate,
+    /// "Draw up to N cards": how many (PickNumber).
+    DrawUpTo,
+    /// Choose a creature type (PickN 1 over `OptionDesc::CreatureType`: every creature type
+    /// of CR 205.3m — those among the chooser's own cards first, most common first, then the
+    /// rest alphabetically) or a color (over `OptionDesc::Color`, CR 105.4) — for permanent
+    /// `object` as it enters ("as this enters, choose …", CR 614.12a: `ability` is the
+    /// choosing ability), or for the resolving spell or ability `object` (CR 608.2c).
+    Choose {
+        what: card_model::ChoiceOf,
+        object: ObjectId,
+        ability: Option<AbilityId>,
+    },
 }
 
 /// A structured description of one option. Frames read the chosen option back from the
@@ -239,6 +251,14 @@ pub enum OptionDesc {
         /// The face being cast (0: the front, as for `CastSpell`; else as for `CastFace`).
         face: u8,
         ability: AbilityId,
+    },
+    /// A creature type to choose (CR 205.3m).
+    CreatureType {
+        name: card_model::CreatureType,
+    },
+    /// A color to choose (CR 105.4).
+    Color {
+        color: card_model::Color,
     },
 }
 

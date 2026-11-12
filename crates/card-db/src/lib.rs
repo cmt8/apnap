@@ -353,6 +353,20 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
             }
         }
     }
+    // CR 607.2d: "the chosen type / color" needs an ability of the card that chooses it.
+    for (refers, choice) in [
+        (
+            text.contains("chosen: Some(Type)")
+                || text.contains("chosen: Some(NotType)")
+                || text.contains("AddChosenType"),
+            "Choose(CreatureType)",
+        ),
+        (text.contains("chosen: Some(Color)"), "Choose(Color)"),
+    ] {
+        if refers && !text.contains(choice) {
+            p.push(format!("refers to a choice no ability makes ({choice})"));
+        }
+    }
     // "Except it has '…'" (CR 707.9a): abilities of the `granted` list.
     for list in text.split("HasAbilities([").skip(1) {
         let list = list.split(']').next().unwrap_or_default();
@@ -382,6 +396,25 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
             }
         }
     }
+    // The delayed triggered abilities the card creates (CR 603.7).
+    let mut delayed: Vec<usize> = Vec::new();
+    // Those that remember an amount ("that much" of the delayed ability).
+    let mut delayed_amount: Vec<usize> = Vec::new();
+    for rest in text.split("DelayedTrigger { ability: ").skip(1) {
+        let index = rest.split(',').next().unwrap_or_default();
+        let remembers_amount = rest
+            .split_once("amount: ")
+            .is_some_and(|(_, a)| a.starts_with("Some"));
+        match index.parse::<usize>() {
+            Ok(i) if i < c.granted.len() => {
+                delayed.push(i);
+                if remembers_amount {
+                    delayed_amount.push(i);
+                }
+            }
+            _ => p.push(format!("no granted ability {index} for a delayed trigger")),
+        }
+    }
     if text.contains("while_source: true") && instant_or_sorcery {
         p.push("an effect of a spell can't last while its source stays".into());
     }
@@ -397,6 +430,16 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
         };
         // What a lasting effect carries works on no object: rules about combat and
         // prevention so far. Only there does anything mean "what the effect is about".
+        // A delayed triggered ability: "at the beginning of [step]" so far, about nothing
+        // remembered.
+        if granted && delayed.contains(&i) {
+            let fits = matches!(a, AbilityDef::Triggered { when, intervening_if: None, .. }
+                if when.events().iter().all(|t| matches!(t, card_model::Trigger::BeginningOf { .. })));
+            if !fits || lasting.contains(&i) {
+                p.push(at("not a delayed triggered ability the engine has".into()));
+                continue;
+            }
+        }
         let carried = granted && lasting.contains(&i);
         if carried {
             let fits = match a {
@@ -561,7 +604,7 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                     _ => false,
                 }),
                 _ => false,
-            };
+            } || (!needs_player && granted && delayed_amount.contains(&i));
             if !given {
                 p.push(at(format!(
                     "{word}: the ability's trigger event doesn't have one"
@@ -980,6 +1023,8 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                                 | ReplaceWith::EntersTappedUnless(_)
                                 | ReplaceWith::EntersTappedUnlessYou(_)
                                 | ReplaceWith::EntersOnlyIfYou(_)
+                                // "As this enters, choose …" (CR 614.12a).
+                                | ReplaceWith::Choose(_)
                                 | ReplaceWith::EntersAsCopy { .. }
                         )
                         | (
@@ -1186,7 +1231,18 @@ fn amounts_of_targets(e: &Effect, out: &mut Vec<u8>, hands: &mut Vec<PlayerRef>)
 }
 
 /// A selector used where "another" has no meaning must not say it.
-fn selector(_s: &card_model::Selector, _p: &mut dyn FnMut(String)) {}
+fn selector(s: &card_model::Selector, p: &mut dyn FnMut(String)) {
+    // "Of the chosen type" is the only subtype asked for; "of the chosen color" the only color.
+    match s.chosen {
+        Some(card_model::OfChosen::Type) if !s.subtypes.is_empty() => {
+            p("a selector of the chosen type that names subtypes too".into())
+        }
+        Some(card_model::OfChosen::Color) if !s.colors.is_empty() => {
+            p("a selector of the chosen color that names colors too".into())
+        }
+        _ => {}
+    }
+}
 
 /// How many selectors of a one-shot effect ask about "those cards" where the resolving
 /// effect filters with them itself (D-069): what it destroys, taps, chooses, moves….
@@ -1305,6 +1361,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             }
         }
         Effect::SetX(a) => amount(a, p),
+        Effect::Choose(_) => {}
         Effect::May(inner) => check_effect(inner, mode, has_x, p),
         Effect::IfDone { first, then } => {
             check_effect(first, mode, has_x, p);
@@ -1461,6 +1518,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         Effect::Tap { what } | Effect::Untap { what } | Effect::Transform { what } => obj(what, p),
         Effect::TapAll(s) | Effect::UntapAll(s) => selector(s, p),
         Effect::Proliferate => {}
+        Effect::Shuffle { who } => player(who, p),
         Effect::UntapChosen { what, count } => {
             selector(what, p);
             amount(count, p);
@@ -1577,6 +1635,32 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         Effect::DamageEachPlayer { amount: a } => amount(a, p),
         Effect::Destroy { what } | Effect::ReturnToHand { what } | Effect::Apply { what, .. } => {
             obj(what, p)
+        }
+        Effect::DrawUpTo { who, amount: a } => {
+            match who {
+                PlayerRef::Each | PlayerRef::EachOpponent => {
+                    p("one player draws up to a number".into())
+                }
+                other => player(other, p),
+            }
+            amount(a, p);
+        }
+        Effect::DelayedTrigger {
+            player: who,
+            amount: a,
+            ..
+        } => {
+            if let Some(who) = who {
+                match who {
+                    PlayerRef::Each | PlayerRef::EachOpponent => {
+                        p("a delayed trigger remembers one player".into())
+                    }
+                    other => player(other, p),
+                }
+            }
+            if let Some(a) = a {
+                amount(a, p);
+            }
         }
         Effect::Lasting { about, .. } => {
             if let Some(what) = about {

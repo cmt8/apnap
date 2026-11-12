@@ -84,7 +84,7 @@ pub fn describes(
                 TargetFilter::SpellMatching(sel) => {
                     st.stack_object(id)
                         .is_some_and(|s| s.kind == StackKind::Spell)
-                        && card_matches(st, id, sel)
+                        && card_matches(st, id, &bind_target(st, sel, source))
                         && {
                             let c = chars(st, id);
                             sel.colors.is_empty() || sel.colors.iter().any(|x| c.colors.contains(x))
@@ -108,13 +108,26 @@ pub fn describes(
                             card_model::Who::You => o.owner == controller,
                             card_model::Who::Opponent => o.owner != controller,
                         }
-                        && card_matches(st, id, cards)
+                        && card_matches(st, id, &bind_target(st, cards, source))
                         // "Another target card": not the card the ability is on.
                         && !(cards.other && Some(id) == source)
                 }
                 TargetFilter::Player | TargetFilter::Opponent => false,
             }
         }
+    }
+}
+
+/// "Target creature card of the chosen type": the choice of the ability's source (CR
+/// 607.2d).
+fn bind_target<'a>(
+    st: &GameState,
+    sel: &'a card_model::Selector,
+    source: Option<ObjectId>,
+) -> alloc::borrow::Cow<'a, card_model::Selector> {
+    match source {
+        Some(source) => crate::chosen::bind_for(st, sel, source),
+        None => alloc::borrow::Cow::Borrowed(sel),
     }
 }
 
