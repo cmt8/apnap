@@ -572,6 +572,41 @@ fn an_adventurer_card_in_hand() {
     assert!(!s.has(|_, o| matches!(o, OptionDesc::PlayLandFace { .. })));
 }
 
+// CR 716.2a: "a creature spell that has an Adventure" — Forge's `AdventureCard` — is an
+// adventurer cast as its creature, whether or not it went on its Adventure first; the
+// Adventure spell itself has an Adventure too, but it isn't a creature spell.
+#[test]
+fn a_creature_spell_that_has_an_adventure() {
+    let inn = "Name:Test Innkeeper\nManaCost:G\nTypes:Creature Human\nPT:1/1\n\
+        T:Mode$ SpellCast | ValidCard$ Creature.AdventureCard | ValidActivatingPlayer$ You | Execute$ TrigDraw | TriggerZones$ Battlefield | TriggerDescription$ Text.\n\
+        SVar:TrigDraw:DB$ Draw | Defined$ You | NumCards$ 1\n\
+        Oracle:Whenever you cast a creature spell that has an Adventure, draw a card.";
+    let mut sc = scenario(&[KNIGHT, inn]);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Mountain", "Mountain", "Mountain", "Mountain", "Mountain"],
+    );
+    sc.card(P0, Zone::Battlefield, "Test Innkeeper");
+    sc.cards(P0, Zone::Hand, &["Test Errant Knight", "Test Golem"]);
+    let mut s = Script::new(sc.build());
+    let drew = |s: &Script| {
+        s.count(|e| matches!(e, engine_core::Event::Drew { player, .. } if *player == P0))
+    };
+    let before = drew(&s);
+    // The Adventure: not a creature spell.
+    s.cast_face("Test Quest Strike")
+        .target_player(P1)
+        .pay()
+        .pass_all();
+    assert_eq!(drew(&s), before);
+    // The creature from exile: a creature spell that has an Adventure.
+    s.cast("Test Errant Knight").pay().pass_all();
+    assert_eq!(drew(&s), before + 1);
+    let golem = s.find(P0, Zone::Hand, "Test Golem").unwrap();
+    assert!(!chars(&s.st, golem).has_adventure);
+}
+
 // CR 716.3b: on the stack as an Adventure it has only the Adventure's characteristics.
 // CR 716.3d: as it resolves it is exiled, and its controller may cast the creature from
 // exile — but not as an Adventure again.

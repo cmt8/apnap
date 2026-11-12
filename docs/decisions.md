@@ -1492,6 +1492,10 @@ face is CR 712.8, playing a land face 712.9, entering 712.10–712.11, "the same
   the card — or play it, if it is a land — from exile, but not as an Adventure again. The
   mark moves with the card from the stack to exile only; it ends when the card leaves
   exile. **Omen** (CR 721.3d): shuffled into its owner's library as it resolves.
+  "That has an Adventure" (CR 716.2a, Forge's `AdventureCard`) is
+  `Selector::has_adventure`, read from `Characteristics::has_adventure` — true for an
+  adventurer card whichever of its characteristics it uses now (Edgewall Innkeeper,
+  Frantic Firebolt, Mysterious Pathlighter).
 - **Split cards** (CR 709.4): the compiler makes the card's own definition the two halves
   combined — both names ("Fire // Ice", which is also the card's name in the library and
   decks, as at Scryfall), the combined mana cost (mana value and colors from it), every
@@ -1532,16 +1536,15 @@ face is CR 712.8, playing a land face 712.9, entering 712.10–712.11, "the same
   compiled right. Fixed: a later event about another subject is written out.
 - Golden state hashes re-blessed: the stable hasher writes a tag for every skipped serde
   field, so the new fields change every state hash. All 15 event-log hashes unchanged.
-- 9,305 → 9,420 of 34,463 scripts (real cards per Scryfall 9,225 → 9,336). By layout:
+- 9,305 → 9,426 of 34,463 scripts (real cards per Scryfall 9,225 → 9,342). By layout:
   modal 27 of 101, transforming 18 of 399, adventurers 59 of 151, omens 5 of 16, split 6
-  of 128. All newly compiled cards were read against both faces' Oracle text.
+  of 128; and 6 cards about adventurers. All newly compiled cards were read against both faces' Oracle text.
 - **What is left, by kind** (cards blocked by it alone): transforming cards — battles
   (`line:Defense`, 10), Sagas (`kw:Chapter`, 9), craft, and in all 36 day/night werewolves
   (`kw:Daybound`), 32 disturb, 32 old werewolf conditions ("if no spells were cast last
   turn"), "enters transformed" (`param:ChangeZone.Transformed`), `trig:Transformed`; modal
   cards — "as this enters, you may pay 3 life" (`repl:Moved`, 17 in all); split cards —
-  Aftermath 13, Fuse 7, Rooms; adventurers — "a creature spell that has an Adventure"
-  (`filter:AdventureCard`, Edgewall Innkeeper). Still blocked as layouts: `Flip`, `Meld`,
+  Aftermath 13, Fuse 7, Rooms. Still blocked as layouts: `Flip`, `Meld`,
   `Prepare`, `Specialize`, `Vengeance`.
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)

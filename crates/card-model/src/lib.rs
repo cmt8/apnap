@@ -634,6 +634,10 @@ pub struct Selector {
     /// Not used for cards outside the battlefield, where `controller` is the owner.
     #[serde(default)]
     pub owner: Who,
+    /// "That has an Adventure" (CR 716.2a): an adventurer card, whether or not it is
+    /// using its Adventure's characteristics now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_adventure: Option<bool>,
 }
 
 impl Selector {

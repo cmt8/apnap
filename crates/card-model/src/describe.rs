@@ -348,6 +348,15 @@ fn selector(s: &Selector, plural: bool) -> String {
     if s.token == Some(true) {
         out.push_str(if plural { " tokens" } else { " token" });
     }
+    match s.has_adventure {
+        Some(true) => out.push_str(if plural {
+            " that have an Adventure"
+        } else {
+            " that has an Adventure"
+        }),
+        Some(false) => out.push_str(" without an Adventure"),
+        None => {}
+    }
     for k in &s.keywords {
         out.push_str(&format!(" with {}", keyword(*k)));
     }
@@ -1184,6 +1193,12 @@ fn card_list(cards: &[Selector], plural: bool) -> String {
             out.push_str(&mana_value(s));
             if !s.names.is_empty() {
                 out.push_str(&format!(" named {}", s.names.join(" or ")));
+            }
+            match s.has_adventure {
+                Some(true) if plural => out.push_str(" that have an Adventure"),
+                Some(true) => out.push_str(" that has an Adventure"),
+                Some(false) => out.push_str(" without an Adventure"),
+                None => {}
             }
             match s.controller {
                 Who::Any => {}

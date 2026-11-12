@@ -702,6 +702,8 @@ impl<'a> Tx<'a> {
                 // the battlefield see `owned`.
                 "YouOwn" => s.owner = Who::You,
                 "OppOwn" => s.owner = Who::Opponent,
+                // CR 716.2a: "that has an Adventure".
+                "AdventureCard" => s.has_adventure = Some(true),
                 "!token" | "nonToken" => s.token = Some(false),
                 "token" => s.token = Some(true),
                 "Basic" => s.supertypes.push(Supertype::Basic),

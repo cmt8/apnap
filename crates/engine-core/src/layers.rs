@@ -64,6 +64,10 @@ pub struct Characteristics {
     /// face's, for the back face of a nonmodal double-faced card (CR 202.3b, 712.6d).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mana_value_from: Option<ManaCost>,
+    /// It has an Adventure (CR 716.2a, 716.2b: part of its copiable values), whether or
+    /// not it uses those characteristics now.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub has_adventure: bool,
 }
 
 impl Characteristics {
@@ -86,6 +90,8 @@ impl Characteristics {
             toughness: d.toughness,
             land_abilities_lost: false,
             mana_value_from: None,
+            // A catalog entry of a face carries its card's layout.
+            has_adventure: d.layout == card_model::Layout::Adventure,
         }
     }
 
@@ -548,6 +554,7 @@ pub fn matches_parts(
         }
         && !(sel.other && id == source)
         && sel.token.is_none_or(|t| is_token == t)
+        && sel.has_adventure.is_none_or(|b| c.has_adventure == b)
         && {
             // CR 202.3: no mana cost is mana value 0.
             let mv = c.mana_value();
