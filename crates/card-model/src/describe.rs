@@ -1117,6 +1117,44 @@ fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
                 let part = |s: &crate::Signed| format!("{}{}", sign(s), amount(&s.amount));
                 // "+X/+X, where X is the number of …" when one count is used for both.
                 let counted = |s: &crate::Signed| !matches!(s.amount, Amount::Fixed(_) | Amount::X);
+                // "+1/+0 for each artifact you control", "-1/-1 for each Elf": each half is
+                // a count of the same permanents, or zero.
+                fn each(s: &crate::Signed) -> Option<Option<&Selector>> {
+                    match &s.amount {
+                        Amount::Count(sel) => Some(Some(sel)),
+                        Amount::Fixed(0) => Some(None),
+                        _ => None,
+                    }
+                }
+                if let (Some(p), Some(t)) = (each(power), each(toughness))
+                    && let Some(sel) = p.or(t)
+                    && p.is_none_or(|x| x == sel)
+                    && t.is_none_or(|x| x == sel)
+                {
+                    let half = |s: &crate::Signed, n: Option<&Selector>, other: &crate::Signed| {
+                        let negative = if n.is_some() {
+                            s.negative
+                        } else {
+                            other.negative
+                        };
+                        format!(
+                            "{}{}",
+                            if negative { "-" } else { "+" },
+                            if n.is_some() { 1 } else { 0 }
+                        )
+                    };
+                    let place = if sel.controller == Who::Any && sel.owner == Who::Any {
+                        " on the battlefield"
+                    } else {
+                        ""
+                    };
+                    return format!(
+                        "{get} {}/{} for each {}{place}",
+                        half(power, p, toughness),
+                        half(toughness, t, power),
+                        selector(sel, false)
+                    );
+                }
                 if power.amount == toughness.amount && counted(power) {
                     format!(
                         "{get} {}X/{}X, where X is {}",
@@ -1420,7 +1458,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                     true,
                 ),
                 Amount::TriggeringAmount => (
-                    " for each other such spell cast before it this turn".to_string(),
+                    " for each other such spell you've cast before it this turn".to_string(),
                     true,
                 ),
                 n => (format!(" {} times", amount(n)), true),

@@ -648,10 +648,15 @@ fn copy_it_for_each_other_spell_of_its_kind() {
         Zone::Hand,
         &["Test Quick Gain", "Test Grizzly", "Test Quick Gain"],
     );
+    sc.card(P1, Zone::Battlefield, "Plains");
+    sc.card(P1, Zone::Hand, "Test Quick Gain");
     let mut s = Script::new(sc.build());
+    s.cast("Test Quick Gain").pay().pass();
+    // An opponent's instant, cast this turn: not one "you've cast".
     s.cast("Test Quick Gain").pay();
     settle(&mut s);
     assert_eq!(life(&s, P0), 41, "no copy of the first");
+    assert_eq!(life(&s, P1), 41);
     s.cast("Test Grizzly").pay();
     settle(&mut s);
     s.cast("Test Quick Gain").pay();
@@ -659,7 +664,16 @@ fn copy_it_for_each_other_spell_of_its_kind() {
     assert_eq!(
         life(&s, P0),
         43,
-        "the second and one copy; the creature doesn't count"
+        "the second and one copy; neither the creature nor the opponent's instant counts"
+    );
+    let cat = forge_test_catalog(&[&storm], &[]);
+    let text =
+        card_model::describe::rules_text(cat.get(cat.find("Test Millennium Storm").unwrap()));
+    assert_eq!(
+        text,
+        [
+            "Whenever you cast an instant or sorcery spell, copy that spell for each other such spell you've cast before it this turn. You may choose new targets for the copies."
+        ]
     );
 }
 
