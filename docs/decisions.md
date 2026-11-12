@@ -2109,9 +2109,12 @@ Rules text: docs/rules-notes/118.9-alternative-costs.md. Tests:
 - **Golden hashes:** re-blessed; every event log unchanged, all state hashes moved — the
   stable hasher writes a marker for each skipped field (`hash.rs` `skip_field`), so the new
   skip-if-empty fields change state hashes without changing a game.
-- **Numbers (on main `cda0566`):** 10,508 → 10,742 of 34,463 scripts (31.2%). EDHREC tiers,
-  main → D-072: top 100 78 → 83 (87.4%), top 300 191 → 199, top 1,000 527 → 539 (54.3%),
-  top 2,000 869 → 887, top 5,000 1,605 → 1,646 (33.0%). Among them: Fierce Guardianship,
+- **Numbers:** on main `cda0566` 10,508 → 10,742 of 34,463 scripts; EDHREC tiers there,
+  main → D-072: top 100 78 → 83, top 300 191 → 199, top 1,000 527 → 539, top 2,000
+  869 → 887, top 5,000 1,605 → 1,646. Merged onto `ef30f04` (D-078): 10,524 → 10,758
+  (31.2%); top 100 79 → 84 of 95 (88.4%), top 300 201 (68.1%), top 1,000 534 → 546 of 992
+  (55.0%), top 2,000 895 (45.0%), top 5,000 1,657 (33.2%); no card compiles only in the
+  combination. Among them: Fierce Guardianship,
   Deadly Rollick, Flawless Maneuver, Cyclonic Rift, Vandalblast, Toxic Deluge, Force of Will,
   Force of Vigor, Flare of Denial, Daze, Mulldrifter, Shriekmaw, Solitude, Faithless Looting,
   Dread Return, Deep Analysis, Think Twice, Strike It Rich, Mizzium Mortars, Electrickery,
