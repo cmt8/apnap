@@ -60,11 +60,28 @@ fn effect_polarity(e: &Effect) -> Polarity {
             Polarity::Neutral => effect_polarity(then),
             p => p,
         },
+        // "Exile it, then return it to the battlefield": a fresh start for one's own
+        // permanent (its enters abilities again).
+        Effect::Seq(v)
+            if v.iter().any(|x| {
+                matches!(
+                    x,
+                    Effect::PutInto {
+                        what: card_model::ObjRef::Noted,
+                        to: card_model::CardDest::Battlefield { .. },
+                        ..
+                    }
+                )
+            }) =>
+        {
+            Polarity::Help
+        }
         Effect::Seq(v) => v
             .iter()
             .map(effect_polarity)
             .find(|p| *p != Polarity::Neutral)
             .unwrap_or(Polarity::Neutral),
+        Effect::Note(inner) | Effect::If { then: inner, .. } => effect_polarity(inner),
         Effect::DealDamage { .. }
         | Effect::Destroy { .. }
         | Effect::Counter { .. }

@@ -1817,6 +1817,160 @@ face is CR 712.8, playing a land face 712.9, entering 712.10–712.11, "the same
   were cast last turn"), "enters transformed" (`param:ChangeZone.Transformed`),
   `trig:Transformed`; split cards — Aftermath 13, Fuse 8, Rooms. Still blocked as
   layouts: `Flip`, `Meld`, `Prepare`, `Specialize`, `Vengeance`.
+## D-069 "Those cards": Forge's remembered cards within one resolution; conditions on one instruction (2026-11-10)
+Rules text: docs/rules-notes/608.2c-400.7j-those-cards.md.
+- **Vocabulary.** `Effect::Note(instruction)`: the cards the instruction moved — as the
+  new objects they became (CR 400.7) — and the tokens it created are "those cards" for the
+  rest of the resolution (of a Dig, only the cards put in its first place).
+  `ObjRef::Noted` ("those cards", "that card", "it"), `Selector::noted` (`Some(true)`: one
+  of them, `Some(false)`: not one of them), `Amount::Noted(selectors)` ("for each creature
+  destroyed this way", "if it's a Spirit"), `Amount::NotedTotal(measure)` ("its mana
+  value", "that creature's power"). `CardDest::Stay`: a search that leaves what it found
+  where it is, for the instructions after it (Cultivate). `Effect::If { test, then }`: a
+  condition on one instruction (Forge's `Condition…$` on a link: a failed condition skips
+  only that link). `PutInto::controller` ("… under your control", Forge's
+  `GainControl$ True`). Named apart from D-065's `Affected::Remembered` /
+  `ObjFilter::Remembered`, which are what a *lasting effect* is about (an effect object's
+  memory, which outlives the resolution); this is resolution-local and never stored on a
+  card or effect.
+- **Engine** (`frames/resolve.rs`, self-contained; `apply.rs` untouched): the resolve
+  frame keeps `noted` (object, the zone this resolution last put it in, whether later
+  instructions can find it, its characteristics just before it moved), `noting`, and
+  `moving` (proposed zone changes, identified by card instance). Every `ApplyFrame` the
+  frame starts records the moves it proposes; when the frame resumes it looks at what
+  became of them: a card that moved is noted (if an instruction is being noted) or
+  followed (if it already was). **Findable** (CR 400.7j): still the same object, in the
+  zone this resolution put it in, and that zone is public — or it was found by a search
+  and stayed. A card a replacement effect sent elsewhere isn't found (Ghostly Flicker
+  doesn't return it from a hand) but is **counted** ("destroyed this way" counts a
+  creature exiled instead by a Rest-in-Peace effect, as Forge's `destroy()` does; an
+  indestructible one isn't destroyed and isn't noted). Amounts read a card as it is now if
+  it is on the battlefield, else as it was just before it moved (CR 608.2h: the sacrificed
+  creature's power is its last known power). Effects that take an `ObjRef` act on every
+  noted card at once (Exile, Destroy, ReturnToHand, PutInto, PutCounters, Tap/Untap,
+  Apply, damage). Each chosen mode starts with nothing noted (`Work::ForgetNoted`). A
+  choice among noted cards in a library is not a new search (no `SearchedLibrary`, the
+  library isn't shown).
+- **When Forge's memory compiles as resolution-local** (`Tx::local_memory`): the chain
+  (an ability and its `SubAbility$` links) has a `Remember…$` writer the compiler knows
+  (`RememberChanged`, `RememberTargets` on the root move, `RememberLKI`, `RememberDestroyed`,
+  `RememberSacrificed`, `RememberTokens`, `RememberMilled`, `RememberDiscarded`), its last
+  link is its only `Cleanup`, with `ClearRemembered$ True` and no condition. Only inside
+  such a chain (and not inside what an effect object carries) do `Defined$ Remembered`,
+  `IsRemembered` / `!IsRemembered`, `Remembered$…`, `RememberedLKI$…`,
+  `Count$RememberedSize` and `ConditionDefined$ Remembered` mean "those cards"; anywhere
+  else they stay the blockers they were. Since every writer of a compiled card forgets at
+  the end of its own chain, nothing else on the card can see the memory (Forge's memory
+  lives on the card). A writer whose chain doesn't forget at its end blocks the card
+  (`remember:not forgotten when the chain ends`), as do: a `Cleanup` that isn't last, a
+  reader before anything is remembered, remembering twice in one chain (`DestroyAll`
+  clears first in Forge), a search that puts found cards back in the library or never
+  shuffles them away, a Dig that leaves what it takes in the library, a move of "those
+  cards" from where they aren't (`Origin$`) or from a hand or library.
+- **`Defined$ Targeted` after the target moved** (CR 400.7: the target slot is a card
+  that is gone; Forge follows the card): the move is noted and the reference is
+  `ObjRef::Noted` if the target went to a public zone; otherwise blocked
+  (`defined:Targeted after it moved`). **Mis-compilation found, older than this batch:**
+  Miraculous Recovery ("return target creature card … to the battlefield. Put a +1/+1
+  counter on it") compiled before and put the counter on nothing. Grave Upheaval's haste
+  likewise (newly compilable through `GainControl$`).
+- **Conditions on links** (`ConditionPresent$`/`ConditionCompare$` on the battlefield,
+  `ConditionDefined$ Remembered`, `ConditionCheckSVar$`/`ConditionSVarCompare$`) are
+  compiled for every chain, not only remembering ones: "if you control a Wizard, draw a
+  card", "if X is 5 or more, destroy all other creatures".
+- **New Oracle guard** `oracle:under your control`: the compiled card puts something onto
+  the battlefield "under your control" exactly when the card returns or puts something "to
+  the battlefield under your control" ("enters the battlefield under your control" is old
+  wording for "you control" and doesn't count). It caught Photon, Lady of Light
+  (`GainControl$` where the card returns it under its owner's control) and blocks Meneldor
+  (harmless there: "a creature you own").
+- **Players of noted cards** (after D-068's `Tx::named_player`): `PlayerRef::NotedControllers`
+  (Forge `RememberedController`) and `PlayerRef::NotNotedControllers`
+  (`NonRememberedController`), each card's controller as it is now on the battlefield or
+  as it last was before it moved (CR 608.2h). Plaguecrafter: "each player who can't
+  [sacrifice] discards a card". card-db refuses them where one player is meant.
+- card-db refuses "those cards" anywhere but a resolving effect, a selector asking about
+  them except where the resolving effect filters with it, `Stay` outside a noted search,
+  a noted instruction that isn't a single one, noted cards as what an Equipment attaches
+  to or a lasting effect is about.
+- AI: an effect that returns noted cards to the battlefield is help (blink your own).
+- With D-067 (how a permanent enters): the moves the resolve frame proposes are looked at
+  when it resumes, after the whole Apply — including its "as this enters" choice and any
+  nested Apply for the price. A noted card entering through such a choice is found where
+  it entered; one a replacement put elsewhere instead (Mox Diamond's graveyard) is not.
+  Tests `a_noted_card_entering_with_a_choice_is_found`,
+  `a_noted_card_put_elsewhere_instead_is_not_found`. With D-068: "its power" of a moved
+  target still comes from `TargetInfo` (`Amount::OfTarget`); only object references
+  (`Defined$ Targeted` as the thing acted on) follow the moved card.
+- Save/load and clone of a game suspended in the middle of a noted resolution continue
+  identically (`a_noted_resolution_saves_loads_and_clones`).
+- **Engine bug found by the soak (older than this batch, newly reachable):** when a player
+  leaves the game (CR 800.4a), the permanents they control but don't own are exiled after
+  the layered view was worked out, without a new generation; the stale view still held
+  them and the next control check panicked ("no object"). It takes a permanent of another
+  player's under your control — reanimated with `GainControl$`. `actions::leave_game` now
+  drops the derived layer cache after those moves (the serialized state, and its hash, are
+  unchanged). Test `a_reanimated_permanent_is_exiled_when_its_controller_leaves`
+  (mutation-checked: it panics without the fix).
+- **With D-068's `Effect::IfDone` (merged 2026-11-11).** The two mean different things.
+  `IfDone { first, then }` is "[first]. If you do, [then]": `then` happens if `first`
+  changed anything at all (any event). `If { test, then }` is a condition counted as the
+  instruction is reached — here, from Forge's `ConditionDefined$ Remembered |
+  ConditionPresent$ … | ConditionCompare$ …`, how many of "those cards" (of a kind) there
+  are. One Forge shape reaches both: an optional trigger whose description says "If you
+  do" / "this way", whose chain notes cards and whose later link asks about them (Carrion
+  Imp, Geothermal Kami, Lagonna-Band Storyteller, Mardu Woe-Reaper). It compiles to
+  `IfDone { first: Note(…), then: If { noted …, … } }` — the two checks together, never one
+  without the other, so no card can reach that meaning two ways. They differ only where the
+  script's test is stricter than "something happened": "you may search … If you do, gain
+  2 life" with nothing found has searched and shuffled (IfDone holds) but noted nothing
+  (the script's `GE1` fails): no life, as the script says (test
+  `you_may_search_if_you_do_with_noted_cards`).
+- **With D-070 and D-066:** a rule about players whose source is exiled as its controller
+  leaves stops at once (`a_rule_about_players_ends_when_its_controller_leaves`); a noted
+  card later played from a graveyard under a "play lands from your graveyard" rule is a
+  new object and the memory is gone with the resolution
+  (`a_noted_card_played_later_is_no_longer_that_card`); counts of noted lands are of cards,
+  not of the mana they make (`counting_noted_lands_not_their_mana`); a noted creature
+  sacrificed to an altar's mana ability while paying "you may pay {2}. If you do, put two
+  +1/+1 counters on it" is a new object this resolution didn't move and gets nothing
+  (`a_noted_creature_sacrificed_for_mana_while_paying`).
+- State hashes changed (`Selector` gained a field: the catalog is part of the state); all
+  15 event logs unchanged. Re-blessed.
+- Merged with main `4f75185` (D-066, D-068 follow-ups, D-070): 10,163 → 10,363 of 34,463
+  (30.1%). None of main's cards stops compiling; one changes text (Miraculous Recovery).
+  Letter of Acceptance, compiled on this branch alone, is blocked by D-066's `oracle:{T}`
+  (it had lost its `{T}`). Two cards compile on neither parent and were read: Klothys, God
+  of Destiny and Thassa, Deep-Dwelling.
+- Merged with main `bbca45d` (D-071, faces): 10,300 → 10,508 of 34,463 (30.5%). None of
+  main's cards stops compiling; one changes text (Miraculous Recovery). Nine faced cards
+  compile on neither parent (Blex's "Search for Blex", Bloomvine Regent's "Claim
+  Territory", Colossal Badger's "Dig Deep", Docent of Perfection, Dowsing Device, Hit //
+  Run, Ravenous Demon, Stormshriek Feral's "Flush Out", Vincent Valentine); all were read.
+  Vincent Valentine's Galian Beast ("return it to the battlefield tapped") had
+  `GainControl$` where the card returns it under its owner's control: the
+  `oracle:under your control` guard now reads "onto the battlefield tapped under your
+  control" as well, and blocks it (`under_your_control_after_tapped_is_read_back`).
+  "Those cards" are the same objects whichever face is up (transforming is no zone
+  change, CR 701.27c), and a noted card in a library or hand is read by its front face
+  (CR 712.8a): a search for a land card finds a pathway, not an instant whose back is a
+  land (`a_noted_double_faced_card_is_found_by_its_front_face`).
+- On `04ef403`: 9,305 → 9,491 of 34,463 scripts; precons 149 → 151 of 275 deck slots.
+  Rebased onto D-067/D-068 (`3e37f8d`): 9,776 → 9,974 (28.9%). Of the 9,776 cards main
+  compiled none stops compiling, and the engine text of one changes: Miraculous Recovery
+  (the fix above). Of the cards named for this batch, Cultivate, Kodama's Reach, Fabled
+  Passage, Ghostly Flicker, Cloudshift, Essence Flux, Displacer Kitten, Teleportation
+  Circle, Flicker of Fate, Fumigate, Plaguecrafter, Bane of Progress, Dark Confidant,
+  Martial Coup, Disciple of Bolas and Reanimate compile. All 198 cards that compile only
+  in the combination were read against their Oracle text.
+- **Still blocked, deliberately:** memory that outlives the resolution (handed to an effect
+  object, `Effect:remembers Remembered…`: Professional Face-Breaker; linked abilities,
+  CR 607; delayed triggers), `ForgetChanged$` (Nissa's Pilgrimage), `RememberedOwner`,
+  Command Beacon (`ChangeZone:no-target` from the command zone, not memory), other
+  `Remember…$` writers (`RememberRevealed`, `RememberDrawn`, `RememberDamaged`, …).
+- **Next:** `ForgetChanged$`; `ChangeZoneAll` with `RememberChanged$` ("exile all …, then
+  return them"); `Effect:remembers Remembered` (an effect object about noted cards: "exile
+  the top card; you may play it this turn", 188 cards).
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may

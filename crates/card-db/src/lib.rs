@@ -173,7 +173,19 @@ fn bodies(def: &CardDef) -> Vec<&Body> {
 fn token_names(def: &CardDef) -> Vec<String> {
     fn walk(e: &Effect, out: &mut Vec<String>) {
         match e {
-            Effect::Seq(v) => v.iter().for_each(|x| walk(x, out)),
+            Effect::Seq(v) | Effect::Together(v) => v.iter().for_each(|x| walk(x, out)),
+            Effect::May(x)
+            | Effect::Note(x)
+            | Effect::If { then: x, .. }
+            | Effect::PlayerMay { effect: x, .. } => walk(x, out),
+            Effect::Pay { paid, unpaid, .. }
+            | Effect::IfDone {
+                first: paid,
+                then: unpaid,
+            } => {
+                walk(paid, out);
+                walk(unpaid, out);
+            }
             Effect::CreateToken { token, .. } => out.push(token.clone()),
             _ => {}
         }
@@ -432,6 +444,30 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
             p.push(at(
                 "hybrid mana outside a mana ability's cost (D-066)".into()
             ));
+        }
+        // "Those cards" (D-069) are known only to the resolving effect that noted them: a
+        // selector may ask about them only where that effect filters with it itself.
+        let text = format!("{a:?}");
+        let asked = text.matches("noted: Some(").count();
+        let allowed: usize = match a {
+            AbilityDef::Spell(b)
+            | AbilityDef::Activated { body: b, .. }
+            | AbilityDef::Triggered { body: b, .. } => {
+                b.modes().iter().map(|m| noted_selectors(&m.effect)).sum()
+            }
+            _ => 0,
+        };
+        if asked != allowed {
+            p.push(at(
+                "\"those cards\" asked about outside the effect that knows them".into(),
+            ));
+        }
+        let resolving = matches!(
+            a,
+            AbilityDef::Spell(_) | AbilityDef::Activated { .. } | AbilityDef::Triggered { .. }
+        );
+        if !resolving && (text.contains("Noted") || text.contains("Note(")) {
+            p.push(at("\"those cards\" outside a resolving effect".into()));
         }
         // "The sacrificed creature's power" needs a sacrifice chosen as its cost is paid.
         if format!("{a:?}").contains("SacrificedPower") {
@@ -1079,6 +1115,33 @@ fn amounts_of_targets(e: &Effect, out: &mut Vec<u8>, hands: &mut Vec<PlayerRef>)
 /// A selector used where "another" has no meaning must not say it.
 fn selector(_s: &card_model::Selector, _p: &mut dyn FnMut(String)) {}
 
+/// How many selectors of a one-shot effect ask about "those cards" where the resolving
+/// effect filters with them itself (D-069): what it destroys, taps, chooses, moves….
+fn noted_selectors(e: &Effect) -> usize {
+    let n = |s: &card_model::Selector| usize::from(s.noted.is_some());
+    match e {
+        Effect::Seq(v) | Effect::Together(v) => v.iter().map(noted_selectors).sum(),
+        Effect::May(x)
+        | Effect::Note(x)
+        | Effect::If { then: x, .. }
+        | Effect::PlayerMay { effect: x, .. } => noted_selectors(x),
+        Effect::Pay { paid, unpaid, .. }
+        | Effect::IfDone {
+            first: paid,
+            then: unpaid,
+        } => noted_selectors(paid) + noted_selectors(unpaid),
+        Effect::DestroyAll(s) | Effect::TapAll(s) | Effect::UntapAll(s) => n(s),
+        Effect::DamageEach { each: s, .. }
+        | Effect::ApplyAll { affected: s, .. }
+        | Effect::PutCountersAll { what: s, .. }
+        | Effect::Sacrifice { what: s, .. } => n(s),
+        Effect::ChooseCards { cards, .. }
+        | Effect::Dig { cards, .. }
+        | Effect::MoveAll { cards, .. } => cards.iter().map(n).sum(),
+        _ => 0,
+    }
+}
+
 fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String)) {
     let slot = |t: &TargetRef| match t {
         TargetRef::Target(i) => mode.targets.get(*i as usize),
@@ -1138,12 +1201,18 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
     }
     for who in hands {
         match who {
-            PlayerRef::Each | PlayerRef::EachOpponent => {
-                p("Amount::HandOf counts one player's hand".into())
-            }
+            PlayerRef::Each
+            | PlayerRef::EachOpponent
+            | PlayerRef::NotedControllers
+            | PlayerRef::NotNotedControllers => p("Amount::HandOf counts one player's hand".into()),
             other => player(&other, p),
         }
     }
+    let stay = |d: &card_model::CardDest, p: &mut dyn FnMut(String)| {
+        if *d == card_model::CardDest::Stay {
+            p("cards left where they are, outside a noted search".into());
+        }
+    };
     let obj = |r: &ObjRef, p: &mut dyn FnMut(String)| {
         if let ObjRef::Target(i) = r {
             match mode.targets.get(*i as usize) {
@@ -1170,14 +1239,55 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         }
         Effect::PlayerMay { who, effect } => {
             match who {
-                PlayerRef::Each | PlayerRef::EachOpponent => {
-                    p("one player decides a \"may\"".into())
-                }
+                PlayerRef::Each
+                | PlayerRef::EachOpponent
+                | PlayerRef::NotedControllers
+                | PlayerRef::NotNotedControllers => p("one player decides a \"may\"".into()),
                 // That is `May`.
                 PlayerRef::You => p("PlayerMay by you: write May".into()),
                 other => player(other, p),
             }
             check_effect(effect, mode, has_x, p);
+        }
+        Effect::Note(inner) => {
+            let mut inner = (**inner).clone();
+            match &mut inner {
+                Effect::Note(_) => p("a noted instruction inside a noted instruction".into()),
+                Effect::Seq(_)
+                | Effect::May(_)
+                | Effect::PlayerMay { .. }
+                | Effect::If { .. }
+                | Effect::IfDone { .. }
+                | Effect::Pay { .. } => p("only a single instruction is noted".into()),
+                // A search that leaves what it finds in the library, for what comes next.
+                Effect::ChooseCards { from, to, .. } if *to == card_model::CardDest::Stay => {
+                    if *from != card_model::CardZone::Library {
+                        p("only a search leaves the cards it finds".into());
+                    }
+                    *to = card_model::CardDest::Hand;
+                }
+                // What it takes is told from the rest by where it goes; taken cards left
+                // in the library aren't moved at all.
+                Effect::Dig { to, rest, .. } => {
+                    use card_model::CardDest as D;
+                    let library = |d: &D| matches!(d, D::LibraryTop | D::LibraryBottom);
+                    if library(to) || to == rest {
+                        p(
+                            "a noted Dig must take its cards out of the library, apart from \
+                           the rest"
+                                .into(),
+                        )
+                    }
+                }
+                _ => {}
+            }
+            check_effect(&inner, mode, has_x, p)
+        }
+        Effect::If { test, then } => {
+            if let card_model::Condition::Compare { amount: a, .. } = test {
+                amount(a, p);
+            }
+            check_effect(then, mode, has_x, p)
         }
         Effect::Pay {
             who,
@@ -1186,7 +1296,10 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             unpaid,
         } => {
             match who {
-                PlayerRef::Each | PlayerRef::EachOpponent => {
+                PlayerRef::Each
+                | PlayerRef::EachOpponent
+                | PlayerRef::NotedControllers
+                | PlayerRef::NotNotedControllers => {
                     p("a cost paid on resolution is paid by one player".into())
                 }
                 other => player(other, p),
@@ -1289,10 +1402,20 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             amount(a, p);
         }
         Effect::SacrificeThis | Effect::ControllerSacrificesThis => {}
-        Effect::AttachThis { to } => obj(to, p),
+        Effect::AttachThis { to } => {
+            if *to == ObjRef::Noted {
+                p("attach to one of those cards: which?".into());
+            }
+            obj(to, p)
+        }
         Effect::ChooseCards {
-            who, cards, count, ..
+            who,
+            cards,
+            count,
+            to,
+            ..
         } => {
+            stay(to, p);
             player(who, p);
             amount(count, p);
             cards.iter().for_each(|s| selector(s, p));
@@ -1302,14 +1425,47 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             amount(a, p);
         }
         Effect::Dig {
-            who, count, cards, ..
+            who,
+            count,
+            cards,
+            to,
+            rest,
+            ..
         } => {
+            stay(to, p);
+            stay(rest, p);
             player(who, p);
             amount(count, p);
             cards.iter().for_each(|s| selector(s, p));
         }
-        Effect::PutInto { what, .. } => obj(what, p),
-        Effect::MoveAll { whose, cards, .. } => {
+        Effect::PutInto {
+            what,
+            to,
+            controller,
+            ..
+        } => {
+            stay(to, p);
+            if let Some(c) = controller {
+                if !matches!(to, card_model::CardDest::Battlefield { .. }) {
+                    p("under whose control, off the battlefield".into());
+                }
+                if matches!(
+                    c,
+                    PlayerRef::Each
+                        | PlayerRef::EachOpponent
+                        | PlayerRef::NotedControllers
+                        | PlayerRef::NotNotedControllers
+                ) {
+                    p("under the control of one player".into());
+                }
+                player(c, p);
+            }
+            obj(what, p)
+        }
+        Effect::MoveAll {
+            whose, cards, to, ..
+        } => {
+            stay(to, p);
             player(whose, p);
             cards.iter().for_each(|s| selector(s, p));
         }
@@ -1338,6 +1494,9 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         }
         Effect::Lasting { about, .. } => {
             if let Some(what) = about {
+                if *what == ObjRef::Noted {
+                    p("a lasting effect about those cards: not yet".into());
+                }
                 obj(what, p);
             }
         }
@@ -1346,6 +1505,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             amount(count, p);
         }
         Effect::ThisSpellTo { to, .. } => {
+            stay(to, p);
             if matches!(
                 to,
                 card_model::CardDest::Battlefield { .. } | card_model::CardDest::Graveyard
