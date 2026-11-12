@@ -1077,6 +1077,17 @@ impl<'a> Tx<'a> {
         if let Ok(n) = text.trim_start_matches('+').parse::<u32>() {
             return Some(Amount::Fixed(n));
         }
+        // "You gain life equal to the life lost this way": Forge's life loss sets
+        // `AFLifeLost` to what the players lost as it resolves. It is the instruction just
+        // before this one in the chain.
+        if text == "AFLifeLost" {
+            if matches!(chain.effects.last(), Some(Effect::LoseLife { .. })) {
+                self.used_svars.insert(text.to_string());
+                return Some(Amount::LifeLostThisWay);
+            }
+            self.block("expr:AFLifeLost not after a life loss");
+            return None;
+        }
         self.chain_targets = Some(chain.targets.len());
         self.read_target = false;
         let a = self.expr(text);
@@ -1124,6 +1135,10 @@ impl<'a> Tx<'a> {
             .is_some_and(|r| r.starts_with(char::is_uppercase))
         {
             self.block(format!("expr:set by an effect {name}"));
+            return None;
+        }
+        if SET_WHILE_RESOLVING.contains(&name) {
+            self.block(format!("expr:set while resolving {name}"));
             return None;
         }
         let Some(v) = self.svar(name) else {
@@ -1960,6 +1975,45 @@ impl<'a> Tx<'a> {
                     None => self.object(&rd, chain, triggered),
                 };
                 Effect::Destroy { what: what? }
+            }
+            // CR 701.34a. `Amount$ N`: "proliferate N times" — one after the other, each
+            // its own choice (Forge's loop).
+            "Proliferate" => {
+                let times = match rd.get("Amount") {
+                    None => Some(1),
+                    Some(n) => n.parse::<usize>().ok().filter(|n| (1..=10).contains(n)),
+                };
+                match times {
+                    Some(1) => Effect::Proliferate,
+                    Some(n) => Effect::Seq(vec![Effect::Proliferate; n]),
+                    None => {
+                        self.block("param:Proliferate.Amount not a number");
+                        return None;
+                    }
+                }
+            }
+            // "Untap up to N lands" (docs/forge/effects.md, Untap): the activator chooses
+            // among every permanent on the battlefield that fits `UntapType$` (whoever
+            // controls it) as it resolves. Forge offers untapped ones too, which can't be
+            // untapped (CR 701.26b): the engine offers only tapped ones.
+            "Untap" if rd.rec.get("UntapUpTo").is_some() => {
+                rd.get("UntapUpTo");
+                if !matches!(rd.get("Defined"), None | Some("You")) {
+                    self.block("param:Untap.UntapUpTo by another player");
+                    return None;
+                }
+                let what = match rd.get("UntapType") {
+                    Some(f) => self.selector(f),
+                    None => {
+                        self.block("param:Untap.UntapUpTo without UntapType");
+                        None
+                    }
+                };
+                let count = rd.get("Amount").and_then(|n| self.amount(n, chain));
+                Effect::UntapChosen {
+                    what: what?,
+                    count: count?,
+                }
             }
             "Tap" | "Untap" => {
                 // `ETB$`: "enters tapped/untapped", which is a replacement, not this effect.
@@ -3352,6 +3406,15 @@ impl<'a> Tx<'a> {
         let to = to?;
         if rd.rec.get("Tapped").is_some() && !matches!(to, CardDest::Battlefield { .. }) {
             self.block("param:ChangeZone.Tapped");
+            return None;
+        }
+        // `Reorder$`: the player who chose the cards puts them on their library "in any
+        // order" (Brainstorm). The engine always has them ordered by that player — the
+        // owner, CR 401.4 — so it only needs to be where they go to a library.
+        if rd.get("Reorder").is_some()
+            && !matches!(to, CardDest::LibraryTop | CardDest::LibraryBottom)
+        {
+            self.block("param:ChangeZone.Reorder not to a library");
             return None;
         }
         // Forge reveals what was found when a quality was asked for and the cards don't
@@ -7203,6 +7266,43 @@ const SCRIPT_DIFFERS: &[(&str, &str)] = &[
         "gives its trigger to Spirit *creatures*; the card says \"all Spirits\" (a noncreature \
          Kindred Spirit must get it too)",
     ),
+];
+
+/// Script variables that Forge's own code sets while a spell or ability resolves
+/// (`sa.setSVar(…)`): the value written in the script is only a placeholder
+/// (`SVar:AFLifeLost:Number$0`). Reading one by its written value would be wrong, so each
+/// is either compiled by its meaning or a blocker.
+const SET_WHILE_RESOLVING: &[&str] = &[
+    "AFLifeLost",
+    "PreventedDamage",
+    "CostCountersRemoved",
+    "Votes",
+    "VoteNum",
+    "Wins",
+    "Losses",
+    "ShieldAmount",
+    "AffectedX",
+    "DifferentResults",
+    "Doubles",
+    "EvenResults",
+    "OddResults",
+    "MaxRolls",
+    "Revealed",
+    "TimesFlipped",
+    "ModsThisTurn",
+    "CasualtyPaid",
+    "Sunburst",
+    "StormCount",
+    "GravestormCount",
+    "PhySpent",
+    "ReplicateAmount",
+    "SquadAmount",
+    "RampageCount",
+    "CharmOrder",
+    "HoneCounters",
+    "NumTurns",
+    "Dies",
+    "MoveToHand",
 ];
 
 /// Compile a script. `Err` lists every blocker found (not just the first), on every face.

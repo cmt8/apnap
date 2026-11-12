@@ -125,6 +125,12 @@ pub enum ChoiceKind {
     ExileFromHand,
     /// CR 601.2h: choose the permanents to return to their owner's hand for a cost.
     ReturnToHand,
+    /// "Untap up to N lands": choose the permanents to untap (PickN over
+    /// `OptionDesc::Card`, tapped permanents only).
+    Untap,
+    /// CR 701.34a: proliferate — choose any number of the permanents that have a counter
+    /// (PickN over `OptionDesc::Card`).
+    Proliferate,
 }
 
 /// A structured description of one option. Frames read the chosen option back from the

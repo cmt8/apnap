@@ -91,17 +91,17 @@ fn a_hash_inside_a_value_is_untouched() {
 
 // Forge's effects write results into SVars named `AF…` ("AFLifeLost will be set by
 // LoseLife"); the script holds only the starting value 0. Reading it as the constant 0
-// would make "you gain life equal to the life lost this way" gain nothing.
+// would make "you gain life equal to the life lost this way" gain nothing. `AFLifeLost`
+// right after a life loss is compiled by its meaning (D-075, `forge_staples.rs`); any
+// other variable of that kind is not read at all.
 #[test]
 fn a_variable_an_effect_sets_is_not_its_starting_value() {
     let card = "Name:Test Tithe\n\
          ManaCost:3 B\n\
          Types:Sorcery\n\
-         A:SP$ LoseLife | Cost$ 3 B | Defined$ Player.Opponent | LifeAmount$ 3 | SubAbility$ DBGainLife | SpellDescription$ Each opponent loses 3 life. You gain life equal to the life lost this way.\n\
-         SVar:DBGainLife:DB$ GainLife | Defined$ You | LifeAmount$ AFLifeLost\n\
-         SVar:AFLifeLost:Number$0\n\
-         # AFLifeLost will be set by LoseLife\n\
-         Oracle:Each opponent loses 3 life. You gain life equal to the life lost this way.";
+         A:SP$ GainLife | Cost$ 3 B | Defined$ You | LifeAmount$ AFDamageDone | SpellDescription$ You gain life.\n\
+         SVar:AFDamageDone:Number$0\n\
+         Oracle:You gain life.";
     let b = forge_test_blockers(card);
-    assert_eq!(b, ["expr:set by an effect AFLifeLost"]);
+    assert_eq!(b, ["expr:set by an effect AFDamageDone"]);
 }

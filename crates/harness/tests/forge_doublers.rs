@@ -1671,6 +1671,72 @@ fn cr_101_2_a_flashback_spell_that_cant_be_countered() {
 }
 
 // ---------------------------------------------------------------------------------------
+// With D-075: proliferate, "the life lost this way"
+
+// CR 701.34a, 614.1a, 122.6 (2026-11-06): proliferating puts counters, so effects that
+// change how many counters are put apply — to each permanent's event, as its controller's
+// effects say: +1/+1 counters on a creature its controller's "that many plus one" covers;
+// not a -1/-1 counter on an opponent's creature chosen in the same proliferate.
+#[test]
+fn proliferate_with_counter_doublers() {
+    let mut cards = counter_cards(&[scales(), season_counters()]);
+    cards.push(
+        "Name:Test Spread\nManaCost:U\nTypes:Sorcery\n\
+         A:SP$ Proliferate | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+    );
+    for (doubler, mine_after) in [("Test Scales", 4), ("Test Counter Season", 4)] {
+        let mut sc = scenario_n(2, &cards);
+        sc.cards(P0, Zone::Battlefield, &[doubler, "Island"]);
+        let mine = sc.card(P0, Zone::Battlefield, "Test Golem");
+        let theirs = sc.card(P1, Zone::Battlefield, "Test Golem");
+        sc.card(P0, Zone::Hand, "Test Spread");
+        let mut st = sc.build();
+        st.objects
+            .get_mut(&mine)
+            .unwrap()
+            .counters
+            .insert(PlusOne, 2);
+        st.objects
+            .get_mut(&theirs)
+            .unwrap()
+            .counters
+            .insert(MinusOne, 1);
+        let mut s = Script::new(st);
+        s.cast("Test Spread").pay().pass_all();
+        assert_eq!(s.kind(), ChoiceKind::Proliferate);
+        let picks: Vec<usize> = (0..s.options().len()).collect();
+        s.respond(engine_core::Response::Pick(picks));
+        // Scales: 2 + (1 plus one) = 4; Season: 2 + (1 twice) = 4.
+        assert_eq!(counters(&s, mine, PlusOne), mine_after, "{doubler}");
+        assert_eq!(counters(&s, theirs, MinusOne), 2, "{doubler}");
+    }
+}
+
+// CR 119.3, 119.10, 614.1a (2026-11-06): "each opponent loses 2 life; you gain life equal
+// to the life lost this way" under "if you would gain life, you gain twice that much": the
+// gain is doubled, the loss is not. (Effects that change how much life is *lost* aren't
+// built: no `Replaces` for losing life yet.)
+#[test]
+fn life_lost_this_way_with_a_life_gain_doubler() {
+    let mut cards = life_cards(&[life_effect("Test Faithmender", "Twice")]);
+    cards.push(
+        "Name:Test Leech\nManaCost:B\nTypes:Sorcery\n\
+         A:SP$ LoseLife | Defined$ Player.Opponent | LifeAmount$ 2 | SubAbility$ DBGainLife | SpellDescription$ Text.\n\
+         SVar:DBGainLife:DB$ GainLife | Defined$ You | LifeAmount$ AFLifeLost\n\
+         SVar:AFLifeLost:Number$0\n\
+         # AFLifeLost will be set by LoseLife\nOracle:Text."
+            .to_string(),
+    );
+    let mut sc = scenario_n(2, &cards);
+    sc.cards(P0, Zone::Battlefield, &["Test Faithmender", "Swamp"]);
+    sc.card(P0, Zone::Hand, "Test Leech");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Leech").pay().pass_all();
+    assert_eq!((life(&s, P0), life(&s, P1)), (44, 38));
+}
+
+// ---------------------------------------------------------------------------------------
 // What doesn't compile.
 
 #[test]

@@ -508,7 +508,8 @@ pub fn count_amount(
         | Amount::OfTarget { .. }
         | Amount::HandOf(_)
         | Amount::Noted(_)
-        | Amount::NotedTotal(_) => 0,
+        | Amount::NotedTotal(_)
+        | Amount::LifeLostThisWay => 0,
     }
 }
 

@@ -202,6 +202,7 @@ fn amount(a: &Amount) -> String {
                 Measure::ManaValue => "mana value",
             }
         ),
+        Amount::LifeLostThisWay => "the life lost this way".into(),
     }
 }
 
@@ -789,6 +790,13 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 a => format!("{add} X mana of {kind}, where X is {}", amount(a)),
             }
         }
+        Effect::GainLife {
+            who,
+            amount: Amount::LifeLostThisWay,
+        } => format!(
+            "{} life equal to the life lost this way",
+            verb(&player(mode, *who), "gain", "gains"),
+        ),
         Effect::GainLife { who, amount: a } => {
             format!(
                 "{} {} life",
@@ -939,6 +947,10 @@ fn effect(mode: &Mode, e: &Effect) -> String {
         }
         Effect::IfDone { first, then } => {
             format!("{}. If you do, {}", effect(mode, first), effect(mode, then))
+        }
+        Effect::Proliferate => "proliferate".to_string(),
+        Effect::UntapChosen { what, count } => {
+            format!("untap up to {} {}", amount(count), selector(what, true))
         }
         // "Its controller may draw a card": the instruction in the decider's own words.
         Effect::PlayerMay { who, effect: inner } => {
