@@ -2363,7 +2363,8 @@ impl Amount {
             | Amount::OfTarget { .. }
             | Amount::HandOf(_)
             | Amount::NotedTotal(_)
-            | Amount::LifeLostThisWay => {}
+            | Amount::LifeLostThisWay
+            | Amount::CountersOnThis(_) => {}
         }
     }
 }
@@ -2593,6 +2594,9 @@ pub enum Amount {
     /// life" instruction of this resolution — after replacement effects, so what was
     /// actually lost (CR 119.3, 608.2c). 0 before any.
     LifeLostThisWay,
+    /// "The number of [kind] counters on this permanent" (CR 122): on the ability's source
+    /// while it is on the battlefield (card-db refuses it where the source may be gone).
+    CountersOnThis(CounterKind),
 }
 
 impl Amount {
@@ -2626,6 +2630,7 @@ impl Amount {
             | Amount::Noted(_)
             | Amount::NotedTotal(_)
             | Amount::LifeLostThisWay => false,
+            Amount::CountersOnThis(_) => true,
         }
     }
 
@@ -2641,7 +2646,8 @@ impl Amount {
             | Amount::Players(_)
             | Amount::LifeAmong { .. }
             | Amount::Domain
-            | Amount::Devotion(_) => true,
+            | Amount::Devotion(_)
+            | Amount::CountersOnThis(_) => true,
             Amount::Count(s) => !s.looks_at_pt(),
             Amount::CardsIn { zone, cards } => {
                 *zone != CardZone::Battlefield && cards.iter().all(|s| !s.looks_at_pt())

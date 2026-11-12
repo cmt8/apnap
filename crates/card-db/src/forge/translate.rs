@@ -1337,6 +1337,12 @@ impl<'a> Tx<'a> {
         {
             return Some(Amount::Fixed(n));
         }
+        // "The number of [kind] counters on this permanent" (CR 122).
+        if let Some(kind) = v.strip_prefix("Count$CardCounters.") {
+            return self
+                .counter_kind(Some(kind))
+                .map(Amount::CountersOnThis);
+        }
         // Another variable, so that it can take a second arithmetic suffix.
         if let Some(name) = v.strip_prefix("SVar$") {
             let Some(inner) = self.svar(name) else {
@@ -4713,6 +4719,10 @@ impl<'a> Tx<'a> {
                 }
                 "POISON" | "ENERGY" | "EXPERIENCE" | "Experience" | "RAD" | "TICKET" => {
                     Some("on players")
+                }
+                // Forge's words for several kinds at once, not a kind.
+                "ALL" | "Any" | "ANY" | "EachFromSource" | "ExistingCounter" => {
+                    Some("not one kind")
                 }
                 _ => None,
             }

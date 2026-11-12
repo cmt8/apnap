@@ -322,6 +322,7 @@ fn amount(a: &Amount) -> String {
             }
         ),
         Amount::LifeLostThisWay => "the life lost this way".into(),
+        Amount::CountersOnThis(k) => format!("the number of {} counters on this permanent", counter(*k)),
     }
 }
 

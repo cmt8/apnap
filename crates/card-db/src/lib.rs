@@ -552,6 +552,25 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
         if !resolving && (text.contains("Noted") || text.contains("Note(")) {
             p.push(at("\"those cards\" outside a resolving effect".into()));
         }
+        // "The number of [kind] counters on this" is read off the source on the battlefield:
+        // not where it is gone by then (it was sacrificed to pay, it died, it left).
+        if format!("{a:?}").contains("CountersOnThis") {
+            let gone = match a {
+                AbilityDef::Activated { cost, .. } => cost.sacrifice_self || cost.exile_self,
+                AbilityDef::Triggered { when, .. } => when.events().iter().any(|t| {
+                    matches!(
+                        t,
+                        card_model::Trigger::Dies(card_model::ObjFilter::This)
+                            | card_model::Trigger::Leaves(card_model::ObjFilter::This)
+                    )
+                }),
+                AbilityDef::Spell(_) => true,
+                _ => false,
+            };
+            if gone {
+                p.push(at("counters on a source that is gone by then".into()));
+            }
+        }
         // "The sacrificed creature's power" needs a sacrifice chosen as its cost is paid.
         if format!("{a:?}").contains("SacrificedPower") {
             let paid = match a {

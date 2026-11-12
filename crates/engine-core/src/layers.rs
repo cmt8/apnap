@@ -72,6 +72,11 @@ pub struct Characteristics {
     /// ability, applied before anything else in layer 4 (CR 613.3), in every zone.
     #[serde(default, skip_serializing_if = "core::ops::Not::not")]
     pub all_creature_types: bool,
+    /// The counters on it (CR 122) — not a characteristic, but known with them so that a
+    /// permanent that has left is known with the counters it had (CR 608.2h). Filled in
+    /// for permanents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub counters: Vec<(CounterKind, u32)>,
 }
 
 impl Characteristics {
@@ -97,6 +102,7 @@ impl Characteristics {
             // A catalog entry of a face carries its card's layout.
             has_adventure: d.layout == card_model::Layout::Adventure,
             all_creature_types: d.has_keyword(Keyword::Changeling),
+            counters: Vec::new(),
         }
     }
 
@@ -519,6 +525,12 @@ pub fn count_amount(
         | Amount::Noted(_)
         | Amount::NotedTotal(_)
         | Amount::LifeLostThisWay => 0,
+        // CR 122: on the source, while it is on the battlefield.
+        Amount::CountersOnThis(kind) => st
+            .objects
+            .get(&source)
+            .filter(|o| o.zone == Zone::Battlefield)
+            .map_or(0, |o| o.counters_of(*kind)),
     }
 }
 
@@ -819,7 +831,8 @@ impl Walk<'_> {
             | Amount::HandSize
             | Amount::LifeTotal
             | Amount::Players(_)
-            | Amount::LifeAmong { .. } => {
+            | Amount::LifeAmong { .. }
+            | Amount::CountersOnThis(_) => {
                 count_amount(self.st, a, e.source, self.you(e, view)) as i32
             }
             Amount::Calc(base, op) => op.apply(self.amount(base, e, view).max(0) as u32) as i32,
@@ -1310,11 +1323,17 @@ fn compute(st: &GameState) -> View {
     }
     // CR 208.3: "A noncreature permanent has no power or toughness, even if it's a card
     // with a power and toughness printed on it" (a God that isn't a creature).
-    for c in view.values_mut() {
+    for (id, c) in view.iter_mut() {
         if !c.is(CardType::Creature) {
             c.power = None;
             c.toughness = None;
         }
+        c.counters = st
+            .object(*id)
+            .counters
+            .iter()
+            .map(|(k, n)| (*k, *n))
+            .collect();
     }
     view
 }
