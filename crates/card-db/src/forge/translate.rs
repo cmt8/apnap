@@ -138,6 +138,63 @@ fn noted_moved(e: &Effect) -> Option<&'static str> {
     }
 }
 
+/// Forge's `AtEOT$` value (docs/forge/effects.md §0.6): the action (`Sacrifice` — by the
+/// effect's controller — or `Exile`), and when: the next end step; `Your…` your next end
+/// step; `…Combat` the next end of combat. Anything else is not read.
+fn at_eot(what: &str) -> Option<(&'static str, TriggerStep, Who)> {
+    let (whose, rest) = match what.strip_prefix("Your") {
+        Some(rest) => (Who::You, rest),
+        None => (Who::Any, what),
+    };
+    let (rest, step) = match rest.strip_suffix("Combat") {
+        Some(rest) => (rest, TriggerStep::EndCombat),
+        None => (rest, TriggerStep::EndStep),
+    };
+    let action = match rest {
+        "Sacrifice" => "Sacrifice",
+        "Exile" => "Exile",
+        _ => return None,
+    };
+    Some((action, step, whose))
+}
+
+/// Is what the chain last noted one object — a single target moved, one token made?
+fn notes_one(chain: &Chain) -> bool {
+    let single = |i: &u8| {
+        !chain
+            .groups
+            .iter()
+            .any(|g| g.count > 1 && (g.first..g.first + g.count).contains(i))
+    };
+    let Some(inner) = chain.effects.iter().rev().find_map(|e| match e {
+        Effect::Note(inner) => Some(inner),
+        _ => None,
+    }) else {
+        return false;
+    };
+    match &**inner {
+        Effect::Exile {
+            what: ObjRef::Target(i),
+        }
+        | Effect::ReturnToHand {
+            what: ObjRef::Target(i),
+        }
+        | Effect::Destroy {
+            what: ObjRef::Target(i),
+        }
+        | Effect::PutInto {
+            what: ObjRef::Target(i),
+            ..
+        } => single(i),
+        Effect::CopyPermanent {
+            what: CopyWhat::Obj(_),
+            count: Amount::Fixed(1),
+            ..
+        } => true,
+        _ => false,
+    }
+}
+
 /// The targets and effects of one mode, as they are collected along a sub-ability chain.
 #[derive(Default)]
 struct Chain {
@@ -1734,7 +1791,21 @@ impl<'a> Tx<'a> {
     /// `[instruction]. [Sacrifice / exile] them at the beginning of the next end step`
     /// (Forge's `AtEOT$`): the instruction is noted, and a delayed triggered ability about
     /// what it made is created (CR 603.7, 603.7c), its text on the card's `granted` list.
-    fn at_end_of_turn(&mut self, first: Effect, what: &str) -> Effect {
+    fn at_end_of_turn(
+        &mut self,
+        first: Effect,
+        what: &str,
+        step: TriggerStep,
+        whose: Who,
+    ) -> Effect {
+        let one = matches!(
+            first,
+            Effect::CopyPermanent {
+                what: CopyWhat::Obj(_),
+                count: Amount::Fixed(1),
+                ..
+            }
+        );
         let effect = match what {
             "Sacrifice" => Effect::SacrificeIt {
                 what: ObjRef::Noted,
@@ -1745,10 +1816,7 @@ impl<'a> Tx<'a> {
         };
         let ability = self.granted.len() as u16;
         self.granted.push(AbilityDef::Triggered {
-            when: Trigger::BeginningOf {
-                step: TriggerStep::EndStep,
-                whose: Who::Any,
-            },
+            when: Trigger::BeginningOf { step, whose },
             intervening_if: None,
             body: Body::Effect(Mode {
                 targets: Vec::new(),
@@ -1764,6 +1832,7 @@ impl<'a> Tx<'a> {
                 player: None,
                 amount: None,
                 objects: Some(ObjRef::Noted),
+                one,
             },
         ])
     }
@@ -3420,8 +3489,9 @@ impl<'a> Tx<'a> {
                 // noted (D-069) and handed to it. Not in a chain that notes other things.
                 match rd.get("AtEOT") {
                     None => copy,
-                    Some(what @ ("Sacrifice" | "Exile")) if !self.memory => {
-                        self.at_end_of_turn(copy, what)
+                    Some(what) if !self.memory && at_eot(what).is_some() => {
+                        let (action, step, whose) = at_eot(what).expect("checked");
+                        self.at_end_of_turn(copy, action, step, whose)
                     }
                     Some(what) => {
                         self.block(format!("CopyPermanent:AtEOT {what}"));
@@ -4415,10 +4485,13 @@ impl<'a> Tx<'a> {
         // The objects it is about (CR 603.7c), and the zone they are in: in the delayed
         // ability they are "those cards".
         let mut objects: Option<(ObjRef, &'static str)> = None;
+        // They are one object ("it"), as far as the text goes.
+        let mut one = false;
         match rd.get("RememberObjects") {
             None => {}
             // What this chain has just moved or made (D-069).
             Some("Remembered" | "RememberedLKI") if self.memory && !self.in_effect => {
+                one = notes_one(chain);
                 match chain.noted_at {
                     Some(at) => objects = Some((ObjRef::Noted, at)),
                     None => {
@@ -4430,6 +4503,49 @@ impl<'a> Tx<'a> {
             // The card a creature that died became ("return that card …").
             Some("TriggeredNewCardLKICopy") if self.in_trigger && self.trig.died => {
                 objects = Some((ObjRef::TriggeringCard, "Graveyard"));
+                one = true;
+            }
+            // The permanent the event is about — "that creature" that blocked or became
+            // blocked, as it was then (Forge's `…LKICopy`); the delayed ability affects it
+            // only while it is still that permanent (CR 603.7c).
+            Some(name)
+                if self.in_trigger
+                    && !self.trig.died
+                    && matches!(
+                        name,
+                        "TriggeredAttackerLKICopy"
+                            | "TriggeredBlockerLKICopy"
+                            | "TriggeredTargetLKICopy"
+                    )
+                    && self.trig.named(name).is_some() =>
+            {
+                let r = match self.trig.named(name) {
+                    Some(Named::This) => ObjRef::This,
+                    _ => ObjRef::Triggering,
+                };
+                objects = Some((r, "Battlefield"));
+                one = true;
+            }
+            // The chain's one target, which no link moved ("destroy it at the beginning of
+            // the next end step"): affected while it is still that object (CR 603.7c).
+            Some("Targeted" | "ParentTarget")
+                if chain.targets.len() == 1 && chain.target_moved.is_none() =>
+            {
+                chain.refers_to_targets.set(true);
+                let at = match chain.targets[0] {
+                    TargetFilter::CardInGraveyard { .. } => "Graveyard",
+                    TargetFilter::Spell | TargetFilter::SpellMatching(_) => {
+                        self.block("DelayedTrigger:remembers a spell");
+                        return None;
+                    }
+                    _ if chain.targets[0].allows_players() => {
+                        self.block("DelayedTrigger:remembers a target that may be a player");
+                        return None;
+                    }
+                    _ => "Battlefield",
+                };
+                objects = Some((ObjRef::Target(0), at));
+                one = true;
             }
             // "Its controller": of the countered spell's target.
             Some("RememberedController") => match chain.countered {
@@ -4440,7 +4556,18 @@ impl<'a> Tx<'a> {
                 }
             },
             Some(other) => {
-                self.block(format!("DelayedTrigger:remembers {}", shape(other)));
+                // Remembered cards of a chain that doesn't keep them to itself (D-069:
+                // they would outlive it), or of an effect object, are named as such.
+                let why = match other {
+                    "Remembered" | "RememberedLKI" if self.in_effect => " (in an effect)",
+                    "Remembered" | "RememberedLKI" => " (not noted by this chain)",
+                    "Targeted" | "ParentTarget" if chain.target_moved.is_some() => {
+                        " (a target the chain moved)"
+                    }
+                    "Targeted" | "ParentTarget" => " (not the chain's one target)",
+                    _ => "",
+                };
+                self.block(format!("DelayedTrigger:remembers {}{why}", shape(other)));
                 return None;
             }
         }
@@ -4495,6 +4622,7 @@ impl<'a> Tx<'a> {
             player,
             amount,
             objects: objects.map(|(r, _)| r),
+            one: objects.is_some() && one,
         };
         // Forge's CounterEffect remembers the mana value before it tries to counter
         // ("should remember even that spell cannot be countered"): the delayed trigger is
