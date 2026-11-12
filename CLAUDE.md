@@ -91,6 +91,12 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
 - A new top-level `GameState` field changes every golden state hash even while it is empty
   (the stable hasher writes a tag for skipped fields): re-bless, and check that the event
   logs did not change.
+- The text of a compiled card (`card_model::describe`) is written like a printed card:
+  number words, "this creature/land/Equipment", "Then" between instructions, a predefined
+  token's reminder text on first mention. The Oracle guard (`oracle_words_missing`) reads
+  phrases out of that text; `guard_phrases_are_still_written` pins them — a new guard
+  phrase or a reworded one goes into that test. `crates/app/tests/glyphs.rs` checks every
+  non-ASCII character the texts produce can be drawn.
 - New dependency in engine-core/card-model ⇒ add to `PURE_ALLOWLIST` in `crates/xtask` AND
   log a decision. Must be `no_std`-capable with `default-features = false`.
 
