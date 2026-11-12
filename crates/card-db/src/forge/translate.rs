@@ -2009,7 +2009,24 @@ impl<'a> Tx<'a> {
                     Some(slot) => Some(ObjRef::Target(slot)),
                     None => self.object(&rd, chain, triggered),
                 };
-                Effect::Destroy { what: what? }
+                let destroy = Effect::Destroy { what: what? };
+                // "It can't be regenerated" (CR 701.19c): Forge tests `NoRegen$` for
+                // presence (DestroyEffect).
+                if rd.get("NoRegen").is_some() {
+                    Effect::CantBeRegenerated(Box::new(destroy))
+                } else {
+                    destroy
+                }
+            }
+            // CR 701.19a: "regenerate [permanent]" — a regeneration shield (Forge's
+            // RegenerateEffect: `Defined$` / `ValidTgts$`, the host by default).
+            "Regenerate" => {
+                let what = match self.target(&rd, chain, false) {
+                    Some(slot) => Some(ObjRef::Target(slot)),
+                    None if rd.rec.get("Defined").is_none() => Some(ObjRef::This),
+                    None => self.object(&rd, chain, triggered),
+                };
+                Effect::Regenerate { what: what? }
             }
             // CR 701.34a. `Amount$ N`: "proliferate N times" — one after the other, each
             // its own choice (Forge's loop).
@@ -2199,7 +2216,13 @@ impl<'a> Tx<'a> {
                     return None;
                 }
                 let sel = self.valid_cards(&rd, api);
-                Effect::DestroyAll(sel?)
+                let destroy = Effect::DestroyAll(sel?);
+                // "They can't be regenerated" (CR 701.19c).
+                if rd.get("NoRegen").is_some() {
+                    Effect::CantBeRegenerated(Box::new(destroy))
+                } else {
+                    destroy
+                }
             }
             // "Choose a creature type. [Instructions about the chosen type.]" (CR 608.2c).
             // Forge keeps the choice on the card; the engine keeps it for the resolution
@@ -2874,6 +2897,7 @@ impl<'a> Tx<'a> {
                                         | "CantAttack"
                                         | "CantBlock"
                                         | "CantAttack,CantBlock"
+                                        | "CantRegenerate"
                                         // (Only one whose "keywords" are rules: see below.)
                                         | "Continuous"
                                 )
@@ -5932,6 +5956,15 @@ impl<'a> Tx<'a> {
                     affected,
                     rule: first,
                 })
+            }
+            // CR 701.19c: "[these] can't be regenerated".
+            "CantRegenerate" => {
+                let affected = rd.get("ValidCard").and_then(|f| self.affected(f));
+                let affected = affected.or_else(|| {
+                    self.block("static:CantRegenerate-who");
+                    None
+                })?;
+                Some(AbilityDef::CantBeRegenerated(affected))
             }
             "CantBlockBy" => {
                 let (attacker, blocker) = (rd.get("ValidAttacker"), rd.get("ValidBlocker"));

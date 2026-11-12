@@ -1493,6 +1493,16 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             format!("{}. If you do, {}", effect(mode, first), effect(mode, then))
         }
         Effect::Proliferate => "proliferate".to_string(),
+        Effect::Regenerate { what } => format!("regenerate {}", obj(mode, *what)),
+        Effect::CantBeRegenerated(inner) => format!(
+            "{}. {} can't be regenerated",
+            effect(mode, inner),
+            if matches!(**inner, Effect::DestroyAll(_)) {
+                "They"
+            } else {
+                "It"
+            }
+        ),
         Effect::Shuffle { who } => format!(
             "{} {} library",
             verb(&player(mode, *who), "shuffle", "shuffles"),
@@ -3171,6 +3181,17 @@ fn ability(a: &AbilityDef) -> String {
             }
         }
         AbilityDef::CantBeCountered { spells: None } => "This spell can't be countered.".into(),
+        AbilityDef::CantBeRegenerated(affected) => {
+            let subject = match affected {
+                Affected::This => "This permanent".to_string(),
+                Affected::Remembered => "That permanent".to_string(),
+                Affected::Enchanted => "Enchanted creature".to_string(),
+                Affected::All(s) => sentence(selector(s, true))
+                    .trim_end_matches('.')
+                    .to_string(),
+            };
+            format!("{subject} can't be regenerated.")
+        }
         AbilityDef::CantBeCountered { spells: Some(s) } => {
             // "Creature spells you control can't be countered."
             let whose = match s.controller {

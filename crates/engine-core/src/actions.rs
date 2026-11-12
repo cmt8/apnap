@@ -76,6 +76,15 @@ pub enum GameAction {
         target: Target,
         amount: u32,
     },
+    /// CR 701.19a: create a regeneration shield on a permanent ("regenerate it").
+    AddRegenerationShield {
+        object: ObjectId,
+    },
+    /// CR 701.19a, 614.8: the permanent regenerates — all damage is removed from it, it is
+    /// tapped, and it is removed from combat.
+    Regenerate {
+        object: ObjectId,
+    },
     /// CR 611.2: abilities begin to work for a while on no object.
     AddLasting {
         source: ObjectId,
@@ -446,7 +455,39 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 timestamp,
                 target,
                 remaining: amount,
+                regenerate: false,
             });
+            ActionResult::Done
+        }
+        GameAction::AddRegenerationShield { object } => {
+            let id = st.next_effect_id;
+            st.next_effect_id += 1;
+            let timestamp = st.alloc_timestamp();
+            st.shields.push(Shield {
+                id,
+                timestamp,
+                target: Target::Object(object),
+                remaining: 1,
+                regenerate: true,
+            });
+            ActionResult::Done
+        }
+        GameAction::Regenerate { object } => {
+            if st.objects.get(&object).is_some_and(|o| o.damage_marked > 0) {
+                execute(st, GameAction::RemoveDamage { object });
+            }
+            if !st.object(object).tapped {
+                execute(st, GameAction::Tap { object });
+            }
+            let in_combat = st.combat.as_ref().is_some_and(|c| {
+                c.attackers
+                    .iter()
+                    .any(|a| a.attacker == object || a.blockers.contains(&object))
+            });
+            if in_combat {
+                execute(st, GameAction::RemoveFromCombat { object });
+            }
+            st.emit(Event::Regenerated { object });
             ActionResult::Done
         }
         GameAction::ConsumeShield { id, n } => {

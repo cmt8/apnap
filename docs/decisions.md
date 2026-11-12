@@ -2510,6 +2510,51 @@ Rules text: docs/rules-notes/d075-commander-staples.md (sections 205.3i, 603.7, 
 - **Next:** regeneration with "can't be regenerated" (`api:Regenerate` alone blocks 185
   cards, `NoRegen` 61), the Channel lands, Esper Sentinel, City of Brass, cumulative upkeep.
 
+## D-079 Regeneration and "can't be regenerated" (2026-11-12)
+Rules text: docs/rules-notes/701-regenerate.md (CR 701.19, 614.8, 701.8, 704.5f–h, 702.2b,
+701.21a, 506.4). Tests: `crates/harness/tests/forge_regen.rs`.
+- **A regeneration shield** (CR 701.19a): `Effect::Regenerate { what }` makes one as the
+  spell or ability resolves (`GameAction::AddRegenerationShield`), on a permanent still
+  there. It is an `effects::Shield` with `regenerate` set (serialized only when set),
+  used up once, and gone at cleanup with the prevention shields ("this turn", 514.2).
+- **A destruction-replacement effect** (CR 614.8, invariant 14): in `replacement::applicable`
+  a regeneration shield applies to a `Proposed::Move` to the graveyard with
+  `MoveCause::Destroy` of a permanent on the battlefield — destroy effects and the
+  state-based actions for lethal damage and deathtouch (701.8b, 704.5g–h) — and turns it
+  into `Proposed::Regenerate` (appended), performed as `GameAction::Regenerate`: all damage
+  removed, tapped by its controller, removed from combat if attacking or blocking (506.4),
+  then `Event::Regenerated` (appended; narrated). Sacrifice (701.21a), toughness 0 (704.5f)
+  and other moves to the graveyard are not destruction and are never replaced. Prevention
+  shields ignore regeneration shields and vice versa. Several applicable shields are chosen
+  among by the affected player like any replacement effects (616.1).
+- **"It can't be regenerated"** (CR 701.19c), as a rider: `Effect::CantBeRegenerated(Box<Effect>)`
+  around a `Destroy` / `DestroyAll` (Forge's `NoRegen$`, tested for presence by
+  DestroyEffect/DestroyAllEffect) makes its destruction `MoveCause::DestroyNoRegen`
+  (appended; `MoveCause::destroys()` covers both for indestructible). As a rule:
+  `AbilityDef::CantBeRegenerated(Affected)` (appended; Forge's `Mode$ CantRegenerate`),
+  a static ability of a permanent or carried by a lasting effect ("target creature can't be
+  regenerated this turn"); read by `replacement::can_be_regenerated`. Shields can still be
+  made; they just aren't applied.
+- **Blocked, by name:** "when it regenerates this way" (`param:Regenerate.RegenerationAbility`,
+  4 cards), static regeneration (CR 701.19b, Forge `R:Event$ Destroy | Regeneration$ True`:
+  `repl:Destroy`, 3), "can't be regenerated" about creatures dealt damage this turn
+  (`static:CantRegenerate-who`: `Creature.DamagedBy`), regenerating the enchanted creature
+  (`defined:card Enchanted`, a blocker of many effects, 17 Regenerate cards among them).
+- The heuristic agent counts regenerating as help (aimed at its own permanents).
+- **Golden: one state hash re-blessed (cmd-2p seed 1), all 15 event logs unchanged.** That
+  game ends with a prevention shield in force, and the stable hasher writes a tag for the
+  skipped `Shield::regenerate` field (`hash.rs`, `skip_field`).
+- Against main `6410af8`/`6252f08` by a card-by-card diff of `forge-coverage --sample 1`:
+  230 cards newly compile, none stops compiling, no engine text changes. All 230 were read
+  against their Oracle text. Among them Pongify, Rapid Hybridization, Terminate, Putrefy,
+  Damnation, Terror, Vendetta, Jokulhaups, Obliterate, Plague Wind, Thrun, Lotleth Troll,
+  Masticore, Sedge Sliver, the Slivers that give regeneration. Text left as it is: Knight of
+  the Mists reads "destroy target Knight creature. It can't be regenerated unless you pay
+  {U}" (the meaning is right — unless you pay, it is destroyed and can't be regenerated —
+  the word order isn't).
+- 11,071 → 11,301 of 34,463 scripts (32.8%); top 1,000 60.6% → 61.4%, top 5,000 35.7% →
+  36.1%.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

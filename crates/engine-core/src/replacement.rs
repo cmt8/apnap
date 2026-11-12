@@ -41,6 +41,16 @@ pub enum MoveCause {
     PlayLand,
     /// CR 702.29c: discarded to pay the cost of its own cycling ability.
     Cycle,
+    /// CR 701.8 with 701.19c: destroyed, and it "can't be regenerated" — regeneration
+    /// shields aren't applied to this destruction.
+    DestroyNoRegen,
+}
+
+impl MoveCause {
+    /// Is the permanent being destroyed (CR 701.8b)?
+    pub fn destroys(self) -> bool {
+        matches!(self, MoveCause::Destroy | MoveCause::DestroyNoRegen)
+    }
 }
 
 /// A game event that hasn't happened yet (CR 614.1: replacement effects watch for events
@@ -125,6 +135,12 @@ pub enum Proposed {
         controller: PlayerId,
         tapped: bool,
         counters: Vec<(CounterKind, u32)>,
+    },
+    /// CR 701.19a, 614.8: what a regeneration shield makes of the permanent's destruction —
+    /// all damage marked on it is removed, its controller taps it, and if it's an
+    /// attacking or blocking creature it is removed from combat.
+    Regenerate {
+        object: ObjectId,
     },
 }
 
@@ -211,7 +227,8 @@ pub fn affected_player(st: &GameState, ev: &Proposed) -> PlayerId {
         Proposed::Move { object, .. }
         | Proposed::PutCounters { object, .. }
         | Proposed::RemoveCounters { object, .. }
-        | Proposed::CeaseToExist { object } => of(*object),
+        | Proposed::CeaseToExist { object }
+        | Proposed::Regenerate { object } => of(*object),
         Proposed::Damage { target, .. } => match target {
             DamageTarget::Player(p) => *p,
             DamageTarget::Object(o) => of(*o),
@@ -352,7 +369,28 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
             DamageTarget::Object(o) => Target::Object(*o),
         };
         for sh in &st.shields {
-            if sh.target == t && sh.remaining > 0 {
+            if sh.target == t && sh.remaining > 0 && !sh.regenerate {
+                out.push(RepKey::Shield(sh.id));
+            }
+        }
+    }
+    // CR 701.19a, 614.8: a regeneration shield replaces the permanent's destruction —
+    // by an effect that says "destroy" or by lethal damage or deathtouch (CR 701.8b) —
+    // unless it "can't be regenerated" (CR 701.19c).
+    if let Proposed::Move {
+        object,
+        to: Zone::Graveyard,
+        cause: MoveCause::Destroy,
+        ..
+    } = &p.event
+        && st
+            .objects
+            .get(object)
+            .is_some_and(|o| o.zone == Zone::Battlefield)
+        && can_be_regenerated(st, *object)
+    {
+        for sh in &st.shields {
+            if sh.regenerate && sh.target == Target::Object(*object) && sh.remaining > 0 {
                 out.push(RepKey::Shield(sh.id));
             }
         }
@@ -1061,10 +1099,71 @@ fn replace_amounts(
     }
 }
 
+/// CR 701.19c: can a regeneration shield be applied to the permanent's destruction? Not if
+/// a static ability of a permanent, or a rule a lasting effect carries, says it "can't be
+/// regenerated".
+pub fn can_be_regenerated(st: &GameState, object: ObjectId) -> bool {
+    use card_model::Affected;
+    let affects = |affected: &Affected, who: Bearer<'_>| match affected {
+        Affected::This => object == who.source,
+        Affected::Remembered => who.about.contains(&object),
+        Affected::Enchanted => {
+            st.objects.get(&who.source).and_then(|o| o.attached_to) == Some(object)
+        }
+        Affected::All(sel) => crate::layers::matches(
+            st,
+            sel,
+            &crate::layers::chars(st, object),
+            st.object(object),
+            who.source,
+            who.controller,
+        ),
+    };
+    for &source in &st.zones.battlefield {
+        for (_, a) in abilities(st, source) {
+            if let AbilityDef::CantBeRegenerated(affected) = a
+                && affects(
+                    affected,
+                    Bearer {
+                        source,
+                        controller: crate::layers::controller_of(st, source),
+                        about: &[],
+                    },
+                )
+            {
+                return false;
+            }
+        }
+    }
+    for (e, _, a) in crate::effects::lasting_abilities(st) {
+        if let AbilityDef::CantBeRegenerated(affected) = a
+            && affects(
+                affected,
+                Bearer {
+                    source: e.source,
+                    controller: e.controller,
+                    about: e.about.as_slice(),
+                },
+            )
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// Apply `key` to `ev`. `None` = the event no longer happens (e.g. all damage prevented,
 /// CR 614.7a). Shield use is recorded through the action chokepoint.
 pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> {
     match key {
+        // CR 701.19a: the shield is used up, and the destruction becomes regeneration.
+        RepKey::Shield(id) if st.shields.iter().any(|s| s.id == id && s.regenerate) => {
+            let Proposed::Move { object, .. } = ev else {
+                unreachable!("a regeneration shield only applies to destruction")
+            };
+            crate::actions::execute(st, crate::actions::GameAction::ConsumeShield { id, n: 1 });
+            Some(Proposed::Regenerate { object })
+        }
         RepKey::Shield(id) => {
             let Proposed::Damage {
                 source,
