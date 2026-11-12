@@ -255,7 +255,7 @@ fn untap_up_to_n_lands_chooses_among_tapped_lands_of_anyone() {
     let text = card_model::describe::rules_text(
         s.st.card_def(s.find(P0, Zone::Graveyard, "Test Unsnap").unwrap()),
     );
-    assert_eq!(text, ["Untap up to 2 lands."]);
+    assert_eq!(text, ["Untap up to two lands."]);
     // Chosen by another player: not compiled.
     let theirs = card(
         "Test Odd Unsnap",
@@ -758,7 +758,7 @@ fn look_at_the_top_cards_put_them_back_in_any_order_then_maybe_shuffle() {
     assert_eq!(
         text,
         [
-            "You look at the top 3 cards of your library, then put them back in any order. Then you may shuffle your library. Then you draw a card."
+            "Look at the top three cards of your library, then put them back in any order. Then you may shuffle your library. Then draw a card."
         ]
     );
     // Accepting shuffles it.

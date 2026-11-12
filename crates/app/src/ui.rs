@@ -492,7 +492,7 @@ pub fn option_label(
                     ),
                 };
                 body.and_then(|b| b.modes().get(*index as usize))
-                    .map(|m| describe::mode_text(def, m))
+                    .map(|m| describe::mode_text_in(def, m, &|k| cat.find(k).map(|id| cat.get(id))))
             });
             text.unwrap_or_else(|| format!("mode {index}"))
         }
@@ -562,7 +562,7 @@ pub fn option_label(
                 (Some(src), Some(a)) if twice || more => format!(
                     "{}: {} (first mana: {})",
                     src.name,
-                    describe::ability_text(cat.get(a.card), cat.ability(*a)),
+                    ability_words(cat, cat.get(a.card), cat.ability(*a)),
                     mana.symbol(),
                 ),
                 (Some(src), _) => format!("tap {} for {}", src.name, mana.symbol()),
@@ -577,11 +577,7 @@ pub fn option_label(
             .and_then(|e| e.abilities.get(*index as usize))
             .map(|a| {
                 let def = cat.get(a.card);
-                format!(
-                    "{}: {}",
-                    def.name,
-                    describe::ability_text(def, cat.ability(*a))
-                )
+                format!("{}: {}", def.name, ability_words(cat, def, cat.ability(*a)))
             })
             .unwrap_or_else(|| harness::text::option_line(v, o)),
         // A card a rule lets them play from somewhere other than their hand: say where.
@@ -618,7 +614,7 @@ pub fn option_label(
         // cycling it) can be told apart.
         OptionDesc::ActivateAbility { source, ability } => {
             let text = find_object(v, *source).map(|src| {
-                let mut text = describe::ability_text(cat.get(ability.card), cat.ability(*ability));
+                let mut text = ability_words(cat, cat.get(ability.card), cat.ability(*ability));
                 if text.chars().count() > 90 {
                     text = text.chars().take(89).chain(['…']).collect();
                 }
@@ -802,6 +798,15 @@ fn whereabouts(v: &PlayerView, id: ObjectId) -> String {
 }
 
 /// A card's accessible name: everything the picture and its badges show, as text.
+/// An ability as rules text, with the tokens it creates described from the catalog.
+fn ability_words(
+    cat: &CardCatalog,
+    def: &card_model::CardDef,
+    a: &card_model::AbilityDef,
+) -> String {
+    describe::ability_text_in(def, a, &|k| cat.find(k).map(|id| cat.get(id)))
+}
+
 fn card_text(o: &ObjectView, cat: &CardCatalog) -> String {
     let def = cat.get(cat.face(o.card, o.face));
     let cost = def
@@ -1046,6 +1051,7 @@ fn card(
         offset,
         motion: (cx.animate && on_battlefield).then(|| egui::Id::unique(("card", o.id.0))),
         draggable: candidate,
+        tokens: Some(cx.cat),
     };
     let resp = cardview::card_widget(ui, art, &look);
     if on_battlefield {
@@ -1399,6 +1405,7 @@ fn player_area(
                 offset: egui::Vec2::ZERO,
                 motion: None,
                 draggable: false,
+                tokens: Some(cx.cat),
             };
             let resp = cardview::card_widget(ui, art, &look).on_hover_text(format!(
                 "The top card of {who} library{}",
@@ -1873,7 +1880,7 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
     let mut gained: Vec<String> = gained
         .iter()
         .map(|(a, n)| {
-            let text = describe::ability_text(cx.cat.get(a.card), cx.cat.ability(*a));
+            let text = ability_words(cx.cat, cx.cat.get(a.card), cx.cat.ability(*a));
             if *n > 1 {
                 format!("Has \"{text}\" x{n}")
             } else {
@@ -1886,7 +1893,7 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
         if e.about.is_some() && e.about == pv.object {
             for a in &e.abilities {
                 let def = cx.cat.get(a.card);
-                let text = describe::ability_text(def, cx.cat.ability(*a));
+                let text = ability_words(cx.cat, def, cx.cat.ability(*a));
                 let text = text.replace("That permanent", "It");
                 gained.push(if e.until_end_of_turn {
                     format!("This turn ({}): {text}", def.name)
@@ -1916,9 +1923,9 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
                 .show(ui, |ui| {
                     ui.set_max_width(card.x * across + 6.0 * (across - 1.0));
                     ui.horizontal(|ui| {
-                        cardview::card_large(ui, art, def, height);
+                        cardview::card_large(ui, art, def, height, Some(cx.cat));
                         for other in &others {
-                            cardview::card_large(ui, art, other, height);
+                            cardview::card_large(ui, art, other, height, Some(cx.cat));
                         }
                     });
                     if let Some(credit) = credit {
@@ -1989,6 +1996,7 @@ fn side_panel(ui: &mut egui::Ui, art: &mut Art, cx: &Ctx<'_>, s: &Session, ptr: 
                 offset: egui::Vec2::ZERO,
                 motion: None,
                 draggable: false,
+                tokens: Some(cx.cat),
             };
             let resp = cardview::card_widget(ui, art, &look);
             if resp.hovered() {
@@ -2148,6 +2156,7 @@ fn card_strip(
                             offset: egui::Vec2::ZERO,
                             motion: None,
                             draggable: false,
+                            tokens: Some(cx.cat),
                         };
                         let resp = cardview::card_widget(ui, art, &look);
                         if resp.hovered() {
@@ -2275,8 +2284,9 @@ fn decision_panel(
     } = d.kind
     {
         let name = entering_name(cx.view, object);
-        title = describe::ability_text(cx.cat.get(ability.card), cx.cat.ability(ability))
-            .replace("this permanent", &name);
+        let def = cx.cat.get(ability.card);
+        title = ability_words(cx.cat, def, cx.cat.ability(ability))
+            .replace(&format!("this {}", describe::this_word(def)), &name);
         if tapped {
             title.push_str(" (It enters tapped anyway.)");
         }
@@ -2289,8 +2299,9 @@ fn decision_panel(
         match ability {
             Some(ability) => {
                 let name = entering_name(cx.view, object);
-                title = describe::ability_text(cx.cat.get(ability.card), cx.cat.ability(ability))
-                    .replace("this permanent", &name);
+                let def = cx.cat.get(ability.card);
+                title = ability_words(cx.cat, def, cx.cat.ability(ability))
+                    .replace(&format!("this {}", describe::this_word(def)), &name);
             }
             None => {
                 if let Some(top) = cx.view.stack.last() {
@@ -3284,7 +3295,7 @@ mod tests {
             .expect("the Golem's ability is offered");
         assert_eq!(
             option_label(&v, &cat, &d, option),
-            "Test Golem — {T}: This deals 1 damage to any target."
+            "Test Golem — {T}: This permanent deals 1 damage to any target."
         );
     }
 

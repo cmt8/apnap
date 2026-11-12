@@ -183,7 +183,7 @@ fn what_a_mana_ability_also_does_happens_at_once() {
     let def = s.st.catalog.get(s.st.object(reefs[0]).card);
     assert_eq!(
         card_model::describe::ability_text(def, &def.abilities[1]),
-        "{T}: Add {U} or {R}. This deals 1 damage to you."
+        "{T}: Add {U} or {R}. This land deals 1 damage to you."
     );
 }
 
@@ -1002,7 +1002,7 @@ fn effects_that_add_mana_of_a_chosen_color() {
     );
     assert_eq!(
         card_model::describe::ability_text(def, &def.abilities[0]),
-        "Whenever a land you control enters, you add one mana of any color."
+        "Whenever a land you control enters, add one mana of any color."
     );
 }
 

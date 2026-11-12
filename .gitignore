@@ -5,3 +5,4 @@
 
 # Worktrees of parallel agents
 /.claude/worktrees/
+**/target/
