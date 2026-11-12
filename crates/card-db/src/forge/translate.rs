@@ -1017,6 +1017,16 @@ impl<'a> Tx<'a> {
 
     /// The value of a script variable (`SVar:X:Count$…`).
     fn expr(&mut self, name: &str) -> Option<Amount> {
+        // `AFLifeLost` and its kind: Forge's effects write their result into an SVar of
+        // this name ("will be set by LoseLife"); the script only holds the starting value
+        // (`Number$0`), which is not what the card means (D-078).
+        if name
+            .strip_prefix("AF")
+            .is_some_and(|r| r.starts_with(char::is_uppercase))
+        {
+            self.block(format!("expr:set by an effect {name}"));
+            return None;
+        }
         let Some(v) = self.svar(name) else {
             self.block(format!("expr:undefined {name}"));
             return None;
@@ -6016,6 +6026,11 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
     };
     for line in &face.unknown {
         tx.block(format!("line:{}", line.split(':').next().unwrap_or("?")));
+    }
+    // Comments (D-078): reviewed ones are ignored, as Forge does; one that says the script
+    // is incomplete, or one nobody has read, blocks.
+    for b in super::comments::blockers(&face.comments) {
+        tx.block(b);
     }
     if SCRIPT_DIFFERS.iter().any(|(name, _)| *name == face.name) {
         tx.block("script:differs from the card");
