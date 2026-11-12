@@ -120,7 +120,7 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
   "enters" effects then apply); becoming one is `Effect::BecomeCopy` (for good only);
   token copies are `Effect::CopyPermanent` through `CreateTokens`/`TokenEnters`, so
   doublers double them. A token copy of a double-faced permanent is double-faced (707.8a).
-  Not built: copies of spells and abilities, "until end of turn" copies, Populate, Myriad.
+  Not built: "until end of turn" copies, Populate, Myriad.
   Tests: `forge_copies.rs`.
 - "This ability costs {1} less to activate for each …" is `AbilityDef::Activated::reduce`
   (generic mana only, counted as the total cost is determined; D-080). "Their first/second
@@ -140,6 +140,14 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
   an ordinary "enters with" replacement compiled onto each Saga, the one each turn a
   turn-based action (505.4), the sacrifice a state-based action (`sagas.rs`, 704.5s).
   Tests: `forge_counters.rs`, `forge_sagas.rs`.
+- A copy of a spell or ability (CR 707.10, D-085) is `Effect::CopySpell` →
+  `GameAction::CopyStackObject`: on the stack with everything decided for the original
+  (modes, X, targets, costs paid), not cast, controlled by who made it; "you may choose new
+  targets" is D-082's choice, asked per copy as it is made. A spell that left the stack is
+  copied from `GameState::left_stack` (608.2h). Storm is `Trigger::CastThis`, counting every
+  player's spells in `PlayerState::cast_this_turn`; "cast or copy" is `Trigger::Cast::copies`.
+  Not built: replicate, casualty, conspire, cascade, "cast a copy". Tests:
+  `forge_spell_copies.rs`.
 - The text of a compiled card (`card_model::describe`) is written like a printed card:
   number words, "this creature/land/Equipment", "Then" between instructions, a predefined
   token's reminder text on first mention. The Oracle guard (`oracle_words_missing`) reads
@@ -231,8 +239,8 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-084): 11,632 of 34,463 scripts compile (33.8%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-084: 98% of
+Status (D-085): 11,689 of 34,463 scripts compile (33.9%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-085: 98% of
 the 100 most played Commander cards compile (missing: Path of Ancestry, The One Ring),
 64% of the top 1,000, 38% of the top 5,000
 (`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
