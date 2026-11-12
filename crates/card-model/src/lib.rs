@@ -75,6 +75,9 @@ pub enum ManaSymbol {
     Colorless,
     /// `{X}` (CR 107.3): its value is announced while casting.
     X,
+    /// A two-color hybrid symbol such as `{R/W}` (CR 107.4e): paid with either color. So
+    /// far only in the costs of mana abilities (D-066).
+    Hybrid(Color, Color),
 }
 
 /// The six mana types (CR 106.1b): five colors plus colorless.
@@ -151,7 +154,7 @@ impl ManaCost {
             .iter()
             .map(|s| match s {
                 ManaSymbol::Generic(n) => *n,
-                ManaSymbol::Colored(_) | ManaSymbol::Colorless => 1,
+                ManaSymbol::Colored(_) | ManaSymbol::Colorless | ManaSymbol::Hybrid(..) => 1,
                 // CR 202.3e: X is 0 everywhere except on the stack.
                 ManaSymbol::X => 0,
             })
@@ -172,6 +175,14 @@ impl ManaCost {
                 ManaSymbol::Colored(c) => out.push_str(ManaType::from_color(*c).symbol()),
                 ManaSymbol::Colorless => out.push_str("{C}"),
                 ManaSymbol::X => out.push_str("{X}"),
+                ManaSymbol::Hybrid(a, b) => {
+                    let letter =
+                        |c: &Color| ManaType::from_color(*c).symbol().trim_matches(['{', '}']);
+                    let _ = core::fmt::Write::write_fmt(
+                        &mut out,
+                        format_args!("{{{}/{}}}", letter(a), letter(b)),
+                    );
+                }
             }
         }
         out
@@ -190,6 +201,21 @@ impl ManaCost {
             };
             let sym = &body[..end];
             rest = &body[end + 1..];
+            let color = |l: &str| match l {
+                "W" => Some(Color::White),
+                "U" => Some(Color::Blue),
+                "B" => Some(Color::Black),
+                "R" => Some(Color::Red),
+                "G" => Some(Color::Green),
+                _ => None,
+            };
+            if let Some((a, b)) = sym.split_once('/') {
+                match (color(a), color(b)) {
+                    (Some(a), Some(b)) if a != b => symbols.push(ManaSymbol::Hybrid(a, b)),
+                    _ => return Err(ParseManaCostError),
+                }
+                continue;
+            }
             symbols.push(match sym {
                 "W" => ManaSymbol::Colored(Color::White),
                 "U" => ManaSymbol::Colored(Color::Blue),
@@ -386,10 +412,16 @@ impl CardDef {
         }
         let mut out: Vec<Color> = Vec::new();
         for s in self.mana_cost.iter().flat_map(|m| &m.symbols) {
-            if let ManaSymbol::Colored(c) = s
-                && !out.contains(c)
-            {
-                out.push(*c);
+            // CR 105.2, 107.4e: a hybrid symbol is both its colors.
+            let colors: &[Color] = match s {
+                ManaSymbol::Colored(c) => core::slice::from_ref(c),
+                ManaSymbol::Hybrid(a, b) => &[*a, *b],
+                _ => &[],
+            };
+            for c in colors {
+                if !out.contains(c) {
+                    out.push(*c);
+                }
             }
         }
         out.sort();
@@ -505,8 +537,9 @@ pub enum AbilityDef {
     CostReduction { spells: Selector, amount: u32 },
     /// "This spell costs {N} less to cast[, where N is …]": functions while it is cast.
     SelfCostReduction(Amount),
-    /// An activated mana ability (CR 605.1a). Its cost is `{T}`, optionally with
-    /// "sacrifice this" (Treasure, CR 111.10a).
+    /// An activated mana ability (CR 605.1a): no target, adds mana, resolves at once
+    /// (CR 605.3b). Its cost includes `{T}` or a sacrifice (D-066); it may also cost mana
+    /// and life.
     Mana {
         cost: Cost,
         produce: ManaProduce,
@@ -516,6 +549,11 @@ pub enum AbilityDef {
         /// "Spend this mana only …" (CR 106.6).
         #[serde(default)]
         spend: Option<ManaRestriction>,
+        /// What else it does as it resolves, after adding the mana (CR 605.3b): "This
+        /// land deals 1 damage to you", "You gain 2 life". Nothing with a target (CR
+        /// 605.5a) and nothing that moves a card to or from a library (CR 605.1a).
+        #[serde(default)]
+        then: Option<Effect>,
     },
     /// A triggered ability (CR 603): "[When/Whenever/At] `when`, [if `intervening_if`,] `body`."
     Triggered {
@@ -551,6 +589,72 @@ pub enum AbilityDef {
         affected: Affected,
         rule: CombatRule,
     },
+    /// A static ability that changes a rule of the game for players rather than any
+    /// object's characteristics (CR 613.10, 613.11): "you have no maximum hand size", "you
+    /// may play an additional land on each of your turns", "you have hexproof", "you may
+    /// play lands from your graveyard". `who` is relative to the ability's controller; the
+    /// rule holds while `only_if` holds for that controller.
+    PlayerRule {
+        who: Who,
+        rule: PlayerRule,
+        #[serde(default)]
+        only_if: Option<Condition>,
+    },
+    /// A static ability that functions only while its card is in `zone` (CR 113.6b): "as
+    /// long as this card is in your graveyard [and you control a Mountain], creatures you
+    /// control have haste". So far only a [`AbilityDef::Static`] about permanents, from the
+    /// graveyard; "you" is the card's owner.
+    FromZone {
+        zone: ActivationZone,
+        ability: Box<AbilityDef>,
+    },
+}
+
+/// What an [`AbilityDef::PlayerRule`] changes for the players it is about.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PlayerRule {
+    /// CR 402.2: "[You have] no maximum hand size".
+    NoMaximumHandSize,
+    /// "[Your] maximum hand size is N" (CR 402.2). Several of these and the next apply in
+    /// timestamp order (CR 613.11).
+    MaximumHandSize(u32),
+    /// "[Your] maximum hand size is increased (reduced) by N".
+    MaximumHandSizeBy(i32),
+    /// CR 305.2: "[You] may play N additional lands on each of [your] turns".
+    AdditionalLandPlays(u32),
+    /// CR 305.2: "[You] may play any number of lands on each of [your] turns".
+    AnyNumberOfLandPlays,
+    /// CR 702.11c: "[You have] hexproof" — can't be the target of spells or abilities
+    /// [your] opponents control.
+    Hexproof,
+    /// CR 702.18a: "[You have] shroud" — can't be the target of spells or abilities.
+    Shroud,
+    /// CR 401.5: "Play with the top card of your library revealed": every player sees it.
+    TopCardRevealed,
+    /// CR 401.5: "You may look at the top card of your library any time."
+    LookAtTopCard,
+    /// CR 601.3, 116.2a: "[You] may play lands and cast spells from [zone]" — the cards of
+    /// the player's own `zone` that match one of `cards` (a land is played, anything else
+    /// is cast). When and how is unchanged: a land is still the turn's land play, a spell
+    /// is cast at the time and for the cost it always is.
+    PlayFrom {
+        zone: PlayZone,
+        cards: Vec<Selector>,
+    },
+    /// "You may cast this card from your graveyard [or from exile]": an ability of the
+    /// card itself, which functions in those zones (CR 113.6f). Whoever owns the card is
+    /// "you".
+    PlayThisFrom(Vec<PlayZone>),
+}
+
+/// A zone a card may be played or cast from by a [`PlayerRule`] (its owner's, for the
+/// zones each player has).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PlayZone {
+    Graveyard,
+    /// The top card of the library only.
+    LibraryTop,
+    Exile,
 }
 
 /// What a [`AbilityDef::CombatRule`] forbids its affected creatures.
@@ -924,6 +1028,10 @@ pub enum ContinuousEffect {
     /// abilities with these indices in [`CardDef::granted`] of the card this effect is
     /// written on. The affected object is the source of what it gains.
     GrantAbilities(Vec<u16>),
+    /// Layer 4: "isn't a [card type]" — the object loses these card types (its subtypes
+    /// stay, as a God that isn't a creature is still a God). CR 208.3: a permanent that
+    /// isn't a creature has no power or toughness.
+    RemoveTypes(Vec<CardType>),
 }
 
 /// Events a static replacement effect watches for (CR 614). M2 vocabulary.
@@ -1208,22 +1316,51 @@ pub enum ManaProduce {
     /// "Add one mana of any color in your commander's color identity" (CR 903.4; with no
     /// commander it adds nothing, CR 903.4f).
     CommanderIdentity,
+    /// Exactly this mana, of at least two types: "Add {U}{B}", "Add {C}{C}{R}" (D-066).
+    Fixed(Vec<ManaType>),
+    /// `count` mana, each of any type in `of` independently: "Add two mana in any
+    /// combination of colors", "Add two mana in any combination of {R} and/or {G}".
+    Combination {
+        of: Vec<ManaType>,
+        count: u32,
+    },
+    /// `amount` mana of ONE type chosen from `of`, the amount counted as the ability
+    /// resolves: "Add {G} for each creature you control", "Add X mana of any one color,
+    /// where X is the number of enchantments you control".
+    Counted {
+        of: Vec<ManaType>,
+        amount: Amount,
+    },
+    /// "Add one mana of any color (`types`: any type) that a [`from`] could produce"
+    /// (CR 106.7): Exotic Orchard, Reflecting Pool. `from` is relative to the ability's
+    /// controller.
+    Reflected {
+        from: Selector,
+        types: bool,
+    },
 }
 
 /// "Spend this mana only to cast [spells] or activate abilities of [permanents]" (CR 106.6).
-/// The mana can pay for a spell matching any of `spells`, or an ability whose source matches
-/// any of `abilities`; the selectors are relative to the player spending it.
+/// The mana can pay for a spell matching any of `spells`, or an ability of a permanent
+/// matching any of `abilities` or of a source matching any of `sources`; the selectors are
+/// relative to the player spending it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ManaRestriction {
     #[serde(default)]
     pub spells: Vec<Selector>,
     #[serde(default)]
     pub abilities: Vec<Selector>,
+    /// Abilities whose source matches any of these wherever it is ("activate abilities of
+    /// artifact sources", "activate an ability": the empty selector). `abilities` is about
+    /// permanents only (D-066).
+    #[serde(default)]
+    pub sources: Vec<Selector>,
 }
 
 impl ManaProduce {
-    /// The types the player chooses between. For [`ManaProduce::CommanderIdentity`] these
-    /// are the five colors: the game narrows them to the identity.
+    /// The types the player chooses between (for [`ManaProduce::Fixed`], the types it
+    /// makes). For [`ManaProduce::CommanderIdentity`] these are the five colors, and for
+    /// [`ManaProduce::Reflected`] all it could ever be: the game narrows them.
     pub fn options(&self) -> Vec<ManaType> {
         match self {
             ManaProduce::One(t) => alloc::vec![*t],
@@ -1231,14 +1368,33 @@ impl ManaProduce {
                 .iter()
                 .map(|c| ManaType::from_color(*c))
                 .collect(),
-            ManaProduce::OneOf(of) | ManaProduce::Times { of, .. } => of.clone(),
+            ManaProduce::OneOf(of)
+            | ManaProduce::Times { of, .. }
+            | ManaProduce::Combination { of, .. }
+            | ManaProduce::Counted { of, .. } => of.clone(),
+            ManaProduce::Fixed(v) => {
+                let mut out: Vec<ManaType> = Vec::new();
+                for t in v {
+                    if !out.contains(t) {
+                        out.push(*t);
+                    }
+                }
+                out
+            }
+            ManaProduce::Reflected { types, .. } => ManaType::ALL
+                .iter()
+                .copied()
+                .filter(|t| *types || *t != ManaType::Colorless)
+                .collect(),
         }
     }
 
-    /// How many mana (all of the chosen type) one activation adds.
+    /// How many mana one activation adds, when that is fixed (not for
+    /// [`ManaProduce::Counted`], which counts as it resolves).
     pub fn count(&self) -> u32 {
         match self {
-            ManaProduce::Times { count, .. } => *count,
+            ManaProduce::Times { count, .. } | ManaProduce::Combination { count, .. } => *count,
+            ManaProduce::Fixed(v) => v.len() as u32,
             _ => 1,
         }
     }
@@ -1530,6 +1686,21 @@ pub enum Effect {
     PlayerMay {
         who: PlayerRef,
         effect: Box<Effect>,
+    },
+    /// "[first]. If you do, [then]": `then` happens only if `first` did something (CR
+    /// 608.2c, 614.6) — "you may exile it. If you do, return another target card…" does
+    /// nothing more if the card to exile is already gone.
+    IfDone {
+        first: Box<Effect>,
+        then: Box<Effect>,
+    },
+    /// A spell or a non-mana ability adds `amount` mana of ONE type its controller chooses
+    /// from `of` as it resolves (CR 106.4, 605.5a): "add one mana of any color" (Lotus
+    /// Cobra's landfall, which is not a mana ability), "add three mana of any one color".
+    AddManaOf {
+        who: PlayerRef,
+        of: Vec<ManaType>,
+        amount: Amount,
     },
     /// CR 701.27a: "transform [it]" — turn a double-faced permanent over so that its
     /// other face is up. It stays the same object (CR 701.27c).
@@ -1833,8 +2004,11 @@ pub fn color_identity(def: &CardDef) -> Vec<Color> {
     let mut out: Vec<Color> = def.colors.clone().unwrap_or_default();
     let add_cost = |m: &ManaCost, out: &mut Vec<Color>| {
         for s in &m.symbols {
-            if let ManaSymbol::Colored(c) = s {
-                out.push(*c);
+            match s {
+                ManaSymbol::Colored(c) => out.push(*c),
+                // CR 903.4: a hybrid symbol counts as both its colors.
+                ManaSymbol::Hybrid(a, b) => out.extend([*a, *b]),
+                _ => {}
             }
         }
     };
@@ -1854,8 +2028,18 @@ pub fn color_identity(def: &CardDef) -> Vec<Color> {
                         ManaProduce::One(t) => alloc::vec![*t],
                         ManaProduce::AnyColor | ManaProduce::CommanderIdentity => Vec::new(),
                         ManaProduce::OneOf(of) => of.clone(),
-                        ManaProduce::Times { of, .. } if of.len() < 5 => of.clone(),
-                        ManaProduce::Times { .. } => Vec::new(),
+                        ManaProduce::Times { of, .. }
+                        | ManaProduce::Combination { of, .. }
+                        | ManaProduce::Counted { of, .. }
+                            if of.len() < 5 =>
+                        {
+                            of.clone()
+                        }
+                        ManaProduce::Times { .. }
+                        | ManaProduce::Combination { .. }
+                        | ManaProduce::Counted { .. }
+                        | ManaProduce::Reflected { .. } => Vec::new(),
+                        ManaProduce::Fixed(v) => v.clone(),
                     };
                     for t in named {
                         if let Some(c) = Color::ALL

@@ -1699,8 +1699,9 @@ fn mana_abilities_with_a_choice_of_type_or_several_mana() {
     assert_eq!(mana_pool(&s, P0), 0);
 }
 
-// What isn't compiled: different mana from one activation ("{W}{U}"), and several mana "in
-// any combination".
+// Different mana from one activation ("{W}{U}"), several mana "in any combination", mana
+// abilities that cost mana or a sacrifice of something else: compiled since D-066 (their
+// meaning is tested in forge_mana.rs). Two sacrifices at once are not.
 #[test]
 fn mana_forms_not_compiled() {
     let rock = |mana: &str| {
@@ -1708,22 +1709,17 @@ fn mana_forms_not_compiled() {
             "Name:Test Prism Rock\nManaCost:2\nTypes:Artifact\nA:AB$ Mana | Cost$ T | {mana} | SpellDescription$ Text.\nOracle:Text."
         )
     };
+    for ok in [
+        rock("Produced$ W U"),
+        rock("Produced$ Combo W U | Amount$ 2"),
+        rock("Produced$ W").replace("Cost$ T", "Cost$ 1 T"),
+        rock("Produced$ W").replace("Cost$ T", "Cost$ T Sac<1/Creature>"),
+    ] {
+        assert_eq!(forge_test_blockers(&ok), [] as [&str; 0], "{ok}");
+    }
     assert_eq!(
-        forge_test_blockers(&rock("Produced$ W U")),
-        ["Mana:produced"]
-    );
-    assert_eq!(
-        forge_test_blockers(&rock("Produced$ Combo W U | Amount$ 2")),
-        ["Mana:produced"]
-    );
-    // A mana ability that costs mana, or a sacrifice of something else.
-    assert_eq!(
-        forge_test_blockers(&rock("Produced$ W").replace("Cost$ T", "Cost$ 1 T")),
-        ["Mana:cost"]
-    );
-    assert_eq!(
-        forge_test_blockers(&rock("Produced$ W").replace("Cost$ T", "Cost$ T Sac<1/Creature>")),
-        ["Mana:cost"]
+        forge_test_blockers(&rock("Produced$ W").replace("Cost$ T", "Cost$ T Sac<2/Creature>")),
+        ["Mana:cost sacrifice N"]
     );
 }
 
@@ -6049,12 +6045,21 @@ fn effect_objects_not_compiled() {
         )),
         ["Effect:duration UntilEndOfCombat"]
     );
-    // "You have hexproof" is about a player: "You" is never a subtype of permanents.
-    let b = forge_test_blockers(
-        "Name:Test Warding Mask\nManaCost:2 W\nTypes:Enchantment\n\
-         S:Mode$ Continuous | Affected$ You | AddKeyword$ Hexproof | Description$ Text.\nOracle:Text.",
-    );
-    assert_eq!(b, ["filter:You"]);
+    // "You have hexproof" is about a player: "You" is never a subtype of permanents. It is
+    // a rule about the player (D-070, tests in forge_players.rs).
+    let mask = "Name:Test Warding Mask\nManaCost:2 W\nTypes:Enchantment\n\
+         S:Mode$ Continuous | Affected$ You | AddKeyword$ Hexproof | Description$ Text.\nOracle:Text.";
+    assert_eq!(forge_test_blockers(mask), [] as [&str; 0]);
+    let cat = forge_test_catalog(&[mask], &[]);
+    assert!(matches!(
+        cat.get(cat.find("Test Warding Mask").unwrap())
+            .abilities
+            .as_slice(),
+        [card_model::AbilityDef::PlayerRule {
+            rule: card_model::PlayerRule::Hexproof,
+            ..
+        }]
+    ));
 }
 
 // CR 113.12, 611.2c (2026-11-06): "can't block" is a rule about a creature, not an ability

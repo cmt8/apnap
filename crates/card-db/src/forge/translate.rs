@@ -15,8 +15,8 @@ use card_model::{
     CardDest, CardType, CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost,
     CostChoice, CounterKind, DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword,
     Layout, ManaCost, ManaProduce, ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef,
-    PlayerRef, ReplaceWith, Replaces, Selector, Signed, Supertype, Take, TargetFilter, TargetGroup,
-    TargetRef, Timing, Trigger, TriggerStep, Who,
+    PlayZone, PlayerRef, PlayerRule, ReplaceWith, Replaces, Selector, Signed, Supertype, Take,
+    TargetFilter, TargetGroup, TargetRef, Timing, Trigger, TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -181,6 +181,9 @@ struct Tx<'a> {
     player_is_you: BTreeSet<String>,
     /// The body being compiled took "that player" for "you".
     took_player_for_you: bool,
+    /// The line just compiled means nothing for the rules (only hints for Forge's AI): no
+    /// ability, and nothing blocked.
+    nothing: bool,
 }
 
 /// The kinds of ability a script gives to other objects.
@@ -582,6 +585,42 @@ fn cost_tokens(text: &str) -> Vec<&str> {
     out
 }
 
+/// CR 205.3i (2026-11-06): the land types.
+const LAND_TYPES: [&str; 17] = [
+    "Cave",
+    "Desert",
+    "Forest",
+    "Gate",
+    "Island",
+    "Lair",
+    "Locus",
+    "Mine",
+    "Mountain",
+    "Plains",
+    "Planet",
+    "Power-Plant",
+    "Sphere",
+    "Swamp",
+    "Tower",
+    "Town",
+    "Urza's",
+];
+
+/// A `Mode$ Continuous` line with nothing but whom it affects and hints for Forge's AI.
+fn only_ai_hints(rec: &Record) -> bool {
+    rec.params.iter().all(|(k, _)| {
+        matches!(
+            k.as_str(),
+            "Mode" | "Affected" | "AffectedDefined" | "AddSVar" | "Description"
+        )
+    })
+}
+
+/// A word of a filter that names players, not cards (`You`, `Player.Opponent`).
+fn player_word(head: &str) -> bool {
+    matches!(head, "You" | "Player" | "Opponent")
+}
+
 fn card_type(word: &str) -> Option<CardType> {
     CARD_TYPES.iter().find(|(n, _)| *n == word).map(|(_, t)| *t)
 }
@@ -709,6 +748,16 @@ impl<'a> Tx<'a> {
                 "Basic" => s.supertypes.push(Supertype::Basic),
                 "Legendary" => s.supertypes.push(Supertype::Legendary),
                 "Snow" => s.supertypes.push(Supertype::Snow),
+                // Colorless (CR 105.2c): none of the five colors.
+                "Colorless" => {
+                    s.not_colors = vec![
+                        Color::White,
+                        Color::Blue,
+                        Color::Black,
+                        Color::Red,
+                        Color::Green,
+                    ]
+                }
                 "tapped" => s.tapped = Some(true),
                 "untapped" => s.tapped = Some(false),
                 "attacking" => s.attacking = Some(true),
@@ -1142,6 +1191,17 @@ impl<'a> Tx<'a> {
         }
         if let Some(c) = v.strip_prefix("Count$Devotion.").and_then(color) {
             return Some(Amount::Devotion(vec![c]));
+        }
+        // CR 700.5: "devotion to [color 1] and [color 2]".
+        if let Some((a, b)) = v
+            .strip_prefix("Count$DevotionDual.")
+            .and_then(|r| r.split_once('.'))
+            && let (Some(a), Some(b)) = (color(a), color(b))
+            && a != b
+        {
+            let mut cs = vec![a, b];
+            cs.sort();
+            return Some(Amount::Devotion(cs));
         }
         // `Count$Compare <variable> GE<n>.<then>.<otherwise>`.
         if let Some(rest) = v.strip_prefix("Count$Compare ") {
@@ -1610,26 +1670,87 @@ impl<'a> Tx<'a> {
                     }
                 }
             }
-            // A spell or a non-mana ability that adds mana: one type, any amount.
+            // A spell or a non-mana ability that adds mana (CR 605.5): exactly that mana
+            // ("R R R G G G": each type `Amount$` times), or `Amount$` mana of one type the
+            // player chooses ("Any": any color; "Combo R G" once: {R} or {G}).
             "Mana" => {
-                let mana = match rd.get("Produced") {
-                    Some("W") => Some(ManaType::White),
-                    Some("U") => Some(ManaType::Blue),
-                    Some("B") => Some(ManaType::Black),
-                    Some("R") => Some(ManaType::Red),
-                    Some("G") => Some(ManaType::Green),
-                    Some("C") => Some(ManaType::Colorless),
-                    _ => {
-                        self.block("Mana:produced");
-                        None
-                    }
+                let letter = |w: &str| match w {
+                    "W" => Some(ManaType::White),
+                    "U" => Some(ManaType::Blue),
+                    "B" => Some(ManaType::Black),
+                    "R" => Some(ManaType::Red),
+                    "G" => Some(ManaType::Green),
+                    "C" => Some(ManaType::Colorless),
+                    _ => None,
                 };
+                let words: Vec<&str> = rd
+                    .get("Produced")
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .collect();
+                let amount_text = rd.get("Amount").unwrap_or("1");
                 let who = self.player(&rd, chain, triggered);
-                let amount = self.amount(rd.get("Amount").unwrap_or("1"), chain);
-                Effect::AddMana {
-                    who: who?,
-                    mana: mana?,
-                    amount: amount?,
+                let amount = self.amount(amount_text, chain);
+                let (who, amount) = (who?, amount?);
+                let colors: Vec<ManaType> =
+                    Color::ALL.into_iter().map(ManaType::from_color).collect();
+                match words.as_slice() {
+                    ["Any"] => Effect::AddManaOf {
+                        who,
+                        of: colors,
+                        amount,
+                    },
+                    ["Combo", rest @ ..] if amount == Amount::Fixed(1) && !rest.is_empty() => {
+                        let of: Option<Vec<ManaType>> = match rest {
+                            ["Any"] => Some(colors),
+                            _ => rest.iter().map(|w| letter(w)).collect(),
+                        };
+                        match of {
+                            Some(mut of) if of.len() > 1 => {
+                                of.dedup();
+                                Effect::AddManaOf { who, of, amount }
+                            }
+                            _ => {
+                                self.block("Mana:produced");
+                                return None;
+                            }
+                        }
+                    }
+                    [_, ..] => match words.iter().map(|w| letter(w)).collect::<Option<Vec<_>>>() {
+                        Some(all) => {
+                            // Each type once, as many times as it is listed.
+                            let mut parts: Vec<Effect> = Vec::new();
+                            for t in ManaType::ALL {
+                                let n = all.iter().filter(|x| **x == t).count() as u32;
+                                if n == 0 {
+                                    continue;
+                                }
+                                let amount = match (&amount, n) {
+                                    (a, 1) => a.clone(),
+                                    (Amount::Fixed(k), n) => Amount::Fixed(k * n),
+                                    (a, n) => Amount::Calc(Box::new(a.clone()), Calc::Times(n)),
+                                };
+                                parts.push(Effect::AddMana {
+                                    who,
+                                    mana: t,
+                                    amount,
+                                });
+                            }
+                            if parts.len() == 1 {
+                                parts.remove(0)
+                            } else {
+                                Effect::Seq(parts)
+                            }
+                        }
+                        None => {
+                            self.block("Mana:produced");
+                            return None;
+                        }
+                    },
+                    [] => {
+                        self.block("Mana:produced");
+                        return None;
+                    }
                 }
             }
             "Destroy" => {
@@ -1875,6 +1996,18 @@ impl<'a> Tx<'a> {
                     && (take != Take::All || in_library(to) || (in_library(rest) && !rest_random))
                 {
                     self.block("Dig:each player chooses");
+                    return None;
+                }
+                // Another player's cards put onto the battlefield: Forge gives them to their
+                // owner; by CR 110.2a it is whoever the card tells to put them there. Only
+                // where nothing is chosen (the library's player reveals and puts them, as
+                // the engine's text says) is that the owner for sure.
+                let battlefield = |d: CardDest| matches!(d, CardDest::Battlefield { .. });
+                let theirs = take == Take::All
+                    && (rest_random || count == Some(Amount::Fixed(1)) || !in_library(rest))
+                    && !(valid.is_some() && !no_reveal && !reveal);
+                if who != PlayerRef::You && (battlefield(to) || battlefield(rest)) && !theirs {
+                    self.block("Dig:another player's cards onto the battlefield, chosen by you");
                     return None;
                 }
                 Effect::Dig {
@@ -2816,6 +2949,14 @@ impl<'a> Tx<'a> {
                 "Swamp" => land_types.push(BasicLandType::Swamp),
                 "Mountain" => land_types.push(BasicLandType::Mountain),
                 "Forest" => land_types.push(BasicLandType::Forest),
+                // "Every basic land type" (CR 205.3i).
+                "AllBasicLandType" => land_types.extend([
+                    BasicLandType::Plains,
+                    BasicLandType::Island,
+                    BasicLandType::Swamp,
+                    BasicLandType::Mountain,
+                    BasicLandType::Forest,
+                ]),
                 w if self.known.subtypes.contains(w) => subtypes.push(w.to_string()),
                 w => {
                     self.block(format!("type added:{}", shape(w)));
@@ -3296,6 +3437,9 @@ impl<'a> Tx<'a> {
             match (kind, on_battlefield) {
                 ("Spell", false) => out.spells.push(self.selector(&filter)?),
                 ("Activated", true) => out.abilities.push(self.selector(&filter)?),
+                // Without `inZoneBattlefield`: an ability of such a source anywhere (a
+                // card's cycling from the hand too).
+                ("Activated", false) => out.sources.push(self.selector(&filter)?),
                 _ => {
                     self.block(format!("Mana:RestrictValid {kind}"));
                     return None;
@@ -3305,7 +3449,222 @@ impl<'a> Tx<'a> {
         Some(out)
     }
 
+    /// `AB$ Mana` / `AB$ ManaReflected`: a mana ability (CR 605.1a; D-049, D-052, D-066).
+    fn mana_ability(&mut self, rec: &'a Record, api: &str) -> Option<AbilityDef> {
+        let rd = Rd::new(rec, api);
+        let cost = rd.get("Cost").and_then(|c| self.cost_of(c, true));
+        let letter = |w: &&str| match *w {
+            "W" => Some(ManaType::White),
+            "U" => Some(ManaType::Blue),
+            "B" => Some(ManaType::Black),
+            "R" => Some(ManaType::Red),
+            "G" => Some(ManaType::Green),
+            "C" => Some(ManaType::Colorless),
+            _ => None,
+        };
+        let colors =
+            || -> Vec<ManaType> { Color::ALL.into_iter().map(ManaType::from_color).collect() };
+        let produce = if api == "ManaReflected" {
+            // "Add one mana of any color/type that a [Valid] could produce" (CR 106.7).
+            let types = match rd.get("ColorOrType") {
+                Some("Color") => Some(false),
+                Some("Type") => Some(true),
+                other => {
+                    self.block(format!(
+                        "ManaReflected:ColorOrType {}",
+                        other.unwrap_or("?")
+                    ));
+                    None
+                }
+            };
+            let property = rd.get("ReflectProperty");
+            if property != Some("Produce") {
+                self.block(format!("ManaReflected:{}", property.unwrap_or("?")));
+            }
+            let from = match rd.get("Valid") {
+                Some(v) if !v.starts_with("Defined.") => self.selector(v),
+                other => {
+                    self.block(format!("ManaReflected:Valid {}", other.unwrap_or("?")));
+                    None
+                }
+            };
+            if rd.get("Amount").is_some_and(|a| a != "1") {
+                self.block("ManaReflected:Amount");
+                return None;
+            }
+            match (types, from, property) {
+                (Some(types), Some(from), Some("Produce")) => {
+                    Some(ManaProduce::Reflected { from, types })
+                }
+                _ => return None,
+            }
+        } else {
+            // `Amount$`: how many times the whole of `Produced$` is made — a number, or a
+            // variable counted as the ability resolves.
+            let (times, counted) = match rd.get("Amount") {
+                None => (Some(1), None),
+                Some(n) => match n.parse::<u32>() {
+                    Ok(n) => (Some(n).filter(|n| *n > 0), None),
+                    Err(_) => match self.expr(n) {
+                        // "For each [permanent you control]" (D-066).
+                        Some(Amount::Count(sel)) if sel.tapped.is_none() => {
+                            (None, Some(Amount::Count(sel)))
+                        }
+                        Some(_) => {
+                            self.block("Mana:counted");
+                            return None;
+                        }
+                        None => return None,
+                    },
+                },
+            };
+            let words: Vec<&str> = rd
+                .get("Produced")
+                .unwrap_or("")
+                .split_whitespace()
+                .collect();
+            match (times, counted) {
+                (_, Some(amount)) => match words.as_slice() {
+                    // "Add X mana of any one color", "Add {B} for each Swamp you control".
+                    ["Any"] => Some(ManaProduce::Counted {
+                        of: colors(),
+                        amount,
+                    }),
+                    [one] => letter(one).map(|t| ManaProduce::Counted {
+                        of: vec![t],
+                        amount,
+                    }),
+                    _ => None,
+                },
+                (Some(n), None) => match words.as_slice() {
+                    // One colour of the player's choice, `n` mana of it.
+                    ["Any"] if n == 1 => Some(ManaProduce::AnyColor),
+                    ["Any"] => Some(ManaProduce::Times {
+                        of: colors(),
+                        count: n,
+                    }),
+                    // "Add {W} or {U}"; with `Amount$ n`, `n` mana each of any listed
+                    // colour ("in any combination").
+                    ["Combo", "Any"] if n == 1 => Some(ManaProduce::AnyColor),
+                    ["Combo", "Any"] => Some(ManaProduce::Combination {
+                        of: colors(),
+                        count: n,
+                    }),
+                    ["Combo", "ColorIdentity"] if n == 1 => Some(ManaProduce::CommanderIdentity),
+                    ["Combo", of @ ..] if !of.is_empty() => {
+                        match of.iter().map(letter).collect::<Option<Vec<ManaType>>>() {
+                            None => None,
+                            Some(mut of) => {
+                                of.dedup();
+                                match (of.as_slice(), n) {
+                                    ([one], 1) => Some(ManaProduce::One(*one)),
+                                    ([one], n) => Some(ManaProduce::Times {
+                                        of: vec![*one],
+                                        count: n,
+                                    }),
+                                    (_, 1) => Some(ManaProduce::OneOf(of)),
+                                    (_, n) => Some(ManaProduce::Combination { of, count: n }),
+                                }
+                            }
+                        }
+                    }
+                    // Fixed mana: "C C", "G" with `Amount$ 3`, "U B", "C C R".
+                    [_, ..] => match words.iter().map(letter).collect::<Option<Vec<ManaType>>>() {
+                        None => None,
+                        Some(all) => {
+                            let all: Vec<ManaType> =
+                                (0..n).flat_map(|_| all.iter().copied()).collect();
+                            match all.as_slice() {
+                                [one] => Some(ManaProduce::One(*one)),
+                                [first, ..] if all.iter().all(|t| t == first) => {
+                                    Some(ManaProduce::Times {
+                                        of: vec![*first],
+                                        count: all.len() as u32,
+                                    })
+                                }
+                                _ => Some(ManaProduce::Fixed(all)),
+                            }
+                        }
+                    },
+                    [] => None,
+                },
+                (None, None) => None,
+            }
+        };
+        // "Activate only if you control …".
+        let only_if = self.condition(&rd);
+        // "Spend this mana only to cast … spells / activate abilities of …".
+        let spend = match rd.get("RestrictValid") {
+            None => Some(None),
+            Some(text) => self.mana_restriction(text).map(Some),
+        };
+        // What else it does (CR 605.3b): "This land deals 1 damage to you."
+        let then = match rd.get("SubAbility") {
+            None => Some(None),
+            Some(name) => self.mana_side_effect(name).map(Some),
+        };
+        rd.finish(&mut self.blockers);
+        let Some(produce) = produce else {
+            self.block("Mana:produced");
+            return None;
+        };
+        let (cost, only_if, spend, then) = (cost?, only_if?, spend?, then?);
+        // D-066: `{T}` or a sacrifice, maybe mana and life; one permanent sacrificed.
+        let uses_up = cost.tap || cost.sacrifice_self || cost.sacrifice.is_some();
+        let other = cost.discard.is_some() || cost.discard_self || cost.exile_self;
+        if !uses_up || other || cost.mana.as_ref().is_some_and(|m| m.has_x()) {
+            self.block("Mana:cost");
+            return None;
+        }
+        if cost.sacrifice.as_ref().is_some_and(|ch| ch.count != 1) {
+            self.block("Mana:cost sacrifice N");
+            return None;
+        }
+        if matches!(produce, ManaProduce::Counted { .. })
+            && (cost.sacrifice_self || cost.sacrifice.is_some())
+        {
+            self.block("Mana:counted with sacrifice");
+            return None;
+        }
+        Some(AbilityDef::Mana {
+            cost,
+            produce,
+            only_if,
+            spend,
+            then,
+        })
+    }
+
+    /// The `SubAbility$` of a mana ability: what it also does as it resolves. CR 605.1a /
+    /// 605.5a: with a target, or moving a card to or from a library, it would not be a
+    /// mana ability; only damage to, life loss and life gain of its controller are
+    /// modelled (D-066).
+    fn mana_side_effect(&mut self, name: &str) -> Option<Effect> {
+        let rec = self.sub(name)?;
+        let api = rec.head().map(|h| h.1).unwrap_or("?");
+        if !matches!(api, "DealDamage" | "LoseLife" | "GainLife") {
+            self.block(format!("Mana:sub {api}"));
+            return None;
+        }
+        let mode = self.mode(rec, false, "DB")?;
+        if !mode.targets.is_empty() {
+            self.block("Mana:sub with a target");
+            return None;
+        }
+        if !crate::mana_side_effect(&mode.effect) {
+            self.block(format!("Mana:sub {api} form"));
+            return None;
+        }
+        Some(mode.effect)
+    }
+
     fn cost(&mut self, text: &str) -> Option<Cost> {
+        self.cost_of(text, false)
+    }
+
+    /// A cost; `hybrid`: two-color hybrid mana (`RW` = `{R/W}`) is understood (D-066: only
+    /// mana abilities can pay it so far).
+    fn cost_of(&mut self, text: &str, hybrid: bool) -> Option<Cost> {
         let mut cost = Cost::default();
         let mut mana = String::new();
         for tok in cost_tokens(text) {
@@ -3391,6 +3750,15 @@ impl<'a> Tx<'a> {
                 {
                     mana.push_str(&format!("{{{tok}}}"))
                 }
+                // CR 107.4e: `RW` is `{R/W}`.
+                (_, false)
+                    if hybrid
+                        && tok.len() == 2
+                        && tok.chars().all(|c| "WUBRG".contains(c))
+                        && tok.as_bytes()[0] != tok.as_bytes()[1] =>
+                {
+                    mana.push_str(&format!("{{{}/{}}}", &tok[..1], &tok[1..]))
+                }
                 _ => {
                     self.block(format!("cost:{kind}"));
                     return None;
@@ -3435,95 +3803,7 @@ impl<'a> Tx<'a> {
                 self.in_spell = false;
                 body.map(AbilityDef::Spell)
             }
-            "AB" if api == "Mana" => {
-                let rd = Rd::new(rec, "Mana");
-                let cost = rd.get("Cost").and_then(|c| self.cost(c));
-                let letter = |w: &&str| match *w {
-                    "W" => Some(ManaType::White),
-                    "U" => Some(ManaType::Blue),
-                    "B" => Some(ManaType::Black),
-                    "R" => Some(ManaType::Red),
-                    "G" => Some(ManaType::Green),
-                    "C" => Some(ManaType::Colorless),
-                    _ => None,
-                };
-                let colors = || -> Vec<ManaType> {
-                    Color::ALL.into_iter().map(ManaType::from_color).collect()
-                };
-                // `Amount$`: how many times the whole of `Produced$` is made.
-                let times = match rd.get("Amount") {
-                    None => Some(1),
-                    Some(n) => n.parse::<u32>().ok().filter(|n| *n > 0),
-                };
-                let words: Vec<&str> = rd
-                    .get("Produced")
-                    .unwrap_or("")
-                    .split_whitespace()
-                    .collect();
-                let produce = times.and_then(|n| match words.as_slice() {
-                    // One colour of the player's choice, `n` mana of it.
-                    ["Any"] if n == 1 => Some(ManaProduce::AnyColor),
-                    ["Any"] => Some(ManaProduce::Times {
-                        of: colors(),
-                        count: n,
-                    }),
-                    // "Add {W} or {U}": each mana any of the listed colours. More than
-                    // one such mana ("in any combination") is not modelled.
-                    ["Combo", "Any"] if n == 1 => Some(ManaProduce::AnyColor),
-                    ["Combo", "ColorIdentity"] if n == 1 => Some(ManaProduce::CommanderIdentity),
-                    ["Combo", of @ ..] if n == 1 && !of.is_empty() => {
-                        let mut of: Vec<ManaType> = of.iter().map(letter).collect::<Option<_>>()?;
-                        of.dedup();
-                        match of.as_slice() {
-                            [one] => Some(ManaProduce::One(*one)),
-                            _ => Some(ManaProduce::OneOf(of)),
-                        }
-                    }
-                    // Fixed mana: "C C", "G" with `Amount$ 3`. Only one type at a time.
-                    [first, ..] => {
-                        let all: Vec<ManaType> = words.iter().map(letter).collect::<Option<_>>()?;
-                        let t = letter(first)?;
-                        if all.iter().any(|x| *x != t) {
-                            return None;
-                        }
-                        match all.len() as u32 * n {
-                            1 => Some(ManaProduce::One(t)),
-                            count => Some(ManaProduce::Times { of: vec![t], count }),
-                        }
-                    }
-                    [] => None,
-                });
-                // "Activate only if you control …".
-                let only_if = self.condition(&rd);
-                // "Spend this mana only to cast … spells / activate abilities of …".
-                let spend = match rd.get("RestrictValid") {
-                    None => Some(None),
-                    Some(text) => self.mana_restriction(text).map(Some),
-                };
-                rd.finish(&mut self.blockers);
-                let Some(produce) = produce else {
-                    self.block("Mana:produced");
-                    return None;
-                };
-                let (cost, only_if, spend) = (cost?, only_if?, spend?);
-                // `{T}`, or `{T}` and "sacrifice this" (Treasure). Mana abilities that cost
-                // mana or anything chosen are not modelled.
-                let plain = Cost {
-                    tap: true,
-                    sacrifice_self: cost.sacrifice_self,
-                    ..Cost::default()
-                };
-                if cost != plain {
-                    self.block("Mana:cost");
-                    return None;
-                }
-                Some(AbilityDef::Mana {
-                    cost,
-                    produce,
-                    only_if,
-                    spend,
-                })
-            }
+            "AB" if api == "Mana" || api == "ManaReflected" => self.mana_ability(rec, api),
             "AB" => {
                 let rd = Rd::new(rec, "activated");
                 let cost = rd.get("Cost").and_then(|c| self.cost(c));
@@ -4053,6 +4333,37 @@ impl<'a> Tx<'a> {
                 self.block("trig:OptionalDecider with a cost");
                 return;
             }
+            // "You may [X]. If you do, [Y]": Forge runs the whole chain once its decider
+            // says yes; the card does Y only if X happened.
+            let if_you_do = rec.get("TriggerDescription").is_some_and(|d| {
+                let d = d.to_lowercase();
+                d.matches("if you do").count() + d.matches("this way").count() == 1
+                    && d.contains("may ")
+            });
+            if decider.is_some()
+                && !priced
+                && if_you_do
+                && let Body::Effect(m) = &mut body
+                && let Effect::Seq(v) = &mut m.effect
+            {
+                // The first instruction that does something ("where X is" comes with it).
+                let first = v
+                    .iter()
+                    .position(|e| !matches!(e, Effect::SetX(_)))
+                    .unwrap_or(0);
+                if first + 1 < v.len() {
+                    let then = v.split_off(first + 1);
+                    let first = std::mem::take(v);
+                    m.effect = Effect::IfDone {
+                        first: Box::new(Effect::Seq(first)),
+                        then: Box::new(if then.len() == 1 {
+                            then.into_iter().next().expect("one")
+                        } else {
+                            Effect::Seq(then)
+                        }),
+                    };
+                }
+            }
             if let Some(decider) = decider
                 && !priced
             {
@@ -4184,9 +4495,12 @@ impl<'a> Tx<'a> {
     }
 
     fn static_ability(&mut self, rec: &'a Record) -> Option<AbilityDef> {
+        self.nothing = false;
         let mode = rec.get("Mode").unwrap_or("?");
         let rd = Rd::new(rec, format!("static {mode}"));
         let out = match mode {
+            // Rules about players, and about where cards may be played from.
+            "Continuous" if Self::is_player_static(&rd) => self.player_static(&rd),
             "Continuous" => {
                 let affected = match (rd.get("AffectedDefined"), rd.get("Affected")) {
                     (None, Some("Card.Self")) | (Some("Self"), None | Some("Card.Self")) => {
@@ -4225,6 +4539,23 @@ impl<'a> Tx<'a> {
                         None
                     }
                 };
+                // Where the ability works: on the battlefield (Forge's default), or — for
+                // what an effect object carries — the command zone.
+                let mut from_graveyard = false;
+                if rd.rec.get("CharacteristicDefining").is_none() {
+                    match rd.get("EffectZone") {
+                        None | Some("Battlefield") => {}
+                        Some("Command") if self.in_effect => {}
+                        // "As long as this card is in your graveyard, …" (CR 113.6b).
+                        Some("Graveyard") if !self.in_effect && self.granting == 0 => {
+                            from_graveyard = true;
+                        }
+                        Some(z) => {
+                            self.block(format!("static:works from {}", shape(z)));
+                            return None;
+                        }
+                    }
+                }
                 let int = |t: Option<&str>| {
                     t.map_or(Some(0), |t| t.trim_start_matches('+').parse::<i32>().ok())
                 };
@@ -4295,6 +4626,24 @@ impl<'a> Tx<'a> {
                 // Layer 4: "are [types] in addition to their other types".
                 if let Some(types) = rd.get("AddType") {
                     effects.insert(0, self.added_types(types.split('&'))?);
+                }
+                // Layer 4: "isn't a creature" (card types only; the subtypes stay).
+                if let Some(types) = rd.get("RemoveType") {
+                    let mut ts = Vec::new();
+                    for t in types.split('&').map(str::trim) {
+                        match card_type(t) {
+                            Some(t) => ts.push(t),
+                            None => {
+                                self.block(format!("static:RemoveType {}", shape(t)));
+                                return None;
+                            }
+                        }
+                    }
+                    let at = effects
+                        .iter()
+                        .position(|e| !matches!(e, ContinuousEffect::AddTypes { .. }))
+                        .unwrap_or(effects.len());
+                    effects.insert(at, ContinuousEffect::RemoveTypes(ts));
                 }
                 // Layer 5: "is [color]" (not "in addition").
                 if let Some(colors) = rd.get("SetColor") {
@@ -4406,6 +4755,18 @@ impl<'a> Tx<'a> {
                     }
                 }
                 if effects.is_empty() && rules.is_empty() {
+                    // Name what wasn't understood: the parameters that weren't read.
+                    let before = self.blockers.len();
+                    rd.finish(&mut self.blockers);
+                    if self.blockers.len() > before {
+                        return None;
+                    }
+                    // A line that only copies hints for Forge's AI to what it affects
+                    // (`AddSVar$`, checked above) says nothing about the rules.
+                    if rd.rec.get("AddSVar").is_some() && only_ai_hints(rd.rec) {
+                        self.nothing = true;
+                        return None;
+                    }
                     self.block("static:Continuous-nothing");
                     return None;
                 }
@@ -4432,6 +4793,20 @@ impl<'a> Tx<'a> {
                             return None;
                         }
                     }
+                }
+                // A static ability of a card in a graveyard: about permanents only (its own
+                // card isn't one), one ability.
+                if from_graveyard {
+                    let about_permanents = matches!(affected, Affected::All(_));
+                    if out.len() != 1 || !about_permanents {
+                        self.block("static:from the graveyard about the card itself");
+                        return None;
+                    }
+                    let a = out.remove(0);
+                    return Some(AbilityDef::FromZone {
+                        zone: ActivationZone::Graveyard,
+                        ability: Box::new(a),
+                    });
                 }
                 let first = out.remove(0);
                 self.additional.extend(out);
@@ -4551,6 +4926,347 @@ impl<'a> Tx<'a> {
         };
         rd.finish(&mut self.blockers);
         out
+    }
+
+    /// Is this `Mode$ Continuous` line (also) a rule about players or about where cards may
+    /// be played from? Forge applies these keys to the affected *players* (`Affected$ You`)
+    /// or lets the affected *cards* be played from their zone (`MayPlay$`).
+    fn is_player_static(rd: &Rd<'a>) -> bool {
+        const KEYS: [&str; 5] = [
+            "SetMaxHandSize",
+            "RaiseMaxHandSize",
+            "AdjustLandPlays",
+            "MayPlay",
+            "MayLookAt",
+        ];
+        KEYS.iter().any(|k| rd.rec.get(k).is_some())
+            || rd.rec.get("Affected").is_some_and(|a| {
+                a.split(',')
+                    .any(|alt| player_word(alt.trim().split('.').next().unwrap_or("")))
+            })
+    }
+
+    /// A `Mode$ Continuous` line about players (`Affected$ You | SetMaxHandSize$ Unlimited`)
+    /// or about cards that may be played from a zone (`Affected$ Land.YouOwn | MayPlay$ True
+    /// | AffectedZone$ Graveyard`), compiled to [`AbilityDef::PlayerRule`]s. Card
+    /// alternatives of the same line that are given keywords ("you and creatures you
+    /// control have hexproof") become static abilities of their own. The first ability is
+    /// returned, the rest go to `self.additional`.
+    fn player_static(&mut self, rd: &Rd<'a>) -> Option<AbilityDef> {
+        // (Looked at below; read here so that an early failure names only what failed.)
+        for key in ["MayPlay", "MayLookAt", "AffectedZone", "EffectZone"] {
+            rd.get(key);
+        }
+        if rd.get("AffectedDefined").is_some() {
+            self.block("static:player rule AffectedDefined");
+            return None;
+        }
+        let Some(affected) = rd.get("Affected") else {
+            self.block("static:player rule without Affected");
+            return None;
+        };
+        let mut players: Vec<Who> = Vec::new();
+        let mut cards: Vec<&'a str> = Vec::new();
+        for alt in affected.split(',').map(str::trim) {
+            match alt {
+                "You" => players.push(Who::You),
+                "Player" => players.push(Who::Any),
+                "Opponent" | "Player.Opponent" => players.push(Who::Opponent),
+                _ if player_word(alt.split('.').next().unwrap_or("")) => {
+                    self.block(format!("filter:player {}", shape(alt)));
+                    return None;
+                }
+                _ => cards.push(alt),
+            }
+        }
+        if players.len() > 1 {
+            self.block("filter:several kinds of player");
+            return None;
+        }
+        let only_if = self.static_condition(rd)?;
+        let mut out: Vec<AbilityDef> = Vec::new();
+        let rule = |who: Who, rule: PlayerRule| AbilityDef::PlayerRule {
+            who,
+            rule,
+            only_if: only_if.clone(),
+        };
+        // Keywords: players have hexproof or shroud; permanents any keyword.
+        let mut keywords: Vec<&'a str> = Vec::new();
+        if let Some(kw) = rd.get("AddKeyword") {
+            keywords = kw.split('&').map(str::trim).collect();
+        }
+        if let Some(&who) = players.first() {
+            // A player's maximum hand size (CR 402.2).
+            match rd.get("SetMaxHandSize") {
+                None => {}
+                Some("Unlimited") => out.push(rule(who, PlayerRule::NoMaximumHandSize)),
+                Some(n) => match n.parse::<u32>() {
+                    Ok(n) => out.push(rule(who, PlayerRule::MaximumHandSize(n))),
+                    Err(_) => {
+                        self.block("static:SetMaxHandSize variable");
+                        return None;
+                    }
+                },
+            }
+            if let Some(n) = rd.get("RaiseMaxHandSize") {
+                match n.trim_start_matches('+').parse::<i32>() {
+                    Ok(n) => out.push(rule(who, PlayerRule::MaximumHandSizeBy(n))),
+                    Err(_) => {
+                        self.block("static:RaiseMaxHandSize variable");
+                        return None;
+                    }
+                }
+            }
+            // Land plays (CR 305.2).
+            match rd.get("AdjustLandPlays") {
+                None => {}
+                Some("Unlimited") => out.push(rule(who, PlayerRule::AnyNumberOfLandPlays)),
+                Some(n) => match n.parse::<u32>() {
+                    Ok(n) if n > 0 => out.push(rule(who, PlayerRule::AdditionalLandPlays(n))),
+                    _ => {
+                        self.block("static:AdjustLandPlays variable");
+                        return None;
+                    }
+                },
+            }
+            for k in &keywords {
+                match *k {
+                    "Hexproof" => out.push(rule(who, PlayerRule::Hexproof)),
+                    "Shroud" => out.push(rule(who, PlayerRule::Shroud)),
+                    other => {
+                        self.block(format!("player keyword:{}", shape(other)));
+                        return None;
+                    }
+                }
+            }
+            if out.is_empty() {
+                self.block("static:player rule-nothing");
+                return None;
+            }
+        } else {
+            // Only cards: what the line says about players means nothing for them.
+            for key in ["SetMaxHandSize", "RaiseMaxHandSize", "AdjustLandPlays"] {
+                if rd.get(key).is_some() {
+                    self.block(format!("static:{key} for cards"));
+                    return None;
+                }
+            }
+        }
+        if !cards.is_empty() {
+            let may_play = rd.get("MayPlay");
+            let may_look = rd.get("MayLookAt");
+            if may_play.is_some() || may_look.is_some() {
+                if !keywords.is_empty() {
+                    self.block("static:MayPlay with keywords");
+                    return None;
+                }
+                out.extend(self.play_from(rd, &cards, may_play, may_look, &only_if)?);
+            } else if !keywords.is_empty() {
+                // Each alternative is its own static ability: keywords given twice are
+                // given once (CR 702: these keywords are redundant).
+                let mut ks = Vec::new();
+                for k in &keywords {
+                    match keyword(k) {
+                        Some(k) => ks.push(k),
+                        None => {
+                            self.block(format!("kw:{k}"));
+                            return None;
+                        }
+                    }
+                }
+                // Only on the battlefield.
+                if rd.get("AffectedZone").is_some_and(|z| z != "Battlefield") {
+                    self.block("static:player rule AffectedZone");
+                    return None;
+                }
+                if rd.get("EffectZone").is_some_and(|z| z != "Battlefield") {
+                    self.block("static:player rule EffectZone");
+                    return None;
+                }
+                for alt in &cards {
+                    let affected = self.affected(alt)?;
+                    out.push(AbilityDef::Static {
+                        affected,
+                        effects: vec![ContinuousEffect::AddKeywords(ks.clone())],
+                        only_if: only_if.clone(),
+                    });
+                }
+            } else {
+                self.block("static:player rule with cards");
+                return None;
+            }
+        } else if rd.get("MayPlay").is_some() || rd.get("MayLookAt").is_some() {
+            self.block("static:MayPlay for players");
+            return None;
+        }
+        if cards.is_empty() || !players.is_empty() {
+            // A rule about players works where the permanent is.
+            if rd.get("AffectedZone").is_some() {
+                self.block("static:player rule AffectedZone");
+                return None;
+            }
+        }
+        if out.is_empty() {
+            self.block("static:player rule-nothing");
+            return None;
+        }
+        let first = out.remove(0);
+        self.additional.extend(out);
+        Some(first)
+    }
+
+    /// `MayPlay$ True` / `MayLookAt$ …` for the cards `alts` of a static ability: which
+    /// cards of which zone the controller may play (CR 601.3, 116.2a) or look at (CR
+    /// 401.5).
+    fn play_from(
+        &mut self,
+        rd: &Rd<'a>,
+        alts: &[&'a str],
+        may_play: Option<&'a str>,
+        may_look: Option<&'a str>,
+        only_if: &Option<Condition>,
+    ) -> Option<Vec<AbilityDef>> {
+        let rule = |rule: PlayerRule| AbilityDef::PlayerRule {
+            who: Who::You,
+            rule,
+            only_if: only_if.clone(),
+        };
+        if may_play.is_some_and(|v| v != "True") {
+            self.block("static:MayPlay value");
+            return None;
+        }
+        let mut zones: Vec<PlayZone> = Vec::new();
+        let affected_zone = rd.get("AffectedZone");
+        for z in affected_zone
+            .unwrap_or("Battlefield")
+            .split(',')
+            .map(str::trim)
+        {
+            zones.push(match z {
+                "Graveyard" => PlayZone::Graveyard,
+                "Library" => PlayZone::LibraryTop,
+                "Exile" => PlayZone::Exile,
+                other => {
+                    self.block(format!("static:MayPlay from {other}"));
+                    return None;
+                }
+            });
+        }
+        let effect_zone = rd.get("EffectZone");
+        let mut out = Vec::new();
+        // "You may cast this card from your graveyard": the card's own ability, working
+        // from the zones it may be cast from (Forge: `EffectZone$` = `AffectedZone$`).
+        if alts == ["Card.Self"] {
+            if may_look.is_some() {
+                self.block("static:MayLookAt Self");
+                return None;
+            }
+            let same = effect_zone.is_some_and(|e| {
+                let mut a: Vec<&str> = e.split(',').map(str::trim).collect();
+                let mut b: Vec<&str> = affected_zone
+                    .unwrap_or("")
+                    .split(',')
+                    .map(str::trim)
+                    .collect();
+                a.sort_unstable();
+                b.sort_unstable();
+                a == b
+            });
+            if !same {
+                self.block("static:MayPlay Self from another zone");
+                return None;
+            }
+            if self.face.types.iter().any(|t| t == "Land") {
+                self.block("static:MayPlay Self land");
+                return None;
+            }
+            if zones.contains(&PlayZone::LibraryTop) {
+                self.block("static:MayPlay Self from library");
+                return None;
+            }
+            out.push(rule(PlayerRule::PlayThisFrom(zones)));
+            return Some(out);
+        }
+        // Otherwise a permanent's ability, about the controller's own cards.
+        if effect_zone.is_some_and(|z| z != "Battlefield") {
+            self.block("static:MayPlay EffectZone");
+            return None;
+        }
+        let mut sels = Vec::new();
+        for alt in alts {
+            let (head, props) = alt.split_once('.').unwrap_or((alt, ""));
+            let mut kept: Vec<&str> = Vec::new();
+            let (mut top, mut yours) = (false, false);
+            for p in props.split('+').map(str::trim).filter(|p| !p.is_empty()) {
+                match p {
+                    "TopLibrary" => top = true,
+                    // A card in a library or graveyard is controlled by its owner.
+                    "YouCtrl" | "YouOwn" => yours = true,
+                    // "You may play that card this turn": cards an effect remembers.
+                    "IsRemembered" => {
+                        self.block("static:MayPlay remembered cards");
+                        return None;
+                    }
+                    other => kept.push(other),
+                }
+            }
+            if !yours {
+                self.block("static:MayPlay from every player's zone");
+                return None;
+            }
+            if top != (zones == [PlayZone::LibraryTop]) {
+                self.block("static:MayPlay library card not on top");
+                return None;
+            }
+            let text = if kept.is_empty() {
+                head.to_string()
+            } else {
+                format!("{head}.{}", kept.join("+"))
+            };
+            let mut s = self.card_selector(&text)?;
+            if s != owned(s.clone()) || s.controller != Who::Any || s.other {
+                self.block("static:MayPlay filter");
+                return None;
+            }
+            // "Cast creature spells from the top of your library": a kind of card that
+            // isn't a land is cast, never played as a land — not even a land that is also
+            // that kind (a land creature). Only "cards" (`Card`), "permanent cards"
+            // (`Permanent`) and lands by type (CR 205.3i) take in lands, as Oracle's "play
+            // lands and cast spells" does.
+            let land_kind = matches!(head, "Card" | "Permanent")
+                || s.types.contains(&CardType::Land)
+                || (s.types.is_empty()
+                    && s.subtypes.iter().any(|t| LAND_TYPES.contains(&t.as_str())));
+            if !land_kind && !s.not_types.contains(&CardType::Land) {
+                s.not_types.push(CardType::Land);
+            }
+            sels.push(s);
+        }
+        // CR 401.5: the top card of the library, revealed or looked at.
+        if let Some(look) = may_look {
+            let all = sels.iter().all(|s| *s == Selector::default());
+            if zones != [PlayZone::LibraryTop] || !all {
+                self.block("static:MayLookAt shape");
+                return None;
+            }
+            match (look, may_play) {
+                ("Player", _) => out.push(rule(PlayerRule::TopCardRevealed)),
+                ("You", _) | ("True", Some(_)) => out.push(rule(PlayerRule::LookAtTopCard)),
+                (other, _) => {
+                    self.block(format!("static:MayLookAt {other}"));
+                    return None;
+                }
+            }
+        }
+        if may_play.is_some() {
+            for zone in zones {
+                out.push(rule(PlayerRule::PlayFrom {
+                    zone,
+                    cards: sels.clone(),
+                }));
+            }
+        }
+        Some(out)
     }
 
     /// Who a static rule is about: the card itself, what it is attached to, or everything
@@ -5124,11 +5840,18 @@ fn ability_records(face: &Face) -> Vec<(String, Record)> {
 /// other than the card does. The compiler can't see that, so they are named here and
 /// never compile (invariant 8: a wrong card is worse than a missing one). Each entry says
 /// what differs; remove it when the pinned Forge commit has the script corrected.
-const SCRIPT_DIFFERS: &[(&str, &str)] = &[(
-    "Swarmyard Massacre",
-    "counts Insects, Rats, Spiders and Squirrels you control; the card counts *creatures* \
-     you control of those types (a noncreature permanent of such a type must not count)",
-)];
+const SCRIPT_DIFFERS: &[(&str, &str)] = &[
+    (
+        "Swarmyard Massacre",
+        "counts Insects, Rats, Spiders and Squirrels you control; the card counts *creatures* \
+         you control of those types (a noncreature permanent of such a type must not count)",
+    ),
+    (
+        "Clash of Realities",
+        "gives its trigger to Spirit *creatures*; the card says \"all Spirits\" (a noncreature \
+         Kindred Spirit must get it too)",
+    ),
+];
 
 /// Compile a script. `Err` lists every blocker found (not just the first), on every face.
 pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
@@ -5285,6 +6008,7 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
         took_it_for_this: false,
         player_is_you: BTreeSet::new(),
         took_player_for_you: false,
+        nothing: false,
     };
     let mut def = CardDef {
         name: face.name.clone(),
@@ -5715,6 +6439,7 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
                     abilities.push((order.statics[i], extra));
                 }
             }
+            None if std::mem::take(&mut tx.nothing) && tx.blockers.len() == before => {}
             None => tx.explained(before, "static"),
         }
     }
@@ -5834,6 +6559,15 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
     compare(&plain, &compiled);
     if !def.granted.is_empty() {
         compare(&quoted, &compiled_quoted);
+    }
+    // "{T}" in a cost: a script can leave it out (Lotus Ring's given "{T}, Sacrifice this
+    // creature: …" is scripted as "Sacrifice this"), and a mana ability without it can be
+    // activated again and again (D-066).
+    let taps = |t: &str| t.matches("{t}").count();
+    if taps(&plain) > taps(&compiled)
+        || (!def.granted.is_empty() && taps(&quoted) > taps(&compiled_quoted))
+    {
+        missing.push("{T}");
     }
     // "Target creature you control" where the card says "target creature": some scripts
     // narrow a target to what Forge's AI should pick. (Equip is a keyword: its "target

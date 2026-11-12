@@ -56,6 +56,10 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
   combat damage this turn") is an `effects::Lasting`, never an ability given to the
   creature (CR 113.12). Whatever reads abilities of permanents for combat rules or
   replacement effects reads `effects::lasting_abilities(st)` too.
+- A rule about a player ("no maximum hand size", extra land plays, "you have hexproof",
+  "play with the top card of your library revealed", "you may play lands from your
+  graveyard") is an `AbilityDef::PlayerRule`, read through `engine_core::players` (D-070),
+  never a flag written into `GameState`.
 - New dependency in engine-core/card-model ⇒ add to `PURE_ALLOWLIST` in `crates/xtask` AND
   log a decision. Must be `no_std`-capable with `default-features = false`.
 
@@ -124,7 +128,8 @@ APNAP_TRACE=1 cargo run --release -p harness -- run --seed N --setup forge-4p   
   place), `frames/cast.rs` (601.2/602.2, and putting triggers on the stack), `frames/resolve.rs`
   (work list; last known information about targets in `TargetInfo`, D-068), `replacement.rs` + `frames/apply.rs` (614–616 pipeline), `triggers.rs` +
   `frames/put_triggers.rs` (603), `frames/check.rs` (117.5/704.3), `effects.rs` (resolved
-  continuous effects, shields), `testing.rs` (feature `test-support`: scenario builder, D-022).
+  continuous effects, shields), `players.rs` (rules about players: hand size, land plays,
+  hexproof, the top card of the library, playing from other zones; D-070), `testing.rs` (feature `test-support`: scenario builder, D-022).
 
 ## Direction (2026-11-09, D-046): every real card, by compiling Forge's scripts
 The user's goal is "every non-silver bordered card ever printed, for the most part,
@@ -138,7 +143,7 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-068): 9,776 of 34,463 scripts compile (28.4%). Since 2026-11-10 the order of
+Status (D-070): 9,891 of 34,463 scripts compile (28.7%). Since 2026-11-10 the order of
 work is EDHREC popularity (the user's wish), not raw count; measured after D-067: 60% of
 the 100 most played Commander cards compile, 39% of the top 1,000, 26% of the top 5,000 (`edhrec_rank` in the Scryfall bulk file in the cache, joined to
 `forge-coverage --why "" --all`). Precons: `harness coverage --verbose` lists what blocks

@@ -282,6 +282,10 @@ pub enum Event {
         player: PlayerId,
         card: ObjectId,
     },
+    /// CR 506.4: a permanent stopped being a creature and was removed from combat.
+    RemovedFromCombat {
+        object: ObjectId,
+    },
     /// CR 701.27a: the permanent turned over; `face` is the face now up. It is the same
     /// object (CR 701.27c).
     Transformed {

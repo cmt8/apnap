@@ -1051,3 +1051,213 @@ fn mana_value_of_a_transformed_permanent_as_a_target() {
         "the Moth's mana value is the Pupa's: 1"
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Faces together with playing from other zones (D-070) and mana abilities (D-066).
+
+const CRUCIBLE: &str = "Name:Test Crucible\nManaCost:3\nTypes:Artifact\n\
+    S:Mode$ Continuous | Affected$ Land.YouOwn | MayPlay$ True | AffectedZone$ Graveyard | Description$ Text.\n\
+    Oracle:You may play lands from your graveyard.";
+
+// CR 601.3e, 712.9 (2026-11-06): "you may play lands from your graveyard" is judged by the
+// face that would be played — a modal card whose back face is a land may be played as that
+// land face from the graveyard (it is the turn's land play, CR 305.2a), but its front
+// face, an instant, may not be cast from there. CR 712.6a: in the graveyard it is an
+// instant card; it enters with the land face up.
+#[test]
+fn a_land_face_played_from_the_graveyard() {
+    let mut sc = scenario(&[TIDE, CRUCIBLE]);
+    sc.card(P0, Zone::Battlefield, "Test Crucible");
+    sc.cards(P0, Zone::Battlefield, &["Island", "Island"]);
+    let card = sc.card(P0, Zone::Graveyard, "Test Tide Charm");
+    let mut s = Script::new(sc.build());
+    assert!(chars(&s.st, card).is(CardType::Instant));
+    assert!(s.has(|_, o| matches!(o, OptionDesc::PlayLandFace { card: c, face: 1 } if *c == card)));
+    assert!(!s.has(|_, o| matches!(o, OptionDesc::PlayLand { card: c } if *c == card)));
+    assert!(!s.has(|_, o| matches!(o, OptionDesc::CastSpell { card: c } if *c == card)));
+    s.play_face("Test Tide Flat");
+    let land = the(&s, P0, Zone::Battlefield, "Test Tide Charm");
+    assert_eq!(s.st.object(land).face, 1);
+    assert!(
+        s.st.object(land).tapped,
+        "the land face's own \"enters tapped\""
+    );
+    assert_eq!(s.st.player(P0).lands_played_this_turn, 1);
+    // Without the rule: nothing from the graveyard.
+    let mut sc = scenario(&[TIDE, CRUCIBLE]);
+    let card = sc.card(P0, Zone::Graveyard, "Test Tide Charm");
+    let s = Script::new(sc.build());
+    assert!(!s.has(|_, o| matches!(o, OptionDesc::PlayLandFace { card: c, .. } if *c == card)));
+}
+
+// CR 601.3e, 712.8c: "you may cast creature spells from your graveyard" lets a modal card
+// whose back face is a creature be cast as that face (and not as its sorcery front). CR
+// 106.6: mana that may be spent only on creature spells pays for it — the restriction
+// looks at the face being cast. CR 601.2g, 605.3a: a mana ability that costs {1} (a
+// Signet) is paid from the pool on the way.
+#[test]
+fn a_creature_face_cast_from_the_graveyard_with_restricted_mana_and_a_signet() {
+    let necro = "Name:Test Necrostone\nManaCost:3\nTypes:Artifact\n\
+        S:Mode$ Continuous | Affected$ Creature.YouOwn | MayPlay$ True | AffectedZone$ Graveyard | Description$ Text.\n\
+        Oracle:You may cast creature spells from your graveyard.";
+    let signet = "Name:Test Signet\nManaCost:2\nTypes:Artifact\n\
+        A:AB$ Mana | Cost$ 1 T | Produced$ U B | SpellDescription$ Add {U}{B}.\n\
+        Oracle:{1}, {T}: Add {U}{B}.";
+    let cavern = "Name:Test Cavern\nManaCost:no cost\nTypes:Land\n\
+        A:AB$ Mana | Cost$ T | Produced$ C | RestrictValid$ Spell.Creature | SpellDescription$ Add {C}. Spend this mana only to cast creature spells.\n\
+        Oracle:{T}: Add {C}. Spend this mana only to cast creature spells.";
+    let mut sc = scenario(&[KILN, necro, signet, cavern]);
+    sc.card(P0, Zone::Battlefield, "Test Necrostone");
+    sc.card(P0, Zone::Battlefield, "Forest");
+    sc.card(P0, Zone::Battlefield, "Test Signet");
+    sc.card(P0, Zone::Battlefield, "Test Cavern");
+    sc.card(P0, Zone::Battlefield, "Plains");
+    let card = sc.card(P0, Zone::Graveyard, "Test Kiln Blast");
+    let mut s = Script::new(sc.build());
+    // {3}{B}: the Signet's {U}{B} (paid for by the Forest), the Cavern's {C} — which only
+    // a creature spell may spend — and the Plains.
+    assert!(!s.has(|_, o| matches!(o, OptionDesc::CastSpell { card: c } if *c == card)));
+    assert!(s.has(|_, o| matches!(o, OptionDesc::CastFace { card: c, face: 1 } if *c == card)));
+    s.cast_face("Test Kiln Golem");
+    s.tap("Forest", engine_core::mana::ManaType::Green);
+    s.tap("Test Signet", engine_core::mana::ManaType::Blue);
+    s.tap("Test Cavern", engine_core::mana::ManaType::Colorless);
+    s.pay();
+    s.pass_all();
+    let golem = the(&s, P0, Zone::Battlefield, "Test Kiln Blast");
+    assert_eq!(chars(&s.st, golem).name, "Test Kiln Golem");
+    // Without the Cavern there is not enough mana: the face isn't offered.
+    let mut sc = scenario(&[KILN, necro, signet, cavern]);
+    sc.card(P0, Zone::Battlefield, "Test Necrostone");
+    sc.card(P0, Zone::Battlefield, "Forest");
+    sc.card(P0, Zone::Battlefield, "Test Signet");
+    sc.card(P0, Zone::Battlefield, "Plains");
+    let card = sc.card(P0, Zone::Graveyard, "Test Kiln Blast");
+    let s = Script::new(sc.build());
+    assert!(!s.has(|_, o| matches!(o, OptionDesc::CastFace { card: c, .. } if *c == card)));
+}
+
+// CR 106.6: the same restricted mana doesn't pay for the sorcery face of the same card —
+// both faces cost {2}; two creature-only mana pay only for the creature face.
+#[test]
+fn restricted_mana_looks_at_the_face_being_cast() {
+    let cavern = "Name:Test Cavern\nManaCost:no cost\nTypes:Land\n\
+        A:AB$ Mana | Cost$ T | Produced$ C | RestrictValid$ Spell.Creature | SpellDescription$ Add {C}. Spend this mana only to cast creature spells.\n\
+        Oracle:{T}: Add {C}. Spend this mana only to cast creature spells.";
+    let twin = "Name:Test Twin Rite\nManaCost:2\nTypes:Sorcery\n\
+        A:SP$ Draw | NumCards$ 1 | SpellDescription$ Draw a card.\nAlternateMode:Modal\nOracle:Draw a card.\n\
+        \nALTERNATE\n\nName:Test Twin Golem\nManaCost:2\nTypes:Artifact Creature Golem\nPT:2/2\nOracle:";
+    let mut sc = scenario(&[twin, cavern]);
+    sc.cards(P0, Zone::Battlefield, &["Test Cavern", "Test Cavern"]);
+    let card = sc.card(P0, Zone::Hand, "Test Twin Rite");
+    let mut s = Script::new(sc.build());
+    assert!(s.has(|_, o| matches!(o, OptionDesc::CastFace { card: c, face: 1 } if *c == card)));
+    assert!(
+        !s.can_cast("Test Twin Rite"),
+        "the sorcery face can't spend it"
+    );
+    s.cast_face("Test Twin Golem").pay().pass_all();
+    let golem = the(&s, P0, Zone::Battlefield, "Test Twin Rite");
+    assert_eq!(chars(&s.st, golem).name, "Test Twin Golem");
+}
+
+// CR 701.27c, 712.6d: a transformed permanent whose back face is a land taps for that
+// face's mana — here two mana in any combination of {R} and/or {G} (D-066).
+#[test]
+fn a_transformed_land_face_taps_for_a_combination() {
+    let seed = "Name:Test Seedling\n\
+        ManaCost:G\n\
+        Types:Creature Plant\n\
+        PT:1/1\n\
+        A:AB$ SetState | Cost$ 1 | Defined$ Self | Mode$ Transform | SpellDescription$ Transform CARDNAME.\n\
+        AlternateMode:DoubleFaced\n\
+        Oracle:{1}: Transform Test Seedling.\n\
+        \n\
+        ALTERNATE\n\
+        \n\
+        Name:Test Heartgrove\n\
+        ManaCost:no cost\n\
+        Colors:green\n\
+        Types:Land\n\
+        A:AB$ Mana | Cost$ T | Produced$ Combo R G | Amount$ 2 | SpellDescription$ Add two mana in any combination of {R} and/or {G}.\n\
+        Oracle:{T}: Add two mana in any combination of {R} and/or {G}.";
+    let mut sc = scenario(&[seed]);
+    sc.card(P0, Zone::Battlefield, "Forest");
+    let it = sc.card(P0, Zone::Battlefield, "Test Seedling");
+    let mut s = Script::new(sc.build());
+    // The front face has no mana ability.
+    assert!(!s.has(|_, o| matches!(o, OptionDesc::TapForMana { source, .. } if *source == it)));
+    s.activate("Test Seedling").pay().pass_all();
+    assert_eq!(chars(&s.st, it).card_types, [CardType::Land]);
+    s.tap("Test Heartgrove", engine_core::mana::ManaType::Red);
+    assert_eq!(s.kind(), ChoiceKind::ChooseColor, "the second mana's type");
+    s.pick("green", |_, o| {
+        matches!(
+            o,
+            OptionDesc::Mana {
+                mana: engine_core::mana::ManaType::Green
+            }
+        )
+    });
+    let pool = s.st.player(P0).mana_pool;
+    assert_eq!(
+        (
+            pool.amounts[engine_core::mana::ManaType::Red.index()],
+            pool.amounts[engine_core::mana::ManaType::Green.index()]
+        ),
+        (1, 1)
+    );
+}
+
+// CR 608.2c, 701.27g: "you may transform this. If you do, you gain 3 life" — the life only
+// if it did transform: not when it already transformed after the ability was put on the
+// stack (then the instruction does nothing).
+#[test]
+fn if_you_do_after_a_transform() {
+    let watcher = "Name:Test Lookout\n\
+        ManaCost:G\n\
+        Types:Creature Human\n\
+        PT:1/1\n\
+        T:Mode$ SpellCast | ValidCard$ Creature | ValidActivatingPlayer$ You | TriggerZones$ Battlefield | Execute$ TrigTransform | OptionalDecider$ You | TriggerDescription$ Whenever you cast a creature spell, you may transform CARDNAME. If you do, you gain 3 life.\n\
+        SVar:TrigTransform:DB$ SetState | Defined$ Self | Mode$ Transform | SubAbility$ DBGain\n\
+        SVar:DBGain:DB$ GainLife | LifeAmount$ 3\n\
+        A:AB$ SetState | Cost$ 1 | Defined$ Self | Mode$ Transform | SpellDescription$ Transform CARDNAME.\n\
+        AlternateMode:DoubleFaced\n\
+        Oracle:Whenever you cast a creature spell, you may transform Test Lookout. If you do, you gain 3 life.\\n{1}: Transform Test Lookout.\n\
+        \n\
+        ALTERNATE\n\
+        \n\
+        Name:Test Howler\n\
+        ManaCost:no cost\n\
+        Colors:green\n\
+        Types:Creature Werewolf\n\
+        PT:3/3\n\
+        Oracle:";
+    let run = |respond: bool| {
+        let mut sc = scenario(&[watcher]);
+        sc.cards(P0, Zone::Battlefield, &["Forest", "Forest"]);
+        let it = sc.card(P0, Zone::Battlefield, "Test Lookout");
+        sc.card(P0, Zone::Hand, "Test Elf");
+        let mut s = Script::new(sc.build());
+        s.cast("Test Elf").pay();
+        // The trigger is on the stack above the Elf.
+        if respond {
+            s.activate("Test Lookout").pay();
+            s.pass_all();
+            assert_eq!(s.st.object(it).face, 1, "transformed in response");
+        }
+        for _ in 0..20 {
+            if s.st.stack.is_empty() || s.next.is_none() {
+                break;
+            }
+            if s.kind() == ChoiceKind::MayAbility {
+                s.pick("yes", |_, o| *o == OptionDesc::Accept);
+            } else {
+                s.pass();
+            }
+        }
+        (s.st.object(it).face, s.st.player(P0).life)
+    };
+    assert_eq!(run(false), (1, 43), "transformed: the life");
+    assert_eq!(run(true), (1, 40), "already transformed: nothing, no life");
+}

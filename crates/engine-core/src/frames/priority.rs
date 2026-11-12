@@ -1,15 +1,12 @@
 //! Priority (CR 117 (2026-11-06)). Text: docs/rules-notes/117-priority-101.4-apnap.md.
 
-use super::cast::{
-    CastFrame, CastSource, can_begin, castable_faces, mana_sources, sorcery_timing, tap_for_mana,
-};
+use super::cast::{CastFrame, CastSource, can_begin, castable_faces, sorcery_timing};
 use super::resolve::ResolveFrame;
 use super::{ApplyFrame, Flow, Frame, Input, StateCheckFrame};
 use crate::decision::{ChoiceKind, OptionDesc};
 use crate::events::Event;
 use crate::ids::PlayerId;
 use crate::layers::{abilities, chars};
-use crate::mana::types_in;
 use crate::replacement::{MoveCause, Proposed};
 use crate::state::GameState;
 use crate::zones::Zone;
@@ -123,15 +120,7 @@ impl PriorityFrame {
                 source,
                 mana,
                 ability,
-            } => {
-                // The ability's own cost may include sacrificing its source (Treasure).
-                let cost = tap_for_mana(st, p, source, mana, ability, None);
-                if cost.is_empty() {
-                    Flow::then(again)
-                } else {
-                    Flow::Continue(vec![again, Frame::Apply(ApplyFrame::new(st, cost))])
-                }
-            }
+            } => super::mana::activate(st, p, again, source, mana, ability, None),
             o => unreachable!("not a priority option: {o:?}"),
         }
     }
@@ -142,23 +131,27 @@ impl PriorityFrame {
 fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
     let mut opts = vec![OptionDesc::Pass];
     let hand = &st.zones.hands[p.index()];
-    // CR 716.3d: cards on an Adventure their controller may play from exile.
-    let adventures: Vec<crate::ids::ObjectId> = st
-        .zones
-        .exile
-        .iter()
-        .copied()
-        .filter(|&c| st.object(c).adventure == Some(p))
-        .collect();
-    // CR 305.1–305.2: one land per turn, sorcery timing.
-    if sorcery_timing(st, p) && st.player(p).lands_played_this_turn < 1 {
-        for &card in hand.iter().chain(&adventures) {
-            if chars(st, card).is(CardType::Land) {
+    // Cards a rule lets them play from another zone: their graveyard, the top of their
+    // library (CR 601.3, 116.2a); and cards on an Adventure they may play from exile (CR
+    // 716.3d).
+    let mut elsewhere = crate::players::playable_elsewhere(st, p);
+    for &c in &st.zones.exile {
+        if st.object(c).adventure == Some(p) && !elsewhere.contains(&c) {
+            elsewhere.push(c);
+        }
+    }
+    // CR 305.1–305.2: lands, as many as they may play this turn, sorcery timing — from the
+    // hand, or from where a rule lets them.
+    if sorcery_timing(st, p) && crate::players::land_play_left(st, p) {
+        for &card in hand.iter().chain(&elsewhere) {
+            if chars(st, card).is(CardType::Land) && crate::players::may_play_face(st, p, card, 0) {
                 opts.push(OptionDesc::PlayLand { card });
             }
             // CR 712.9: a land face of a modal double-faced card.
             for face in castable_faces(st, card) {
-                if crate::layers::chars_as(st, card, face).is(CardType::Land) {
+                if crate::layers::chars_as(st, card, face).is(CardType::Land)
+                    && crate::players::may_play_face(st, p, card, face)
+                {
                     opts.push(OptionDesc::PlayLandFace { card, face });
                 }
             }
@@ -170,7 +163,7 @@ fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
         .command
         .iter()
         .filter(|&&c| st.object(c).owner == p);
-    for &card in hand.iter().chain(commanders).chain(&adventures) {
+    for &card in hand.iter().chain(commanders).chain(&elsewhere) {
         if can_begin(st, p, CastSource::Card(card)) {
             opts.push(OptionDesc::CastSpell { card });
         }
@@ -210,18 +203,6 @@ fn priority_options(st: &GameState, p: PlayerId) -> Vec<OptionDesc> {
             }
         }
     }
-    for src in mana_sources(st, p, None, None) {
-        for mana in types_in(src.mask) {
-            let option = OptionDesc::TapForMana {
-                source: src.id,
-                mana,
-                ability: src.ability,
-            };
-            // An ability the permanent has twice is one option.
-            if !opts.contains(&option) {
-                opts.push(option);
-            }
-        }
-    }
+    opts.extend(super::mana::priority_options(st, p));
     opts
 }
