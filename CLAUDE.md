@@ -132,6 +132,14 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
   other legal targets and leaves it if there are none. "Becomes the target" triggers, when
   built, must hook in there. A mass move of "your" cards touches only your zones and only
   you shuffle. Tests: `forge_top1000.rs`.
+- Counters (CR 122, D-084) have one representation: `CounterKind::PlusOne/MinusOne/
+  Named(CounterName)`; doublers, proliferate, "enters with", counter costs
+  (`Cost::remove_counters/add_counters`, through the replacement pipeline) take any kind;
+  only ±1 annihilate. Kinds with rules of their own are blocked by name until built.
+  Sagas (CR **715** in this edition) are `Trigger::Chapter(n)`; the first lore counter is
+  an ordinary "enters with" replacement compiled onto each Saga, the yearly one a
+  turn-based action (505.4), the sacrifice a state-based action (`sagas.rs`, 704.5s).
+  Tests: `forge_counters.rs`, `forge_sagas.rs`.
 - The text of a compiled card (`card_model::describe`) is written like a printed card:
   number words, "this creature/land/Equipment", "Then" between instructions, a predefined
   token's reminder text on first mention. The Oracle guard (`oracle_words_missing`) reads
@@ -223,10 +231,10 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-082): 11,535 of 34,463 scripts compile (33.5%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-082: 98% of
+Status (D-084): 11,632 of 34,463 scripts compile (33.8%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-084: 98% of
 the 100 most played Commander cards compile (missing: Path of Ancestry, The One Ring),
-63% of the top 1,000, 37% of the top 5,000
+64% of the top 1,000, 38% of the top 5,000
 (`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
 the rest. Feature tests live in `crates/harness/tests/forge_features.rs` and, one file per
 feature area since D-066, `forge_<area>.rs` next to it: invented cards written
@@ -255,12 +263,11 @@ craft, "enters/cast transformed" and "when this transforms" triggers (modal doub
 transforming, Adventure, Omen and split cards are built, D-071), searching another player's library, "X target creatures", changing a target to a fixed or restricted one (CR 115.7b/c), delve/convoke/improvise, flashback
 given to other cards, draw and mana replacement effects, effects that change life
 loss, memory that outlives a resolution (effect objects remembering
-cards, linked abilities per CR 607, delayed triggers that keep remembered cards past their chain), counters other than +1/+1 and
--1/-1, "as this enters, choose …" other than a creature type or a color (D-076; how a permanent enters is otherwise built, D-067:
+cards, linked abilities per CR 607, delayed triggers that keep remembered cards past their chain), keyword, loyalty, shield, stun and player counters (other named counters are built, D-084), "as this enters, choose …" other than a creature type or a color (D-076; how a permanent enters is otherwise built, D-067:
 `ReplaceWith::EntersTappedUnless…`, the choice asked inside `ApplyFrame` as
 `ChoiceKind::AsEnters`), "sacrifice … instead" lands, "lands enter untapped", "exile it
 instead. When you do, …", static regeneration and "when it regenerates this way", abilities given to cards that aren't on
-the battlefield, "becomes the target" triggers, protection, Sagas,
+the battlefield, "becomes the target" triggers, protection, read ahead and transforming Sagas, planeswalkers,
 and of Forge's "Effect" objects everything but combat rules and "prevent all damage"
 (`effects::Lasting`, D-065: no triggers, no characteristic changes, nothing about
 players yet). `forge-coverage --families` ranks what is left by kind of feature.
