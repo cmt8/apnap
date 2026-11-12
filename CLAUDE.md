@@ -66,6 +66,11 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
   which face a permanent or spell shows is `GameObject::face`, read through
   `layers::chars` / `chars_as`. A permission to play or cast from a zone is judged by the
   face played (`players::may_play_face_from`, CR 601.3e). Tests: `forge_faces.rs`.
+- "Those cards" (D-069): what an effect just moved is remembered only within the chain
+  that remembers it and forgets it as its last link (`Effect::Note`, `ObjRef::Noted`,
+  `Selector::noted`, `Amount::Noted*`, `PlayerRef::NotedControllers`); this is not
+  `Affected/ObjFilter::Remembered`. `Effect::If` is a condition counted when the instruction
+  is reached; `Effect::IfDone` is "if you do". Tests: `forge_remember.rs`.
 - New dependency in engine-core/card-model ⇒ add to `PURE_ALLOWLIST` in `crates/xtask` AND
   log a decision. Must be `no_std`-capable with `default-features = false`.
 
@@ -151,9 +156,9 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-071): 10,300 of 34,463 scripts compile (29.9%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-071: 78% of
-the 100 most played Commander cards compile, 52% of the top 1,000, 31% of the top 5,000
+Status (D-069): 10,508 of 34,463 scripts compile (30.5%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-069: 82% of
+the 100 most played Commander cards compile, 53% of the top 1,000, 32% of the top 5,000
 (`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
 the rest. Feature tests live in `crates/harness/tests/forge_features.rs` and, one file per
 feature area since D-066, `forge_<area>.rs` next to it: invented cards written
@@ -174,7 +179,8 @@ presence, `Defined$ Targeted` means every target of the chain, a trigger that ru
 Not built yet: the full generated-text-vs-Oracle round trip (a word-level guard exists),
 flip, meld, prepare and specialize cards, Fuse, Aftermath, Rooms, day/night, disturb,
 craft, "enters/cast transformed" and "when this transforms" triggers (modal double-faced,
-transforming, Adventure, Omen and split cards are built, D-071), searching another player's library, "X target creatures", counters other than +1/+1 and
+transforming, Adventure, Omen and split cards are built, D-071), searching another player's library, "X target creatures", memory that outlives a resolution (effect objects remembering
+cards, linked abilities per CR 607, delayed triggers), counters other than +1/+1 and
 -1/-1, "as this enters, choose …" (how a permanent enters is otherwise built, D-067:
 `ReplaceWith::EntersTappedUnless…`, the choice asked inside `ApplyFrame` as
 `ChoiceKind::AsEnters`), "sacrifice … instead" lands, "lands enter untapped", "exile it
