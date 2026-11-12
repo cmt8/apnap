@@ -516,7 +516,8 @@ pub fn count_amount(
         | Amount::OfTarget { .. }
         | Amount::HandOf(_)
         | Amount::Noted(_)
-        | Amount::NotedTotal(_) => 0,
+        | Amount::NotedTotal(_)
+        | Amount::LifeLostThisWay => 0,
     }
 }
 
@@ -1293,11 +1294,12 @@ fn compute(st: &GameState) -> View {
             // CR 613.4c / 122.1a: +1/+1 and -1/-1 counters.
             for (id, c) in view.iter_mut() {
                 let o = st.object(*id);
-                let n = o.counters_of(CounterKind::PlusOne) as i32
-                    - o.counters_of(CounterKind::MinusOne) as i32;
+                // (Counts saturate, D-073: no number of counters overflows a P/T.)
+                let count = |k| i32::try_from(o.counters_of(k)).unwrap_or(i32::MAX);
+                let n = count(CounterKind::PlusOne).saturating_sub(count(CounterKind::MinusOne));
                 if let (Some(p), Some(t)) = (c.power.as_mut(), c.toughness.as_mut()) {
-                    *p += n;
-                    *t += n;
+                    *p = p.saturating_add(n);
+                    *t = t.saturating_add(n);
                 }
             }
         }

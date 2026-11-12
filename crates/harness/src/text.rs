@@ -26,6 +26,10 @@ fn p(p: PlayerId) -> String {
 #[derive(Debug, Clone)]
 struct Info {
     name: String,
+    /// The catalog entry of the card (its front face), for turning it over.
+    card: Option<card_model::CardDefId>,
+    /// Which face is up (CR 712.6); 0 unless a `Transformed` event said otherwise.
+    face: u8,
     owner: Option<PlayerId>,
     creature: bool,
 }
@@ -77,8 +81,21 @@ pub struct Narrator {
     /// The ability just put on the stack, while nothing else has happened.
     just_announced: Option<ObjectId>,
     /// Permanents tapped for mana and mana added since the last payment.
-    mana_src: Vec<ObjectId>,
-    mana_added: Vec<ManaType>,
+    adds: Vec<ManaType>,
+    adds_src: Option<ObjectId>,
+    adds_player: Option<PlayerId>,
+    /// The last event was a `ManaAdded` (more mana from the same source follows).
+    adds_open: bool,
+    /// The permanent whose tap the next `ManaAdded` belongs to.
+    tap_src: Option<ObjectId>,
+    /// What each player has floating: the mana whose type is known, and a count of the rest.
+    pool: std::collections::BTreeMap<PlayerId, (Vec<ManaType>, u32)>,
+    /// A search that has not (yet) taken a card out of the library.
+    searching: Option<(PlayerId, bool)>,
+    /// A step heading shown before the next line that happens in that step.
+    pending_step: Option<&'static str>,
+    /// The heading last shown this turn.
+    last_heading: Option<&'static str>,
     /// Permanents untapped in the untap step (one summary line).
     untapped: Vec<ObjectId>,
     step: Option<Step>,
@@ -108,6 +125,8 @@ impl Narrator {
                     id,
                     Info {
                         name: format!("{} ({})", st.card_def(id).name, p(st.object(id).owner)),
+                        card: Some(st.object(id).card),
+                        face: 0,
                         owner: Some(st.object(id).owner),
                         creature: creature(id),
                     },
@@ -126,8 +145,15 @@ impl Narrator {
             cast_buf: Vec::new(),
             triggers: Vec::new(),
             just_announced: None,
-            mana_src: Vec::new(),
-            mana_added: Vec::new(),
+            adds: Vec::new(),
+            adds_src: None,
+            adds_player: None,
+            adds_open: false,
+            tap_src: None,
+            pool: std::collections::BTreeMap::new(),
+            searching: None,
+            pending_step: None,
+            last_heading: None,
             untapped: Vec::new(),
             step: None,
             attack_taps: Vec::new(),
@@ -170,11 +196,17 @@ impl Narrator {
                 Event::Drew { player, .. } => Some(*player),
                 _ => None,
             };
+            // Only draws with nothing between them but their own zone changes are one line,
+            // and only at the same nesting: a draw step is not a spell's draw.
+            if !matches!(e, Event::Drew { .. } | Event::ZoneChange { .. }) {
+                last_drawer = None;
+            }
             if out.len() > before {
                 if let (Some(d), Some(l)) = (drawer, last_drawer)
                     && d == l
                     && out.len() == before + 1
                     && before > 0
+                    && indent(&out[before]) == indent(&out[before - 1])
                 {
                     let line = out.pop().unwrap_or_default();
                     let what = line.split_once(" draws ").map_or("", |x| x.1);
@@ -207,6 +239,8 @@ impl Narrator {
 
     /// Nothing more will be said about the held-back events of this batch.
     fn end_batch(&mut self, viewer: Option<PlayerId>, out: &mut Vec<String>) {
+        self.flush_adds(out);
+        self.adds_open = false;
         // A tap may still turn into a mana tap in the next batch (a choice of color).
         if !matches!(self.pend, Some(Pend::Tap(_))) {
             self.flush_pend(viewer, out);
@@ -272,6 +306,10 @@ impl Narrator {
     /// A line of the game log: indented under the resolving object, or kept back until the
     /// cast it belongs to is announced.
     fn emit(&mut self, line: String, out: &mut Vec<String>) {
+        if let Some(h) = self.pending_step.take() {
+            self.last_heading = Some(h);
+            out.push(h.to_string());
+        }
         let line = if self.resolving.is_some() && !line.starts_with('\n') {
             format!("    {}", line.trim_start())
         } else {
@@ -328,7 +366,7 @@ impl Narrator {
         };
         match (&pend, e) {
             (Pend::Tap(o), Event::ManaAdded { .. }) => {
-                self.mana_src.push(*o);
+                self.tap_src = Some(*o);
                 self.pend = None;
             }
             (Pend::Tap(o), Event::AttackerDeclared { attacker, .. }) if o == attacker => {
@@ -398,6 +436,10 @@ impl Narrator {
             && !matches!(e, Event::Fizzled { object } if *object == top)
         {
             self.resolving = Some(top);
+            if let Some(h) = self.pending_step.take() {
+                self.last_heading = Some(h);
+                out.push(h.to_string());
+            }
             out.push(format!("  {} resolves", self.name(top)));
         }
         self.passes = 0;
@@ -406,8 +448,45 @@ impl Narrator {
     fn track_names(&mut self, e: &Event) {
         match e {
             Event::ZoneChange { old, new, .. } => {
-                if let Some(i) = self.info.get(old).cloned() {
+                if let Some(mut i) = self.info.get(old).cloned() {
+                    // CR 712.6a: off the stack and battlefield a card has its front face.
+                    if i.face != 0
+                        && let Some(c) = i.card
+                    {
+                        i.face = 0;
+                        let owner = i.owner.map_or(String::new(), |o| format!(" ({})", p(o)));
+                        i.name = format!("{}{owner}", self.catalog.get(c).name);
+                        i.creature = self
+                            .catalog
+                            .get(c)
+                            .card_types
+                            .contains(&card_model::CardType::Creature);
+                    }
                     self.info.insert(*new, i);
+                }
+            }
+            Event::Transformed { object, face } => {
+                if let Some(i) = self.info.get_mut(object)
+                    && let Some(c) = i.card
+                {
+                    let def = self.catalog.get(self.catalog.face(c, *face));
+                    let owner = i.owner.map_or(String::new(), |o| format!(" ({})", p(o)));
+                    i.face = *face;
+                    i.name = format!("{}{owner}", def.name);
+                    i.creature = def.card_types.contains(&card_model::CardType::Creature);
+                }
+            }
+            Event::AttackerDeclared { attacker: o, .. }
+            | Event::BlockerDeclared { blocker: o, .. }
+            | Event::DamageDealt {
+                source: o,
+                combat: true,
+                ..
+            } => {
+                // CR 700.4: a creature that dies was a creature on the battlefield, however
+                // it became one; attacking, blocking or dealing combat damage proves it.
+                if let Some(i) = self.info.get_mut(o) {
+                    i.creature = true;
                 }
             }
             Event::TokenCreated {
@@ -420,6 +499,8 @@ impl Narrator {
                     *object,
                     Info {
                         name: format!("{} token ({})", def.name, p(*controller)),
+                        card: Some(*card),
+                        face: 0,
                         owner: Some(*controller),
                         creature: def.card_types.contains(&card_model::CardType::Creature),
                     },
@@ -442,9 +523,64 @@ impl Narrator {
         }
     }
 
+    fn flush_adds(&mut self, out: &mut Vec<String>) {
+        if self.adds.is_empty() {
+            return;
+        }
+        let syms: String = std::mem::take(&mut self.adds)
+            .iter()
+            .map(|m| m.symbol())
+            .collect();
+        let who = self.adds_player.take().map_or(String::new(), p);
+        let l = match self.adds_src.take() {
+            Some(o) => format!("  {who} taps {} for {syms}", self.short(o)),
+            None => format!("  {who} adds {syms}"),
+        };
+        self.emit(l, out);
+    }
+
+    /// A search that took nothing from the library says so when it is over.
+    fn finish_search(&mut self, out: &mut Vec<String>) {
+        if let Some((who, false)) = self.searching.take() {
+            let l = format!("  {} finds nothing", p(who));
+            self.emit(l, out);
+        }
+        self.searching = None;
+    }
+
+    fn end_resolution(&mut self) {
+        self.resolving = None;
+    }
+
     fn feed(&mut self, e: &Event, viewer: Option<PlayerId>, out: &mut Vec<String>) {
         self.track_names(e);
+        if !matches!(e, Event::ManaAdded { .. }) {
+            self.flush_adds(out);
+            self.adds_open = false;
+        }
+        if matches!(
+            e,
+            Event::Shuffled { .. }
+                | Event::Resolved { .. }
+                | Event::PriorityPassed { .. }
+                | Event::StepBegan { .. }
+                | Event::TurnBegan { .. }
+                | Event::SpellCast { .. }
+                | Event::AbilityActivated { .. }
+        ) {
+            self.finish_search(out);
+        }
+        if let Event::ZoneChange {
+            from: Zone::Library,
+            ..
+        } = e
+            && let Some((_, found)) = &mut self.searching
+        {
+            *found = true;
+        }
         if let Event::PriorityPassed { .. } = e {
+            // Nothing resolves while players pass (CR 117.3d).
+            self.end_resolution();
             self.flush_pend(viewer, out);
             self.flush_untaps(out);
             self.flush_attack_taps(out);
@@ -492,14 +628,38 @@ impl Narrator {
             Event::TurnBegan { turn, active } => {
                 self.drain_cast(out);
                 self.active = Some(*active);
-                self.mana_src.clear();
-                self.mana_added.clear();
                 self.triggers.clear();
+                self.end_resolution();
+                self.pending_step = None;
+                self.last_heading = None;
                 out.push(format!("\n--- turn {turn}: {} ---", p(*active)));
             }
             Event::StepBegan { step } => {
                 self.step = Some(*step);
                 self.drain_cast(out);
+                self.end_resolution();
+                // Headings appear only if something happens in the step (combat: any of
+                // its steps), so a reader can check timing without noise.
+                let in_combat = self.pending_step == Some("  -- combat --");
+                self.pending_step = match step {
+                    Step::Upkeep => Some("  -- upkeep --"),
+                    // The draw after an upkeep with actions in it needs its own heading.
+                    Step::Draw if self.last_heading == Some("  -- upkeep --") => {
+                        Some("  -- draw --")
+                    }
+                    Step::BeginningOfCombat => Some("  -- combat --"),
+                    Step::PostcombatMain => Some("  -- second main --"),
+                    Step::End => Some("  -- end step --"),
+                    Step::DeclareAttackers
+                    | Step::DeclareBlockers
+                    | Step::CombatDamage
+                    | Step::EndOfCombat
+                        if in_combat =>
+                    {
+                        Some("  -- combat --")
+                    }
+                    _ => None,
+                };
             }
             Event::ZoneChange {
                 new, from, to, old, ..
@@ -559,12 +719,12 @@ impl Narrator {
             }
             Event::Resolved { spell } => {
                 self.stack.retain(|s| s != spell);
-                if self.resolving == Some(*spell) {
-                    self.resolving = None;
-                } else {
+                if self.resolving != Some(*spell) {
                     let l = format!("  {} resolves", self.name(*spell));
                     self.emit(l, out);
                 }
+                // Whatever was being narrated is over (the stack may also be empty).
+                self.end_resolution();
             }
             Event::AttackerDeclared { attacker, defender } => {
                 self.attack_taps.retain(|o| o != attacker);
@@ -646,6 +806,8 @@ impl Narrator {
                             Info {
                                 name: n.clone(),
                                 owner: None,
+                                card: None,
+                                face: 0,
                                 creature: false,
                             },
                         );
@@ -658,6 +820,8 @@ impl Narrator {
                             Info {
                                 name: n.clone(),
                                 owner: None,
+                                card: None,
+                                face: 0,
                                 creature: false,
                             },
                         );
@@ -712,6 +876,9 @@ impl Narrator {
                 self.emit(l, out);
             }
             Event::AbilityRemoved { ability } => {
+                if self.resolving == Some(*ability) {
+                    self.end_resolution();
+                }
                 if self.stack.contains(ability) {
                     self.stack.retain(|s| s != ability);
                     let n = self.name(*ability);
@@ -850,29 +1017,37 @@ impl Narrator {
                     self.emit(l, out);
                 }
             }
-            Event::ManaAdded { mana, .. } => self.mana_added.push(*mana),
-            Event::ManaPaid { amount, .. } => {
-                let srcs = std::mem::take(&mut self.mana_src);
-                let added = std::mem::take(&mut self.mana_added);
-                let mut l = format!("  (paid {amount}");
-                if !srcs.is_empty() || !added.is_empty() {
-                    l.push_str(": ");
-                    if !srcs.is_empty() {
-                        l.push_str(&self.counted(&srcs, 50));
-                        l.push_str(" -> ");
-                    }
-                    for m in &added {
-                        l.push_str(m.symbol());
-                    }
+            Event::ManaAdded { player, mana } => {
+                let src = self.tap_src.take();
+                // A second mana straight after the first is the same source's.
+                if src.is_some() || !self.adds_open {
+                    self.flush_adds(out);
+                    self.adds_src = src;
+                    self.adds_player = Some(*player);
                 }
-                l.push(')');
+                self.adds.push(*mana);
+                self.adds_open = true;
+                self.pool.entry(*player).or_default().0.push(*mana);
+            }
+            Event::ManaPaid { player, amount } => {
+                let (known, unknown) = self.pool.remove(player).unwrap_or_default();
+                let total = known.len() as u32 + unknown;
+                let l = if total == *amount && unknown == 0 && !known.is_empty() {
+                    let syms: String = known.iter().map(|m| m.symbol()).collect();
+                    format!("  (paid {amount} from the pool: {syms})")
+                } else if total > *amount {
+                    self.pool.insert(*player, (Vec::new(), total - amount));
+                    format!("  (paid {amount}; {} left floating)", total - amount)
+                } else {
+                    format!("  (paid {amount})")
+                };
                 self.emit(l, out);
             }
-            Event::ManaEmptied { .. } => {
-                self.mana_src.clear();
-                self.mana_added.clear();
+            Event::ManaEmptied { player, .. } => {
+                self.pool.remove(player);
             }
             Event::SearchedLibrary { player } => {
+                self.searching = Some((*player, false));
                 let l = format!("  {} searches their library", p(*player));
                 self.emit(l, out);
             }
@@ -945,11 +1120,17 @@ impl Narrator {
                     None => "== game over: draw ==".into(),
                 });
             }
+            Event::ObjectLeftGame { object } => {
+                self.stack.retain(|s| s != object);
+            }
+            Event::ContinuousEffectBegan { source, .. } => {
+                // The event carries only an id; what the effect does is in the state.
+                let l = format!("  {} starts a continuous effect", self.name(*source));
+                self.emit(l, out);
+            }
             // Deliberately silent: bookkeeping with no news for a reader.
             Event::PriorityPassed { .. }
-            | Event::ObjectLeftGame { .. }
             | Event::CeasedToExist { .. }
-            | Event::ContinuousEffectBegan { .. }
             | Event::DamageRemoved { .. } => {}
         }
     }
@@ -1011,6 +1192,10 @@ impl Narrator {
             (f, Zone::Library) => format!("  {n} is put into the library from {}", zone(f)),
         })
     }
+}
+
+fn indent(l: &str) -> usize {
+    l.len() - l.trim_start().len()
 }
 
 fn counter(k: card_model::CounterKind) -> &'static str {

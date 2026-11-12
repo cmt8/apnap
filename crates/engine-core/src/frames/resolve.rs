@@ -130,6 +130,18 @@ pub enum Work {
     EndNote,
     /// One chosen mode is done: what it noted means nothing to the next (CR 700.2).
     ForgetNoted,
+    /// A "lose life" instruction has been carried out: the life the players lost to it
+    /// ("the life lost this way") is how far each of these players' life totals went
+    /// down from what it was before it (`before`), negative changes counting as none.
+    LifeLost { before: Vec<(PlayerId, i32)> },
+    /// "Untap up to `n` [permanents]": the controller chooses among the tapped ones that
+    /// match, then they are untapped.
+    UntapChosen {
+        what: Box<card_model::Selector>,
+        n: u32,
+    },
+    /// CR 701.34a: the controller proliferates.
+    Proliferate,
     /// "Choose a creature type." (CR 608.2c): the controller chooses now; the instructions
     /// after it read the choice (`ResolveFrame::chosen`).
     Choose { what: card_model::ChoiceOf },
@@ -316,11 +328,19 @@ pub struct ResolveFrame {
     /// Zone changes proposed and not yet looked at (for noting, and to follow those cards).
     #[serde(default)]
     pub moving: Vec<Moving>,
+    /// The life lost to the most recent "lose life" instruction ("the life lost this
+    /// way"). Serialized only once there has been one.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub life_lost: u32,
     /// "The chosen type" of the resolving text (CR 607.2d): what it chose itself while
     /// resolving ("choose a creature type. Destroy all creatures that aren't of the chosen
     /// type"), else what was chosen for the ability's source as it entered.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen: Vec<card_model::Chosen>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl ResolveFrame {
@@ -344,6 +364,7 @@ impl ResolveFrame {
             noted: Vec::new(),
             noting: None,
             moving: Vec::new(),
+            life_lost: 0,
             chosen: Vec::new(),
         }
     }
@@ -712,6 +733,7 @@ impl ResolveFrame {
             Amount::X => self.x,
             Amount::SacrificedPower => self.sacrificed_power,
             Amount::TriggeringAmount => self.facts.amount,
+            Amount::LifeLostThisWay => self.life_lost,
             // CR 608.2h: counted as the effect is applied.
             Amount::HandOf(who) => self
                 .player(st, k, *who)
@@ -977,6 +999,96 @@ impl ResolveFrame {
                     if st.event_count > since {
                         self.work.push(Work::Eval { k, effect: then });
                     }
+                }
+                Work::UntapChosen { what, n } => {
+                    if let Some(inp) = input.take() {
+                        for object in picked_cards(&inp) {
+                            if st.objects.get(&object).is_some_and(|o| o.tapped) {
+                                execute(st, GameAction::Untap { object });
+                            }
+                        }
+                        continue;
+                    }
+                    // CR 701.26b: only a tapped permanent can be untapped.
+                    let pool: Vec<ObjectId> =
+                        crate::layers::matching(st, &what, self.source, self.controller)
+                            .into_iter()
+                            .filter(|&o| st.object(o).tapped)
+                            .collect();
+                    let max = (n as usize).min(pool.len());
+                    if max > 0 && st.in_game(self.controller) {
+                        let controller = self.controller;
+                        let options = pool
+                            .into_iter()
+                            .map(|card| OptionDesc::Card { card })
+                            .collect();
+                        self.work.push(Work::UntapChosen { what, n });
+                        return Flow::ask(
+                            Frame::Resolve(Box::new(self)),
+                            controller,
+                            ChoiceKind::Untap,
+                            Primitive::PickN { min: 0, max },
+                            options,
+                        );
+                    }
+                }
+                Work::Proliferate => {
+                    if let Some(inp) = input.take() {
+                        // One event: another counter of each kind on each one, at once.
+                        let events: Vec<Proposed> = picked_cards(&inp)
+                            .into_iter()
+                            .filter(|o| st.objects.contains_key(o))
+                            .flat_map(|object| {
+                                st.object(object)
+                                    .counters
+                                    .iter()
+                                    .filter(|(_, n)| **n > 0)
+                                    .map(|(&kind, _)| Proposed::PutCounters {
+                                        object,
+                                        kind,
+                                        count: 1,
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect();
+                        if !events.is_empty() {
+                            let apply = ApplyFrame::new(st, events);
+                            return Flow::Continue(vec![
+                                Frame::Resolve(Box::new(self)),
+                                Frame::Apply(apply),
+                            ]);
+                        }
+                        continue;
+                    }
+                    let pool: Vec<ObjectId> = st
+                        .zones
+                        .battlefield
+                        .iter()
+                        .copied()
+                        .filter(|o| st.object(*o).counters.values().any(|n| *n > 0))
+                        .collect();
+                    if !pool.is_empty() && st.in_game(self.controller) {
+                        let controller = self.controller;
+                        let max = pool.len();
+                        let options = pool
+                            .into_iter()
+                            .map(|card| OptionDesc::Card { card })
+                            .collect();
+                        self.work.push(Work::Proliferate);
+                        return Flow::ask(
+                            Frame::Resolve(Box::new(self)),
+                            controller,
+                            ChoiceKind::Proliferate,
+                            Primitive::PickN { min: 0, max },
+                            options,
+                        );
+                    }
+                }
+                Work::LifeLost { before } => {
+                    self.life_lost = before
+                        .iter()
+                        .map(|&(p, life)| (life - st.player(p).life).max(0) as u32)
+                        .sum();
                 }
                 Work::PlayerMay { k, player, effect } => match input.take() {
                     None if st.in_game(player) => {
@@ -1847,7 +1959,13 @@ impl ResolveFrame {
             }
             Effect::LoseLife { who, amount } => {
                 let amount = self.amount(st, k, &amount);
-                self.players(st, k, who)
+                let players = self.players(st, k, who);
+                // Done after the loss: how much each of them lost (CR 119.3), whatever
+                // replacement effects made of it.
+                self.work.push(Work::LifeLost {
+                    before: players.iter().map(|&p| (p, st.player(p).life)).collect(),
+                });
+                players
                     .into_iter()
                     .map(|player| Proposed::LoseLife { player, amount })
                     .collect()
@@ -1963,6 +2081,10 @@ impl ResolveFrame {
                 Vec::new()
             }
             Effect::Counter { what } => match self.target(st, k, what) {
+                // CR 101.2, 614.17: "can't be countered" — this does nothing to it (D-073).
+                Some(Target::Object(spell)) if crate::replacement::cant_be_countered(st, spell) => {
+                    Vec::new()
+                }
                 // CR 701.6a: a countered spell is put into its owner's graveyard.
                 Some(Target::Object(spell)) => {
                     st.emit(Event::Countered { object: spell });
@@ -1996,6 +2118,7 @@ impl ResolveFrame {
                         token,
                         count,
                         controller,
+                        more: Vec::new(),
                     })
                     .collect()
             }
@@ -2267,6 +2390,18 @@ impl ResolveFrame {
                     since: st.event_count,
                 });
                 self.work.push(Work::Eval { k, effect: first });
+                Vec::new()
+            }
+            Effect::Proliferate => {
+                self.work.push(Work::Proliferate);
+                Vec::new()
+            }
+            Effect::UntapChosen { what, count } => {
+                let n = self.amount(st, k, &count);
+                self.work.push(Work::UntapChosen {
+                    what: Box::new(what),
+                    n,
+                });
                 Vec::new()
             }
             Effect::PlayerMay { who, effect } => {

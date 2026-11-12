@@ -66,6 +66,14 @@ const BULLY: &str = "Name:Test Bullying Ogre\nManaCost:R\nTypes:Creature Ogre\nP
 const CYCLER: &str =
     "Name:Test Dune Beast\nManaCost:5 R\nTypes:Creature Beast\nPT:4/4\nK:Cycling:2\nOracle:Text.";
 const STEPPE: &str = "Name:Test Steppe\nManaCost:no cost\nTypes:Land Plains\nOracle:Text.";
+const PUPA: &str = "Name:Test Pupa\nManaCost:G\nTypes:Creature Insect\nPT:2/2\n\
+    A:AB$ SetState | Cost$ 1 | Defined$ Self | Mode$ Transform | SpellDescription$ Transform CARDNAME.\n\
+    AlternateMode:DoubleFaced\nOracle:Text.\n\nALTERNATE\n\nName:Test Moth\nManaCost:no cost\nColors:white\n\
+    Types:Creature Insect\nPT:4/4\nK:Flying\nOracle:Flying";
+const GEYSER: &str = "Name:Test Geyser\nManaCost:2\nTypes:Artifact\n\
+    A:AB$ Mana | Cost$ T | Produced$ R | Amount$ 3 | SpellDescription$ Add RRR.\nOracle:Text.";
+const MIND: &str = "Name:Test Upkeeper\nManaCost:1\nTypes:Artifact\n\
+    A:AB$ Draw | Cost$ 1 | NumCards$ 1 | SpellDescription$ Text.\nOracle:Text.";
 const LANDCYCLER: &str = "Name:Test Dune Strider\nManaCost:5 W\nTypes:Creature Camel\nPT:4/4\nK:TypeCycling:Plains:2\nOracle:Text.";
 
 // Problem 1: no targets chosen prints a line that says so, not a bare "targeting ".
@@ -94,7 +102,10 @@ fn targets_and_payment_follow_the_cast_line() {
     let lines = log(&st, &s, None);
     let cast = pos(&lines, "P0 casts Test Zapping");
     assert!(pos(&lines, "targeting P1") > cast, "{lines:#?}");
-    assert!(pos(&lines, "(paid 1: Mountain") > cast, "{lines:#?}");
+    assert!(
+        pos(&lines, "(paid 1 from the pool: {R})") > cast,
+        "{lines:#?}"
+    );
     // ... and before the resolution.
     assert!(pos(&lines, "Test Zapping (P0) resolves") > pos(&lines, "targeting P1"));
     // Two spells in a row: each target line sits under its own cast.
@@ -408,11 +419,10 @@ fn tapping_for_mana_is_folded_into_the_payment() {
     let (mut s, st) = game(sc);
     s.cast("Test Zapping").target_player(P1).pay();
     let lines = log(&st, &s, None);
-    assert!(!lines.iter().any(|l| l.contains("taps")), "{lines:#?}");
+    // Mana is told when it is produced; the payment says what was spent from the pool.
+    let tap = pos(&lines, "P0 taps Mountain for {R}");
     assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("(paid 1: Mountain -> {R})")),
+        pos(&lines, "(paid 1 from the pool: {R})") > tap,
         "{lines:#?}"
     );
 }
@@ -500,4 +510,189 @@ fn drawing_stays_hidden_inside_a_resolution() {
         mine.iter().any(|l| l.trim().starts_with("P0 draws Forest")),
         "{mine:#?}"
     );
+}
+
+// Defect 1: a draw by an upkeep ability and the draw step's draw are two lines, the first
+// nested under its resolution, the second at the outer level.
+#[test]
+fn an_upkeep_draw_and_the_draw_step_draw_are_separate_lines() {
+    let mut sc = scenario(&[MIND]);
+    sc.cards(P1, Zone::Battlefield, &["Forest", "Test Upkeeper"]);
+    let (mut s, st) = game(sc);
+    // Play on to P1's upkeep.
+    let mut guard = 0;
+    while !(s.st.turn.step == engine_core::turn::Step::Upkeep
+        && s.st.turn.active == P1
+        && s.kind() == engine_core::ChoiceKind::Priority)
+    {
+        s.pass_all();
+        guard += 1;
+        assert!(guard < 400);
+    }
+    assert_eq!(s.who(), P1);
+    s.activate("Test Upkeeper").pay().pass_all();
+    s.pass_all();
+    let lines = log(&st, &s, None);
+    let res = lines
+        .iter()
+        .rposition(|l| l.contains("ability of Test Upkeeper (P1) resolves"))
+        .expect("resolves");
+    let mut draws = lines[res..].iter().filter(|l| l.contains("P1 draws"));
+    let first = draws.next().expect("ability draw");
+    let second = draws.next().unwrap_or_else(|| panic!("{lines:#?}"));
+    assert!(indent(first) > indent(second), "{lines:#?}");
+    assert!(!first.contains(", "), "one card each: {first}");
+}
+
+// Defect 2: nesting ends when the resolving object is done.
+#[test]
+fn nesting_ends_after_a_trigger_resolves() {
+    let mut sc = scenario(&[BULLY, ZAP]);
+    sc.cards(P0, Zone::Battlefield, &["Mountain", "Mountain"]);
+    sc.cards(P0, Zone::Hand, &["Test Bullying Ogre", "Test Zapping"]);
+    sc.card(P1, Zone::Battlefield, "Test Golem");
+    let (mut s, st) = game(sc);
+    s.cast("Test Bullying Ogre").pay().pass_all();
+    s.target("Test Golem").pass_all();
+    s.cast("Test Zapping").target_player(P1).pay();
+    let lines = log(&st, &s, None);
+    let c = pos(&lines, "P0 casts Test Zapping");
+    assert_eq!(indent(&lines[c]), 0, "{lines:#?}");
+}
+
+// Defect 4: mana that spells and abilities add is told, grouped.
+#[test]
+fn mana_added_by_an_ability_is_narrated() {
+    let mut sc = scenario(&[GEYSER]);
+    sc.card(P0, Zone::Battlefield, "Test Geyser");
+    let (mut s, st) = game(sc);
+    s.tap("Test Geyser", engine_core::mana::ManaType::Red);
+    let lines = log(&st, &s, None);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("P0 taps Test Geyser for {R}{R}{R}")),
+        "{lines:#?}"
+    );
+}
+
+// Defect 6: a search that takes nothing says so; one that takes a card does not.
+#[test]
+fn a_failed_search_finds_nothing() {
+    let mut sc = scenario(&[LANDCYCLER, STEPPE]);
+    sc.cards(P0, Zone::Battlefield, &["Plains", "Plains"]);
+    sc.card(P0, Zone::Hand, "Test Dune Strider");
+    sc.card(P0, Zone::Library, "Plains");
+    let (mut s, st) = game(sc);
+    s.activate("Test Dune Strider").pay().pass_all();
+    s.respond(engine_core::Response::Pick(vec![]));
+    s.pass_all();
+    let lines = log(&st, &s, None);
+    let l = pos(&lines, "searches their library");
+    assert!(pos(&lines, "P0 finds nothing") > l, "{lines:#?}");
+
+    let mut sc = scenario(&[LANDCYCLER, STEPPE]);
+    sc.cards(P0, Zone::Battlefield, &["Plains", "Plains"]);
+    sc.card(P0, Zone::Hand, "Test Dune Strider");
+    sc.card(P0, Zone::Library, "Plains");
+    let (mut s, st) = game(sc);
+    s.activate("Test Dune Strider").pay().pass_all();
+    s.pick(
+        "the basic Plains",
+        |s, o| matches!(o, OptionDesc::Card { card } if s.name(*card) == "Plains"),
+    );
+    s.pass_all();
+    let lines = log(&st, &s, None);
+    assert!(
+        !lines.iter().any(|l| l.contains("finds nothing")),
+        "{lines:#?}"
+    );
+}
+
+// Defect 7: a permanent that attacked or blocked was a creature when it died.
+#[test]
+fn something_that_fought_dies() {
+    let mut sc = scenario(&[SCRIBE]);
+    let id = sc.card(P0, Zone::Battlefield, "Test Scribe");
+    let st = sc.build();
+    let ev = [
+        Event::AttackerDeclared {
+            attacker: id,
+            defender: P1,
+        },
+        Event::ZoneChange {
+            old: id,
+            new: ObjectId(900),
+            card_instance: engine_core::CardInstanceId(1),
+            from: Zone::Battlefield,
+            to: Zone::Graveyard,
+        },
+    ];
+    let lines = Narrator::new(&st).lines(&ev, None);
+    assert!(lines[1].ends_with("dies"), "{lines:#?}");
+}
+
+// Defect 8: headings for combat, the second main phase, and upkeep/end only if used.
+#[test]
+fn step_headings_appear_when_something_happens() {
+    use engine_core::turn::Step;
+    let mut sc = scenario(&[]);
+    let a = sc.card(P0, Zone::Battlefield, "Test Elf");
+    let st = sc.build();
+    let ev = [
+        Event::StepBegan { step: Step::Upkeep },
+        Event::StepBegan { step: Step::Draw },
+        Event::StepBegan {
+            step: Step::BeginningOfCombat,
+        },
+        Event::StepBegan {
+            step: Step::DeclareAttackers,
+        },
+        Event::AttackerDeclared {
+            attacker: a,
+            defender: P1,
+        },
+        Event::StepBegan {
+            step: Step::PostcombatMain,
+        },
+        Event::LifeChanged {
+            player: P0,
+            delta: 1,
+            life: 41,
+        },
+        Event::StepBegan { step: Step::End },
+        Event::StepBegan {
+            step: Step::Cleanup,
+        },
+    ];
+    let lines = Narrator::new(&st).lines(&ev, None);
+    assert_eq!(
+        lines,
+        [
+            "  -- combat --",
+            "  Test Elf (P0) attacks P1",
+            "  -- second main --",
+            "  P0 gains 1 (41)"
+        ]
+    );
+}
+
+// Defect 3: a transformed permanent is named by the face that is up.
+#[test]
+fn a_transformed_permanent_is_named_by_its_face() {
+    let mut sc = scenario(&[PUPA]);
+    let pupa = sc.card(P0, Zone::Battlefield, "Test Pupa");
+    let st = sc.build();
+    let ev = [
+        Event::Transformed {
+            object: pupa,
+            face: 1,
+        },
+        Event::AttackerDeclared {
+            attacker: pupa,
+            defender: P1,
+        },
+    ];
+    let lines = Narrator::new(&st).lines(&ev, None);
+    assert!(lines[1].contains("Test Moth (P0) attacks P1"), "{lines:#?}");
 }
