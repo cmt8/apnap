@@ -150,6 +150,13 @@ pub(crate) fn condition_holds(
             crate::layers::count_amount(st, amount, source, controller),
             *n,
         ),
+        // CR 903.3d: a permanent on the battlefield that is a commander.
+        Some(Condition::ControlCommander { own }) => st.zones.battlefield.iter().any(|&id| {
+            st.is_commander(id)
+                && crate::layers::controller_of(st, id) == controller
+                && (!own || st.object(id).owner == controller)
+        }),
+        Some(Condition::CastFor(kind)) => crate::frames::altcost::cast_for(st, source, *kind),
     }
 }
 

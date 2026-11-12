@@ -166,6 +166,7 @@ pub fn new_game_with_commanders(
                     face: 0,
                     transforms: 0,
                     adventure: None,
+                    cast_with: None,
                 },
             );
             if zone == Zone::Command {

@@ -1643,6 +1643,33 @@ fn cr_616_1_order_of_life_gain_effects() {
     }
 }
 
+// CR 101.2, 702.34a (2026-11-06): a spell cast for an alternative cost (flashback) that
+// can't be countered isn't countered either; it resolves and is then exiled.
+#[test]
+fn cr_101_2_a_flashback_spell_that_cant_be_countered() {
+    let mut cards = counter_war_cards();
+    cards.push(
+        "Name:Test Endless Word\nManaCost:W\nTypes:Instant\n\
+         K:Flashback:W\n\
+         R:Event$ Counter | ValidCard$ Card.Self | ValidSA$ Spell | Layer$ CantHappen | Description$ Text.\n\
+         A:SP$ GainLife | LifeAmount$ 3 | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+    );
+    let mut sc = scenario_n(2, &cards);
+    sc.cards(P0, Zone::Battlefield, &["Plains"]);
+    sc.cards(P1, Zone::Battlefield, &["Island"]);
+    sc.card(P0, Zone::Graveyard, "Test Endless Word");
+    sc.card(P1, Zone::Hand, "Test Denial");
+    let mut s = Script::new(sc.build());
+    s.cast_with("Test Endless Word").pay().pass();
+    s.cast("Test Denial").target("Test Endless Word").pay();
+    s.pass_all();
+    assert!(s.find(P0, Zone::Stack, "Test Endless Word").is_some());
+    s.pass_all();
+    assert_eq!(s.st.player(P0).life, 43);
+    assert!(s.find(P0, Zone::Exile, "Test Endless Word").is_some());
+}
+
 // ---------------------------------------------------------------------------------------
 // What doesn't compile.
 

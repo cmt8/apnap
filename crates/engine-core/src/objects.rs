@@ -47,6 +47,10 @@ pub struct GameObject {
     /// (CR 716.3d). Ends when it leaves exile (a new object).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adventure: Option<PlayerId>,
+    /// The alternative cost paid for the spell this permanent was (CR 702.74a "if its
+    /// evoke cost was paid"): an ability of its card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_with: Option<card_model::AbilityId>,
 }
 
 fn is_front(face: &u8) -> bool {

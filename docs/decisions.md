@@ -2027,6 +2027,117 @@ Necrosages, Culling the Weak, Embodiment of Spring, Kuro Pitlord, Sawtooth Loon,
 each read against its Oracle text. Most of the 57 `# TODO` cards stay blocked by something
 else (Proliferate, Flashback, copy effects ...).
 
+## D-072 Other ways to pay for a spell: alternative costs, flashback, evoke, overload, "pay X life" (2026-11-12)
+Rules text: docs/rules-notes/118.9-alternative-costs.md. Tests:
+`crates/harness/tests/forge_altcost.rs` (26).
+- **Vocabulary** (appended at the end of their enums/structs): `AbilityDef::AlternativeCost
+  (AltCost { kind, cost, only_if })`, `AltKind { Rather, Flashback, Evoke, Overload(Body) }`
+  — `Rather` is "you may [cost] rather than pay this spell's mana cost" / "… cast this spell
+  without paying its mana cost" (`cost.mana` none), `Overload` carries the spell's text with
+  "target" changed to "each" (CR 702.96c). `Cost::exile_from_hand` ("exile N [cards] from
+  your hand"), `Cost::return_to_hand` ("return N [permanents] you control to their owner's
+  hand"), `Cost::life_x` ("as an additional cost, pay X life"). `Condition::ControlCommander
+  { own }` ("if you control a commander" / "… your commander", CR 903.3d — also usable in
+  static abilities: the Lieutenants), `Condition::CastFor(AltKindName::Evoke)` ("if its evoke
+  cost was paid"), `Effect::ControllerSacrificesThis` (evoke's "its controller sacrifices
+  it", whoever controls it by then; `SacrificeThis` needs the ability's controller).
+- **Where it hooks into casting.** The choice of an alternative cost is its own priority
+  option, `OptionDesc::CastWith { card, face, ability }`, offered right after the
+  `CastSpell`/`CastFace` of the same card and face, one per alternative cost of that face in
+  printed order (invariant 5; CR 601.2b, 118.9a: one alternative cost per spell). It is only
+  offered when the cast can be completed with it (D-019): its zone (flashback: the owner's
+  graveyard, CR 702.34a; everything else: wherever the card may be cast — hand, command zone,
+  a `PlayFrom` rule), its condition (checked as casting begins), and the payability of the
+  resulting cost. `CastFrame::alt` remembers it; `cast::proposal_with` replaces the mana
+  cost with the alternative cost's and merges its other parts with the additional cost
+  (`Cost::with`, CR 118.9d) **before** payment: the payment code and the planner (D-066) see
+  an ordinary cost. Commander tax and cost reductions still apply (CR 903.8, 118.9d,
+  tested); with no mana cost there is no X to announce, so X is 0 (CR 107.3b, tested).
+  New logic is in `frames/altcost.rs`; `cast.rs` got two stages (`ChooseExile`,
+  `ChooseReturn`, after `ChooseDiscard`) and the paying of those parts in `finish`.
+- **What the spell remembers.** `StackObject::alt` (set by `GameAction::SetCastAlt` as the
+  spell is announced) and, for a permanent spell, `GameObject::cast_with` on the permanent
+  it becomes. Flashback (CR 702.34a) is a replacement effect in the pipeline: any move of
+  that spell off the stack except to exile goes to exile instead (resolving, countered,
+  bounced) — `replacement::applicable` names it by the flashback ability (`RepKey::Static`),
+  so it competes with other replacement effects like any other. Overload's text is read from
+  the stack object (`altcost::spell_body`, in the resolve frame). Evoke's sacrifice is an
+  ordinary triggered ability the compiler adds to the card, with `CastFor(Evoke)` as its
+  intervening "if" (CR 603.4) — it is lost with "loses all abilities", as the rules say.
+- **"Those cards" (D-069) was not needed:** nothing here acts on a card the same resolution
+  moved. Flashback's exile is a rule about the spell itself (a replacement, CR 702.34a), not
+  a remembered card. "Exile the top card … you may cast it without paying its mana cost"
+  (cascade, `Play` with `WithoutManaCost$`) is not built; when it is, it should name the
+  card with `ObjRef::Noted` and cast it with an alternative cost of no mana.
+- **Costs.** "Return an Island you control" may return a land tapped for mana for this same
+  cost (CR 601.2g–h, tested); the planner keeps enough permanents for it as for a sacrifice,
+  and card-db refuses a cost that both sacrifices and returns. Cards exiled from the hand
+  are never the card whose cost it is; a script of an ability activated from the hand that
+  doesn't say `Other` is blocked (`cost:ExileFromHand-maybe-itself`). "Pay X life": X is
+  announced at the X stage, at most the caster's life (CR 119.4); only a spell's own
+  `Cost$` may have it (`cost:PayLife-amount` elsewhere).
+- **Restricted mana** looks at the spell, not at which cost is paid (CR 106.6, tested: mana
+  for creature spells pays a creature's evoke cost and no instant's alternative cost).
+- **Faces (D-071):** an alternative cost belongs to the face being cast (CR 601.2b, 712.8c):
+  `altcost::alternatives(st, card, face)`, tested with an invented modal double-faced card.
+  No compiled real card has that shape (the one multi-face script with an alternative cost,
+  a transforming Saga, is blocked otherwise).
+- **Compiler.** `S:Mode$ AlternativeCost` with `ValidSA$ Spell.Self` (or `Spell` +
+  `ValidCard$ Card.Self`), `EffectZone$ All`, `ValidPlayer$ You`, `Cost$` (`0` = no mana),
+  `Condition$ PlayerTurn/NotPlayerTurn`, `IsPresent$` (incl. `Card.IsCommander+YouCtrl`,
+  `…+YouOwn`), `CheckSVar$`/`SVarCompare$`. `K:Flashback:<cost>`, `K:Evoke:<cost>`,
+  `K:Overload:<cost>` (printed last). Overload is compiled the way Forge builds it
+  (`CardFactoryUtil`): the spell's one instruction in its mass form, `ValidTgts$` becoming
+  `ValidCards$`/`ChangeType$` (`Destroy`→`DestroyAll`, `ChangeZone` from the battlefield→
+  `ChangeZoneAll`, `DealDamage`→`DamageAll`, `Tap`/`Untap`/`Pump`/`PutCounter`→`…All`).
+  Costs `ExileFromHand<N/filter>` (types, subtypes, colors), `Return<N/filter>`,
+  `PayLife<X>` in a spell's `Cost$`. Filter `YouDontCtrl` = `Who::Opponent`: in a game
+  without teams every other player is an opponent (CR 102.3); the text says "an opponent
+  controls". `Counter` with `Destination$ Graveyard` (Forge's default written out:
+  Force of Will, Force of Negation and other counterspells).
+- **The heuristic agent** takes a free alternative cost (+30 over the spell's score), a
+  cheaper mana one (+5), overload (+15), flashback (−2); evokes only a card it can't cast;
+  never an alternative cost that sacrifices, discards, exiles or returns cards (pitching for
+  nothing), nor one paying life below 10 + the life; for "pay X life" it pays at most a
+  third of its life. Exile-from-hand choices like discards, return choices like sacrifices.
+  The app labels `CastWith` with the face and the ability's text ("cast Fierce
+  Guardianship — If you control a commander, …") and titles the two new choices.
+- **Texts fixed on the way (no behaviour change):** "unless you sacrifice a mountain" →
+  "… a Mountain" (the unless-cost text lower-cased whole words; 11 cards), "creature card"
+  → "creature card with power 2 or less" (card filters in a library or graveyard dropped
+  `power_max`/`toughness_max` from the text; 3 cards, and the new Vesperlark).
+- **Golden hashes:** re-blessed; every event log unchanged, all state hashes moved — the
+  stable hasher writes a marker for each skipped field (`hash.rs` `skip_field`), so the new
+  skip-if-empty fields change state hashes without changing a game.
+- **Numbers:** on main `cda0566` 10,508 → 10,742 of 34,463 scripts; EDHREC tiers there,
+  main → D-072: top 100 78 → 83, top 300 191 → 199, top 1,000 527 → 539, top 2,000
+  869 → 887, top 5,000 1,605 → 1,646. Merged onto `ef30f04` (D-078): 10,524 → 10,758
+  (31.2%); top 100 79 → 84 of 95 (88.4%), top 300 201 (68.1%), top 1,000 534 → 546 of 992
+  (55.0%), top 2,000 895 (45.0%), top 5,000 1,657 (33.2%); no card compiles only in the
+  combination. Among them: Fierce Guardianship,
+  Deadly Rollick, Flawless Maneuver, Cyclonic Rift, Vandalblast, Toxic Deluge, Force of Will,
+  Force of Vigor, Flare of Denial, Daze, Mulldrifter, Shriekmaw, Solitude, Faithless Looting,
+  Dread Return, Deep Analysis, Think Twice, Strike It Rich, Mizzium Mortars, Electrickery,
+  Momentary Blink, Unburial Rites, Lingering Souls. All newly compiled cards were read
+  against their Oracle text; nothing that compiled before stopped compiling or changed
+  meaning.
+- **Still blocked, by name:** `api:ChangeTargets` (Deflecting Swat #74, Misdirection, Bolt
+  Bend; CR 115.7: targeting abilities on the stack is not modelled, and 115.7a/b/d differ —
+  next); `kw:Convoke`, `kw:Improvise`, `kw:Delve` (pay mana by tapping/exiling, after the
+  total cost is locked in — they belong in the planner, D-066); `kw:AlternateAdditionalCost`
+  (Demand Answers: one of two additional costs); `kw:Madness`, `kw:Foretell`, `kw:Escape`,
+  `kw:Miracle`; reductions (`param:static ReduceCost.*`, `param:*.ReduceCost`: the channel
+  lands Otawara, Boseiju); `static:AlternativeCost of other spells or abilities` (Dream Halls,
+  equip/cycling costs), `param:Continuous.MayPlayAltManaCost` (Bolas's Citadel),
+  `MayPlayWithoutManaCost` (Omniscience); `param:static AlternativeCost.CheckSecondSVar`,
+  `.Announce`, `.XAlternative`, `.ManaRestriction`; `kw:Flashback with parameters`, flashback
+  given to other cards (Snapcaster Mage, Past in Flames: `kw:Flashback`); overload of more
+  than one instruction or of a player target.
+- **Next here:** ChangeTargets (a target filter for spells *and abilities* on the stack;
+  115.7d as a re-pick of each target slot with "keep" offered, groups as one pick of a set of
+  the same size), then delve/convoke/improvise in the planner, then the channel lands'
+  `ReduceCost`.
+
 ## D-073 Replacement effects that change how much; tokens enter the battlefield (2026-11-12)
 Rules text: docs/rules-notes/614-doublers-603.2d-additional-triggers.md (with
 614-616-replacement-prevention.md).

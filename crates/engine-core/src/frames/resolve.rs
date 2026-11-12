@@ -1661,9 +1661,8 @@ impl ResolveFrame {
                     }
                     return Some(Flow::then(Frame::Apply(ApplyFrame::new(st, vec![mv]))));
                 }
-                st.card_def(top.id)
-                    .spell_ability()
-                    .cloned()
+                // CR 702.96c: as an overload cost changed its text.
+                super::altcost::spell_body(st, top.id)
                     .expect("instants and sorceries have a spell ability")
             }
             StackKind::Ability {
@@ -2155,13 +2154,15 @@ impl ResolveFrame {
                 }
                 Vec::new()
             }
-            // CR 701.21a: a player can sacrifice only a permanent they control.
-            Effect::SacrificeThis => {
+            // CR 701.21a: a player can sacrifice only a permanent they control. "Its
+            // controller sacrifices it" (CR 702.74a): whoever that is now.
+            e @ (Effect::SacrificeThis | Effect::ControllerSacrificesThis) => {
                 let mine = st
                     .objects
                     .get(&self.source)
                     .is_some_and(|o| o.zone == Zone::Battlefield)
-                    && crate::layers::controller_of(st, self.source) == self.controller;
+                    && (matches!(e, Effect::ControllerSacrificesThis)
+                        || crate::layers::controller_of(st, self.source) == self.controller);
                 if mine {
                     vec![Proposed::moving(
                         self.source,

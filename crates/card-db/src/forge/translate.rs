@@ -11,12 +11,13 @@
 
 use super::parse::{Face, Record, Script};
 use card_model::{
-    AbilityDef, ActivationZone, Affected, Amount, AsEnters, BasicLandType, Body, Calc, CardDef,
-    CardDest, CardType, CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost,
-    CostChoice, CounterKind, DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword,
-    Layout, ManaCost, ManaProduce, ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef,
-    PlayZone, PlayerRef, PlayerRule, ReplaceWith, Replaces, Selector, Signed, Supertype, Take,
-    TargetFilter, TargetGroup, TargetRef, Timing, Trigger, TriggerCause, TriggerStep, Who,
+    AbilityDef, ActivationZone, Affected, AltCost, AltKind, AltKindName, Amount, AsEnters,
+    BasicLandType, Body, Calc, CardDef, CardDest, CardType, CardZone, Cmp, Color, CombatRule,
+    Condition, ContinuousEffect, Cost, CostChoice, CounterKind, DamageBy, DamagePer, DamageTo,
+    EachPlayerAction, Effect, Keyword, Layout, ManaCost, ManaProduce, ManaRestriction, ManaType,
+    Measure, Mode, ObjFilter, ObjRef, PlayZone, PlayerRef, PlayerRule, ReplaceWith, Replaces,
+    Selector, Signed, Supertype, Take, TargetFilter, TargetGroup, TargetRef, Timing, Trigger,
+    TriggerCause, TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -166,6 +167,8 @@ struct Tx<'a> {
     used_svars: BTreeSet<String>,
     tokens: BTreeSet<String>,
     has_x_cost: bool,
+    /// Reading a spell's own `Cost$` (its additional costs): "pay X life" is X announced.
+    spell_cost: bool,
     /// A characteristic-defining ability defines the card's (power, toughness).
     defines_pt: (bool, bool),
     /// Compiling the body of a triggered ability (where "X" is not the X being paid).
@@ -824,6 +827,9 @@ impl<'a> Tx<'a> {
                 "Other" => s.other = true,
                 "YouCtrl" => s.controller = Who::You,
                 "OppCtrl" => s.controller = Who::Opponent,
+                // "You don't control": every other player is an opponent in the games the
+                // engine plays (no teams, CR 102.3), so the same set (D-072).
+                "YouDontCtrl" => s.controller = Who::Opponent,
                 // Whose card it is, whoever controls it (CR 108.3). For cards outside
                 // the battlefield see `owned`.
                 "YouOwn" => s.owner = Who::You,
@@ -2004,6 +2010,12 @@ impl<'a> Tx<'a> {
                 // Only spells, and only as a target.
                 if rd.get("TargetType") != Some("Spell") {
                     self.block("Counter:not-a-spell-target");
+                    return None;
+                }
+                // `Destination$ Graveyard` is Forge's default written out (CounterEffect:
+                // CR 701.6a, "put into its owner's graveyard").
+                if rd.get("Destination").is_some_and(|d| d != "Graveyard") {
+                    self.block("param:Counter.Destination");
                     return None;
                 }
                 for k in ["Defined", "TargetMin", "TargetMax"] {
@@ -3864,6 +3876,18 @@ impl<'a> Tx<'a> {
     }
 
     fn present(&mut self, rd: &Rd<'a>, filter: &'a str) -> Option<Condition> {
+        // "If you control a commander" / "… your commander" (CR 903.3d).
+        if rd.rec.get("PresentCompare").is_none() && rd.rec.get("PresentZone").is_none() {
+            match filter {
+                "Card.IsCommander+YouCtrl" => {
+                    return Some(Condition::ControlCommander { own: false });
+                }
+                "Card.IsCommander+YouOwn+YouCtrl" | "Card.IsCommander+YouCtrl+YouOwn" => {
+                    return Some(Condition::ControlCommander { own: true });
+                }
+                _ => {}
+            }
+        }
         let cmp = self.compare(rd.get("PresentCompare").unwrap_or("GE1"));
         let zone = rd.get("PresentZone");
         let sel = match zone {
@@ -4320,8 +4344,72 @@ impl<'a> Tx<'a> {
                     }
                     *slot = Some(CostChoice { count, what });
                 }
+                // "Exile N [cards] from your hand" (never the card itself: a spell is on the
+                // stack as its cost is paid, and `Other` is required of an ability's cost
+                // where it matters), "return N [permanents] you control to their owner's
+                // hand" (CR 601.2h).
+                ("ExileFromHand" | "Return", true) => {
+                    let (Some(count), Some(types)) = (count.filter(|n| *n > 0), args.get(1)) else {
+                        self.block(format!("cost:{kind}-amount"));
+                        return None;
+                    };
+                    let mut what = Vec::new();
+                    for alt in types.split(';') {
+                        match self.alt(alt.trim())? {
+                            Alt::Sel(s) => what.push(s),
+                            Alt::This => {
+                                self.block(format!("cost:{kind}-this"));
+                                return None;
+                            }
+                        }
+                    }
+                    let slot = if kind == "Return" {
+                        // Permanents they control: whose they are is the cost's own rule.
+                        if what
+                            .iter()
+                            .any(|s| s.controller != Who::Any || s.owner != Who::Any)
+                        {
+                            self.block("cost:Return-whose");
+                            return None;
+                        }
+                        &mut cost.return_to_hand
+                    } else {
+                        // A card in a hand: its types, subtypes and colors.
+                        let plain = what.iter().all(|s| {
+                            *s == Selector {
+                                types: s.types.clone(),
+                                not_types: s.not_types.clone(),
+                                subtypes: s.subtypes.clone(),
+                                not_subtypes: s.not_subtypes.clone(),
+                                colors: s.colors.clone(),
+                                not_colors: s.not_colors.clone(),
+                                other: s.other,
+                                ..Selector::default()
+                            }
+                        });
+                        if !plain {
+                            self.block("cost:ExileFromHand-filter");
+                            return None;
+                        }
+                        &mut cost.exile_from_hand
+                    };
+                    if slot.is_some() {
+                        self.block(format!("cost:{kind}-twice"));
+                        return None;
+                    }
+                    *slot = Some(CostChoice { count, what });
+                }
                 ("PayLife", true) => match count {
                     Some(n) if cost.life == 0 && n > 0 => cost.life = n,
+                    // "As an additional cost to cast this spell, pay X life" (CR 107.3a):
+                    // X is announced, when the script says X is what was paid.
+                    None if args.first() == Some(&"X")
+                        && self.spell_cost
+                        && !cost.life_x
+                        && self.face.svars.get("X").is_some_and(|v| v == "Count$xPaid") =>
+                    {
+                        cost.life_x = true
+                    }
                     _ => {
                         self.block("cost:PayLife-amount");
                         return None;
@@ -4371,7 +4459,14 @@ impl<'a> Tx<'a> {
                     if !same {
                         // The whole cost is restated: the card's mana cost plus what is
                         // paid in addition ("as an additional cost to cast this spell, …").
-                        let mut cost = self.cost(text)?;
+                        self.spell_cost = true;
+                        let cost = self.cost(text);
+                        self.spell_cost = false;
+                        let mut cost = cost?;
+                        // "Pay X life": X is the X paid, for the spell's text too.
+                        if cost.life_x {
+                            self.has_x_cost = true;
+                        }
                         let mana = std::mem::take(&mut cost.mana);
                         let printed = mana_cost(printed).ok().flatten();
                         if mana != printed || cost.tap || cost.sacrifice_self {
@@ -4413,6 +4508,17 @@ impl<'a> Tx<'a> {
                 let body = self.body(rec, false, "AB");
                 self.from_zone = ActivationZone::Battlefield;
                 let (cost, from) = (cost?, from?);
+                // The engine never lets a card be exiled for its own cost; from the hand a
+                // script that doesn't say "another" would let it (D-072).
+                if from == ActivationZone::Hand
+                    && cost
+                        .exile_from_hand
+                        .as_ref()
+                        .is_some_and(|c| c.what.iter().any(|s| !s.other))
+                {
+                    self.block("cost:ExileFromHand-maybe-itself");
+                    return None;
+                }
                 if !zone_cost_fits(&cost, from) {
                     self.block("activated:cost does not fit the zone");
                     return None;
@@ -5467,6 +5573,7 @@ impl<'a> Tx<'a> {
                     }
                 }
             }
+            "AlternativeCost" => self.alternative_cost(&rd),
             "ReduceCost" => {
                 if rd.get("Type") != Some("Spell") {
                     self.block("static:ReduceCost-type");
@@ -5510,6 +5617,142 @@ impl<'a> Tx<'a> {
         };
         rd.finish(&mut self.blockers);
         out
+    }
+
+    /// A cost paid rather than a spell's mana cost (CR 118.9): `0` is "without paying its
+    /// mana cost" (no mana at all).
+    fn alt_cost_of(&mut self, text: &str) -> Option<Cost> {
+        let mut cost = self.cost(text)?;
+        if cost
+            .mana
+            .as_ref()
+            .is_some_and(|m| m.mana_value() == 0 && !m.has_x())
+        {
+            cost.mana = None;
+        }
+        if cost.tap || cost.sacrifice_self || cost.discard_self || cost.exile_self {
+            self.block("altcost:names its own card");
+            return None;
+        }
+        Some(cost)
+    }
+
+    /// CR 702.96a–c: the spell's text with every "target" changed to "each". Forge's reading
+    /// (`CardFactoryUtil`, `Overload`): the spell ability without target restrictions, its
+    /// objects `Defined$ Valid <ValidTgts>` — every object its target filter allows. Here:
+    /// the spell's one instruction in its mass form (`Destroy` → `DestroyAll` of
+    /// `ValidCards$ <ValidTgts>`, `ChangeZone` → `ChangeZoneAll`, …), compiled as any such
+    /// line. A spell of more than one instruction, or whose targets may be players, is not
+    /// compiled.
+    fn overloaded(&mut self) -> Option<Body> {
+        let [rec] = self.face.abilities.as_slice() else {
+            self.block("kw:Overload-shape");
+            return None;
+        };
+        let (kind, api) = rec.head()?;
+        if kind != "SP" || rec.get("SubAbility").is_some() {
+            self.block("kw:Overload of more than one instruction");
+            return None;
+        }
+        let from_battlefield = matches!(rec.get("Origin"), Some("Battlefield"));
+        let (all, key) = match api {
+            "Destroy" => ("DestroyAll", "ValidCards"),
+            "ChangeZone" if from_battlefield => ("ChangeZoneAll", "ChangeType"),
+            "DealDamage" => ("DamageAll", "ValidCards"),
+            "Tap" => ("TapAll", "ValidCards"),
+            "Untap" => ("UntapAll", "ValidCards"),
+            "Pump" => ("PumpAll", "ValidCards"),
+            "PutCounter" => ("PutCounterAll", "ValidCards"),
+            other => {
+                self.block(format!("kw:Overload of {other}"));
+                return None;
+            }
+        };
+        let Some(valid) = rec.get("ValidTgts") else {
+            self.block("kw:Overload without a target");
+            return None;
+        };
+        let objects_only = valid.split(',').all(|v| {
+            let head = v.trim().split('.').next().unwrap_or("");
+            !player_word(head) && head != "Any"
+        });
+        if !objects_only || rec.get("TargetType").is_some() {
+            self.block("kw:Overload of a target that may be a player or spell");
+            return None;
+        }
+        let mut params = Vec::new();
+        for (k, v) in &rec.params {
+            match k.as_str() {
+                "SP" => params.push(("SP".to_string(), all.to_string())),
+                "ValidTgts" => params.push((key.to_string(), v.clone())),
+                // How many targets: every one of them, overloaded.
+                "TgtPrompt" | "TargetMin" | "TargetMax" | "AITgts" | "AITgtsStrict" => {}
+                _ => params.push((k.clone(), v.clone())),
+            }
+        }
+        // Compiled like the card's own lines; it lives as long as the compiler's borrows.
+        let rec: &'a Record = Box::leak(Box::new(Record { params }));
+        self.in_spell = true;
+        let body = self.body(rec, false, "SP");
+        self.in_spell = false;
+        body
+    }
+
+    /// `S:Mode$ AlternativeCost | ValidSA$ Spell.Self | EffectZone$ All | Cost$ …`: "you may
+    /// [cost] rather than pay this spell's mana cost", "if …, you may cast this spell without
+    /// paying its mana cost" (CR 118.9). Forge offers it wherever the card is cast from
+    /// (`EffectZone$ All`), to its controller (`ValidPlayer$ You`: the card's owner, the only
+    /// one who casts it here), when the conditions hold as casting begins
+    /// (`StaticAbility.checkConditions`). Alternative costs that other permanents give
+    /// spells, abilities' alternative costs, `Announce$`, `XAlternative$`,
+    /// `ManaRestriction$` are not compiled (named by their parameters).
+    fn alternative_cost(&mut self, rd: &Rd<'a>) -> Option<AbilityDef> {
+        let own = matches!(
+            (rd.get("ValidSA"), rd.get("ValidCard")),
+            (Some("Spell.Self"), None) | (Some("Spell"), Some("Card.Self"))
+        );
+        if !own {
+            self.block("static:AlternativeCost of other spells or abilities");
+            return None;
+        }
+        if !matches!(rd.get("ValidPlayer"), None | Some("You")) {
+            self.block("static:AlternativeCost for another player");
+            return None;
+        }
+        if rd.get("EffectZone") != Some("All") {
+            self.block("static:AlternativeCost from one zone");
+            return None;
+        }
+        let cost = match rd.get("Cost") {
+            Some(text) => self.alt_cost_of(text),
+            None => {
+                self.block("static:AlternativeCost without a cost");
+                None
+            }
+        };
+        let named = match rd.get("Condition") {
+            None => Some(None),
+            Some("PlayerTurn") => Some(Some(Condition::YourTurn)),
+            Some("NotPlayerTurn") => Some(Some(Condition::NotYourTurn)),
+            Some(other) => {
+                self.block(format!("condition:{other}"));
+                None
+            }
+        };
+        let present = self.condition(rd);
+        let (cost, named, present) = (cost?, named?, present?);
+        let only_if = match (named, present) {
+            (Some(_), Some(_)) => {
+                self.block("condition:two");
+                return None;
+            }
+            (a, b) => a.or(b),
+        };
+        Some(AbilityDef::AlternativeCost(AltCost {
+            kind: AltKind::Rather,
+            cost,
+            only_if,
+        }))
     }
 
     /// `S:Mode$ Panharmonicon` (D-073, CR 603.2d): "if [an artifact or creature entering /
@@ -7097,6 +7340,7 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
         used_svars: BTreeSet::new(),
         tokens: BTreeSet::new(),
         has_x_cost: false,
+        spell_cost: false,
         defines_pt: (false, false),
         in_trigger: false,
         from_zone: ActivationZone::Battlefield,
@@ -7487,6 +7731,47 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
                             cycling: true,
                         },
                     ));
+                }
+                _ => tx.explained(before, "keyword"),
+            }
+            continue;
+        }
+        // Alternative costs written as keywords, printed last (CR 702.34a flashback, 702.74a
+        // evoke, 702.96a overload): `K:<name>:<cost>`, nothing after the cost.
+        if let Some((name, text)) = k.split_once(':')
+            && matches!(name, "Flashback" | "Evoke" | "Overload")
+        {
+            let before = tx.blockers.len();
+            if text.contains(':') {
+                tx.block(format!("kw:{name} with parameters"));
+                continue;
+            }
+            let cost = tx.alt_cost_of(text);
+            let kind = match name {
+                "Flashback" => Some(AltKind::Flashback),
+                "Evoke" => Some(AltKind::Evoke),
+                _ => tx.overloaded().map(AltKind::Overload),
+            };
+            match (cost, kind) {
+                (Some(cost), Some(kind)) => {
+                    // "When this permanent enters, if its evoke cost was paid, its
+                    // controller sacrifices it."
+                    if matches!(kind, AltKind::Evoke) {
+                        equips.push(AbilityDef::Triggered {
+                            when: Trigger::Enters(ObjFilter::This),
+                            intervening_if: Some(Condition::CastFor(AltKindName::Evoke)),
+                            body: Body::Effect(Mode {
+                                targets: Vec::new(),
+                                effect: Effect::ControllerSacrificesThis,
+                                groups: Vec::new(),
+                            }),
+                        });
+                    }
+                    equips.push(AbilityDef::AlternativeCost(AltCost {
+                        kind,
+                        cost,
+                        only_if: None,
+                    }));
                 }
                 _ => tx.explained(before, "keyword"),
             }
