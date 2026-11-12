@@ -250,3 +250,97 @@ fn choose_new_targets_for_an_ability() {
     assert!(s.st.objects.contains_key(&theirs));
     let _ = forge_test_blockers("Name:x");
 }
+
+// CR 400.3 / 404.1 (2026-11-06): cards go to their owners' graveyards, so "your graveyard"
+// holds the cards you own. CR 110.2a: a card put onto the battlefield enters under the
+// control of the player the effect says (its owner by default). CR 701.24a: only the players
+// told to shuffle shuffle. Forge: `ChangeZoneAll | Origin$ Graveyard` (every player's
+// graveyard unless `Defined$`/a target; `Card.YouCtrl` = your cards), `Tapped$`,
+// `GainControl$`, `Shuffle$`.
+#[test]
+fn everything_of_a_kind_from_graveyards() {
+    let reclaim = card(
+        "Test Reclaiming",
+        "3 G",
+        "Sorcery",
+        "A:SP$ ChangeZoneAll | ChangeType$ Land.YouCtrl | Origin$ Graveyard | Destination$ Battlefield | Tapped$ True | SpellDescription$ Text.",
+    );
+    let realms = "Name:Test Dark Realms\nManaCost:B\nTypes:Sorcery\n\
+        A:SP$ ChangeZoneAll | ChangeType$ Creature | Origin$ Graveyard | Destination$ Battlefield | GainControl$ True | SpellDescription$ Text.\n\
+        Oracle:Put all creature cards from all graveyards onto the battlefield under your control."
+        .to_string();
+    let reshuffle = card(
+        "Test Reshuffle",
+        "U",
+        "Sorcery",
+        "A:SP$ ChangeZoneAll | ChangeType$ Card.YouOwn | Origin$ Graveyard | Destination$ Library | Shuffle$ True | SpellDescription$ Text.",
+    );
+    let bear = card("Test Grave Cub", "1 G", "Creature Bear", "PT:2/2");
+    let mut sc = scenario(&[&reclaim, &realms, &reshuffle, &bear]);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Forest", "Forest", "Forest", "Forest", "Swamp", "Island"],
+    );
+    sc.cards(P0, Zone::Graveyard, &["Mountain", "Plains"]);
+    sc.cards(P1, Zone::Graveyard, &["Swamp", "Test Grave Cub"]);
+    sc.cards(
+        P0,
+        Zone::Hand,
+        &["Test Reclaiming", "Test Dark Realms", "Test Reshuffle"],
+    );
+    let mut s = Script::new(sc.build());
+    s.cast("Test Reclaiming").pay().pass_all();
+    let mountain = s
+        .find(P0, Zone::Battlefield, "Mountain")
+        .expect("my land returned");
+    assert!(s.st.object(mountain).tapped);
+    assert!(s.find(P0, Zone::Battlefield, "Plains").is_some());
+    assert!(
+        s.find(P1, Zone::Graveyard, "Swamp").is_some(),
+        "not the opponent's land"
+    );
+    // Every graveyard's creature cards, under my control.
+    s.cast("Test Dark Realms").pay().pass_all();
+    let cub = s
+        .find(P1, Zone::Battlefield, "Test Grave Cub")
+        .expect("P1 owns it");
+    assert_eq!(engine_core::layers::chars(&s.st, cub).controller, P0);
+    // My graveyard into my library: only I shuffle.
+    s.cast("Test Reshuffle").pay().pass_all();
+    assert!(
+        s.st.zones
+            .list(Zone::Graveyard, P0)
+            .iter()
+            .all(|&c| s.name(c) != "Test Reclaiming")
+    );
+    assert_eq!(
+        s.count(|e| matches!(e, Event::Shuffled { player } if *player == P1)),
+        0
+    );
+    assert_eq!(
+        s.count(|e| matches!(e, Event::Shuffled { player } if *player == P0)),
+        1
+    );
+    assert!(
+        !s.st.zones.list(Zone::Graveyard, P1).is_empty(),
+        "P1's graveyard stays"
+    );
+    let cat = forge_test_catalog(&[&reclaim], &[]);
+    let text = card_model::describe::rules_text(cat.get(cat.find("Test Reclaiming").unwrap()));
+    assert_eq!(
+        text,
+        ["Put all land cards from your graveyard onto the battlefield tapped."]
+    );
+    // Into a library without a shuffle: the order would be the owners' to choose (CR 401.4).
+    let stacked = card(
+        "Test Stacking",
+        "U",
+        "Sorcery",
+        "A:SP$ ChangeZoneAll | ChangeType$ Card | Origin$ Graveyard | Destination$ Library | SpellDescription$ Text.",
+    );
+    assert_eq!(
+        forge_test_blockers(&stacked),
+        ["ChangeZoneAll:Graveyard->Library"]
+    );
+}

@@ -1927,6 +1927,10 @@ pub enum Effect {
         /// Then those players shuffle their libraries (CR 701.24d: even if nothing moved).
         #[serde(default)]
         shuffle: bool,
+        /// "… onto the battlefield under your control" (CR 110.2a): who controls what
+        /// enters; otherwise each card's owner. Serialized only when set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controller: Option<PlayerRef>,
     },
     /// A spell or a non-mana ability adds mana (CR 106.4, 605.5): "add {R} for each tapped
     /// land your opponents control", "add {G}{G}". `amount` mana of the one type.

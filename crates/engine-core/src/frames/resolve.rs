@@ -2899,7 +2899,10 @@ impl ResolveFrame {
                 cards,
                 to,
                 shuffle,
+                controller,
             } => {
+                // "Under your control": the controller of what enters (CR 110.2a).
+                let under = controller.and_then(|p| self.player(st, k, p));
                 let players = self.players_apnap(st, k, whose);
                 let mut found: Vec<ObjectId> = Vec::new();
                 for &p in &players {
@@ -2917,7 +2920,16 @@ impl ResolveFrame {
                     self.work.push(Work::Shuffle { players });
                 }
                 self.work.push(Work::Move {
-                    moves: found.into_iter().map(|o| move_to(o, to)).collect(),
+                    moves: found
+                        .into_iter()
+                        .map(|o| {
+                            let mut mv = move_to(o, to);
+                            if let (Proposed::Move { controller, .. }, Some(p)) = (&mut mv, under) {
+                                *controller = Some(p);
+                            }
+                            mv
+                        })
+                        .collect(),
                     checked: 0,
                 });
                 Vec::new()
@@ -3007,10 +3019,7 @@ type TargetRules = (Vec<Vec<TargetFilter>>, Vec<Vec<card_model::TargetGroup>>);
 /// The target rules of a spell or ability on the stack, per chosen mode: each slot's filter,
 /// and the groups of slots that are one instance of "target" (CR 115.3). An Aura spell has
 /// one: what it may enchant (CR 303.4a).
-fn stack_target_rules(
-    st: &GameState,
-    so: &crate::stack::StackObject,
-) -> Option<TargetRules> {
+fn stack_target_rules(st: &GameState, so: &crate::stack::StackObject) -> Option<TargetRules> {
     let body = match &so.kind {
         StackKind::Spell => match super::altcost::spell_body(st, so.id) {
             Some(b) => b,

@@ -2568,7 +2568,18 @@ impl<'a> Tx<'a> {
                         self.object(&rd, chain, triggered)?
                     }
                     None => {
-                        self.block("ChangeZone:no-target");
+                        // Named by what it moves, from where to where: the forms differ
+                        // ("this card" from a graveyard by a trigger, a card defined by an
+                        // event, the commander from the command zone…).
+                        self.block(format!(
+                            "ChangeZone:no-target {origin}->{} {}",
+                            dest.unwrap_or("?"),
+                            match (rd.rec.get("Defined"), rd.rec.get("ChangeType")) {
+                                (Some(d), _) => format!("Defined {}", shape(d)),
+                                (None, Some(t)) => format!("ChangeType {}", shape(t)),
+                                (None, None) => "this card".to_string(),
+                            }
+                        ));
                         return None;
                     }
                 };
@@ -2688,6 +2699,110 @@ impl<'a> Tx<'a> {
                             cards,
                             to,
                             shuffle: false,
+                            controller: None,
+                        }
+                    }
+                    // Everything of a kind in graveyards (every player's, or `Defined$` /
+                    // the target player's) or hands: "exile all graveyards", "return all land
+                    // cards from your graveyard to the battlefield tapped", "put all creature
+                    // cards in all graveyards onto the battlefield under your control".
+                    // Forge's ChangeZoneAllEffect: no `Defined$` and no target is everyone's
+                    // zone (and everyone shuffles, with `Shuffle$`).
+                    ((Some(origin @ ("Graveyard" | "Hand")), Some(dest), Some(filter)), slot) => {
+                        let from = if origin == "Graveyard" {
+                            CardZone::Graveyard
+                        } else {
+                            CardZone::Hand
+                        };
+                        let whose = match (slot, rd.get("Defined")) {
+                            (Some(i), None)
+                                if matches!(
+                                    chain.targets[i as usize],
+                                    TargetFilter::Player | TargetFilter::Opponent
+                                ) =>
+                            {
+                                PlayerRef::Target(i)
+                            }
+                            (None, None) => PlayerRef::Each,
+                            (None, Some("You")) => PlayerRef::You,
+                            (None, Some("Player")) => PlayerRef::Each,
+                            _ => {
+                                self.block("ChangeZoneAll:whose");
+                                return None;
+                            }
+                        };
+                        let tapped = rd.get("Tapped").is_some();
+                        let shuffle = rd.get("Shuffle").is_some();
+                        let to = match dest {
+                            "Hand" => CardDest::Hand,
+                            "Exile" => CardDest::Exile,
+                            "Graveyard" if from != CardZone::Graveyard => CardDest::Graveyard,
+                            "Battlefield" => CardDest::Battlefield { tapped },
+                            // Only shuffled in: the order of cards put into a library together
+                            // is otherwise their owners' (CR 401.4), which isn't asked here.
+                            "Library" if shuffle => CardDest::LibraryTop,
+                            _ => {
+                                self.block(format!("ChangeZoneAll:{origin}->{dest}"));
+                                return None;
+                            }
+                        };
+                        if tapped && !matches!(to, CardDest::Battlefield { .. }) {
+                            self.block("param:ChangeZoneAll.Tapped");
+                            return None;
+                        }
+                        if shuffle && to != CardDest::LibraryTop {
+                            self.block("param:ChangeZoneAll.Shuffle");
+                            return None;
+                        }
+                        let controller = match rd.get("GainControl") {
+                            None => None,
+                            Some("True") if matches!(to, CardDest::Battlefield { .. }) => {
+                                Some(PlayerRef::You)
+                            }
+                            Some(_) => {
+                                self.block("param:ChangeZoneAll.GainControl");
+                                return None;
+                            }
+                        };
+                        let cards = if filter == "Card" {
+                            Vec::new()
+                        } else {
+                            self.card_alts(filter, true)?
+                        };
+                        // "Your graveyard" (`Card.YouOwn`/`YouCtrl` off the battlefield is the
+                        // owner): only that player's zone — and only that player shuffles.
+                        // Forge shuffles every player's library here (no `Defined$`), which
+                        // the card doesn't say.
+                        let only =
+                            |w: Who| !cards.is_empty() && cards.iter().all(|s| s.controller == w);
+                        let whose = match whose {
+                            PlayerRef::Each if only(Who::You) => PlayerRef::You,
+                            PlayerRef::Each if only(Who::Opponent) => PlayerRef::EachOpponent,
+                            w => w,
+                        };
+                        // CR 110.2a: put onto the battlefield, a card enters under the control
+                        // of the player told to put it there — the engine's default is its
+                        // owner. Others' cards need the card to say whose control (or "each
+                        // player returns …").
+                        if matches!(to, CardDest::Battlefield { .. })
+                            && controller.is_none()
+                            && whose != PlayerRef::You
+                        {
+                            let o = self.face.oracle.as_deref().unwrap_or("").to_lowercase();
+                            if !(o.contains("owners' control") || o.contains("each player")) {
+                                self.block(
+                                    "ChangeZoneAll:onto the battlefield under whose control",
+                                );
+                                return None;
+                            }
+                        }
+                        Effect::MoveAll {
+                            from,
+                            whose,
+                            cards,
+                            to,
+                            shuffle,
+                            controller,
                         }
                     }
                     _ => {
@@ -8018,6 +8133,11 @@ fn ability_records(face: &Face) -> Vec<(String, Record)> {
 /// never compile (invariant 8: a wrong card is worse than a missing one). Each entry says
 /// what differs; remove it when the pinned Forge commit has the script corrected.
 const SCRIPT_DIFFERS: &[(&str, &str)] = &[
+    (
+        "Manabond",
+        "puts the lands from the hand without revealing it; the card says \"reveal your hand\", \
+         and \"if you do, discard your hand\" whether or not a land was put",
+    ),
     (
         "Knight of the Mists",
         "destroys target Knight *creature*; the card says \"target Knight\" (a Kindred Knight \

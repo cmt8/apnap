@@ -2073,6 +2073,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             cards,
             to,
             shuffle,
+            controller,
         } => {
             let whose_text = match whose {
                 PlayerRef::Each => String::new(),
@@ -2099,7 +2100,14 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                         CardZone::Hand => "hand",
                         _ => "graveyard",
                     };
-                    let list = card_list(cards, true);
+                    // "All land cards from your graveyard": whose they are is the zone's.
+                    let list = if whose_text.is_empty() {
+                        card_list(cards, true)
+                    } else {
+                        card_list(cards, true)
+                            .replace(" you own", "")
+                            .replace(" an opponent owns", "")
+                    };
                     if whose_text.is_empty() {
                         format!("all {list} from all {zone}s")
                     } else {
@@ -2126,11 +2134,22 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 }
                 CardDest::Stay => format!("leave {what} where they are"),
             };
+            if let Some(p) = controller {
+                out.push_str(&format!(" under {} control", possessive(&player(mode, *p))));
+            }
             if *shuffle && *to != CardDest::LibraryTop {
                 out.push_str(", then those players shuffle");
             }
             out
         }
+    }
+}
+
+/// "your", "target player's".
+fn possessive(who: &str) -> String {
+    match who {
+        "you" => "your".to_string(),
+        other => format!("{other}'s"),
     }
 }
 
