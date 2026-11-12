@@ -75,9 +75,11 @@ pub(crate) fn gather(st: &mut GameState) -> Gathered {
         })
         .collect();
 
-    // CR 704.5d: a token in a zone other than the battlefield ceases to exist.
+    // CR 704.5d: a token in a zone other than the battlefield ceases to exist. CR 704.5e:
+    // a copy of a spell anywhere but on the stack too.
     for o in st.objects.values() {
-        if o.is_token && o.zone != Zone::Battlefield {
+        if (o.is_token && o.zone != Zone::Battlefield) || (o.spell_copy && o.zone != Zone::Stack)
+        {
             g.events.push(Proposed::CeaseToExist { object: o.id });
         }
     }

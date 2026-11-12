@@ -286,4 +286,17 @@ pub enum Event {
     RemovedFromCombat {
         object: ObjectId,
     },
+    /// CR 707.4 / 707.5: `object` is now a copy of `card` (it became one, or entered or was
+    /// created as one).
+    BecameCopy {
+        object: ObjectId,
+        card: card_model::CardDefId,
+    },
+    /// CR 707.10: `copy`, a copy of spell or ability `of`, was put on the stack under
+    /// `controller`'s control (it wasn't cast or activated).
+    StackObjectCopied {
+        copy: ObjectId,
+        of: ObjectId,
+        controller: PlayerId,
+    },
 }

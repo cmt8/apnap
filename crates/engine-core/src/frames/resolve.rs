@@ -414,6 +414,17 @@ impl ResolveFrame {
                     .get(id)
                     .is_some_and(|o| !matches!(o.zone, Zone::Battlefield | Zone::Stack))
             }),
+            // "Equipped / enchanted creature": what the source is attached to now.
+            ObjRef::Host => st
+                .objects
+                .get(&self.source)
+                .filter(|o| o.zone == Zone::Battlefield)
+                .and_then(|o| o.attached_to)
+                .filter(|id| {
+                    st.objects
+                        .get(id)
+                        .is_some_and(|o| o.zone == Zone::Battlefield)
+                }),
             // "It": only while it is still the object that triggered this (CR 400.7).
             ObjRef::Triggering => self.subject.filter(|id| {
                 st.objects
@@ -1591,6 +1602,7 @@ impl ResolveFrame {
                         token,
                         count,
                         controller,
+                        copy: None,
                     })
                     .collect()
             }
@@ -1792,6 +1804,73 @@ impl ResolveFrame {
                 Vec::new()
             }
             // CR 701.21a: a player can sacrifice only a permanent they control.
+            // CR 701.21a: only a permanent its controller controls.
+            Effect::SacrificeIt { what } => match self.obj(st, k, what) {
+                Some(o) if crate::layers::controller_of(st, o) == self.controller => {
+                    vec![Proposed::moving(o, Zone::Graveyard, MoveCause::Sacrifice)]
+                }
+                _ => Vec::new(),
+            },
+            // CR 707, 111.2: token copies, created by (and so owned and controlled by) the
+            // controller. A copy of something that is gone isn't made (CR 111.12), nor one
+            // of an instant or sorcery (CR 111.5).
+            Effect::CopyPermanent {
+                what,
+                count,
+                except,
+                gains,
+                tapped,
+                at_end,
+            } => {
+                let count = self.amount(st, k, &count);
+                let originals: Vec<ObjectId> = match what {
+                    card_model::CopyWhat::Obj(r) => self.obj(st, k, r).into_iter().collect(),
+                    card_model::CopyWhat::Each(sel) => {
+                        crate::layers::matching(st, &sel, self.source, self.controller)
+                    }
+                };
+                let card = self.card;
+                originals
+                    .into_iter()
+                    .filter(|&o| chars(st, o).is_permanent_type())
+                    .map(|o| {
+                        let values = crate::copy::values(st, o).with(card, &except);
+                        Proposed::CreateTokens {
+                            token: values.card,
+                            count,
+                            controller: self.controller,
+                            copy: Some(Box::new(crate::replacement::TokenCopy {
+                                values,
+                                tapped,
+                                gains: gains.clone(),
+                                at_end: at_end.map(|index| card_model::AbilityId {
+                                    card,
+                                    index,
+                                    granted: true,
+                                }),
+                                source: self.source,
+                                controller: self.controller,
+                                card,
+                            })),
+                        }
+                    })
+                    .collect()
+            }
+            // CR 707.4: this permanent becomes a copy, for good; its other effects stay.
+            Effect::BecomeCopy { what, except } => {
+                let this = self.obj(st, k, ObjRef::This);
+                if let (Some(this), Some(original)) = (this, self.obj(st, k, what)) {
+                    let values = crate::copy::values(st, original).with(self.card, &except);
+                    execute(
+                        st,
+                        GameAction::BecomeCopy {
+                            object: this,
+                            values,
+                        },
+                    );
+                }
+                Vec::new()
+            }
             Effect::SacrificeThis => {
                 let mine = st
                     .objects

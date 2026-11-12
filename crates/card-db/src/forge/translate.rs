@@ -13,7 +13,7 @@ use super::parse::{Face, Record, Script};
 use card_model::{
     AbilityDef, ActivationZone, Affected, Amount, AsEnters, BasicLandType, Body, Calc, CardDef,
     CardDest, CardType, CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost,
-    CostChoice, CounterKind, DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword,
+    CopyExcept, CopyWhat, CostChoice, CounterKind, DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword,
     ManaCost, ManaProduce, ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef, PlayZone,
     PlayerRef, PlayerRule, ReplaceWith, Replaces, Selector, Signed, Supertype, Take, TargetFilter,
     TargetGroup, TargetRef, Timing, Trigger, TriggerStep, Who,
@@ -2556,6 +2556,82 @@ impl<'a> Tx<'a> {
                     }
                 }
             }
+            // "Create a token that's a copy of …" (docs/forge/effects.md §28).
+            "CopyPermanent" => {
+                let what = match self.target(&rd, chain, false) {
+                    Some(slot) => CopyWhat::Obj(ObjRef::Target(slot)),
+                    None => match rd.rec.get("Defined") {
+                        // "Equipped creature", "enchanted creature".
+                        Some("Equipped" | "Enchanted") => {
+                            rd.get("Defined");
+                            CopyWhat::Obj(ObjRef::Host)
+                        }
+                        // "For each token you control, create a token that's a copy of it."
+                        Some(d) if d.starts_with("Valid ") => {
+                            rd.get("Defined");
+                            CopyWhat::Each(self.selector(&d["Valid ".len()..])?)
+                        }
+                        // A copy of the object as it last existed, even if it is gone
+                        // (CR 111.12): not compiled — a copy is made of what is still
+                        // there.
+                        Some(d) if d.ends_with("LKICopy") => {
+                            rd.get("Defined");
+                            self.block("CopyPermanent:copy of what it last was");
+                            return None;
+                        }
+                        _ => CopyWhat::Obj(self.object(&rd, chain, triggered)?),
+                    },
+                };
+                let count = self.amount(rd.get("NumCopies").unwrap_or("1"), chain);
+                let except = self.copy_except(&rd);
+                let mut gains = Vec::new();
+                if let Some(ks) = rd.get("PumpKeywords") {
+                    for k in ks.split('&').map(str::trim) {
+                        match keyword(k) {
+                            Some(k) => gains.push(k),
+                            None => {
+                                self.block(format!("copy:keyword {k}"));
+                                return None;
+                            }
+                        }
+                    }
+                }
+                let tapped = rd.get("TokenTapped") == Some("True");
+                let at_end = match rd.get("AtEOT") {
+                    Some(what) => Some(self.at_end(what)?),
+                    None => None,
+                };
+                Effect::CopyPermanent {
+                    what,
+                    count: count?,
+                    except: except?,
+                    gains,
+                    tapped,
+                    at_end,
+                }
+            }
+            // "This permanent becomes a copy of …" for good (docs/forge/effects.md §43):
+            // no `Duration$`, no `CloneTarget$`, no `Choices$` (all left unread).
+            "Clone" => {
+                let what = match self.target(&rd, chain, false) {
+                    Some(slot) => ObjRef::Target(slot),
+                    None => match rd.rec.get("Defined") {
+                        None => {
+                            self.block("Clone:copies nothing named");
+                            return None;
+                        }
+                        Some(_) => self.object(&rd, chain, triggered)?,
+                    },
+                };
+                if what == ObjRef::This {
+                    self.block("Clone:a copy of itself");
+                    return None;
+                }
+                Effect::BecomeCopy {
+                    what,
+                    except: self.copy_except(&rd)?,
+                }
+            }
             other => {
                 self.block(format!("api:{other}"));
                 return None;
@@ -3301,8 +3377,23 @@ impl<'a> Tx<'a> {
     /// not compiled.)
     fn etb_replacement(&mut self, k: &str) -> Option<AbilityDef> {
         let parts: Vec<&str> = k.splitn(6, ':').collect();
+        if parts.get(1) == Some(&"Copy") {
+            return self.etb_copy(&parts);
+        }
         let [_, "Other", svar, "Mandatory", "Battlefield", valid] = parts.as_slice() else {
-            self.block("kw:ETBReplacement");
+            // "As this enters, choose a creature type / a color / a card name …" (Cavern of
+            // Souls, Herald's Horn): a choice remembered by the permanent, not compiled.
+            let api = parts
+                .get(2)
+                .and_then(|svar| self.records.iter().find(|(n, _)| n == svar))
+                .and_then(|(_, r)| r.head())
+                .map_or("?", |h| h.1);
+            let layer = parts.get(1).copied().unwrap_or("?");
+            if api.starts_with("Choose") || matches!(api, "NameCard" | "GenericChoice") {
+                self.block(format!("kw:ETBReplacement as this enters, choose ({api})"));
+            } else {
+                self.block(format!("kw:ETBReplacement:{layer} {api}"));
+            }
             return None;
         };
         let Some(rec) = self.records.iter().find(|(n, _)| n == svar).map(|(_, r)| r) else {
@@ -3328,6 +3419,158 @@ impl<'a> Tx<'a> {
             replaces: Replaces::OtherEnters(sel?),
             with: Self::enters_with(kind?, amount?),
         })
+    }
+
+    /// `K:ETBReplacement:Copy:<SVar>:Optional` with `DB$ Clone | Choices$ <filter>`: "you
+    /// may have this enter [tapped] as a copy of [a permanent][, except …]" (CR 707.5,
+    /// 614.1c).
+    fn etb_copy(&mut self, parts: &[&str]) -> Option<AbilityDef> {
+        let [_, "Copy", svar, "Optional"] = parts else {
+            self.block("kw:ETBReplacement:Copy not optional");
+            return None;
+        };
+        let rec = self.sub(svar)?;
+        if rec.head() != Some(("DB", "Clone")) {
+            self.block("kw:ETBReplacement:Copy not Clone");
+            return None;
+        }
+        // Spark Double's "it enters with an additional counter …" is an effect made on
+        // the side (CR 707.9e), not compiled.
+        if rec.get("SubAbility").is_some() {
+            self.block("Clone:SubAbility");
+            return None;
+        }
+        let rd = Rd::new(rec, "Clone");
+        let Some(choices) = rd.get("Choices") else {
+            self.block("Clone:enters as a copy without Choices");
+            return None;
+        };
+        let of = self.selector(choices);
+        let tapped = rd.get("IntoPlayTapped") == Some("True");
+        let except = self.copy_except(&rd);
+        rd.finish(&mut self.blockers);
+        Some(AbilityDef::Replacement {
+            replaces: Replaces::ThisEnters,
+            with: ReplaceWith::EntersAsCopy {
+                of: of?,
+                except: except?,
+                tapped,
+            },
+        })
+    }
+
+    /// The exceptions of a copy effect (CR 707.9): `NonLegendary$`, `AddKeywords$`,
+    /// `AddTypes$`, `SetPower$`/`SetToughness$`, `SetColor$`, `SetCreatureTypes$`. Any other
+    /// modifier is left unread (and so blocks the card).
+    fn copy_except(&mut self, rd: &Rd<'a>) -> Option<Vec<CopyExcept>> {
+        let mut out = Vec::new();
+        let mut ok = true;
+        if rd.get("NonLegendary") == Some("True") {
+            out.push(CopyExcept::NotLegendary);
+        }
+        if let Some(ks) = rd.get("AddKeywords") {
+            let mut keywords = Vec::new();
+            for k in ks.split('&').map(str::trim) {
+                match keyword(k) {
+                    Some(k) => keywords.push(k),
+                    None => {
+                        self.block(format!("copy:keyword {k}"));
+                        ok = false;
+                    }
+                }
+            }
+            out.push(CopyExcept::AddKeywords(keywords));
+        }
+        if let Some(ts) = rd.get("AddTypes") {
+            let (mut card_types, mut subtypes) = (Vec::new(), Vec::new());
+            for t in ts.split('&').map(str::trim) {
+                match card_type(t) {
+                    Some(t) => card_types.push(t),
+                    None if self.known.subtypes.contains(t) => subtypes.push(t.to_string()),
+                    None => {
+                        self.block(format!("copy:AddTypes {}", shape(t)));
+                        ok = false;
+                    }
+                }
+            }
+            out.push(CopyExcept::AddTypes {
+                card_types,
+                subtypes,
+            });
+        }
+        match (rd.get("SetPower"), rd.get("SetToughness")) {
+            (None, None) => {}
+            (Some(p), Some(t)) => match (p.parse::<i32>(), t.parse::<i32>()) {
+                (Ok(power), Ok(toughness)) => out.push(CopyExcept::SetPT { power, toughness }),
+                _ => {
+                    self.block("copy:SetPower variable");
+                    ok = false;
+                }
+            },
+            _ => {
+                self.block("copy:SetPower without SetToughness");
+                ok = false;
+            }
+        }
+        if let Some(cs) = rd.get("SetColor") {
+            let mut colors = Vec::new();
+            for c in cs.split(',').map(str::trim) {
+                match color(c) {
+                    Some(c) => colors.push(c),
+                    None if c == "Colorless" => {}
+                    None => {
+                        self.block(format!("copy:SetColor {c}"));
+                        ok = false;
+                    }
+                }
+            }
+            out.push(CopyExcept::SetColors(colors));
+        }
+        if let Some(ts) = rd.get("SetCreatureTypes") {
+            let mut types = Vec::new();
+            for t in ts.split_whitespace() {
+                if self.known.subtypes.contains(t) {
+                    types.push(t.to_string());
+                } else {
+                    self.block(format!("copy:SetCreatureTypes {}", shape(t)));
+                    ok = false;
+                }
+            }
+            out.push(CopyExcept::SetCreatureTypes(types));
+        }
+        ok.then_some(out)
+    }
+
+    /// `AtEOT$ Sacrifice|Exile` of a token copy: "[sacrifice / exile] it at the beginning
+    /// of the next end step" — a delayed triggered ability (CR 603.7), added to the card's
+    /// `granted` list. Returns its place there.
+    fn at_end(&mut self, what: &str) -> Option<u16> {
+        let effect = match what {
+            "Sacrifice" => Effect::SacrificeIt {
+                what: ObjRef::Triggering,
+            },
+            "Exile" => Effect::Exile {
+                what: ObjRef::Triggering,
+            },
+            other => {
+                self.block(format!("param:AtEOT {other}"));
+                return None;
+            }
+        };
+        let index = self.granted.len() as u16;
+        self.granted.push(AbilityDef::Triggered {
+            when: Trigger::BeginningOf {
+                step: TriggerStep::EndStep,
+                whose: Who::Any,
+            },
+            intervening_if: None,
+            body: Body::Effect(Mode {
+                targets: Vec::new(),
+                effect,
+                groups: Vec::new(),
+            }),
+        });
+        Some(index)
     }
 
     /// `RestrictValid$` of a mana ability: `Spell.<card filter>` and
@@ -6203,6 +6446,25 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
         // no prevention, no damage triggers).
         if has_word(plain, "damage") && !has_word(compiled, "damage") {
             missing.push("says damage");
+        }
+        // "A copy of …, except it has haste": the exceptions of a copy effect (CR 707.9)
+        // are part of what the copy is.
+        let sentences = |text: &str, all: &[&str]| {
+            text.split(['.', '/', '•'])
+                .filter(|s| all.iter().all(|w| s.contains(w)))
+                .count()
+        };
+        if sentences(plain, &["copy", "except"]) > 0 && !has_word(compiled, "except") {
+            missing.push("says except");
+        }
+        // "[The token] gains haste until end of turn": an effect that ends, which a script
+        // of a token copy may leave lasting ("that token gains haste").
+        let token_gains = compiled.contains("token gains") || compiled.contains("tokens gain");
+        if token_gains
+            && sentences(plain, &["gain", "until end of turn"])
+                > sentences(compiled, &["gain", "until end of turn"])
+        {
+            missing.push("says gains until end of turn");
         }
         // "Another target creature": the ability's source can't be chosen.
         if (plain.contains("another target") || plain.contains("other target"))

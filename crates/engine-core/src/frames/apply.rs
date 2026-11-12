@@ -274,12 +274,19 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
                 counters,
                 shuffle,
                 attach_to,
+                copy,
             } => {
                 let Some(o) = st.objects.get(&object) else {
                     continue; // already gone (e.g. moved earlier in this batch)
                 };
                 // CR 111.8: a token that has left the battlefield can't move again.
                 if o.is_token && o.zone != Zone::Battlefield {
+                    continue;
+                }
+                // CR 704.5e / 707.10a: a copy of a spell put anywhere but onto the
+                // battlefield ceases to exist (it is no card to be put there).
+                if o.spell_copy && to != Zone::Battlefield {
+                    execute(st, GameAction::CeaseToExist { object });
                     continue;
                 }
                 let (owner, was_controller) = (o.owner, o.controller);
@@ -292,6 +299,7 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
                         controller,
                         tapped,
                         counters,
+                        copy,
                     },
                 ) {
                     crate::actions::ActionResult::Moved(id) => id,
@@ -377,11 +385,25 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
                 token,
                 count,
                 controller,
+                copy,
             } => {
                 // CR 800.4b: no tokens for a player who has left the game.
                 if st.in_game(controller) {
                     for _ in 0..count {
-                        execute(st, GameAction::CreateToken { token, controller });
+                        let made = execute(
+                            st,
+                            GameAction::CreateToken {
+                                token,
+                                controller,
+                                copy: copy.as_ref().map(|c| alloc::boxed::Box::new(c.values.clone())),
+                                tapped: copy.as_ref().is_some_and(|c| {
+                                    c.tapped || crate::copy::enters_tapped(&st.catalog, &c.values, controller)
+                                }),
+                            },
+                        );
+                        if let (Some(c), crate::actions::ActionResult::Moved(id)) = (&copy, made) {
+                            crate::copy::token_extras(st, c, id);
+                        }
                     }
                 }
             }

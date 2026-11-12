@@ -67,6 +67,8 @@ impl Scenario {
                 deathtouch_damage: false,
                 attached_to: None,
                 last_controller: owner,
+                copy: None,
+                spell_copy: false,
             },
         );
         if zone == Zone::Stack {

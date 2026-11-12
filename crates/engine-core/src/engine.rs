@@ -106,6 +106,7 @@ pub fn new_game_with_commanders(
         continuous: Vec::new(),
         shields: Vec::new(),
         lasting: Vec::new(),
+        delayed: Vec::new(),
         next_effect_id: 0,
         commanders: Vec::new(),
         commander_cards: BTreeMap::new(),
@@ -162,6 +163,8 @@ pub fn new_game_with_commanders(
                     deathtouch_damage: false,
                     attached_to: None,
                     last_controller: owner,
+                    copy: None,
+                    spell_copy: false,
                 },
             );
             if zone == Zone::Command {

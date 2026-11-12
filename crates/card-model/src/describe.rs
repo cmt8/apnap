@@ -6,7 +6,8 @@
 use crate::{
     AbilityDef, ActivationZone, Affected, Amount, AsEnters, Body, Calc, CardDef, CardDest,
     CardType, CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost, CounterKind,
-    DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword, ManaProduce, Measure, Mode,
+    CopyExcept, CopyWhat, DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword,
+    ManaProduce, Measure, Mode,
     ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, Take, TargetFilter, TargetRef,
     Timing, Trigger, TriggerStep, Who,
 };
@@ -281,6 +282,55 @@ fn obj(mode: &Mode, r: ObjRef) -> String {
         ObjRef::Triggering => "it".into(),
         ObjRef::ThisCard => "this card".into(),
         ObjRef::TriggeringCard => "that card".into(),
+        // `rules_text` says "equipped" for an Equipment.
+        ObjRef::Host => "enchanted creature".into(),
+    }
+}
+
+/// ", except it isn't legendary and it has haste" (CR 707.9); empty for none.
+fn copy_except(except: &[CopyExcept]) -> String {
+    let parts: Vec<String> = except
+        .iter()
+        .map(|e| match e {
+            CopyExcept::NotLegendary => "it isn't legendary".to_string(),
+            CopyExcept::AddKeywords(ks) => format!(
+                "it has {}",
+                join(ks.iter().map(|k| keyword(*k).to_lowercase()).collect(), "and")
+            ),
+            CopyExcept::AddTypes {
+                card_types,
+                subtypes,
+            } => {
+                let mut words: Vec<String> = subtypes.clone();
+                words.extend(card_types.iter().map(|t| card_type(*t).to_string()));
+                format!(
+                    "it's {} in addition to its other types",
+                    with_article(&words.join(" "))
+                )
+            }
+            CopyExcept::SetPT { power, toughness } => format!("it's {power}/{toughness}"),
+            CopyExcept::SetColors(cs) if cs.is_empty() => "it's colorless".to_string(),
+            CopyExcept::SetColors(cs) => format!(
+                "it's {}",
+                join(cs.iter().map(|c| color(*c).to_string()).collect(), "and")
+            ),
+            CopyExcept::SetCreatureTypes(ts) => format!("it's {}", with_article(&ts.join(" "))),
+            CopyExcept::HasAbilities(indices) => format!(
+                "it has {}",
+                join(
+                    indices
+                        .iter()
+                        .map(|i| format!("{GRANTED}{i}{GRANTED}"))
+                        .collect(),
+                    "and"
+                )
+            ),
+        })
+        .collect();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(", except {}", join(parts, "and"))
     }
 }
 
@@ -549,10 +599,20 @@ fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
 const GRANTED: char = '\u{1}';
 /// Brackets "index|what it is about" of an ability a lasting effect carries.
 const LASTING: char = '\u{2}';
+/// Brackets the index of a delayed triggered ability "at the beginning of the next end
+/// step" (CR 603.7): its instruction is said with when it happens.
+const DELAYED: char = '\u{3}';
 
 /// Replace each marker `continuous` left with the quoted text of that ability of
 /// `def.granted` (which can quote others in turn).
 fn quote_granted(def: &CardDef, text: &str) -> String {
+    let delayed;
+    let text = if text.contains(DELAYED) {
+        delayed = say_delayed(def, text);
+        delayed.as_str()
+    } else {
+        text
+    };
     // The abilities of lasting effects first, said outright: "target creature can't be
     // blocked" for "That permanent can't be blocked."
     let mut said = String::new();
@@ -617,8 +677,88 @@ fn quote_granted(def: &CardDef, text: &str) -> String {
     out
 }
 
+/// Fill in the delayed triggered abilities: "Sacrifice it at the beginning of the next end
+/// step".
+fn say_delayed(def: &CardDef, text: &str) -> String {
+    let mut out = String::new();
+    let mut parts = text.split(DELAYED);
+    while let Some(plain) = parts.next() {
+        out.push_str(plain);
+        let Some(marker) = parts.next() else { break };
+        let (index, them) = match marker.split_once('|') {
+            Some((i, _)) => (i, true),
+            None => (marker, false),
+        };
+        match index.parse::<usize>().ok().and_then(|i| def.granted.get(i)) {
+            Some(AbilityDef::Triggered { body: b, .. }) => {
+                let mut text = body(b);
+                if them {
+                    text = text.replace(" it.", " them.");
+                }
+                let text = text.trim_end_matches('.');
+                let text = text.strip_prefix("You ").unwrap_or(text);
+                let mut chars = text.chars();
+                if let Some(first) = chars.next() {
+                    out.extend(first.to_uppercase());
+                    out.push_str(chars.as_str());
+                }
+                out.push_str(" at the beginning of the next end step");
+            }
+            _ => out.push_str("[a missing ability]"),
+        }
+    }
+    out
+}
+
 fn effect(mode: &Mode, e: &Effect) -> String {
     match e {
+        Effect::CopyPermanent {
+            what,
+            count,
+            except,
+            gains,
+            tapped,
+            at_end,
+        } => {
+            let n = amount(count);
+            let one = n == "1";
+            let tokens = match (one, *tapped) {
+                (true, false) => "a token that's".to_string(),
+                (true, true) => "a tapped token that's".to_string(),
+                (false, false) => format!("{n} tokens that are"),
+                (false, true) => format!("{n} tapped tokens that are"),
+            };
+            let copies = if one { "a copy" } else { "copies" };
+            let except = copy_except(except);
+            let mut out = match what {
+                CopyWhat::Obj(r) => {
+                    format!("you create {tokens} {copies} of {}{except}", obj(mode, *r))
+                }
+                CopyWhat::Each(s) => format!(
+                    "for each {}, you create {tokens} {copies} of that permanent{except}",
+                    selector(s, false)
+                ),
+            };
+            let several = !one || matches!(what, CopyWhat::Each(_));
+            if !gains.is_empty() {
+                out.push_str(&format!(
+                    ". {} {}",
+                    if several { "Those tokens gain" } else { "That token gains" },
+                    join(gains.iter().map(|k| keyword(*k).to_lowercase()).collect(), "and")
+                ));
+            }
+            if let Some(i) = at_end {
+                let them = if several { "|them" } else { "" };
+                out.push_str(&format!(". {DELAYED}{i}{them}{DELAYED}"));
+            }
+            out
+        }
+        Effect::BecomeCopy { what, except } => format!(
+            "this permanent becomes a copy of {}{}",
+            obj(mode, *what),
+            copy_except(except)
+        ),
+        Effect::SacrificeIt { what } => format!("you sacrifice {}", obj(mode, *what)),
         // The abilities' texts are filled in by `quote_granted`, which has the card.
         Effect::Lasting {
             abilities,
@@ -1887,6 +2027,20 @@ fn ability(a: &AbilityDef) -> String {
                         counter(*kind)
                     )
                 }
+                ReplaceWith::EntersAsCopy {
+                    of,
+                    except,
+                    tapped,
+                } => format!(
+                    "You may have {} enter{} as a copy of {} on the battlefield{}.",
+                    what.to_lowercase(),
+                    if *tapped { " tapped" } else { "" },
+                    match of.controller {
+                        Who::Any => format!("any {}", selector(&Selector { other: false, ..of.clone() }, false)),
+                        _ => with_article(&selector(&Selector { other: false, ..of.clone() }, false)),
+                    },
+                    copy_except(except)
+                ),
                 ReplaceWith::EntersWithCounted { kind, amount: a } => {
                     format!(
                         "{what} enters with X {} counters on it, where X is {}.",

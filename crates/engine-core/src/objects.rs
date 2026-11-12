@@ -33,6 +33,16 @@ pub struct GameObject {
     /// The layered controller last seen by the engine; a change marks the permanent
     /// summoning sick (CR 302.6). Bookkeeping for `layers::sync_control`.
     pub last_controller: PlayerId,
+    /// CR 707.2: the copiable values of the copy effect it is under (layer 1a), if it is a
+    /// copy — a token copy, a permanent that entered or became a copy, a copy of a spell.
+    /// Not carried to a new object (CR 400.7), except that a copy of a permanent spell
+    /// stays what it is as it becomes a token (CR 608.3f).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<alloc::boxed::Box<crate::copy::Copiable>>,
+    /// CR 707.10: a copy of a spell — not a card; it ceases to exist anywhere but on the
+    /// stack (CR 704.5e).
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub spell_copy: bool,
 }
 
 impl GameObject {

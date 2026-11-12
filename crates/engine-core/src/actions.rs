@@ -14,6 +14,7 @@ use crate::objects::GameObject;
 use crate::stack::{StackKind, StackObject, Target};
 use crate::state::GameState;
 use crate::zones::{LibraryPosition, Zone};
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use card_model::{AbilityId, CardDefId, ContinuousEffect, CounterKind};
 
@@ -33,11 +34,32 @@ pub enum GameAction {
         tapped: bool,
         /// Counters it enters with (CR 122.6).
         counters: Vec<(CounterKind, u32)>,
+        /// It enters as a copy (CR 707.5): these are its copiable values.
+        copy: Option<Box<crate::copy::Copiable>>,
     },
     /// CR 111.1: create a token (from a token definition) on the battlefield.
     CreateToken {
         token: CardDefId,
         controller: PlayerId,
+        /// A token that's a copy (CR 707, 111.3): its copiable values.
+        copy: Option<Box<crate::copy::Copiable>>,
+        tapped: bool,
+    },
+    /// CR 707.4: a permanent becomes a copy — these are its copiable values from now on.
+    BecomeCopy {
+        object: ObjectId,
+        values: crate::copy::Copiable,
+    },
+    /// CR 603.7: a delayed triggered ability is created.
+    AddDelayed {
+        source: ObjectId,
+        controller: PlayerId,
+        ability: AbilityId,
+        about: Option<ObjectId>,
+    },
+    /// CR 603.7b: it has triggered (once) and is gone.
+    RemoveDelayed {
+        id: u32,
     },
     /// CR 122.1: put counters on a permanent.
     PutCounters {
@@ -258,6 +280,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             controller,
             tapped,
             counters,
+            copy,
         } => {
             let new = perform_move(st, object, to, position, controller);
             if to == Zone::Battlefield {
@@ -266,10 +289,48 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 for (kind, n) in counters {
                     *o.counters.entry(kind).or_default() += n;
                 }
+                // CR 707.5: it entered as a copy; it never was anything else here.
+                if let Some(values) = copy {
+                    let card = values.card;
+                    st.object_mut(new).copy = Some(values);
+                    st.emit(Event::BecameCopy { object: new, card });
+                }
             }
             ActionResult::Moved(new)
         }
-        GameAction::CreateToken { token, controller } => {
+        GameAction::BecomeCopy { object, values } => {
+            let card = values.card;
+            st.object_mut(object).copy = Some(Box::new(values));
+            st.emit(Event::BecameCopy { object, card });
+            ActionResult::Done
+        }
+        GameAction::AddDelayed {
+            source,
+            controller,
+            ability,
+            about,
+        } => {
+            let id = st.next_effect_id;
+            st.next_effect_id += 1;
+            st.delayed.push(crate::triggers::Delayed {
+                id,
+                source,
+                controller,
+                ability,
+                about,
+            });
+            ActionResult::Done
+        }
+        GameAction::RemoveDelayed { id } => {
+            st.delayed.retain(|d| d.id != id);
+            ActionResult::Done
+        }
+        GameAction::CreateToken {
+            token,
+            controller,
+            copy,
+            tapped,
+        } => {
             let id = st.alloc_object_id();
             let timestamp = st.alloc_timestamp();
             let card_instance = crate::ids::CardInstanceId(st.next_card_instance);
@@ -284,7 +345,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                     controller,
                     zone: Zone::Battlefield,
                     timestamp,
-                    tapped: false,
+                    tapped,
                     damage_marked: 0,
                     summoning_sick: true,
                     counters: Default::default(),
@@ -292,6 +353,8 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                     deathtouch_damage: false,
                     attached_to: None,
                     last_controller: controller,
+                    copy: copy.clone(),
+                    spell_copy: false,
                 },
             );
             st.zones.battlefield.push(id);
@@ -300,6 +363,12 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 card: token,
                 controller,
             });
+            if let Some(values) = copy {
+                st.emit(Event::BecameCopy {
+                    object: id,
+                    card: values.card,
+                });
+            }
             ActionResult::Moved(id)
         }
         GameAction::PutCounters { object, kind, n } => {
@@ -745,6 +814,7 @@ pub fn move_object(
             controller,
             tapped: false,
             counters: Vec::new(),
+            copy: None,
         },
     ) {
         ActionResult::Moved(id) => id,
@@ -810,10 +880,18 @@ fn perform_move(
         damage_marked: 0,
         summoning_sick: to == Zone::Battlefield,
         counters: Default::default(),
-        is_token: old.is_token,
+        // CR 608.3f: a copy of a permanent spell becomes a token as it enters, with the
+        // characteristics of the spell it was (CR 111.13).
+        is_token: old.is_token || (old.spell_copy && to == Zone::Battlefield),
         deathtouch_damage: false,
         attached_to: None,
         last_controller: controller,
+        copy: if old.spell_copy && matches!(to, Zone::Battlefield | Zone::Stack) {
+            old.copy.clone()
+        } else {
+            None
+        },
+        spell_copy: old.spell_copy && to != Zone::Battlefield,
     };
     st.objects.insert(new_id, obj);
     if to == Zone::Stack {
