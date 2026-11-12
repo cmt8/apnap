@@ -5,11 +5,10 @@
 
 use crate::{
     AbilityDef, ActivationZone, Affected, Amount, AsEnters, Body, Calc, CardDef, CardDest,
-    CardType, CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost, CounterKind,
-    CopyExcept, CopyWhat, DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword,
-    ManaProduce, Measure, Mode,
-    ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, Take, TargetFilter, TargetRef,
-    Timing, Trigger, TriggerStep, Who,
+    CardType, CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, CopyExcept, CopyWhat,
+    Cost, CounterKind, DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword,
+    ManaProduce, Measure, Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector,
+    Take, TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
 };
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -378,7 +377,10 @@ fn copy_except(except: &[CopyExcept]) -> String {
             CopyExcept::NotLegendary => "it isn't legendary".to_string(),
             CopyExcept::AddKeywords(ks) => format!(
                 "it has {}",
-                join(ks.iter().map(|k| keyword(*k).to_lowercase()).collect(), "and")
+                join(
+                    ks.iter().map(|k| keyword(*k).to_lowercase()).collect(),
+                    "and"
+                )
             ),
             CopyExcept::AddTypes {
                 card_types,
@@ -838,8 +840,15 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             if !gains.is_empty() {
                 out.push_str(&format!(
                     ". {} {}",
-                    if several { "Those tokens gain" } else { "That token gains" },
-                    join(gains.iter().map(|k| keyword(*k).to_lowercase()).collect(), "and")
+                    if several {
+                        "Those tokens gain"
+                    } else {
+                        "That token gains"
+                    },
+                    join(
+                        gains.iter().map(|k| keyword(*k).to_lowercase()).collect(),
+                        "and"
+                    )
                 ));
             }
             if let Some(i) = at_end {
@@ -2464,17 +2473,28 @@ fn ability(a: &AbilityDef) -> String {
                         counter(*kind)
                     )
                 }
-                ReplaceWith::EntersAsCopy {
-                    of,
-                    except,
-                    tapped,
-                } => format!(
+                ReplaceWith::EntersAsCopy { of, except, tapped } => format!(
                     "You may have {} enter{} as a copy of {} on the battlefield{}.",
                     what.to_lowercase(),
                     if *tapped { " tapped" } else { "" },
                     match of.controller {
-                        Who::Any => format!("any {}", selector(&Selector { other: false, ..of.clone() }, false)),
-                        _ => with_article(&selector(&Selector { other: false, ..of.clone() }, false)),
+                        Who::Any => format!(
+                            "any {}",
+                            selector(
+                                &Selector {
+                                    other: false,
+                                    ..of.clone()
+                                },
+                                false
+                            )
+                        ),
+                        _ => with_article(&selector(
+                            &Selector {
+                                other: false,
+                                ..of.clone()
+                            },
+                            false
+                        )),
                     },
                     copy_except(except)
                 ),

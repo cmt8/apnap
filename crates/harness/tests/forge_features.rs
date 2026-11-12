@@ -2509,7 +2509,10 @@ fn other_permanents_enter_with_counters_for_each() {
     // "As this enters, choose …" is the same keyword with another effect: not compiled.
     let banner = "Name:Test Banner\nManaCost:3\nTypes:Artifact\nK:ETBReplacement:Other:ChooseColor\n\
         SVar:ChooseColor:DB$ ChooseColor | Defined$ You | SpellDescription$ Text.\nOracle:Text.";
-    assert_eq!(forge_test_blockers(banner), ["kw:ETBReplacement as this enters, choose (ChooseColor)"]);
+    assert_eq!(
+        forge_test_blockers(banner),
+        ["kw:ETBReplacement as this enters, choose (ChooseColor)"]
+    );
 }
 
 // ---------------------------------------------------------------------------------------

@@ -100,7 +100,11 @@ pub fn base(st: &GameState, id: ObjectId, face: u8, controller: PlayerId) -> Cha
 }
 
 /// The characteristics given by copiable values (CR 707.2, 707.9).
-pub fn characteristics(catalog: &CardCatalog, v: &Copiable, controller: PlayerId) -> Characteristics {
+pub fn characteristics(
+    catalog: &CardCatalog,
+    v: &Copiable,
+    controller: PlayerId,
+) -> Characteristics {
     let mut c = Characteristics::printed(v.card, catalog.get(v.card), controller);
     for e in &v.except {
         match &e.what {
@@ -143,13 +147,13 @@ pub fn characteristics(catalog: &CardCatalog, v: &Copiable, controller: PlayerId
                 c.colors.sort();
             }
             CopyExcept::SetCreatureTypes(ts) => c.subtypes = ts.clone(),
-            CopyExcept::HasAbilities(indices) => c.abilities.extend(indices.iter().map(|&index| {
-                AbilityId {
+            CopyExcept::HasAbilities(indices) => {
+                c.abilities.extend(indices.iter().map(|&index| AbilityId {
                     card: e.card,
                     index,
                     granted: true,
-                }
-            })),
+                }))
+            }
         }
     }
     c

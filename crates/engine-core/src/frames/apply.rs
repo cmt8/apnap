@@ -472,7 +472,9 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) -> Vec<Proposed
                             controller,
                             tapped,
                             counters,
-                            copy: copy.as_ref().map(|c| alloc::boxed::Box::new(c.values.clone())),
+                            copy: copy
+                                .as_ref()
+                                .map(|c| alloc::boxed::Box::new(c.values.clone())),
                         },
                     );
                     // What the instruction says about each token copy it made.

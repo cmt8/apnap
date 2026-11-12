@@ -377,7 +377,9 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                 when: card_model::Trigger::BeginningOf { .. },
                 ..
             }) => {}
-            _ => p.push(format!("delayed ability {index}: not a step trigger in granted")),
+            _ => p.push(format!(
+                "delayed ability {index}: not a step trigger in granted"
+            )),
         }
     }
     // The abilities lasting effects carry ("target creature can't be blocked this turn").
@@ -992,6 +994,7 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                                 | ReplaceWith::EntersTappedUnless(_)
                                 | ReplaceWith::EntersTappedUnlessYou(_)
                                 | ReplaceWith::EntersOnlyIfYou(_)
+                                | ReplaceWith::EntersAsCopy { .. }
                         )
                         | (
                             Replaces::OtherEnters(_),

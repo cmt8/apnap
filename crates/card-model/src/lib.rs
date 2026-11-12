@@ -1988,7 +1988,9 @@ pub enum Effect {
     },
     /// "Sacrifice it" (CR 701.21a): the object, if it is still on the battlefield under the
     /// control of the ability's controller.
-    SacrificeIt { what: ObjRef },
+    SacrificeIt {
+        what: ObjRef,
+    },
 }
 
 /// A zone an effect takes cards out of as it resolves.

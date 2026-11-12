@@ -610,7 +610,9 @@ pub fn apply_chosen(
         if let OptionDesc::Card { card } = answer {
             let values = crate::copy::values(st, *card).with(ability.card, &except);
             match &mut ev {
-                Proposed::Move { copy, tapped: t, .. } => {
+                Proposed::Move {
+                    copy, tapped: t, ..
+                } => {
                     *copy = Some(alloc::boxed::Box::new(values));
                     *t |= tapped;
                 }
@@ -1003,7 +1005,9 @@ fn as_it_would_exist(
             controller: *controller,
             tapped: *tapped,
             counters: counters.clone(),
-            copy: copy.as_ref().map(|c| alloc::boxed::Box::new(c.values.clone())),
+            copy: copy
+                .as_ref()
+                .map(|c| alloc::boxed::Box::new(c.values.clone())),
         },
         _ => return None,
     };
@@ -1359,7 +1363,8 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
             }
             // "Enters tapped unless …" whose condition has come to hold meanwhile; "you may
             // have this enter as a copy" with nothing on the battlefield to copy.
-            if entering_unchanged(st, &with, &ev) || matches!(with, ReplaceWith::EntersAsCopy { .. })
+            if entering_unchanged(st, &with, &ev)
+                || matches!(with, ReplaceWith::EntersAsCopy { .. })
             {
                 return Some(ev);
             }

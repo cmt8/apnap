@@ -14,11 +14,10 @@ use card_model::{
     AbilityDef, ActivationZone, Affected, AltCost, AltKind, AltKindName, Amount, AsEnters,
     BasicLandType, Body, Calc, CardDef, CardDest, CardType, CardZone, Cmp, Color, CombatRule,
     Condition, ContinuousEffect, CopyExcept, CopyWhat, Cost, CostChoice, CounterKind, DamageBy,
-    DamagePer, DamageTo,
-    EachPlayerAction, Effect, Keyword, Layout, ManaCost, ManaProduce, ManaRestriction, ManaType,
-    Measure, Mode, ObjFilter, ObjRef, PlayZone, PlayerRef, PlayerRule, ReplaceWith, Replaces,
-    Selector, Signed, Supertype, Take, TargetFilter, TargetGroup, TargetRef, Timing, Trigger,
-    TriggerCause, TriggerStep, Who,
+    DamagePer, DamageTo, EachPlayerAction, Effect, Keyword, Layout, ManaCost, ManaProduce,
+    ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef, PlayZone, PlayerRef, PlayerRule,
+    ReplaceWith, Replaces, Selector, Signed, Supertype, Take, TargetFilter, TargetGroup, TargetRef,
+    Timing, Trigger, TriggerCause, TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
