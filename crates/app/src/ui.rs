@@ -425,6 +425,7 @@ pub fn anchor(o: &OptionDesc) -> Option<Anchor> {
         | OptionDesc::Trigger { source, .. } => Anchor::Obj(*source),
         OptionDesc::DamageRecipient { object } => Anchor::Obj(*object),
         OptionDesc::Attack { defender, .. } => Anchor::Player(*defender),
+        OptionDesc::AttackPlaneswalker { planeswalker, .. } => Anchor::Obj(*planeswalker),
         OptionDesc::Block { attacker, .. } => Anchor::Obj(*attacker),
         OptionDesc::Target { target } => match target {
             Target::Object(id) => Anchor::Obj(*id),
@@ -500,6 +501,10 @@ pub fn option_label(
             text.unwrap_or_else(|| format!("mode {index}"))
         }
         OptionDesc::Attack { defender, .. } => format!("attack P{}", defender.0),
+        OptionDesc::AttackPlaneswalker { planeswalker, .. } => format!(
+            "attack {}",
+            find_object(v, *planeswalker).map_or("a planeswalker", |o| o.name.as_str())
+        ),
         // CR 614.12a: "As this enters, you may pay 2 life. If you don't, it enters tapped."
         OptionDesc::Accept if matches!(d.kind, ChoiceKind::AsEnters { .. }) => match d.kind {
             ChoiceKind::AsEnters { ability, .. } => match cat.ability(ability) {

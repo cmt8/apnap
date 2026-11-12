@@ -811,9 +811,28 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             match target {
                 DamageTarget::Player(p) => change_life(st, p, -life_amount(amount)),
                 DamageTarget::Object(o) => {
-                    let obj = st.object_mut(o);
-                    obj.damage_marked = obj.damage_marked.saturating_add(amount);
-                    obj.deathtouch_damage |= deathtouch;
+                    let c = crate::layers::chars(st, o);
+                    let planeswalker = c.is(card_model::CardType::Planeswalker);
+                    // CR 120.3e: damage is marked on a creature (and, as before, on any
+                    // other permanent that isn't a planeswalker).
+                    if c.is(card_model::CardType::Creature) || !planeswalker {
+                        let obj = st.object_mut(o);
+                        obj.damage_marked = obj.damage_marked.saturating_add(amount);
+                        obj.deathtouch_damage |= deathtouch;
+                    }
+                    // CR 120.3c, 306.8: damage dealt to a planeswalker removes that many
+                    // loyalty counters from it.
+                    let loyalty = st.object(o).counters_of(CounterKind::LOYALTY);
+                    if planeswalker && loyalty > 0 {
+                        execute(
+                            st,
+                            GameAction::RemoveCounters {
+                                object: o,
+                                kind: CounterKind::LOYALTY,
+                                n: amount.min(loyalty),
+                            },
+                        );
+                    }
                 }
             }
             ActionResult::Done

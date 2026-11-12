@@ -418,6 +418,21 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
     if text.contains("while_source: true") && instant_or_sorcery {
         p.push("an effect of a spell can't last while its source stays".into());
     }
+    // CR 306.5a–b: a planeswalker has a printed loyalty and enters with that many loyalty
+    // counters (its intrinsic replacement ability, as compiled).
+    if c.has_type(CardType::Planeswalker) {
+        let enters = c.loyalty.is_some_and(|n| {
+            c.abilities.iter().any(|a| {
+                matches!(a, AbilityDef::Replacement {
+                    replaces: card_model::Replaces::ThisEnters,
+                    with: card_model::ReplaceWith::EntersWithCounters { kind, n: m },
+                } if *kind == card_model::CounterKind::LOYALTY && *m == n)
+            })
+        });
+        if !enters {
+            p.push("a planeswalker enters with its printed loyalty (CR 306.5b)".into());
+        }
+    }
     let printed = c.abilities.iter().enumerate().map(|(i, a)| (i, a, false));
     let given = c.granted.iter().enumerate().map(|(i, a)| (i, a, true));
     for (i, a, granted) in printed.chain(given) {
@@ -709,8 +724,57 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                 body,
                 from,
                 cycling,
+                timing,
                 ..
             } => {
+                // CR 606.2, 606.4: a loyalty ability's cost is one loyalty symbol — loyalty
+                // counters put on or removed from the planeswalker it is printed on.
+                let loyalty = |k: card_model::CounterKind| k == card_model::CounterKind::LOYALTY;
+                let symbols = [
+                    cost.add_counters.is_some_and(|(k, _)| loyalty(k)),
+                    cost.remove_counters.is_some_and(|(k, _)| loyalty(k)),
+                    cost.remove_x_counters.is_some_and(loyalty),
+                ]
+                .iter()
+                .filter(|b| **b)
+                .count();
+                let only_symbol = *cost
+                    == Cost {
+                        add_counters: cost.add_counters,
+                        remove_counters: cost.remove_counters,
+                        remove_x_counters: cost.remove_x_counters,
+                        ..Cost::default()
+                    };
+                if *timing == card_model::Timing::Loyalty
+                    && (symbols != 1
+                        || !only_symbol
+                        || granted
+                        || *from != ActivationZone::Battlefield
+                        || !c.has_type(CardType::Planeswalker))
+                {
+                    p.push(at(
+                        "a loyalty ability is one loyalty symbol, printed on a planeswalker".into(),
+                    ));
+                }
+                if *timing != card_model::Timing::Loyalty
+                    && cost.add_counters.is_some_and(|(_, n)| n == 0)
+                {
+                    p.push(at(
+                        "a cost of zero counters is a loyalty ability's \"0\"".into()
+                    ));
+                }
+                // CR 605.1a: an activated ability without a target that could add mana, and
+                // isn't a loyalty ability, is a mana ability — it doesn't use the stack.
+                let targets = body.modes().iter().any(|m| !m.targets.is_empty());
+                if *timing != card_model::Timing::Loyalty
+                    && !targets
+                    && format!("{body:?}").contains("AddMana")
+                {
+                    p.push(at(
+                        "an activated ability that adds mana with no target is a mana ability (CR 605.1a)"
+                            .into(),
+                    ));
+                }
                 // CR 113.6: the cost can name the card only where the ability works from.
                 let on_battlefield = cost.tap || cost.sacrifice_self;
                 let fits = match from {
@@ -729,7 +793,8 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                             .into(),
                     ));
                 }
-                let has_x = cost.mana.as_ref().is_some_and(|m| m.has_x());
+                let has_x = cost.mana.as_ref().is_some_and(|m| m.has_x())
+                    || cost.remove_x_counters.is_some();
                 if cost.life_x {
                     p.push(at("\"pay X life\" is only a spell's additional cost".into()));
                 }
@@ -762,6 +827,7 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                     // add …"): not in the mana planner yet.
                     || cost.remove_counters.is_some()
                     || cost.add_counters.is_some()
+                    || cost.remove_x_counters.is_some()
                 {
                     p.push(at("a mana ability cost that isn't modelled (D-066)".into()));
                 }
@@ -886,6 +952,7 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                     || cost.exile_self
                     || cost.remove_counters.is_some()
                     || cost.add_counters.is_some()
+                    || cost.remove_x_counters.is_some()
                 {
                     p.push(at(
                         "an additional cost is a sacrifice, a discard or life, nothing else".into(),
@@ -1208,7 +1275,8 @@ fn check_cost(cost: &Cost, p: &mut dyn FnMut(String)) {
         .into_iter()
         .flatten()
     {
-        if n == 0 {
+        // (A loyalty ability's "[0]" puts zero loyalty counters on it, CR 606.4.)
+        if n == 0 && cost.add_counters != Some((card_model::CounterKind::LOYALTY, 0)) {
             p(format!("a cost of zero {kind:?} counters"));
         }
     }
@@ -1531,6 +1599,9 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             }
             if cost.discard_self || cost.exile_self {
                 p("a cost paid on resolution can't use the card in hand or graveyard".into());
+            }
+            if cost.remove_x_counters.is_some() {
+                p("no X is announced for a cost paid on resolution".into());
             }
             // `{T}` and "sacrifice this" are the ability's source: its controller's.
             if (cost.tap || cost.sacrifice_self) && *who != PlayerRef::You {

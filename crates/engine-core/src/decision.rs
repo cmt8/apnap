@@ -267,6 +267,12 @@ pub enum OptionDesc {
     Color {
         color: card_model::Color,
     },
+    /// Attack a planeswalker (CR 506.3, 508.1b); its controller is the defending player.
+    /// Offered after `Attack` on that player, the player's planeswalkers in timestamp order.
+    AttackPlaneswalker {
+        attacker: ObjectId,
+        planeswalker: ObjectId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

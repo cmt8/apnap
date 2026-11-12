@@ -65,11 +65,34 @@ pub struct RestrictedMana {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttackInfo {
     pub attacker: ObjectId,
+    /// The defending player (CR 508.5): the player it attacks, or the controller of the
+    /// planeswalker it attacks.
     pub defender: PlayerId,
     /// CR 509.1h: stays true even if every blocker is removed from combat.
     pub blocked: bool,
     /// Blockers still in combat, in declaration order.
     pub blockers: Vec<ObjectId>,
+    /// CR 506.3, 508.1b: the planeswalker it attacks (controlled by `defender` when it was
+    /// declared), if it attacks one rather than a player.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planeswalker: Option<ObjectId>,
+}
+
+impl AttackInfo {
+    /// CR 506.4, 506.4c, 510.1b: the planeswalker it attacks, while that is still in combat —
+    /// on the battlefield, a planeswalker, controlled by the defending player. `None` for
+    /// an attack on a player.
+    pub fn planeswalker_in_combat(&self, st: &GameState) -> Option<ObjectId> {
+        let pw = self.planeswalker?;
+        st.objects
+            .get(&pw)
+            .is_some_and(|o| {
+                o.zone == crate::zones::Zone::Battlefield
+                    && crate::layers::chars(st, pw).is(card_model::CardType::Planeswalker)
+                    && crate::layers::controller_of(st, pw) == self.defender
+            })
+            .then_some(pw)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +170,10 @@ pub struct GameState {
     /// Delayed triggered abilities waiting for their event (CR 603.7).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delayed: Vec<crate::effects::Delayed>,
+    /// CR 606.3: the permanents a loyalty ability of which has been activated this turn
+    /// (cleared as each turn begins; a permanent that changes zones is a new object).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loyalty_activated: Vec<ObjectId>,
 }
 
 impl GameState {

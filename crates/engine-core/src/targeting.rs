@@ -87,8 +87,15 @@ pub fn describes(
                 return false;
             };
             match filter {
-                TargetFilter::AnyTarget | TargetFilter::Creature => {
+                TargetFilter::Creature => {
                     o.zone == Zone::Battlefield && chars(st, id).is(CardType::Creature)
+                }
+                // CR 115.4: "any target" — a creature, player, planeswalker or battle (no
+                // battles yet).
+                TargetFilter::AnyTarget => {
+                    let c = chars(st, id);
+                    o.zone == Zone::Battlefield
+                        && (c.is(CardType::Creature) || c.is(CardType::Planeswalker))
                 }
                 TargetFilter::Spell => st
                     .stack_object(id)

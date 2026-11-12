@@ -181,7 +181,11 @@ pub(crate) fn can_block(
 pub struct DeclareAttackersFrame {
     pub candidates: Vec<ObjectId>,
     pub next: usize,
+    /// Each attacker and its defending player (CR 508.5).
     pub chosen: Vec<(ObjectId, PlayerId)>,
+    /// The attackers among `chosen` that attack a planeswalker, and which (CR 508.1b).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub planeswalkers: Vec<(ObjectId, ObjectId)>,
 }
 
 impl DeclareAttackersFrame {
@@ -204,27 +208,49 @@ impl DeclareAttackersFrame {
             candidates,
             next: 0,
             chosen: Vec::new(),
+            planeswalkers: Vec::new(),
         }
     }
 
     pub(crate) fn run(mut self, st: &mut GameState, input: Option<Input>) -> Flow {
         let ap = st.turn.active;
         if let Some(inp) = input {
-            if let Some(OptionDesc::Attack { attacker, defender }) = inp.picked_one().cloned() {
-                self.chosen.push((attacker, defender));
+            match inp.picked_one().cloned() {
+                Some(OptionDesc::Attack { attacker, defender }) => {
+                    self.chosen.push((attacker, defender))
+                }
+                Some(OptionDesc::AttackPlaneswalker {
+                    attacker,
+                    planeswalker,
+                }) => {
+                    let defender = crate::layers::controller_of(st, planeswalker);
+                    self.chosen.push((attacker, defender));
+                    self.planeswalkers.push((attacker, planeswalker));
+                }
+                _ => {}
             }
             self.next += 1;
         }
         if let Some(&creature) = self.candidates.get(self.next) {
-            // CR 508.1b: which player each attacker attacks (planeswalkers/battles: M3).
-            let options = st
-                .opponents(ap)
-                .into_iter()
-                .map(|defender| OptionDesc::Attack {
+            // CR 508.1b: which player or planeswalker each attacker attacks — each opponent
+            // in seat order, then the planeswalkers that player controls, in timestamp
+            // order (no battles yet).
+            let mut options = Vec::new();
+            for defender in st.opponents(ap) {
+                options.push(OptionDesc::Attack {
                     attacker: creature,
                     defender,
-                })
-                .collect();
+                });
+                for &pw in &st.zones.battlefield {
+                    let c = chars(st, pw);
+                    if c.is(CardType::Planeswalker) && c.controller == defender {
+                        options.push(OptionDesc::AttackPlaneswalker {
+                            attacker: creature,
+                            planeswalker: pw,
+                        });
+                    }
+                }
+            }
             return Flow::ask(
                 Frame::DeclareAttackers(self),
                 ap,
@@ -243,13 +269,25 @@ impl DeclareAttackersFrame {
         // CR 508.1k: they become attacking creatures.
         let mut combat = CombatState::default();
         for &(attacker, defender) in &self.chosen {
+            let planeswalker = self
+                .planeswalkers
+                .iter()
+                .find(|(a, _)| *a == attacker)
+                .map(|(_, pw)| *pw);
             combat.attackers.push(AttackInfo {
                 attacker,
                 defender,
                 blocked: false,
                 blockers: Vec::new(),
+                planeswalker,
             });
             st.emit(Event::AttackerDeclared { attacker, defender });
+            if let Some(planeswalker) = planeswalker {
+                st.emit(Event::AttacksPlaneswalker {
+                    attacker,
+                    planeswalker,
+                });
+            }
         }
         st.combat = Some(combat);
         // "Attacking creatures you control get …": the layered view depends on combat.
@@ -506,9 +544,16 @@ impl CombatDamageFrame {
             let power = power as u32;
             let trample = c.has(Keyword::Trample);
             let deathtouch = c.has(Keyword::Deathtouch);
-            let player = st
-                .in_game(a.defender)
-                .then_some(DamageTarget::Player(a.defender));
+            // CR 510.1b: what it attacks — the player, or the planeswalker while that is
+            // still in combat; attacking a planeswalker that has left combat, nothing
+            // (CR 506.4c). CR 702.19b, 702.19f: trample's excess goes there too, never to
+            // the planeswalker's controller.
+            let player = match a.planeswalker {
+                Some(_) => a.planeswalker_in_combat(st).map(DamageTarget::Object),
+                None => st
+                    .in_game(a.defender)
+                    .then_some(DamageTarget::Player(a.defender)),
+            };
             if !a.blocked || (a.blockers.is_empty() && trample) {
                 // CR 510.1b, 702.19d
                 if let Some(t) = player {
