@@ -99,7 +99,9 @@ pub(crate) fn snapshot(st: &GameState, id: ObjectId) -> Lki {
 
 /// Does the object `id` (seen as `c` / `facts`) satisfy a trigger's object filter, for an
 /// ability whose source is `source`, controlled by `controller`?
-/// `host`: the permanent the source is attached to ("enchanted creature").
+/// `host`: the permanent the source is attached to ("enchanted creature"); `chosen`: what
+/// was chosen for the source ("of the chosen type").
+#[allow(clippy::too_many_arguments)]
 fn filter_hit(
     filter: &ObjFilter,
     id: ObjectId,

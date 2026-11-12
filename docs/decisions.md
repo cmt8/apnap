@@ -2138,6 +2138,109 @@ Rules text: docs/rules-notes/118.9-alternative-costs.md. Tests:
   the same size), then delve/convoke/improvise in the planner, then the channel lands'
   `ReduceCost`.
 
+## D-076 "As this enters, choose a creature type / a color"; "the chosen type"; changeling (2026-11-12)
+Rules text: docs/rules-notes/614.12a-607.2d-chosen-type-color.md. Tests:
+`crates/harness/tests/forge_chosen.rs`, `crates/app/tests/chosen.rs`.
+- **Vocabulary** (appended): `ReplaceWith::Choose(ChoiceOf)` ("as this enters, choose …",
+  with `Replaces::ThisEnters`), `Effect::Choose(ChoiceOf)` ("choose a creature type." while a
+  spell resolves), `Selector::chosen: Option<OfChosen>` ("of the chosen type" / "that
+  aren't of the chosen type" / "of the chosen color"), `ContinuousEffect::AddChosenType`
+  (layer 4), `Keyword::Changeling`, `AbilityDef::CostReduction::anyone` ("creature spells of
+  the chosen type cost {2} less": anyone's spells). `card_model::chosen` holds CR 205.3m's
+  creature types (`CREATURE_TYPES`, sorted; `CreatureType` is an index serialized as its
+  name), `ChoiceOf { CreatureType, Color }`, `Chosen { CreatureType, Color }`.
+- **The choice is made in D-067's place:** `replacement::entry_choice` asks it for a
+  `ReplaceWith::Choose` (always — there is always something to choose), as the new
+  `ChoiceKind::Choose { what, object, ability }` over `OptionDesc::CreatureType` /
+  `OptionDesc::Color`, of the player the permanent will enter under the control of (also
+  when an effect puts it there). `ApplyFrame::chosen` keeps the answer, by the entering
+  object, until the batch is performed; `perform` then gives it to the new object
+  (`GameAction::SetChosen`, `Event::Chose`) — only if it did enter the battlefield. No
+  stack, no priority (CR 603.6d); enters-triggers see the choice (it is set before triggers
+  are looked for).
+- **Where a choice lives:** a permanent's on the object (`GameObject::chosen`, a new object
+  has none, CR 400.7; public: `ObjectView::chosen`, the app's enlarged card shows "Chosen
+  type: Elf", the log "P0 chooses Elf for X"); an ability's on its stack object
+  (`StackObject::chosen`, copied from its source when it is put on the stack — the same value
+  once the source has left, CR 608.2h); a resolving spell's own choice in its resolve frame
+  (`ResolveFrame::chosen`, CR 608.2c: no object keeps it). Mana restricted to "a creature
+  spell of the chosen type" keeps the value it was made with (`RestrictedMana::chosen`; two
+  units are alike only if that is too).
+- **One way to read it:** a selector that refers to a choice is *bound* before it is matched
+  (`chosen::bind`): the reference becomes the chosen subtype or color itself, so layers,
+  triggers, replacement effects, costs, targets, player rules and resolution all compare the
+  same way. `layers::matches` binds with the choice of the ability's source; the places that
+  match without it bind first (trigger filters and cast triggers, damage/dies/enters
+  replacement filters, cost reductions, graveyard and spell targets, "may cast from the top
+  of your library" rules, conditions, mana restrictions with the mana's own value); a
+  resolving instruction is bound from the frame (its own choice first, else its source's).
+  A reference left unbound means nothing was chosen (CR 607.5a): "of the chosen type"
+  matches nothing, "not of the chosen type" everything (as Forge).
+- **Linked abilities (CR 607.2d):** an object keeps one choice of each kind, read by the
+  abilities of the same object. card-db refuses a card that refers to a choice none of its
+  abilities makes (`invalid:`), and the compiler names what isn't read: a dies/leaves trigger
+  of the source that refers to it (`chosen:in a trigger on its source leaving`), a static
+  ability that works from another zone, abilities given to other objects, discard costs,
+  mana restrictions of "not the chosen type", of several kinds at once or on an ability that
+  sacrifices its source (`chosen:…`), a choosing ability of a permanent (Forge keeps the
+  last choice on the card for its other abilities: `ChooseType:in an ability of a
+  permanent`), `Animate:Types ChosenType`.
+- **The options** (CR 205.3m: any creature type may be chosen): every type, those among the
+  chooser's own cards first — counted over all their cards, library included (their own
+  deck is known to them) — most common first, then the rest alphabetically. Colors: the five,
+  WUBRG (CR 105.4). The app shows a search field and the first 24 matches in that order
+  (Enter takes the first); the heuristic agent picks the type (or color) most common among
+  its own creatures and creature cards it can see, ties and nothing seen to the engine's
+  order. The random agent picks any of the 367.
+- **"Is the chosen type in addition"** (`AddChosenType`, layer 4): only a creature or kindred
+  gains it (CR 205.3d).
+- **Changeling** (CR 702.73a): `Characteristics::all_creature_types`, set from the printed
+  keyword (so in every zone, and before anything else in layer 4, CR 613.3: losing all
+  abilities later doesn't undo it); `has_subtype` answers yes for every creature type of
+  205.3m. Only the printed keyword is compiled: changeling given by another effect wouldn't
+  be a characteristic-defining ability (CR 604.3a).
+- **Compiler:** `K:ETBReplacement:Other:<SVar>` with `DB$ ChooseType | Type$ Creature` or
+  `DB$ ChooseColor` (`Defined$ You` or none; `ETB$ True` accepted); `SP$`/`DB$ ChooseType` and
+  `ChooseColor` in a spell; filter properties `ChosenType`, `IsNotChosenType`, `ChosenColor`
+  (alone: with a subtype or color beside them → `filter:.ChosenType with another`);
+  `AddType$ ChosenType`; `K:Changeling`; `ReduceCost` with no `Activator$` (Forge: any
+  player); `DestroyAll | Zone$ Battlefield` (Forge reads nothing else); a `ChangesZone`
+  trigger without `TriggerZones$` whose filter needs the chosen type (only a permanent has a
+  choice, so it can only trigger there). `ETBReplacement` forms are now named by their API:
+  `kw:ETBReplacement:Copy` (D-074's), `kw:ETBReplacement:ChoosePlayer`, `…:ChooseNumber`,
+  `…:GenericChoice`, `…:<api>+SubAbility`; `ChooseType:Card`, `ChooseType:Basic Land`,
+  `param:ETBReplacement ChooseColor.Exclude` (Thriving lands), `…ChooseType.ValidTypes`.
+- **New Oracle guard** `oracle:says chosen`: the card says "chosen type", "chosen color" or
+  "choose a creature type" ("of that type" read as "of the chosen type") where the compiled
+  card doesn't, or the reverse.
+- **Text:** "As this permanent enters, choose a creature type.", "… you control of the
+  chosen type", "creatures that aren't of the chosen type", "spells of the chosen type cost
+  {2} less" (anyone's). Fixed while reading: "Each another creature you control enters
+  with …" → "Each other …" (four cards, text only).
+- **Read against the Oracle text:** all newly compiled cards. `For the Ancestors` takes
+  *creature* cards of the chosen type where the card says "cards of the chosen type" (a
+  Kindred card of that type): `SCRIPT_DIFFERS`.
+- Golden hashes: RESULT.
+- COUNTS
+- **A token copy** of a permanent with an as-enters choice (D-073/D-074): the choice is asked
+  from `replacement::applicable` for an entering object's *printed* card (`st.card_def`) and
+  set in `perform` for a `Proposed::Move` to the battlefield. A token created as an object
+  of that card that enters through the same stage would be asked; a permanent that enters
+  as a copy of another card (copiable values from layer 1) would not, until `applicable`
+  reads the entering object's copiable abilities, and created tokens need `perform` to give
+  them the choice too.
+- **Still blocked, by name:** Cavern of Souls (`param:Mana.AddsNoCounter`: the other half,
+  "that spell can't be countered", is another branch's; the restriction half is built and
+  tested), Three Tree City and Utopia Sprawl / Caged Sun / Gauntlet of Power / Heraldic Banner
+  (`Mana:produced` "of the chosen color" and mana triggers), Herald's Horn
+  (`api:PeekAndReveal`), Door of Destinies (charge counters), Path of Ancestry
+  (`param:Mana.TriggersWhenSpent`), Kindred Summons (`api:DigUntil`), Kindred Charge
+  (`api:CopyPermanent`), Roaming Throne (`static:Panharmonicon`, D-073's), Coat of Arms
+  (`filter:.sharesCreatureTypeWith`), Arcane Adaptation (`…AffectedZone`), Stuffy Doll
+  (choose a player), Nykthos / Nyx Lotus (a permanent's ability choosing a color, devotion to
+  it), Thriving lands (a color other than one), Cloud Key / Serra's Emissary (a card type),
+  Multiversal Passage / Banner of Kinship (`R:Event$ Moved` with a choice and more).
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

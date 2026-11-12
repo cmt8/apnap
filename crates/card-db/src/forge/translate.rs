@@ -7553,6 +7553,17 @@ fn chosen_blockers(def: &CardDef) -> Vec<&'static str> {
             _ => {}
         }
     }
+    // "Discard a card of the chosen type": the cards a discard cost may take are found
+    // without the ability's source.
+    let discards = def.abilities.iter().any(|a| match a {
+        AbilityDef::Activated { cost, .. }
+        | AbilityDef::Mana { cost, .. }
+        | AbilityDef::AdditionalCost(cost) => cost.discard.as_ref().is_some_and(|d| refers(d)),
+        _ => false,
+    });
+    if discards {
+        out.push("chosen:in a discard cost");
+    }
     // An ability given to another object would look for that object's choice.
     if def.granted.iter().any(|a| refers(a)) {
         out.push("chosen:in an ability given to another object");

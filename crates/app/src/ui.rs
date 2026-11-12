@@ -437,6 +437,15 @@ pub fn anchor(o: &OptionDesc) -> Option<Anchor> {
     })
 }
 
+/// The name of a permanent that is entering: a card somewhere the viewer can see, or the
+/// spell that is resolving into it.
+fn entering_name(v: &PlayerView, id: ObjectId) -> String {
+    find_object(v, id)
+        .map(|o| o.name.clone())
+        .or_else(|| v.stack.iter().find(|s| s.id == id).map(|s| s.name.clone()))
+        .unwrap_or_else(|| "it".to_string())
+}
+
 fn find_object(v: &PlayerView, id: ObjectId) -> Option<&ObjectView> {
     v.hand
         .iter()
@@ -2182,8 +2191,7 @@ fn type_picker(app: &mut App, ui: &mut egui::Ui, d: &PendingDecision, actions: &
             egui::TextEdit::singleline(&mut app.search)
                 .hint_text("type a creature type")
                 .desired_width(180.0),
-        )
-        .request_focus();
+        );
     });
     let needle = app.search.trim().to_lowercase();
     let matching: Vec<(usize, &'static str)> = d
@@ -2261,7 +2269,7 @@ fn decision_panel(
         tapped,
     } = d.kind
     {
-        let name = find_object(cx.view, object).map_or("it".to_string(), |o| o.name.clone());
+        let name = entering_name(cx.view, object);
         title = describe::ability_text(cx.cat.get(ability.card), cx.cat.ability(ability))
             .replace("this permanent", &name);
         if tapped {
@@ -2275,8 +2283,7 @@ fn decision_panel(
     {
         match ability {
             Some(ability) => {
-                let name =
-                    find_object(cx.view, object).map_or("it".to_string(), |o| o.name.clone());
+                let name = entering_name(cx.view, object);
                 title = describe::ability_text(cx.cat.get(ability.card), cx.cat.ability(ability))
                     .replace("this permanent", &name);
             }
