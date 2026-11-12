@@ -1476,6 +1476,9 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 ""
             }
         ),
+        // "X is this creature's power": "its" could be read as another object's.
+        Effect::SetX(Amount::SourcePower) => "X is this permanent's power".to_string(),
+        Effect::SetX(Amount::SourceToughness) => "X is this permanent's toughness".to_string(),
         Effect::SetX(a) => format!("X is {}", amount(a)),
         Effect::Tap { what } => format!("tap {}", obj(mode, *what)),
         Effect::Transform { what } => format!("transform {}", obj(mode, *what)),
