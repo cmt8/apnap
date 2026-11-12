@@ -119,6 +119,10 @@ pub enum Work {
         then: Box<Effect>,
         since: u64,
     },
+    /// A "lose life" instruction has been carried out: the life the players lost to it
+    /// ("the life lost this way") is how far each of these players' life totals went
+    /// down from what it was before it (`before`), negative changes counting as none.
+    LifeLost { before: Vec<(PlayerId, i32)> },
 }
 
 /// The fixed part of a [`Work::ChooseCards`] (amounts already worked out, CR 608.2h).
@@ -257,6 +261,14 @@ pub struct ResolveFrame {
     /// The card the resolving text is written on: the spell's, or the ability's (which
     /// is another card's than its source's when the ability was given to the source).
     pub card: card_model::CardDefId,
+    /// The life lost to the most recent "lose life" instruction ("the life lost this
+    /// way"). Serialized only once there has been one.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub life_lost: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 impl ResolveFrame {
@@ -277,6 +289,7 @@ impl ResolveFrame {
             spell_to: None,
             target_info: Vec::new(),
             card: card_model::CardDefId(0),
+            life_lost: 0,
         }
     }
 
@@ -474,6 +487,7 @@ impl ResolveFrame {
             Amount::X => self.x,
             Amount::SacrificedPower => self.sacrificed_power,
             Amount::TriggeringAmount => self.facts.amount,
+            Amount::LifeLostThisWay => self.life_lost,
             // CR 608.2h: counted as the effect is applied.
             Amount::HandOf(who) => self
                 .player(st, k, *who)
@@ -651,6 +665,12 @@ impl ResolveFrame {
                     if st.event_count > since {
                         self.work.push(Work::Eval { k, effect: then });
                     }
+                }
+                Work::LifeLost { before } => {
+                    self.life_lost = before
+                        .iter()
+                        .map(|&(p, life)| (life - st.player(p).life).max(0) as u32)
+                        .sum();
                 }
                 Work::PlayerMay { k, player, effect } => match input.take() {
                     None if st.in_game(player) => {
@@ -1460,7 +1480,13 @@ impl ResolveFrame {
             }
             Effect::LoseLife { who, amount } => {
                 let amount = self.amount(st, k, &amount);
-                self.players(st, k, who)
+                let players = self.players(st, k, who);
+                // Done after the loss: how much each of them lost (CR 119.3), whatever
+                // replacement effects made of it.
+                self.work.push(Work::LifeLost {
+                    before: players.iter().map(|&p| (p, st.player(p).life)).collect(),
+                });
+                players
                     .into_iter()
                     .map(|player| Proposed::LoseLife { player, amount })
                     .collect()

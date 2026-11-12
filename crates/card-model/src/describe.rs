@@ -180,6 +180,7 @@ fn amount(a: &Amount) -> String {
             Measure::ManaValue => "its mana value",
         }
         .into(),
+        Amount::LifeLostThisWay => "the life lost this way".into(),
     }
 }
 
@@ -681,6 +682,13 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 amount(a)
             ),
         },
+        Effect::GainLife {
+            who,
+            amount: Amount::LifeLostThisWay,
+        } => format!(
+            "{} life equal to the life lost this way",
+            verb(&player(mode, *who), "gain", "gains"),
+        ),
         Effect::GainLife { who, amount: a } => {
             format!(
                 "{} {} life",

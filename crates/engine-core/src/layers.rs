@@ -460,7 +460,8 @@ pub fn count_amount(
         | Amount::TriggeringAmount
         | Amount::SacrificedPower
         | Amount::OfTarget { .. }
-        | Amount::HandOf(_) => 0,
+        | Amount::HandOf(_)
+        | Amount::LifeLostThisWay => 0,
     }
 }
 

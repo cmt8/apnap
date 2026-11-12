@@ -978,6 +978,17 @@ impl<'a> Tx<'a> {
         if let Ok(n) = text.trim_start_matches('+').parse::<u32>() {
             return Some(Amount::Fixed(n));
         }
+        // "You gain life equal to the life lost this way": Forge's life loss sets
+        // `AFLifeLost` to what the players lost as it resolves. It is the instruction just
+        // before this one in the chain.
+        if text == "AFLifeLost" {
+            if matches!(chain.effects.last(), Some(Effect::LoseLife { .. })) {
+                self.used_svars.insert(text.to_string());
+                return Some(Amount::LifeLostThisWay);
+            }
+            self.block("expr:AFLifeLost not after a life loss");
+            return None;
+        }
         self.chain_targets = Some(chain.targets.len());
         self.read_target = false;
         let a = self.expr(text);
@@ -1015,6 +1026,10 @@ impl<'a> Tx<'a> {
 
     /// The value of a script variable (`SVar:X:Count$…`).
     fn expr(&mut self, name: &str) -> Option<Amount> {
+        if SET_WHILE_RESOLVING.contains(&name) {
+            self.block(format!("expr:set while resolving {name}"));
+            return None;
+        }
         let Some(v) = self.svar(name) else {
             self.block(format!("expr:undefined {name}"));
             return None;
@@ -5628,6 +5643,68 @@ const SCRIPT_DIFFERS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Comment lines of Forge scripts (`# …`) that have been read, with every card they are
+/// on, and that say nothing about what the card does: notes on Forge's AI, or on how the
+/// script works where the compiler reads that part by its meaning anyway. A comment is
+/// matched by its beginning. A comment that admits the script differs from the card ("TODO:
+/// need EnchantedLKI…", "Doesn't follow the strict wording of the Oracle text") must never
+/// be listed here.
+const COMMENTS_READ: &[&str] = &[
+    // Tutors (Demonic, Diabolic, Grim, Mystical, Personal, Imperial Seal…).
+    "# TODO: The AI will currently search for the most expensive valid card in the library.",
+    "# TODO: Improve the tutoring logic for the AI.",
+    "# TODO: improve AI tutoring logic",
+    // Consult the Necrosages, Culling the Weak, Embodiment of Spring, Kuro, Sawtooth Loon,
+    // Utopia Vow, Natural Order (and the other "SacAndUpgrade" cards).
+    "# TODO: The AI will pretty much always use this to draw cards",
+    "# TODO: Improve the mana ritual AI",
+    "# TODO: Just like with Sakura-Tribe Elder, the AI",
+    "# TODO: the AI can be improved for this",
+    "# TODO: The AI is bad with the \"put two cards on the bottom of your library\" thing",
+    "# TODO: For AI, this acts as a curse spell",
+    "# AI Preference is needed to make the AI consider the ability.",
+    // The script variable Forge's life loss sets as it resolves: read by its meaning
+    // ("the life lost this way", `Tx::expr`), never by the value written in the script.
+    "# AFLifeLost will be set by LoseLife",
+];
+
+/// Script variables that Forge's own code sets while a spell or ability resolves
+/// (`sa.setSVar(…)`): the value written in the script is only a placeholder
+/// (`SVar:AFLifeLost:Number$0`). Reading one by its written value would be wrong, so each
+/// is either compiled by its meaning or a blocker.
+const SET_WHILE_RESOLVING: &[&str] = &[
+    "AFLifeLost",
+    "PreventedDamage",
+    "CostCountersRemoved",
+    "Votes",
+    "VoteNum",
+    "Wins",
+    "Losses",
+    "ShieldAmount",
+    "AffectedX",
+    "DifferentResults",
+    "Doubles",
+    "EvenResults",
+    "OddResults",
+    "MaxRolls",
+    "Revealed",
+    "TimesFlipped",
+    "ModsThisTurn",
+    "CasualtyPaid",
+    "Sunburst",
+    "StormCount",
+    "GravestormCount",
+    "PhySpent",
+    "ReplicateAmount",
+    "SquadAmount",
+    "RampageCount",
+    "CharmOrder",
+    "HoneCounters",
+    "NumTurns",
+    "Dies",
+    "MoveToHand",
+];
+
 /// Compile a script. `Err` lists every blocker found (not just the first).
 pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
     let mut early = Blockers::new();
@@ -5673,6 +5750,12 @@ pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
         ..CardDef::default()
     };
     for line in &face.unknown {
+        // A comment line (Forge ignores it) that has been read and says nothing about
+        // what the card does. Any other comment may be admitting a difference from the
+        // card, so it stays a blocker until someone reads it.
+        if line.starts_with('#') && COMMENTS_READ.iter().any(|c| line.starts_with(c)) {
+            continue;
+        }
         tx.block(format!("line:{}", line.split(':').next().unwrap_or("?")));
     }
     if SCRIPT_DIFFERS.iter().any(|(name, _)| *name == face.name) {

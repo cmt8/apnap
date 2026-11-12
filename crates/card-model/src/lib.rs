@@ -1722,6 +1722,10 @@ pub enum Amount {
     /// hand", "target player's hand" (as the effect is applied, CR 608.2h). 0 for a
     /// player who has left the game.
     HandOf(PlayerRef),
+    /// "The life lost this way": the life the players lost to the most recent "lose
+    /// life" instruction of this resolution — after replacement effects, so what was
+    /// actually lost (CR 119.3, 608.2c). 0 before any.
+    LifeLostThisWay,
 }
 
 impl Amount {
@@ -1751,7 +1755,8 @@ impl Amount {
             | Amount::TriggeringAmount
             | Amount::SacrificedPower
             | Amount::OfTarget { .. }
-            | Amount::HandOf(_) => false,
+            | Amount::HandOf(_)
+            | Amount::LifeLostThisWay => false,
         }
     }
 
