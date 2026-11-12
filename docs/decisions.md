@@ -2554,6 +2554,103 @@ Rules text: docs/rules-notes/701-regenerate.md (CR 701.19, 614.8, 701.8, 704.5f�
   the word order isn't).
 - 11,071 → 11,301 of 34,463 scripts (32.8%); top 1,000 60.6% → 61.4%, top 5,000 35.7% →
   36.1%.
+## D-074 Copies of permanents: enter as a copy, become a copy, token copies (2026-11-12)
+Rules text: docs/rules-notes/707-copies.md. Tests: `crates/harness/tests/forge_copies.rs`.
+- **Copiable values** (CR 707.2) are `copy::Copiable { card, except }`: one catalog entry
+  (a card, a token definition or a face — CR 707.8: a double-faced permanent is copied as
+  the face that is up) plus the exceptions of the copy effects that made them, in order,
+  each with the card it is written on (`copy::Exception`). An object that is a copy carries
+  them in `GameObject::copy` (serialized only when set). **Layer 1a is one hook:**
+  `copy::base(st, id, face, controller)` is where `layers::chars_as` and the layer walk
+  start; it is the printed face for anything else. Everything downstream follows from it:
+  abilities (named by the copied card's `AbilityId`s; the walk's `Key::Static` now names the
+  `AbilityId`, not a printed index), triggers, replacement effects, mana value (a copy of a
+  transformed back face has no mana cost: 0, CR 202.3b), the name for the legend rule.
+- **Fixed when the copy effect begins** (CR 707.2b): changing or removing the original
+  changes nothing. A copy of a copy copies its values, exceptions included (CR 707.3,
+  707.9a–b). Not copied because they aren't copiable values: counters, status, Auras,
+  other continuous effects, being a commander (CR 903.3), what was chosen as it entered.
+- **Exceptions** (`CopyExcept`): not legendary, has keywords, types in addition, base P/T
+  (a characteristic-defining ability of the original that sets P/T is not copied, CR
+  707.9d), colors, creature types, "has [abilities of the `granted` list]".
+- **Enters as a copy** (CR 707.5, 614.1c): `ReplaceWith::EntersAsCopy { of, except,
+  tapped }`, a choice inside the replacement pipeline (D-067's `ChoiceKind::AsEnters`):
+  the permanents matching `of` on the battlefield before it enters, or `Decline` (it enters
+  as itself). The answer sets `Proposed::Move::copy`; then the copied text's own "enters"
+  effects apply — "enters with counters", "enters tapped", "as this enters, you may pay 2
+  life" and D-076's "choose a creature type" (CR 707.6: the copy makes its own choice) —
+  because `replacement::entering_abilities` reads the event's copy. A copied
+  enters-as-a-copy ability applies too (CR 707.9e example) unless it is the very ability
+  that applied already (CR 614.5: a Clone copying a Clone that copied nothing stays a 0/0
+  Clone; noted as a limit).
+- **Becomes a copy** (CR 707.4): `Effect::BecomeCopy { what, except }` — for good; the
+  same object, no enter/leave, its other effects stay. "Until end of turn" is not compiled.
+- **Token copies** (CR 707, 111.12): `Effect::CopyPermanent { what: CopyWhat, count,
+  except, gains, tapped }`; `CopyWhat::Obj(ObjRef)` (a target, this, "equipped/enchanted
+  creature" = new `ObjRef::Host`, "it", D-069's "those cards") or `Each(Selector)` ("for
+  each token you control"). They are created through D-073's path: `Proposed::CreateTokens`
+  carries `copy: Option<TokenCopy>` for its first kind, so doublers double them (and a
+  substituting replacement drops the copy), and each `TokenEnters` is modified like any
+  permanent entering — with the copied "enters" replacement effects and choices (source
+  `copy::ENTERING_TOKEN`, the token not being an object yet). `gains` ("that token gains
+  haste") is a noncopiable continuous effect begun as the token is created. Copying
+  something that is gone makes nothing (CR 111.12); the "copy of what it last was" forms
+  (`…LKICopy`) are blocked.
+- **Views and app:** `ObjectView::card` of a copy is the copied card (its picture and text);
+  `ObjectView::printed` is the card or token it is itself. The app's enlarged card says
+  "Test Clone, a copy of …" / "A token copy of …". The heuristic agent copies the most
+  valuable permanent offered. The narrator says "X becomes a copy of Y" (`Event::BecameCopy`).
+- **Compiler:** `K:ETBReplacement:Copy:<SVar>:Optional` + `DB$ Clone | Choices$ …` (with
+  `IntoPlayTapped$`, the copy modifiers); `AB$/DB$ Clone` with a target or `Defined$` and no
+  `Duration$`/`CloneTarget$`/`Choices$`; `CopyPermanent` with `ValidTgts$`/`Defined$`,
+  `NumCopies$`, `NonLegendary$`, `AddKeywords$`, `AddTypes$`, `SetPower$`+`SetToughness$`,
+  `SetColor$`, `SetCreatureTypes$`, `PumpKeywords$` (no `PumpDuration$`), `TokenTapped$`.
+  **New Oracle guards:** `oracle:says except` (a sentence with "copy" and "except" whose
+  compiled card has no exception) and `oracle:says gains until end of turn` (a token copy
+  that "gains haste until end of turn" where the script makes it lasting: Devastating
+  Onslaught, Molten Duplication). Pinned in `guard_phrases_are_still_written`.
+- **Deliberately blocked, by name:** "sacrifice / exile it at the beginning of the next end
+  step" (`CopyPermanent:AtEOT (a delayed trigger about the token)`: D-075's delayed
+  triggers don't remember objects yet — 45 scripts, 22 by it alone; Kiki-Jiki, The Fire
+  Crystal, Twinflame, Feldon, Molten Duplication, Splinter Twin…); Spark Double and Altered
+  Ego (`Clone:SubAbility`: an additional effect, CR 707.9e); "becomes a copy until end of
+  turn" (`param:Clone.Duration`: Cursed Mirror, Mirage Mirror, Shifting Woodland); "except
+  it has this ability" (`param:Clone.GainThisAbility`: Thespian's Stage) and added triggers
+  (`param:Clone.AddTriggers`: Phantasmal Image); Populate; LKI copies (Mirrorworks,
+  Miirym); Myriad, Encore. **Copies of spells and abilities** (`api:CopySpellAbility`,
+  `kw:Storm`, Replicate, Casualty, Conspire) are not built: the engine has the groundwork
+  (`GameObject::spell_copy`, a copy of a spell ceases to exist off the stack, CR 704.5e;
+  a permanent spell copy becomes a token, CR 608.3f) but no effect creates one.
+- **Double-faced permanents** (CR 707.8, 707.8a — the text covers every double-faced
+  permanent, modal ones included: the token copy has both faces): a token copy of one is
+  double-faced (`Copiable::faces`; the token is the card with the original's face up, its
+  values follow its own face, exceptions applied to each), so it transforms; a copy of one
+  with its back face up enters back face up. A permanent that enters or becomes a copy is
+  not double-faced: it copies the face that is up (mana value 0 for a back face, CR 202.3b).
+- **Regeneration (D-079):** the shield is the object's, not a copiable value; a copy has the
+  copied "{W}: Regenerate this creature" and regenerates itself (tested).
+- **Blocker bookkeeping:** `Tx::blockers` counts every raise (`Raised`), so a second ability
+  blocked by a name an earlier one raised is no longer reported `unexplained:` (Orthion).
+- **Limits:** (1) "if this would enter, you may [discard a land] instead; if you don't, put
+  it into its owner's graveyard" is not applied to a token copy: it enters with no question
+  (comment in `replacement::applicable`). (2) A Clone copying a Clone that copied nothing:
+  CR 707.5 says the copied "enters" replacement abilities "will take effect", and the 707.9e
+  example has Altered Ego choose again through the Clone ability it copied. Here a copied
+  enter-as-a-copy ability that is written on *another* card is offered (as in that
+  example), but the very ability that already applied — Clone copying Clone, the same
+  `AbilityId` — is not offered a second time (CR 614.5 read as "the same effect"): the
+  second Clone enters as a 0/0 Clone and dies, where a reading of 707.5 by analogy would let
+  it choose again. (3) A copied "creature types are …" replaces all non-land subtypes.
+- Golden hashes: all 15 event logs unchanged; state hashes moved (the stable hasher writes
+  a tag for each skipped `GameObject` field). Re-blessed.
+- 11,071 → 11,123 (on main 31fa7b2: 11,301 → 11,353) of 34,463 scripts (52 newly compiled, none lost, no existing text
+  changed); top 1,000 by EDHREC rank 601 → 606 (on 31fa7b2: 609 → 614), top 5,000 1,782 → 1,809 (1,800 → 1,827). All 52 read against
+  their Oracle text. Among the most played: Helm of the Host, Second Harvest, Sculpting
+  Steel, Vesuva, Clone, Irenicus's Vile Duplication, Pack Rat, Relm's Sketching,
+  Mirrormade, Copy Enchantment, Glasspool Mimic, Stunt Double, Quicksilver Gargantuan.
+- **Next:** delayed triggers that remember objects (unblocks the 22 "next end step"
+  copiers), copies of spells and abilities with "you may choose new targets" (CR 707.10c)
+  and storm, "except it has this ability".
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may

@@ -866,10 +866,10 @@ fn choice_forms_not_compiled_block() {
         forge_test_blockers(&with("DB$ ChooseType | Type$ Creature | SubAbility$ X"))
             .contains(&"kw:ETBReplacement:ChooseType+SubAbility".to_string())
     );
-    // "Enters as a copy": D-074's.
+    // "Enters as a copy" compiles (D-074, tested in forge_copies.rs).
     let copy = "Name:Test Odd Copy\nManaCost:3\nTypes:Artifact\nK:ETBReplacement:Copy:DBCopy:Optional\n\
         SVar:DBCopy:DB$ Clone | Choices$ Artifact.Other\nOracle:Text.";
-    assert!(forge_test_blockers(copy).contains(&"kw:ETBReplacement:Copy".to_string()));
+    assert!(forge_test_blockers(copy).is_empty());
 }
 
 #[test]

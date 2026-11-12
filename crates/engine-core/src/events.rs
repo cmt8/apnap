@@ -304,4 +304,10 @@ pub enum Event {
     Regenerated {
         object: ObjectId,
     },
+    /// CR 707.4 / 707.5: `object` is now a copy of `card` (it became one, or entered or was
+    /// created as one).
+    BecameCopy {
+        object: ObjectId,
+        card: card_model::CardDefId,
+    },
 }

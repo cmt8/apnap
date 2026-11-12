@@ -367,6 +367,21 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
             p.push(format!("refers to a choice no ability makes ({choice})"));
         }
     }
+    // "Except it has '…'" (CR 707.9a): abilities of the `granted` list.
+    for list in text.split("HasAbilities([").skip(1) {
+        let list = list.split(']').next().unwrap_or_default();
+        if list.is_empty() {
+            p.push("a copy exception that gives no ability".into());
+        }
+        for index in list.split(", ").filter(|i| !i.is_empty()) {
+            if index
+                .parse::<usize>()
+                .map_or(true, |i| i >= c.granted.len())
+            {
+                p.push(format!("no granted ability {index}"));
+            }
+        }
+    }
     // The abilities lasting effects carry ("target creature can't be blocked this turn").
     let mut lasting: Vec<usize> = Vec::new();
     for list in text.split("Lasting { abilities: [").skip(1) {
@@ -1022,6 +1037,7 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                                 | ReplaceWith::EntersOnlyIfYou(_)
                                 // "As this enters, choose …" (CR 614.12a).
                                 | ReplaceWith::Choose(_)
+                                | ReplaceWith::EntersAsCopy { .. }
                         )
                         | (
                             Replaces::OtherEnters(_),
@@ -1543,6 +1559,14 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             amount(a, p);
         }
         Effect::SacrificeThis | Effect::ControllerSacrificesThis => {}
+        Effect::BecomeCopy { what, .. } => obj(what, p),
+        Effect::CopyPermanent { what, count, .. } => {
+            match what {
+                card_model::CopyWhat::Obj(r) => obj(r, p),
+                card_model::CopyWhat::Each(s) => selector(s, p),
+            }
+            amount(count, p);
+        }
         Effect::AttachThis { to } => {
             if *to == ObjRef::Noted {
                 p("attach to one of those cards: which?".into());

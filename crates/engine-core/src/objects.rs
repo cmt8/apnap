@@ -57,6 +57,16 @@ pub struct GameObject {
     /// object has none (CR 400.7). Public.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen: Vec<Chosen>,
+    /// CR 707.2: the copiable values of the copy effect it is under (layer 1a), if it is a
+    /// copy — a token copy, a permanent that entered or became a copy, a copy of a spell.
+    /// Not carried to a new object (CR 400.7), except that a copy of a permanent spell
+    /// stays what it is as it becomes a token (CR 608.3f).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<alloc::boxed::Box<crate::copy::Copiable>>,
+    /// CR 707.10: a copy of a spell — not a card; it ceases to exist anywhere but on the
+    /// stack (CR 704.5e).
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub spell_copy: bool,
 }
 
 fn is_front(face: &u8) -> bool {
