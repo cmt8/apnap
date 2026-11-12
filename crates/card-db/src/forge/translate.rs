@@ -12,12 +12,12 @@
 use super::parse::{Face, Record, Script};
 use card_model::{
     AbilityDef, ActivationZone, Affected, AltCost, AltKind, AltKindName, Amount, AsEnters,
-    BasicLandType, Body, Calc, CardDef, CardDest, CardType, CardZone, Cmp, Color, CombatRule,
-    Condition, ContinuousEffect, Cost, CostChoice, CounterKind, DamageBy, DamagePer, DamageTo,
-    DelayWindow, EachPlayerAction, Effect, Keyword, Layout, ManaCost, ManaProduce, ManaRestriction,
-    ManaType, Measure, Mode, ObjFilter, ObjRef, PlayZone, PlayerRef, PlayerRule, ReplaceWith,
-    Replaces, Selector, Signed, Supertype, Take, TargetFilter, TargetGroup, TargetRef, Timing,
-    Trigger, TriggerCause, TriggerStep, Who,
+    BasicLandType, Body, Calc, CardDef, CardDest, CardType, CardZone, ChoiceOf, Cmp, Color,
+    CombatRule, Condition, ContinuousEffect, Cost, CostChoice, CounterKind, DamageBy, DamagePer,
+    DamageTo, DelayWindow, EachPlayerAction, Effect, Keyword, Layout, ManaCost, ManaProduce,
+    ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef, OfChosen, PlayZone, PlayerRef,
+    PlayerRule, ReplaceWith, Replaces, Selector, Signed, Supertype, Take, TargetFilter,
+    TargetGroup, TargetRef, Timing, Trigger, TriggerCause, TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -869,6 +869,24 @@ impl<'a> Tx<'a> {
                 "!IsRemembered" if self.memory && !self.in_effect => s.noted = Some(false),
                 "attacking" => s.attacking = Some(true),
                 "blocking" => s.blocking = Some(true),
+                // "Of the chosen type", "that aren't of the chosen type", "of the chosen
+                // color" (CR 607.2d). One reference to a choice, and no subtype or color of
+                // its own beside it (`Selector::chosen`).
+                "ChosenType" | "IsNotChosenType" | "ChosenColor" => {
+                    let of = match p {
+                        "ChosenType" => OfChosen::Type,
+                        "IsNotChosenType" => OfChosen::NotType,
+                        _ => OfChosen::Color,
+                    };
+                    let clash = s.chosen.is_some()
+                        || (of == OfChosen::Type && !s.subtypes.is_empty())
+                        || (of == OfChosen::Color && !s.colors.is_empty());
+                    if clash {
+                        self.block(format!("filter:.{p} with another"));
+                        ok = false;
+                    }
+                    s.chosen = Some(of);
+                }
                 _ => {
                     if let Some(c) = color(p) {
                         // Forge's `+` is "and": "Card.Red+White" is red and white, which
@@ -2175,8 +2193,24 @@ impl<'a> Tx<'a> {
             // CR 603.7: "at the beginning of the next …, [do something]".
             "DelayedTrigger" => self.delayed_trigger(&rd, chain)?,
             "DestroyAll" => {
+                // Forge destroys on the battlefield whatever this says.
+                if !matches!(rd.get("Zone"), None | Some("Battlefield")) {
+                    self.block("param:DestroyAll.Zone");
+                    return None;
+                }
                 let sel = self.valid_cards(&rd, api);
                 Effect::DestroyAll(sel?)
+            }
+            // "Choose a creature type. [Instructions about the chosen type.]" (CR 608.2c).
+            // Forge keeps the choice on the card; the engine keeps it for the resolution
+            // only, which is the same for a spell. A permanent's ability that chooses as it
+            // resolves would leave the choice on the permanent for its other abilities.
+            "ChooseType" | "ChooseColor" => {
+                if !self.in_spell {
+                    self.block(format!("{api}:in an ability of a permanent"));
+                    return None;
+                }
+                Effect::Choose(self.choice(&rd, api)?)
             }
             "DamageAll" => {
                 let amount = rd.get("NumDmg").and_then(|n| self.amount(n, chain));
@@ -2652,6 +2686,12 @@ impl<'a> Tx<'a> {
                 // Layer 4: types added (nothing is removed: the `Remove…` keys are not
                 // read, so a script that has them is not compiled).
                 if let Some(types) = rd.get("Types") {
+                    // (The chosen type of a resolving effect is not carried into what it
+                    // makes last: only a static ability adds it.)
+                    if types.split(',').any(|t| t.trim() == "ChosenType") {
+                        self.block("Animate:Types ChosenType");
+                        return None;
+                    }
                     effects.push(self.added_types(types.split(','))?);
                 }
                 // Layer 5: only "becomes [these colors]", not "in addition".
@@ -3590,8 +3630,17 @@ impl<'a> Tx<'a> {
         &mut self,
         words: impl Iterator<Item = &'t str>,
     ) -> Option<ContinuousEffect> {
+        let words: Vec<&str> = words.map(str::trim).collect();
+        // "Is the chosen type in addition to its other types" (CR 607.2d, 205.3d).
+        if words.contains(&"ChosenType") {
+            if words.len() == 1 {
+                return Some(ContinuousEffect::AddChosenType);
+            }
+            self.block("type added:ChosenType and others");
+            return None;
+        }
         let (mut card_types, mut subtypes, mut land_types) = (Vec::new(), Vec::new(), Vec::new());
-        for word in words.map(str::trim) {
+        for word in words {
             if let Some(t) = card_type(word) {
                 card_types.push(t);
                 continue;
@@ -4282,8 +4331,16 @@ impl<'a> Tx<'a> {
     /// not compiled.)
     fn etb_replacement(&mut self, k: &str) -> Option<AbilityDef> {
         let parts: Vec<&str> = k.splitn(6, ':').collect();
+        // "As this enters, choose a creature type / a color" (CR 614.1c, 614.12a).
+        if let [_, "Other", svar] = parts.as_slice() {
+            return self.etb_choice(svar);
+        }
         let [_, "Other", svar, "Mandatory", "Battlefield", valid] = parts.as_slice() else {
-            self.block("kw:ETBReplacement");
+            match parts.get(1) {
+                // "Enters as a copy": another kind of entering (CR 707), not compiled.
+                Some(&"Copy") => self.block("kw:ETBReplacement:Copy"),
+                _ => self.block("kw:ETBReplacement"),
+            }
             return None;
         };
         let Some(rec) = self.records.iter().find(|(n, _)| n == svar).map(|(_, r)| r) else {
@@ -4309,6 +4366,67 @@ impl<'a> Tx<'a> {
             replaces: Replaces::OtherEnters(sel?),
             with: Self::enters_with(kind?, amount?),
         })
+    }
+
+    /// `K:ETBReplacement:Other:<SVar>` whose SVar is `DB$ ChooseType | Type$ Creature` or
+    /// `DB$ ChooseColor`, chosen by the permanent's controller: "As this enters, choose a
+    /// creature type / a color." Any other effect there is named by its API.
+    fn etb_choice(&mut self, svar: &str) -> Option<AbilityDef> {
+        let Some(rec) = self.records.iter().find(|(n, _)| n == svar).map(|(_, r)| r) else {
+            self.block("kw:ETBReplacement");
+            return None;
+        };
+        let api = match rec.head() {
+            Some(("DB", api @ ("ChooseType" | "ChooseColor"))) => api,
+            Some((_, api)) => {
+                self.block(format!("kw:ETBReplacement:{api}"));
+                return None;
+            }
+            None => {
+                self.block("kw:ETBReplacement");
+                return None;
+            }
+        };
+        let rec = self.sub(svar)?;
+        let rd = Rd::new(rec, format!("ETBReplacement {api}"));
+        // Applied to the entering card (as every choice here is).
+        if !matches!(rd.get("ETB"), None | Some("True")) {
+            self.block(format!("param:ETBReplacement {api}.ETB"));
+        }
+        let what = self.choice(&rd, api);
+        if rd.get("SubAbility").is_some() {
+            self.block(format!("kw:ETBReplacement:{api}+SubAbility"));
+            return None;
+        }
+        rd.finish(&mut self.blockers);
+        Some(AbilityDef::Replacement {
+            replaces: Replaces::ThisEnters,
+            with: ReplaceWith::Choose(what?),
+        })
+    }
+
+    /// What a `ChooseType` / `ChooseColor` record has its controller choose: a creature
+    /// type (`Type$ Creature`: any of CR 205.3m) or one of the five colors (CR 105.4). Other
+    /// families of types, restricted lists, other choosers and several colors are named.
+    fn choice(&mut self, rd: &Rd<'a>, api: &str) -> Option<ChoiceOf> {
+        match rd.get("Defined") {
+            None | Some("You") => {}
+            Some(other) => {
+                self.block(format!("{api}:chooser {}", shape(other)));
+                return None;
+            }
+        }
+        match api {
+            "ChooseType" => match rd.get("Type") {
+                Some("Creature") => Some(ChoiceOf::CreatureType),
+                other => {
+                    self.block(format!("ChooseType:{}", other.unwrap_or("?")));
+                    None
+                }
+            },
+            "ChooseColor" => Some(ChoiceOf::Color),
+            _ => unreachable!("not a choice: {api}"),
+        }
     }
 
     /// `RestrictValid$` of a mana ability: `Spell.<card filter>` and
@@ -5209,6 +5327,12 @@ impl<'a> Tx<'a> {
                 None if own_event => {}
                 // An ability something is given works where that thing is given it.
                 None if self.granting > 0 => {}
+                // "Whenever a creature you control of the chosen type enters": only a
+                // permanent has a choice (made as it entered), so it can trigger nowhere else.
+                None if rec.get("ValidCard").is_some_and(|v| {
+                    v.split(['.', '+', ','])
+                        .any(|w| w == "ChosenType" || w == "ChosenColor")
+                }) => {}
                 None => self.block("trig:zone unstated"),
                 Some(z) => self.block(format!("trig:zone {z}")),
             }
@@ -5872,9 +5996,19 @@ impl<'a> Tx<'a> {
                         Err(_) => self.expr(amount),
                     }
                     .map(AbilityDef::SelfCostReduction),
-                    // "[These] spells you cast cost {N} less to cast."
-                    (Some(f), None | Some("Battlefield"), Some("You")) => {
+                    // "[These] spells you cast cost {N} less to cast." / with no `Activator$`,
+                    // anyone's spells ("creature spells of the chosen type cost {2} less").
+                    (Some(f), None | Some("Battlefield"), activator @ (Some("You") | None)) => {
+                        let anyone = activator.is_none();
                         let spells = self.card_selector(f);
+                        if anyone
+                            && spells
+                                .as_ref()
+                                .is_some_and(|s| s.controller != Who::Any || s.owner != Who::Any)
+                        {
+                            self.block("static:ReduceCost-whose");
+                            return None;
+                        }
                         let n = amount.parse::<u32>().ok().or_else(|| {
                             self.block("static:ReduceCost-variable");
                             None
@@ -5882,6 +6016,7 @@ impl<'a> Tx<'a> {
                         Some(AbilityDef::CostReduction {
                             spells: spells?,
                             amount: n?,
+                            anyone,
                         })
                     }
                     _ => {
@@ -7499,6 +7634,11 @@ const SCRIPT_DIFFERS: &[(&str, &str)] = &[
         "gives its trigger to Spirit *creatures*; the card says \"all Spirits\" (a noncreature \
          Kindred Spirit must get it too)",
     ),
+    (
+        "For the Ancestors",
+        "takes creature cards of the chosen type; the card says \"cards of the chosen type\" (a \
+         Kindred card of that type may be taken too)",
+    ),
 ];
 
 /// Script variables that Forge's own code sets while a spell or ability resolves
@@ -8134,6 +8274,12 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
             }
             continue;
         }
+        // CR 702.73a: changeling, a characteristic-defining ability — printed only (one
+        // given by another effect would not be a CDA, CR 604.3a, so `keyword` doesn't know it).
+        if k == "Changeling" {
+            def.keywords.push(Keyword::Changeling);
+            continue;
+        }
         match keyword(k) {
             Some(k) => def.keywords.push(k),
             None => {
@@ -8202,6 +8348,9 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
             }
         }
     }
+    for b in chosen_blockers(&def) {
+        tx.block(b);
+    }
     // Forge scripts leave out some things the card says where its AI would never choose
     // otherwise ("you may put a counter", "another target creature" on an ability that
     // sacrifices its source). The card as compiled is read back against its Oracle text
@@ -8221,6 +8370,82 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
     } else {
         Err(tx.blockers)
     }
+}
+
+/// Where "the chosen type / color" is written somewhere the engine doesn't read it from
+/// (D-076): named, never dropped.
+fn chosen_blockers(def: &CardDef) -> Vec<&'static str> {
+    let refers = |x: &dyn core::fmt::Debug| format!("{x:?}").contains("chosen: Some(");
+    let mut out = Vec::new();
+    for a in &def.abilities {
+        match a {
+            // "When this dies, … of the chosen type": the ability is put on the stack after
+            // its source has left, and the choice isn't carried that far.
+            AbilityDef::Triggered { when, body, .. }
+                if refers(body)
+                    && when.events().iter().any(|t| {
+                        matches!(
+                            t,
+                            Trigger::Dies(ObjFilter::This) | Trigger::Leaves(ObjFilter::This)
+                        )
+                    }) =>
+            {
+                out.push("chosen:in a trigger on its source leaving")
+            }
+            // (A rule about players reads its source's choice: `players::may_play_with`.)
+            AbilityDef::FromZone { .. } if refers(a) => out.push("chosen:in another zone"),
+            AbilityDef::Mana {
+                spend: Some(r),
+                cost,
+                ..
+            } if refers(r) => {
+                let not = r
+                    .spells
+                    .iter()
+                    .chain(&r.abilities)
+                    .chain(&r.sources)
+                    .any(|s| s.chosen == Some(OfChosen::NotType));
+                let several = r.spells.len() > 1 || r.abilities.len() > 1 || r.sources.len() > 1;
+                if not || cost.sacrifice_self || cost.sacrifice.is_some() || several {
+                    out.push("chosen:mana restriction shape");
+                }
+            }
+            _ => {}
+        }
+    }
+    // "Discard a card of the chosen type": the cards a discard cost may take are found
+    // without the ability's source.
+    let discards = def.abilities.iter().any(|a| match a {
+        AbilityDef::Activated { cost, .. }
+        | AbilityDef::Mana { cost, .. }
+        | AbilityDef::AdditionalCost(cost) => cost.discard.as_ref().is_some_and(|d| refers(d)),
+        _ => false,
+    });
+    if discards {
+        out.push("chosen:in a discard cost");
+    }
+    // A delayed triggered ability (CR 603.7c) would have to keep the choice as it was when
+    // the ability was created; it takes its source's at the time it triggers instead. No
+    // card that compiles otherwise needs it: named, not built.
+    let text = format!("{:?}", def.abilities);
+    let delayed: Vec<usize> = text
+        .split("DelayedTrigger { ability: ")
+        .skip(1)
+        .filter_map(|r| r.split(',').next()?.trim().parse().ok())
+        .collect();
+    for (i, a) in def.granted.iter().enumerate() {
+        if refers(a) {
+            out.push(if delayed.contains(&i) {
+                "chosen:in a delayed trigger"
+            } else {
+                // An ability given to another object would look for that object's choice.
+                "chosen:in an ability given to another object"
+            });
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Rules text in lower case without "(reminder text)", split into what is said outright
@@ -8304,6 +8529,17 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
     compare(&plain, &compiled);
     if !def.granted.is_empty() {
         compare(&quoted, &compiled_quoted);
+    }
+    // "Choose a creature type" / "of the chosen type": a choice, and what refers to it, are
+    // said by the card exactly where the compiled card says them (D-076).
+    for phrase in ["chosen type", "chosen color", "choose a creature type"] {
+        // ("Choose a creature type. Draw a card for each permanent you control of that
+        // type": the type just chosen.)
+        let said = plain.replace("of that type", "of the chosen type");
+        if said.contains(phrase) != compiled.contains(phrase) {
+            missing.push("says chosen");
+            break;
+        }
     }
     // "{T}" in a cost: a script can leave it out (Lotus Ring's given "{T}, Sacrifice this
     // creature: …" is scripted as "Sacrifice this"), and a mana ability without it can be
@@ -8758,6 +8994,44 @@ mod tests {
             "{t}"
         );
         assert!(oracle_words_missing("equip {1}", &equipment).is_empty());
+        // "says chosen" (D-076): "choose a creature type", "of the chosen type", "of the
+        // chosen color" are written as the guard reads them.
+        let banner = CardDef {
+            name: "Test".into(),
+            card_types: vec![CardType::Artifact],
+            abilities: vec![
+                AbilityDef::Replacement {
+                    replaces: card_model::Replaces::ThisEnters,
+                    with: card_model::ReplaceWith::Choose(card_model::ChoiceOf::CreatureType),
+                },
+                AbilityDef::Static {
+                    affected: card_model::Affected::All(Selector {
+                        types: vec![CardType::Creature],
+                        chosen: Some(card_model::OfChosen::Type),
+                        ..Selector::default()
+                    }),
+                    effects: vec![card_model::ContinuousEffect::ModifyPT(1, 1)],
+                    only_if: None,
+                },
+                AbilityDef::Static {
+                    affected: card_model::Affected::All(Selector {
+                        types: vec![CardType::Creature],
+                        chosen: Some(card_model::OfChosen::Color),
+                        ..Selector::default()
+                    }),
+                    effects: vec![card_model::ContinuousEffect::ModifyPT(1, 1)],
+                    only_if: None,
+                },
+            ],
+            ..CardDef::default()
+        };
+        let t = text(&banner);
+        assert!(
+            t.contains("choose a creature type")
+                && t.contains("chosen type")
+                && t.contains("chosen color"),
+            "{t}"
+        );
         // ... but a narrowed target elsewhere still is.
         let narrowed = spell(
             vec![TargetFilter::Permanent(vec![Selector {

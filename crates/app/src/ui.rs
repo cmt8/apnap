@@ -98,6 +98,9 @@ pub struct App {
     pub alloc: Vec<u32>,
     pub order: Vec<usize>,
     pub focus: Option<Anchor>,
+    /// What is typed into the search field of a long list of options ("choose a creature
+    /// type").
+    pub search: String,
     /// Card images and mana symbols.
     pub art: Art,
     /// Pause after each thing an AI seat visibly does, in milliseconds (0 = no pause).
@@ -206,6 +209,7 @@ impl App {
             alloc: Vec::new(),
             order: Vec::new(),
             focus: None,
+            search: String::new(),
             art,
             pace_ms,
             resume_at: None,
@@ -391,6 +395,14 @@ pub fn prompt(kind: ChoiceKind) -> &'static str {
         ChoiceKind::Proliferate => {
             "Proliferate: choose permanents to get another counter of each kind"
         }
+        ChoiceKind::Choose {
+            what: card_model::ChoiceOf::CreatureType,
+            ..
+        } => "Choose a creature type",
+        ChoiceKind::Choose {
+            what: card_model::ChoiceOf::Color,
+            ..
+        } => "Choose a color",
     }
 }
 
@@ -423,9 +435,20 @@ pub fn anchor(o: &OptionDesc) -> Option<Anchor> {
         | OptionDesc::Mode { .. }
         | OptionDesc::Mana { .. }
         | OptionDesc::Shield { .. }
+        | OptionDesc::CreatureType { .. }
+        | OptionDesc::Color { .. }
         | OptionDesc::Accept
         | OptionDesc::Decline => return None,
     })
+}
+
+/// The name of a permanent that is entering: a card somewhere the viewer can see, or the
+/// spell that is resolving into it.
+fn entering_name(v: &PlayerView, id: ObjectId) -> String {
+    find_object(v, id)
+        .map(|o| o.name.clone())
+        .or_else(|| v.stack.iter().find(|s| s.id == id).map(|s| s.name.clone()))
+        .unwrap_or_else(|| "it".to_string())
 }
 
 fn find_object(v: &PlayerView, id: ObjectId) -> Option<&ObjectView> {
@@ -499,6 +522,7 @@ pub fn option_label(
             }
             _ => "No: it enters tapped".into(),
         },
+        OptionDesc::Color { color } => format!("{color:?}"),
         OptionDesc::Accept => "Yes".into(),
         OptionDesc::Decline => "No".into(),
         OptionDesc::Pass if d.kind == ChoiceKind::Priority => "Pass priority".into(),
@@ -1831,6 +1855,10 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
         if o.damage_marked > 0 {
             now.push(format!("{} damage", o.damage_marked));
         }
+        // CR 607.2d: what was chosen for it as it entered (public).
+        for c in &o.chosen {
+            now.push(chosen_line(*c));
+        }
         for (kind, n) in &o.counters {
             now.push(format!("{} x{n}", counter_name(*kind)));
         }
@@ -2157,6 +2185,64 @@ fn card_strip(
     clicked
 }
 
+/// "Chosen type: Elf", "Chosen color: Green".
+pub fn chosen_line(c: card_model::Chosen) -> String {
+    match c {
+        card_model::Chosen::CreatureType(t) => format!("Chosen type: {}", t.name()),
+        card_model::Chosen::Color(c) => format!("Chosen color: {c:?}"),
+    }
+}
+
+/// How many creature types the picker shows at once (the rest are found by typing).
+pub const TYPES_SHOWN: usize = 24;
+
+/// "Choose a creature type": a search field and the matching types as buttons, in the
+/// engine's order (the types among the player's own cards first, the most common first).
+fn type_picker(app: &mut App, ui: &mut egui::Ui, d: &PendingDecision, actions: &mut Vec<Action>) {
+    ui.horizontal(|ui| {
+        ui.label("Search:");
+        ui.add(
+            egui::TextEdit::singleline(&mut app.search)
+                .hint_text("type a creature type")
+                .desired_width(180.0),
+        );
+    });
+    let needle = app.search.trim().to_lowercase();
+    let matching: Vec<(usize, &'static str)> = d
+        .options
+        .iter()
+        .enumerate()
+        .filter_map(|(i, o)| match o {
+            OptionDesc::CreatureType { name } => Some((i, name.name())),
+            _ => None,
+        })
+        .filter(|(_, n)| n.to_lowercase().contains(&needle))
+        .collect();
+    // Enter takes the first match.
+    if !matching.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        actions.push(Action::Respond(Response::Pick(vec![matching[0].0])));
+    }
+    egui::ScrollArea::vertical()
+        .max_height(160.0)
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for &(i, name) in matching.iter().take(TYPES_SHOWN) {
+                    if ui.button(name).clicked() {
+                        actions.push(Action::Respond(Response::Pick(vec![i])));
+                    }
+                }
+            });
+        });
+    if matching.len() > TYPES_SHOWN {
+        ui.weak(format!(
+            "{} more — type to narrow the list",
+            matching.len() - TYPES_SHOWN
+        ));
+    } else if matching.is_empty() {
+        ui.weak("No creature type has that in its name.");
+    }
+}
+
 /// The decision panel: prompt plus a button for every option, by primitive.
 fn decision_panel(
     app: &mut App,
@@ -2197,7 +2283,7 @@ fn decision_panel(
         tapped,
     } = d.kind
     {
-        let name = find_object(cx.view, object).map_or("it".to_string(), |o| o.name.clone());
+        let name = entering_name(cx.view, object);
         let def = cx.cat.get(ability.card);
         title = ability_words(cx.cat, def, cx.cat.ability(ability))
             .replace(&format!("this {}", describe::this_word(def)), &name);
@@ -2205,7 +2291,36 @@ fn decision_panel(
             title.push_str(" (It enters tapped anyway.)");
         }
     }
+    // "As Test Banner enters, choose a creature type." / "… for Test Dominion".
+    if let ChoiceKind::Choose {
+        object, ability, ..
+    } = d.kind
+    {
+        match ability {
+            Some(ability) => {
+                let name = entering_name(cx.view, object);
+                let def = cx.cat.get(ability.card);
+                title = ability_words(cx.cat, def, cx.cat.ability(ability))
+                    .replace(&format!("this {}", describe::this_word(def)), &name);
+            }
+            None => {
+                if let Some(top) = cx.view.stack.last() {
+                    title.push_str(&format!(" for {}", top.name));
+                }
+            }
+        }
+    }
     ui.strong(RichText::new(title).size(15.0).color(GOLD));
+    // Every creature type may be chosen (CR 205.3m): a searchable list, the types of the
+    // player's own cards first.
+    if let ChoiceKind::Choose {
+        what: card_model::ChoiceOf::CreatureType,
+        ..
+    } = d.kind
+    {
+        type_picker(app, ui, d, actions);
+        return;
+    }
     let labels: Vec<String> = d
         .options
         .iter()
@@ -2519,6 +2634,7 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
         app.order.clear();
         app.number = 0;
         app.focus = None;
+        app.search.clear();
     }
     let view = session.view();
     let decision = session.human_decision().cloned();

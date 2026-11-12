@@ -5,10 +5,10 @@
 
 use crate::{
     AbilityDef, ActivationZone, Affected, Amount, AsEnters, Body, Calc, CardDef, CardDest,
-    CardType, CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost, CounterKind,
-    DamageBy, DamagePer, DamageTo, DelayWindow, EachPlayerAction, Effect, Keyword, ManaProduce,
-    Measure, Mode, ObjFilter, ObjRef, PlayerRef, ReplaceWith, Replaces, Selector, Take,
-    TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
+    CardType, CardZone, ChoiceOf, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost,
+    CounterKind, DamageBy, DamagePer, DamageTo, DelayWindow, EachPlayerAction, Effect, Keyword,
+    ManaProduce, Measure, Mode, ObjFilter, ObjRef, OfChosen, PlayerRef, ReplaceWith, Replaces,
+    Selector, Take, TargetFilter, TargetRef, Timing, Trigger, TriggerStep, Who,
 };
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -36,6 +36,7 @@ pub fn keyword(k: Keyword) -> &'static str {
         Keyword::Shadow => "Shadow",
         Keyword::Horsemanship => "Horsemanship",
         Keyword::Flanking => "Flanking",
+        Keyword::Changeling => "Changeling",
         Keyword::Landwalk(crate::BasicLandType::Plains) => "Plainswalk",
         Keyword::Landwalk(crate::BasicLandType::Island) => "Islandwalk",
         Keyword::Landwalk(crate::BasicLandType::Swamp) => "Swampwalk",
@@ -422,7 +423,9 @@ fn target_filter_words(f: &TargetFilter) -> String {
         TargetFilter::Player => "target player".into(),
         TargetFilter::Opponent => "target opponent".into(),
         TargetFilter::Spell => "target spell".into(),
-        TargetFilter::SpellMatching(s) => format!("target {} spell", spell_kind(s)),
+        TargetFilter::SpellMatching(s) => {
+            format!("target {} spell{}", spell_kind(s), of_chosen(s, false))
+        }
         TargetFilter::Permanent(selectors) => {
             let parts: Vec<String> = selectors.iter().map(|s| selector(s, false)).collect();
             format!("target {}", join(parts, "or"))
@@ -510,6 +513,26 @@ fn with_article(s: &str) -> String {
         format!("an {s}")
     } else {
         format!("a {s}")
+    }
+}
+
+/// "a creature type", "a color".
+fn choice_of(c: ChoiceOf) -> &'static str {
+    match c {
+        ChoiceOf::CreatureType => "a creature type",
+        ChoiceOf::Color => "a color",
+    }
+}
+
+/// " of the chosen type", " that aren't of the chosen type", " of the chosen color": what a
+/// selector says about a choice, after its noun (empty if it says nothing).
+fn of_chosen(s: &Selector, plural: bool) -> &'static str {
+    match s.chosen {
+        None => "",
+        Some(OfChosen::Type) => " of the chosen type",
+        Some(OfChosen::NotType) if plural => " that aren't of the chosen type",
+        Some(OfChosen::NotType) => " that isn't of the chosen type",
+        Some(OfChosen::Color) => " of the chosen color",
     }
 }
 
@@ -860,6 +883,8 @@ fn selector(s: &Selector, plural: bool) -> String {
             " an opponent controls"
         }),
     }
+    // "Creatures you control of the chosen type".
+    out.push_str(of_chosen(s, plural));
     out
 }
 
@@ -956,6 +981,10 @@ fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
                 }
             }
             ContinuousEffect::SwitchPT => format!("{become_} power-and-toughness switched"),
+            ContinuousEffect::AddChosenType => {
+                let its = if plural { "their" } else { "its" };
+                format!("{is} the chosen type in addition to {its} other types")
+            }
             ContinuousEffect::RemoveTypes(ts) => {
                 let not = if plural { "aren't" } else { "isn't" };
                 let names: Vec<String> = ts
@@ -1154,6 +1183,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             let turn = if *until_end_of_turn { " this turn" } else { "" };
             format!("{}{turn}", join(parts, "and"))
         }
+        Effect::Choose(what) => format!("choose {}", choice_of(*what)),
         Effect::Seq(v) => v
             .iter()
             .map(|x| effect(mode, x))
@@ -2084,6 +2114,7 @@ fn card_list(cards: &[Selector], plural: bool) -> String {
                 Who::You => out.push_str(" you own"),
                 Who::Opponent => out.push_str(" an opponent owns"),
             }
+            out.push_str(of_chosen(s, plural));
             out
         })
         .collect();
@@ -2180,7 +2211,7 @@ fn card_noun(s: &Selector) -> String {
         words.push(types(&s.types, "or"));
     }
     words.push("card".into());
-    words.join(" ")
+    words.join(" ") + of_chosen(s, false)
 }
 
 fn capitalize(s: &str) -> String {
@@ -2851,9 +2882,11 @@ fn ability(a: &AbilityDef) -> String {
             spend.as_ref().map_or(String::new(), |r| {
                 let mut uses: Vec<String> = Vec::new();
                 if !r.spells.is_empty() {
+                    // "Cast Elf or Goblin spells", "cast creature spells of the chosen type".
                     uses.push(format!(
-                        "cast {} spells",
-                        join(r.spells.iter().map(spell_kind).collect(), "or")
+                        "cast {} spells{}",
+                        join(r.spells.iter().map(spell_kind).collect(), "or"),
+                        r.spells.first().map_or("", |s| of_chosen(s, true))
                     ));
                 }
                 if !r.abilities.is_empty() {
@@ -2869,8 +2902,9 @@ fn ability(a: &AbilityDef) -> String {
                     uses.push("activate an ability".to_string());
                 } else if !r.sources.is_empty() {
                     uses.push(format!(
-                        "activate abilities of {} sources",
-                        join(r.sources.iter().map(spell_kind).collect(), "or")
+                        "activate abilities of {} sources{}",
+                        join(r.sources.iter().map(spell_kind).collect(), "or"),
+                        r.sources.first().map_or("", |s| of_chosen(s, true))
                     ));
                 }
                 format!(" Spend this mana only to {}.", join(uses, "or"))
@@ -3101,6 +3135,11 @@ fn ability(a: &AbilityDef) -> String {
                     what.to_lowercase(),
                     as_enters(act)
                 ),
+                ReplaceWith::Choose(c) => format!(
+                    "As {} enters, choose {}.",
+                    what.to_lowercase(),
+                    choice_of(*c)
+                ),
                 ReplaceWith::EntersWithCounters { kind, n } => {
                     // Another permanent's counters are put on it besides its own.
                     let extra = matches!(replaces, Replaces::OtherEnters(_));
@@ -3183,10 +3222,19 @@ fn ability(a: &AbilityDef) -> String {
                 ),
             }
         }
-        AbilityDef::CostReduction { spells, amount: n } => {
+        AbilityDef::CostReduction {
+            spells,
+            amount: n,
+            anyone,
+        } => {
             // "Colorless spells you cast with mana value 7 or greater cost {1} less".
             let text = selector(spells, false);
-            let (kind, with) = match text.find(" with ") {
+            // "… spells you cast with power 4 or greater", "… of the chosen type".
+            let split = [" with ", " of the chosen ", " that isn't "]
+                .iter()
+                .filter_map(|w| text.find(w))
+                .min();
+            let (kind, with) = match split {
                 Some(i) => (&text[..i], &text[i..]),
                 None => (text.as_str(), ""),
             };
@@ -3197,7 +3245,8 @@ fn ability(a: &AbilityDef) -> String {
             } else {
                 format!("{} spells", capitalize(kind))
             };
-            format!("{spells} you cast{with} cost {{{n}}} less to cast.")
+            let cast = if *anyone { "" } else { " you cast" };
+            format!("{spells}{cast}{with} cost {{{n}}} less to cast.")
         }
         AbilityDef::CombatRule { affected, rule } => {
             let (subject, plural) = match affected {

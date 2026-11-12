@@ -52,6 +52,7 @@ fn keyword_name(k: Keyword) -> &'static str {
         Keyword::Shadow => "Shadow",
         Keyword::Horsemanship => "Horsemanship",
         Keyword::Flanking => "Flanking",
+        Keyword::Changeling => "Changeling",
         Keyword::Landwalk(card_model::BasicLandType::Plains) => "Plainswalk",
         Keyword::Landwalk(card_model::BasicLandType::Island) => "Islandwalk",
         Keyword::Landwalk(card_model::BasicLandType::Swamp) => "Swampwalk",

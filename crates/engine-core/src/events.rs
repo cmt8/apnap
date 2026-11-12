@@ -292,4 +292,11 @@ pub enum Event {
         object: ObjectId,
         face: u8,
     },
+    /// `player` chose `chosen` for `object`: as the permanent entered (CR 614.12a), or for
+    /// the spell or ability `object` while it resolved (CR 608.2c). Public.
+    Chose {
+        player: PlayerId,
+        object: ObjectId,
+        chosen: card_model::Chosen,
+    },
 }

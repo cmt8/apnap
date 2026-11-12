@@ -6,7 +6,7 @@ use super::{Flow, Frame, Input};
 use crate::actions::{GameAction, execute};
 use crate::decision::{ChoiceKind, OptionDesc};
 use crate::events::Event;
-use crate::ids::ObjectId;
+use crate::ids::{ObjectId, PlayerId};
 use crate::layers::controller_of;
 use crate::replacement::{
     MoveCause, Pending, Proposed, RepKey, affected_player, applicable, apply, apply_chosen,
@@ -30,6 +30,12 @@ pub struct ApplyFrame {
     /// (CR 614.12a: "as this enters, you may pay 2 life").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub choosing: Option<RepKey>,
+    /// What was chosen for the permanents entering in this batch ("as this enters, choose
+    /// a creature type", CR 614.12a), by the place its event will have in `ready` (the front
+    /// event is the next to be ready; a token has no object yet): each new permanent has its
+    /// choice from the moment it is on the battlefield.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen: Vec<(u32, PlayerId, card_model::Chosen)>,
 }
 
 impl ApplyFrame {
@@ -61,6 +67,7 @@ impl ApplyFrame {
             queue: queue.into_iter().map(|(_, p)| p).collect(),
             ready: Vec::new(),
             choosing: None,
+            chosen: Vec::new(),
         }
     }
 
@@ -114,6 +121,14 @@ impl ApplyFrame {
                 let answer = inp.picked_one().cloned().expect("one option is picked");
                 let mut p = self.queue.remove(0);
                 p.applied.push(key);
+                // "As this enters, choose …": kept until the permanent is there.
+                if let OptionDesc::CreatureType { .. } | OptionDesc::Color { .. } = &answer {
+                    self.chosen.push((
+                        self.ready.len() as u32,
+                        inp.decision.player,
+                        crate::chosen::answer(&answer),
+                    ));
+                }
                 let (event, caused) = apply_chosen(st, key, p.event, &answer);
                 self.queue.insert(
                     0,
@@ -214,7 +229,7 @@ impl ApplyFrame {
                 }
             }
         }
-        let caused = perform(st, core::mem::take(&mut self.ready));
+        let caused = perform(st, core::mem::take(&mut self.ready), &self.chosen);
         // Life that lifelink gains, where an effect would modify it (CR 120.4c, 119.10).
         if !caused.is_empty() {
             return Flow::then(Frame::Apply(ApplyFrame::new(st, caused)));
@@ -256,7 +271,13 @@ fn token_entries(ev: &Proposed) -> Vec<Proposed> {
 /// life gained through lifelink when an effect modifies life gain (CR 120.4c: the damage's
 /// results are processed as modified by replacement effects). They happen next, as a batch
 /// of their own (D-073); without such an effect lifelink's life is gained here.
-pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) -> Vec<Proposed> {
+/// `chosen`: what was chosen for the permanents entering with this batch (CR 614.12a), by
+/// the place of their event in `events`.
+pub(crate) fn perform(
+    st: &mut GameState,
+    events: Vec<Proposed>,
+    chosen: &[(u32, PlayerId, card_model::Chosen)],
+) -> Vec<Proposed> {
     let mut caused = Vec::new();
     // CR 704.8 / 603.10a: last known information for everything leaving the battlefield,
     // captured before any of the batch happens.
@@ -310,7 +331,20 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) -> Vec<Proposed
     }
     let mark = st.out.len();
     let mut lost = Vec::new();
-    for ev in events {
+    // CR 614.12a, 607.2d: the choice made as it entered is the new permanent's.
+    let give = |st: &mut GameState, i: usize, new: ObjectId| {
+        for &(_, player, chosen) in chosen.iter().filter(|c| c.0 as usize == i) {
+            execute(
+                st,
+                GameAction::SetChosen {
+                    object: new,
+                    player,
+                    chosen,
+                },
+            );
+        }
+    };
+    for (i, ev) in events.into_iter().enumerate() {
         match ev {
             Proposed::Move {
                 object,
@@ -347,6 +381,10 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) -> Vec<Proposed
                     crate::actions::ActionResult::Moved(id) => id,
                     r => unreachable!("{r:?}"),
                 };
+                // (Only if it did enter: an effect may have sent it elsewhere instead.)
+                if to == Zone::Battlefield {
+                    give(st, i, new);
+                }
                 match cause {
                     MoveCause::Discard => st.emit(Event::Discarded {
                         player: owner,
@@ -445,8 +483,8 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) -> Vec<Proposed
                 counters,
             } => {
                 // CR 800.4b: no tokens for a player who has left the game.
-                if st.in_game(controller) {
-                    execute(
+                if st.in_game(controller)
+                    && let crate::actions::ActionResult::Moved(new) = execute(
                         st,
                         GameAction::CreateToken {
                             token,
@@ -454,7 +492,9 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) -> Vec<Proposed
                             tapped,
                             counters,
                         },
-                    );
+                    )
+                {
+                    give(st, i, new);
                 }
             }
             Proposed::PutCounters {

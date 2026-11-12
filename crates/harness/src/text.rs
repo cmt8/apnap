@@ -985,6 +985,23 @@ impl Narrator {
                 let l = format!("  {} transforms ({side} face up)", self.name(*object));
                 self.emit(l, out);
             }
+            // CR 614.12a: a choice made as a permanent enters is public.
+            Event::Chose {
+                player,
+                object,
+                chosen,
+            } => {
+                let value = match chosen {
+                    card_model::Chosen::CreatureType(t) => t.name().to_string(),
+                    card_model::Chosen::Color(c) => format!("{c:?}").to_lowercase(),
+                };
+                let l = format!(
+                    "  {} chooses {value} for {}",
+                    p(*player),
+                    self.name(*object)
+                );
+                self.emit(l, out);
+            }
             Event::Tapped { object } => {
                 if self.step == Some(Step::DeclareAttackers) {
                     self.attack_taps.push(*object);
@@ -1389,6 +1406,8 @@ pub fn option_line(v: &PlayerView, o: &OptionDesc) -> String {
                 ability.index
             )
         }
+        OptionDesc::CreatureType { name } => name.name().into(),
+        OptionDesc::Color { color } => format!("{color:?}").to_lowercase(),
     }
 }
 

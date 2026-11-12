@@ -3,7 +3,8 @@
 use crate::ids::{CardInstanceId, ObjectId, PlayerId, Timestamp};
 use crate::zones::Zone;
 use alloc::collections::BTreeMap;
-use card_model::{CardDefId, CounterKind};
+use alloc::vec::Vec;
+use card_model::{CardDefId, Chosen, CounterKind};
 use serde::{Deserialize, Serialize};
 
 /// A game object. Printed data lives in the catalog (`card`); characteristics are NEVER
@@ -51,6 +52,11 @@ pub struct GameObject {
     /// evoke cost was paid"): an ability of its card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_with: Option<card_model::AbilityId>,
+    /// What was chosen for it as it entered the battlefield ("as this enters, choose a
+    /// creature type", CR 614.12a): its "chosen type", "chosen color" (CR 607.2d). A new
+    /// object has none (CR 400.7). Public.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen: Vec<Chosen>,
 }
 
 fn is_front(face: &u8) -> bool {
@@ -64,5 +70,10 @@ fn is_zero(n: &u32) -> bool {
 impl GameObject {
     pub fn counters_of(&self, kind: CounterKind) -> u32 {
         self.counters.get(&kind).copied().unwrap_or(0)
+    }
+
+    /// Its chosen value of this kind, if one was chosen.
+    pub fn chosen(&self, of: card_model::ChoiceOf) -> Option<Chosen> {
+        self.chosen.iter().copied().find(|c| c.of() == of)
     }
 }

@@ -264,7 +264,7 @@ pub(crate) fn mana_ways(
                 continue;
             }
             if let (Some(r), Some(payee)) = (spend, payee)
-                && !may_spend(st, p, r, payee)
+                && !may_spend(st, p, r, &st.object(id).chosen, payee)
             {
                 continue;
             }
@@ -1054,6 +1054,7 @@ fn simulate(
                     player: p,
                     mana: t,
                     ability,
+                    chosen: super::cast::restriction_choice(st, ability, w.id),
                 },
             );
         }
@@ -1249,6 +1250,7 @@ pub(crate) fn tap_for_mana(
                     player: p,
                     mana,
                     ability,
+                    chosen: super::cast::restriction_choice(st, ability, way.id),
                 },
                 None => GameAction::AddMana { player: p, mana },
             },
@@ -1584,6 +1586,11 @@ impl ManaFrame {
                                     player: p,
                                     mana,
                                     ability: self.ability,
+                                    chosen: super::cast::restriction_choice(
+                                        st,
+                                        self.ability,
+                                        self.source,
+                                    ),
                                 }
                             } else {
                                 GameAction::AddMana { player: p, mana }

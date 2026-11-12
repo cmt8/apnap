@@ -52,6 +52,10 @@ pub struct RestrictedMana {
     pub mana: crate::mana::ManaType,
     pub amount: u32,
     pub ability: card_model::AbilityId,
+    /// What was chosen for the mana's source as it made it, if the restriction says "of
+    /// the chosen type" (CR 607.2d): two such units are alike only if this is too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<card_model::Chosen>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

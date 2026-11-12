@@ -241,6 +241,7 @@ pub enum GameAction {
         player: PlayerId,
         mana: ManaType,
         ability: AbilityId,
+        chosen: Option<card_model::Chosen>,
     },
     /// CR 106.6: `amount` of the restricted mana at `entry` is about to pay for something
     /// it may be spent on: it joins the rest of the pool, to be paid with it.
@@ -265,6 +266,13 @@ pub enum GameAction {
     SetCastAlt {
         object: ObjectId,
         ability: card_model::AbilityId,
+    },
+    /// CR 614.12a: what `player` chose for permanent `object` as it entered ("as this
+    /// enters, choose a creature type"): the permanent has it from now on (CR 607.2d).
+    SetChosen {
+        object: ObjectId,
+        player: PlayerId,
+        chosen: card_model::Chosen,
     },
 }
 
@@ -332,6 +340,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                     transforms: 0,
                     adventure: None,
                     cast_with: None,
+                    chosen: Vec::new(),
                 },
             );
             let o = st.object_mut(id);
@@ -497,6 +506,24 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             st.emit(Event::RemovedFromCombat { object });
             ActionResult::Done
         }
+        GameAction::SetChosen {
+            object,
+            player,
+            chosen,
+        } => {
+            let o = st.object_mut(object);
+            // One choice of each kind: a second ability choosing the same kind would be
+            // a second linked pair, which nothing compiled has.
+            o.chosen.retain(|c| c.of() != chosen.of());
+            o.chosen.push(chosen);
+            st.generation += 1;
+            st.emit(Event::Chose {
+                player,
+                object,
+                chosen,
+            });
+            ActionResult::Done
+        }
         GameAction::RecordSourceLki { ability, chars } => {
             if let Some(so) = st.stack.iter_mut().find(|s| s.id == ability) {
                 so.source_lki = Some(chars);
@@ -592,17 +619,19 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             player,
             mana,
             ability,
+            chosen,
         } => {
             let pool = &mut st.player_mut(player).restricted_mana;
             match pool
                 .iter_mut()
-                .find(|r| r.mana == mana && r.ability == ability)
+                .find(|r| r.mana == mana && r.ability == ability && r.chosen == chosen)
             {
                 Some(r) => r.amount += 1,
                 None => pool.push(crate::state::RestrictedMana {
                     mana,
                     amount: 1,
                     ability,
+                    chosen,
                 }),
             }
             st.emit(Event::ManaAdded { player, mana });
@@ -714,6 +743,12 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             facts,
         } => {
             let id = st.alloc_object_id();
+            // CR 607.2d: "the chosen type" in the ability is its source's choice.
+            let chosen = st
+                .objects
+                .get(&source)
+                .map(|o| o.chosen.clone())
+                .unwrap_or_default();
             st.stack.push(StackObject {
                 id,
                 controller,
@@ -740,6 +775,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                     })
                     .map(|o| o.transforms),
                 alt: None,
+                chosen,
             });
             st.emit(Event::AbilityActivated {
                 player: controller,
@@ -961,6 +997,7 @@ fn perform_move(
             None
         },
         cast_with,
+        chosen: Vec::new(),
     };
     st.objects.insert(new_id, obj);
     if to == Zone::Stack {
@@ -978,6 +1015,7 @@ fn perform_move(
             facts: Default::default(),
             source_transforms: None,
             alt: None,
+            chosen: Vec::new(),
         });
     } else {
         let list = st.zones.list_mut(to, old.owner);

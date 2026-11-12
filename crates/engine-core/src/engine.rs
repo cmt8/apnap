@@ -168,6 +168,7 @@ pub fn new_game_with_commanders(
                     transforms: 0,
                     adventure: None,
                     cast_with: None,
+                    chosen: Vec::new(),
                 },
             );
             if zone == Zone::Command {
