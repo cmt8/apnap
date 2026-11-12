@@ -10,7 +10,7 @@
 //!   coverage [--verbose]               per-precon script/verification status
 //!   fetch-forge                        clone Forge's card scripts (pinned commit) into the cache
 //!   fetch-bulk                         Scryfall's Oracle card file (every card) into the cache
-//!   forge-coverage [--top N]           how many Forge scripts compile; what blocks the rest
+//!   forge-coverage [--top N] [--ranked [N]]  how many Forge scripts compile; what blocks the rest (by EDHREC rank)
 //!   bless                              rewrite crates/harness/tests/golden/games.txt
 
 use engine_core::{Agent, ChoiceKind, OptionDesc, PendingDecision, PlayerId, Primitive, Response};
@@ -363,6 +363,26 @@ fn main() -> ExitCode {
                     real.len(),
                     100.0 * ok as f64 / real.len().max(1) as f64
                 );
+            }
+            // `--ranked [N]`: the same by EDHREC popularity (Commander-legal cards), with the
+            // blockers of the top N (default 1,000) broken down.
+            if let Some(i) = args.iter().position(|a| a == "--ranked") {
+                let n = args
+                    .get(i + 1)
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(1000);
+                match card_db::scryfall::load_bulk_ranks() {
+                    Ok(ranks) => {
+                        let report = harness::ranked::ranked(
+                            ranks,
+                            &|s| lib.cards.contains_key(s),
+                            &lib.blocked,
+                            n,
+                        );
+                        print!("{report}");
+                    }
+                    Err(e) => println!("(no ranking: {e})"),
+                }
             }
             // How many cards each blocker stops, and for how many it is the only one.
             // `--families`: rank the kinds of feature instead of the single blockers. A
