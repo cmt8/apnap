@@ -272,32 +272,42 @@ fn main() -> ExitCode {
             if sample > 0 {
                 let shown = lib.cards.iter().filter(|(_, c)| {
                     with.is_none_or(|t| {
-                        card_model::describe::rules_text(&c.def)
-                            .iter()
-                            .any(|line| line.contains(t.as_str()))
+                        c.def.all_faces().any(|f| {
+                            card_model::describe::rules_text(f)
+                                .iter()
+                                .any(|line| line.contains(t.as_str()))
+                        }) || c.def.faces.iter().any(|f| f.name.contains(t.as_str()))
                     })
                 });
                 for (i, (name, c)) in shown.enumerate() {
                     if i % sample != sample / 2 {
                         continue;
                     }
-                    let oracle = bulk
-                        .as_ref()
-                        .ok()
-                        .and_then(|d| d.get(name))
-                        .and_then(|c| c.oracle_text.clone())
-                        .unwrap_or_default();
-                    println!(
-                        "== {} | {} | {}\n   oracle: {}\n   engine: {}",
-                        name,
-                        c.def
-                            .mana_cost
+                    // Each face of a card with several, with its own Oracle text.
+                    for (f, face) in c.def.all_faces().enumerate() {
+                        let oracle = bulk
                             .as_ref()
-                            .map_or(String::new(), |m| m.to_text()),
-                        card_model::describe::type_line(&c.def),
-                        oracle.replace('\n', " / "),
-                        card_model::describe::rules_text(&c.def).join(" / ")
-                    );
+                            .ok()
+                            .and_then(|d| d.get(name))
+                            // Scryfall has a split card's halves, not the two combined.
+                            .and_then(|c| match c.layout.as_str() {
+                                "split" => f.checked_sub(1).and_then(|f| c.face(f)),
+                                _ => c.face(f),
+                            })
+                            .and_then(|c| c.oracle_text.clone())
+                            .unwrap_or_default();
+                        println!(
+                            "{} {} | {} | {}\n   oracle: {}\n   engine: {}",
+                            if f == 0 { "==" } else { "  //" },
+                            face.name,
+                            face.mana_cost
+                                .as_ref()
+                                .map_or(String::new(), |m| m.to_text()),
+                            card_model::describe::type_line(face),
+                            oracle.replace('\n', " / "),
+                            card_model::describe::rules_text(face).join(" / ")
+                        );
+                    }
                 }
             }
             // `--why <text>`: the blocked cards with a blocker containing <text>, each with
@@ -341,16 +351,13 @@ fn main() -> ExitCode {
                     .map(|(n, _)| n)
                     .collect();
                 let front = |n: &str| n.split(" // ").next().unwrap_or(n).to_string();
-                let ok = real
-                    .iter()
-                    .filter(|n| lib.cards.contains_key(&front(n)))
-                    .count();
-                let none = real
-                    .iter()
-                    .filter(|n| {
-                        !lib.cards.contains_key(&front(n)) && !lib.blocked.contains_key(&front(n))
-                    })
-                    .count();
+                // By its full name (a split card) or its front face's (other faces).
+                let compiled =
+                    |n: &str| lib.cards.contains_key(n) || lib.cards.contains_key(&front(n));
+                let blocked =
+                    |n: &str| lib.blocked.contains_key(n) || lib.blocked.contains_key(&front(n));
+                let ok = real.iter().filter(|n| compiled(n)).count();
+                let none = real.iter().filter(|n| !compiled(n) && !blocked(n)).count();
                 println!(
                     "{ok} of {} real cards (per Scryfall) compile ({:.1}%); Forge has no script for {none}",
                     real.len(),

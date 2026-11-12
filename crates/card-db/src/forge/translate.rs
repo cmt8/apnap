@@ -14,9 +14,9 @@ use card_model::{
     AbilityDef, ActivationZone, Affected, Amount, AsEnters, BasicLandType, Body, Calc, CardDef,
     CardDest, CardType, CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost,
     CostChoice, CounterKind, DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword,
-    ManaCost, ManaProduce, ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef, PlayZone,
-    PlayerRef, PlayerRule, ReplaceWith, Replaces, Selector, Signed, Supertype, Take, TargetFilter,
-    TargetGroup, TargetRef, Timing, Trigger, TriggerStep, Who,
+    Layout, ManaCost, ManaProduce, ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef,
+    PlayZone, PlayerRef, PlayerRule, ReplaceWith, Replaces, Selector, Signed, Supertype, Take,
+    TargetFilter, TargetGroup, TargetRef, Timing, Trigger, TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -741,6 +741,8 @@ impl<'a> Tx<'a> {
                 // the battlefield see `owned`.
                 "YouOwn" => s.owner = Who::You,
                 "OppOwn" => s.owner = Who::Opponent,
+                // CR 716.2a: "that has an Adventure".
+                "AdventureCard" => s.has_adventure = Some(true),
                 "!token" | "nonToken" => s.token = Some(false),
                 "token" => s.token = Some(true),
                 "Basic" => s.supertypes.push(Supertype::Basic),
@@ -1771,6 +1773,29 @@ impl<'a> Tx<'a> {
                 match api {
                     "Tap" => Effect::Tap { what: what? },
                     _ => Effect::Untap { what: what? },
+                }
+            }
+            // CR 701.27a: "transform this permanent" (docs/forge/effects.md: SetState). Forge
+            // reads `Defined$` (default: the card itself) and `Mode$`; the other modes
+            // (flip, turning face up or down, specializing) aren't transforming.
+            "SetState" => {
+                if rd.get("Mode") != Some("Transform") {
+                    self.block(format!(
+                        "SetState:mode {}",
+                        rd.rec.get("Mode").unwrap_or("none")
+                    ));
+                    return None;
+                }
+                if rd.rec.get("ValidTgts").is_some() {
+                    self.block("SetState:target");
+                    return None;
+                }
+                match self.object(&rd, chain, triggered)? {
+                    ObjRef::This => Effect::Transform { what: ObjRef::This },
+                    _ => {
+                        self.block("SetState:not itself");
+                        return None;
+                    }
                 }
             }
             "TapAll" | "UntapAll" => {
@@ -5828,17 +5853,134 @@ const SCRIPT_DIFFERS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Compile a script. `Err` lists every blocker found (not just the first).
+/// Compile a script. `Err` lists every blocker found (not just the first), on every face.
 pub fn compile(script: &Script, known: &Known) -> Result<Compiled, Blockers> {
-    let mut early = Blockers::new();
-    if script.faces.len() != 1 || script.alternate_mode.is_some() {
-        early.insert(format!(
+    // How the faces relate (docs/forge/script-format.md §1.2). Only the layouts the engine
+    // has rules for compile; each face is then compiled as a card of its own.
+    let layout = match (script.alternate_mode.as_deref(), script.faces.len()) {
+        (None, 1) => Some(Layout::Normal),
+        (Some("Modal"), 2) => Some(Layout::Modal),
+        (Some("DoubleFaced"), 2) => Some(Layout::Transform),
+        (Some("Adventure"), 2) => Some(Layout::Adventure),
+        (Some("Omen"), 2) => Some(Layout::Omen),
+        (Some("Split"), 2) => Some(Layout::Split),
+        _ => None,
+    };
+    let Some(layout) = layout else {
+        return Err(Blockers::from([format!(
             "layout:{}",
             script.alternate_mode.as_deref().unwrap_or("multi-face")
-        ));
-        return Err(early);
+        )]));
+    };
+    let mut blockers = Blockers::new();
+    let mut tokens = BTreeSet::new();
+    let mut faces = Vec::new();
+    for face in &script.faces {
+        match compile_face(face, known) {
+            Ok(c) => {
+                tokens.extend(c.tokens);
+                faces.push(c.def);
+            }
+            Err(b) => blockers.extend(b),
+        }
     }
-    let face = &script.faces[0];
+    if !blockers.is_empty() {
+        return Err(blockers);
+    }
+    if layout == Layout::Split {
+        return split_card(faces).map(|def| Compiled { def, tokens });
+    }
+    let mut def = faces.remove(0);
+    def.layout = layout;
+    def.faces = faces;
+    Ok(Compiled { def, tokens })
+}
+
+/// A split card (CR 709): the two halves, and the card they make combined (CR 709.4) —
+/// what it is everywhere but on the stack. Only halves that are instants or sorceries with
+/// nothing but their spell ability (and an additional cost to cast it): an ability that
+/// works from a hand or graveyard would be the whole card's, and a Room's halves are
+/// permanents with rules of their own (CR 709.5).
+fn split_card(halves: Vec<CardDef>) -> Result<CardDef, Blockers> {
+    let mut blockers = Blockers::new();
+    for h in &halves {
+        if h.creature_types.iter().any(|t| t == "Room") {
+            blockers.insert("split:Room".to_string());
+        } else if !h
+            .card_types
+            .iter()
+            .all(|t| matches!(t, CardType::Instant | CardType::Sorcery))
+        {
+            blockers.insert("split:permanent half".to_string());
+        }
+        if !h.keywords.is_empty()
+            || !h.granted.is_empty()
+            || h.abilities
+                .iter()
+                .any(|a| !matches!(a, AbilityDef::Spell(_) | AbilityDef::AdditionalCost(_)))
+        {
+            blockers.insert("split:half with other abilities".to_string());
+        }
+    }
+    if !blockers.is_empty() {
+        return Err(blockers);
+    }
+    let union = |f: &dyn Fn(&CardDef) -> Vec<String>| {
+        let mut out: Vec<String> = Vec::new();
+        for h in &halves {
+            for x in f(h) {
+                if !out.contains(&x) {
+                    out.push(x);
+                }
+            }
+        }
+        out
+    };
+    let mut card_types: Vec<CardType> = Vec::new();
+    let mut supertypes: Vec<Supertype> = Vec::new();
+    for h in &halves {
+        for t in &h.card_types {
+            if !card_types.contains(t) {
+                card_types.push(*t);
+            }
+        }
+        for t in &h.supertypes {
+            if !supertypes.contains(t) {
+                supertypes.push(*t);
+            }
+        }
+    }
+    // CR 709.4b: the combined mana cost; the colors come from it (or from the halves'
+    // color indicators).
+    let mana_cost = ManaCost {
+        symbols: halves
+            .iter()
+            .flat_map(|h| h.mana_cost.iter().flat_map(|m| m.symbols.clone()))
+            .collect(),
+    };
+    let colors = halves.iter().any(|h| h.colors.is_some()).then(|| {
+        let mut c: Vec<Color> = halves.iter().flat_map(|h| h.printed_colors()).collect();
+        c.sort();
+        c.dedup();
+        c
+    });
+    Ok(CardDef {
+        // CR 709.4a: both names.
+        name: union(&|h| vec![h.name.clone()]).join(" // "),
+        mana_cost: Some(mana_cost),
+        supertypes,
+        card_types,
+        creature_types: union(&|h| h.creature_types.clone()),
+        colors,
+        layout: Layout::Split,
+        faces: halves,
+        ..CardDef::default()
+    })
+}
+
+/// Compile one face of a script as a card of its own.
+fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
+    let early = Blockers::new();
     let parsed = ability_records(face);
     let mut tx = Tx {
         face,
@@ -6629,9 +6771,9 @@ mod tests {
             "{b:?}"
         );
         let b = blockers(
-            "Name:A\nTypes:Creature Elf\nAlternateMode:DoubleFaced\nALTERNATE\nName:B\nTypes:Creature Elf",
+            "Name:A\nTypes:Creature Elf\nAlternateMode:Flip\nALTERNATE\nName:B\nTypes:Creature Elf",
         );
-        assert!(b.contains("layout:DoubleFaced"), "{b:?}");
+        assert!(b.contains("layout:Flip"), "{b:?}");
         // An ability variable nothing refers to.
         let b = blockers(&format!(
             "{base}A:SP$ Draw | NumCards$ 2\nSVar:DBExtra:DB$ GainLife | LifeAmount$ 3"

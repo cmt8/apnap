@@ -13,8 +13,8 @@ pub mod scryfall;
 
 use card_model::{
     AbilityDef, ActivationZone, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript,
-    CardType, Condition, Cost, Effect, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces, Supertype,
-    TargetFilter, TargetRef, Trigger, Who,
+    CardType, Condition, Cost, Effect, Layout, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces,
+    Supertype, TargetFilter, TargetRef, Trigger, Who,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -191,14 +191,76 @@ fn token_names(def: &CardDef) -> Vec<String> {
 pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
     let c = &script.card;
     let mut p = Vec::new();
-    if c.name.trim().is_empty() {
-        p.push("empty name".into());
-    }
     if strictness == Strictness::Strict && !script.verified {
         p.push("unverified card in strict mode (CLAUDE.md invariant 8)".into());
     }
     if script.verified && script.tests.is_empty() {
         p.push("verified cards must name at least one test (spec §10.2)".into());
+    }
+    p.extend(validate_face(c, None));
+    // A card with several faces: each face is checked as a card of its own (CR 712.6).
+    match (c.layout, c.faces.len()) {
+        (Layout::Normal, 0)
+        | (Layout::Modal | Layout::Transform | Layout::Adventure | Layout::Omen, 1)
+        | (Layout::Split, 2) => {}
+        (layout, n) => p.push(format!("a {layout:?} card with {n} other face(s)")),
+    }
+    if c.face_of.is_some() {
+        p.push("face_of is set by the catalog, never written".into());
+    }
+    // CR 709: the halves of a split card are instants or sorceries (a Room's halves,
+    // with their unlocking rules, aren't compiled), and the card is the two combined.
+    if c.layout == Layout::Split {
+        let halves = c.faces.iter().all(|f| {
+            f.card_types
+                .iter()
+                .all(|t| matches!(t, CardType::Instant | CardType::Sorcery))
+        });
+        if !halves || !c.abilities.is_empty() || !c.keywords.is_empty() || !c.granted.is_empty() {
+            p.push("a split card is two instant or sorcery halves combined".into());
+        }
+    }
+    // CR 716.2, 721.2: the alternative characteristics are an instant or sorcery with
+    // that spell type, and the card itself a permanent card.
+    if c.layout.alternative_spell() {
+        let kind = if c.layout == Layout::Adventure {
+            "Adventure"
+        } else {
+            "Omen"
+        };
+        let ok = c.faces.first().is_some_and(|f| {
+            (f.has_type(CardType::Instant) || f.has_type(CardType::Sorcery))
+                && f.creature_types.iter().any(|t| t == kind)
+        });
+        if !ok || c.has_type(CardType::Instant) || c.has_type(CardType::Sorcery) {
+            p.push(format!(
+                "an {kind} card is a permanent card with an {kind} spell"
+            ));
+        }
+    }
+    for (i, f) in c.faces.iter().enumerate() {
+        if !f.faces.is_empty() || f.layout != Layout::Normal || f.face_of.is_some() {
+            p.push(format!(
+                "face {}: a face has no faces or layout of its own",
+                i + 1
+            ));
+        }
+        if f.token != c.token {
+            p.push(format!("face {}: a token face of a card", i + 1));
+        }
+        for m in validate_face(f, Some(c.layout)) {
+            p.push(format!("face {} ({}): {m}", i + 1, f.name));
+        }
+    }
+    p
+}
+
+/// The checks of one face of a card; `back` is the layout of the card when it is a back
+/// face.
+fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
+    let mut p: Vec<String> = Vec::new();
+    if c.name.trim().is_empty() {
+        p.push("empty name".into());
     }
     let creature = c.has_type(CardType::Creature);
     if creature != (c.power.is_some() && c.toughness.is_some()) {
@@ -208,8 +270,14 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
     if land && c.mana_cost.is_some() {
         p.push("lands have no mana cost (they are played, not cast)".into());
     }
-    if !land && !c.token && c.mana_cost.is_none() {
+    // CR 712.2: the back face of a nonmodal double-faced card has no mana cost (it isn't
+    // cast with it up); every other face that isn't a land has one.
+    let transformed = back == Some(Layout::Transform);
+    if !land && !c.token && c.mana_cost.is_none() && !transformed {
         p.push("non-land, non-token cards need a mana cost".into());
+    }
+    if transformed && c.mana_cost.is_some() {
+        p.push("the back face of a transforming card has no mana cost".into());
     }
     // CR 107.4e: spells can't be paid for with hybrid mana yet (D-066).
     if c.mana_cost.as_ref().is_some_and(|m| {
@@ -228,7 +296,9 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
         .iter()
         .filter(|a| matches!(a, AbilityDef::Spell(_)))
         .count();
-    if instant_or_sorcery && spells != 1 {
+    // A split card as a whole (CR 709.4) has no text of its own: its halves' spell
+    // abilities are theirs.
+    if instant_or_sorcery && spells != 1 && c.layout != Layout::Split {
         p.push("an instant or sorcery needs exactly one Spell ability".into());
     }
     if !instant_or_sorcery && spells != 0 {
@@ -1127,7 +1197,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             }
             amount(a, p);
         }
-        Effect::Tap { what } | Effect::Untap { what } => obj(what, p),
+        Effect::Tap { what } | Effect::Untap { what } | Effect::Transform { what } => obj(what, p),
         Effect::TapAll(s) | Effect::UntapAll(s) => selector(s, p),
         Effect::Discard { who, amount: a } => {
             player(who, p);
@@ -1295,6 +1365,9 @@ pub fn validate_commander_deck(catalog: &CardCatalog, deck: &Deck) -> Vec<String
         let d = catalog.get(id);
         if d.token {
             p.push(format!("{} is a token definition", d.name));
+        }
+        if d.face_of.is_some() {
+            p.push(format!("{} is a face of another card, not a card", d.name));
         }
         if !d.supertypes.contains(&Supertype::Basic) && !seen.insert(id) {
             p.push(format!("more than one {} (CR 903.5b)", d.name));

@@ -27,8 +27,13 @@ pub enum ImageKind {
 /// they are checked rather than trusted.
 const IMAGE_HOSTS: [&str; 2] = ["https://cards.scryfall.io/", "https://svgs.scryfall.io/"];
 
+/// The picture of the card — of a two-sided card, its front face (each face is a card of
+/// its own through [`ScryfallCard::face`]).
 pub fn image_url(card: &ScryfallCard, kind: ImageKind) -> Option<&str> {
-    let uris = card.image_uris.as_ref()?;
+    let uris = card
+        .image_uris
+        .as_ref()
+        .or_else(|| card.card_faces.first()?.image_uris.as_ref())?;
     match kind {
         ImageKind::Normal => uris.normal.as_deref(),
         ImageKind::Large => uris.large.as_deref(),

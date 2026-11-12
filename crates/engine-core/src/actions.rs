@@ -33,6 +33,9 @@ pub enum GameAction {
         tapped: bool,
         /// Counters it enters with (CR 122.6).
         counters: Vec<(CounterKind, u32)>,
+        /// The face it is put onto the stack or battlefield with (CR 712.8–712.11); 0 for
+        /// the default: the front face, or from the stack the face that was up there.
+        face: u8,
     },
     /// CR 111.1: create a token (from a token definition) on the battlefield.
     CreateToken {
@@ -124,6 +127,15 @@ pub enum GameAction {
     },
     Tap {
         object: ObjectId,
+    },
+    /// CR 701.27: a double-faced permanent turns over.
+    Transform {
+        object: ObjectId,
+    },
+    /// CR 716.3d: an Adventure spell is resolving: once exiled, `player` may cast it.
+    SendOnAdventure {
+        spell: ObjectId,
+        player: PlayerId,
     },
     Untap {
         object: ObjectId,
@@ -258,8 +270,9 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             controller,
             tapped,
             counters,
+            face,
         } => {
-            let new = perform_move(st, object, to, position, controller);
+            let new = perform_move(st, object, to, position, controller, face);
             if to == Zone::Battlefield {
                 let o = st.object_mut(new);
                 o.tapped = tapped;
@@ -292,6 +305,9 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                     deathtouch_damage: false,
                     attached_to: None,
                     last_controller: controller,
+                    face: 0,
+                    transforms: 0,
+                    adventure: None,
                 },
             );
             st.zones.battlefield.push(id);
@@ -472,7 +488,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 st.emit(Event::DrewFromEmptyLibrary { player });
                 return ActionResult::Drew(None);
             };
-            let new = perform_move(st, top, Zone::Hand, LibraryPosition::Top, None);
+            let new = perform_move(st, top, Zone::Hand, LibraryPosition::Top, None, 0);
             st.player_mut(player).drawn_this_turn += 1;
             st.emit(Event::Drew { player, card: new });
             ActionResult::Drew(Some(new))
@@ -482,6 +498,22 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             st.rng.shuffle(&mut lib);
             st.zones.libraries[player.index()] = lib;
             st.emit(Event::Shuffled { player });
+            ActionResult::Done
+        }
+        GameAction::SendOnAdventure { spell, player } => {
+            st.object_mut(spell).adventure = Some(player);
+            ActionResult::Done
+        }
+        GameAction::Transform { object } => {
+            // CR 701.27a: turn it over; CR 613.7g: a new timestamp; CR 701.27c: the same
+            // object, with its counters, damage and attachments.
+            let timestamp = st.alloc_timestamp();
+            let o = st.object_mut(object);
+            o.face = if o.face == 0 { 1 } else { 0 };
+            o.transforms += 1;
+            o.timestamp = timestamp;
+            let face = o.face;
+            st.emit(Event::Transformed { object, face });
             ActionResult::Done
         }
         GameAction::Tap { object } => {
@@ -655,6 +687,14 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 targets: Vec::new(),
                 sacrificed_power: 0,
                 facts,
+                // Only a double-faced permanent can transform (CR 712.7).
+                source_transforms: st
+                    .objects
+                    .get(&source)
+                    .filter(|o| {
+                        o.zone == Zone::Battlefield && st.catalog.get(o.card).layout.double_faced()
+                    })
+                    .map(|o| o.transforms),
             });
             st.emit(Event::AbilityActivated {
                 player: controller,
@@ -745,6 +785,33 @@ pub fn move_object(
             controller,
             tapped: false,
             counters: Vec::new(),
+            face: 0,
+        },
+    ) {
+        ActionResult::Moved(id) => id,
+        other => unreachable!("move returned {other:?}"),
+    }
+}
+
+/// `move_object`, putting the card onto the stack or battlefield with face `face` up
+/// (CR 712.8b: a modal double-faced card cast with its back face).
+pub fn move_object_face(
+    st: &mut GameState,
+    object: ObjectId,
+    to: Zone,
+    controller: Option<PlayerId>,
+    face: u8,
+) -> ObjectId {
+    match execute(
+        st,
+        GameAction::MoveZone {
+            object,
+            to,
+            position: LibraryPosition::Top,
+            controller,
+            tapped: false,
+            counters: Vec::new(),
+            face,
         },
     ) {
         ActionResult::Moved(id) => id,
@@ -789,8 +856,16 @@ fn perform_move(
     to: Zone,
     position: LibraryPosition,
     controller: Option<PlayerId>,
+    face: u8,
 ) -> ObjectId {
     let old = detach(st, id);
+    // CR 712.6a: off the stack and battlefield a card has only its front face up. CR
+    // 712.10: a resolving spell becomes a permanent with the face it had on the stack.
+    let face = match to {
+        Zone::Battlefield | Zone::Stack if face != 0 => face,
+        Zone::Battlefield if old.zone == Zone::Stack => old.face,
+        _ => 0,
+    };
     // CR 400.7 (2026-11-06): a new object with no memory of its previous existence.
     let new_id = st.alloc_object_id();
     let timestamp = st.alloc_timestamp();
@@ -814,6 +889,14 @@ fn perform_move(
         deathtouch_damage: false,
         attached_to: None,
         last_controller: controller,
+        face,
+        transforms: 0,
+        // CR 716.3d: what was sent on an Adventure may be cast while it stays exiled.
+        adventure: if old.zone == Zone::Stack && to == Zone::Exile {
+            old.adventure
+        } else {
+            None
+        },
     };
     st.objects.insert(new_id, obj);
     if to == Zone::Stack {
@@ -829,6 +912,7 @@ fn perform_move(
             targets: Vec::new(),
             sacrificed_power: 0,
             facts: Default::default(),
+            source_transforms: None,
         });
     } else {
         let list = st.zones.list_mut(to, old.owner);
@@ -889,7 +973,7 @@ fn leave_game(st: &mut GameState, p: PlayerId) {
         .filter(|&id| crate::layers::controller_of(st, id) == p)
         .collect();
     for id in controlled {
-        perform_move(st, id, Zone::Exile, LibraryPosition::Top, None);
+        perform_move(st, id, Zone::Exile, LibraryPosition::Top, None, 0);
     }
     // Their mana pool and life no longer matter; priority is handled by the priority frame.
     st.player_mut(p).mana_pool = Default::default();
