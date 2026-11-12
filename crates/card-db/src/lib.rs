@@ -347,7 +347,10 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 AbilityDef::Replacement { replaces, .. } => *replaces != Replaces::ThisEnters,
                 AbilityDef::Mana { .. }
                 | AbilityDef::Triggered { .. }
-                | AbilityDef::CostReduction { .. } => true,
+                | AbilityDef::CostReduction { .. }
+                | AbilityDef::AdditionalTrigger { .. } => true,
+                // "This spell can't be countered" is about the card itself.
+                AbilityDef::CantBeCountered { spells } => spells.is_some(),
                 // "This card" may be cast from a zone: only its own, printed ability.
                 AbilityDef::PlayerRule { rule, .. } => {
                     !matches!(rule, card_model::PlayerRule::PlayThisFrom(_))
@@ -525,6 +528,12 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                     .is_some_and(|r| r.spells.is_empty() && r.abilities.is_empty())
                 {
                     p.push(at("mana that can be spent on nothing".into()));
+                }
+            }
+            AbilityDef::AdditionalTrigger { .. } => {}
+            AbilityDef::CantBeCountered { spells } => {
+                if spells.is_none() && c.card_types.iter().all(|t| *t == CardType::Land) {
+                    p.push(at("a land is never a spell (CR 305.1)".into()));
                 }
             }
             AbilityDef::FromZone { zone, ability } => {

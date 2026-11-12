@@ -1192,3 +1192,47 @@ fn modify(mut ev: Proposed, with: ReplaceWith) -> Proposed {
     }
     ev
 }
+
+/// CR 101.2, 701.6a, 614.17: a spell that "can't be countered" — by an ability of its own
+/// ("this spell can't be countered", which works on the stack) or of a permanent
+/// ("creature spells you control can't be countered", read off what permanents have now,
+/// CLAUDE.md invariant 4). Countering it does nothing to it (D-073).
+pub fn cant_be_countered(st: &GameState, spell: ObjectId) -> bool {
+    let Some(o) = st.objects.get(&spell) else {
+        return false;
+    };
+    if o.zone != Zone::Stack
+        || !st
+            .stack
+            .iter()
+            .any(|s| s.id == spell && matches!(s.kind, crate::stack::StackKind::Spell))
+    {
+        return false;
+    }
+    let own = abilities(st, spell)
+        .into_iter()
+        .any(|(_, a)| matches!(a, AbilityDef::CantBeCountered { spells: None }));
+    own || st.zones.battlefield.iter().any(|&source| {
+        abilities(st, source).into_iter().any(|(_, a)| {
+            let AbilityDef::CantBeCountered { spells: Some(sel) } = a else {
+                return false;
+            };
+            let c = crate::layers::chars(st, spell);
+            crate::layers::matches_parts(
+                sel,
+                &c,
+                crate::layers::Facts {
+                    id: spell,
+                    controller: c.controller,
+                    owner: o.owner,
+                    is_token: false,
+                    tapped: false,
+                    attacking: false,
+                    blocking: false,
+                },
+                source,
+                crate::layers::controller_of(st, source),
+            )
+        })
+    })
+}

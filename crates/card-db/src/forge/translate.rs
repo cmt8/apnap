@@ -16,7 +16,7 @@ use card_model::{
     CostChoice, CounterKind, DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword,
     ManaCost, ManaProduce, ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef, PlayZone,
     PlayerRef, PlayerRule, ReplaceWith, Replaces, Selector, Signed, Supertype, Take, TargetFilter,
-    TargetGroup, TargetRef, Timing, Trigger, TriggerStep, Who,
+    TargetGroup, TargetRef, Timing, Trigger, TriggerCause, TriggerStep, Who,
 };
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -4694,6 +4694,7 @@ impl<'a> Tx<'a> {
                     }
                 }
             }
+            "Panharmonicon" => self.panharmonicon(&rd),
             other => {
                 self.block(format!("static:{other}"));
                 None
@@ -4701,6 +4702,58 @@ impl<'a> Tx<'a> {
         };
         rd.finish(&mut self.blockers);
         out
+    }
+
+    /// `S:Mode$ Panharmonicon` (D-073, CR 603.2d): "if [an artifact or creature entering /
+    /// a creature dying / a creature attacking] causes a triggered ability of [a permanent
+    /// you control] to trigger, that ability triggers an additional time". `ValidCard$` is
+    /// the trigger's source; `ValidMode$` the kind of trigger event, with `ValidCause$` (and
+    /// `Origin$`/`Destination$` for zone changes) what caused it. Forge's `ValidZone$`
+    /// default, the battlefield, is the only zone compiled.
+    fn panharmonicon(&mut self, rd: &Rd<'a>) -> Option<AbilityDef> {
+        if self.in_effect || self.granting > 0 {
+            self.block("static:Panharmonicon elsewhere");
+            return None;
+        }
+        let sources = match rd.get("ValidCard") {
+            Some(f) => self.obj_filter(f),
+            None => {
+                self.block("static:Panharmonicon without ValidCard");
+                None
+            }
+        };
+        let mode = rd.get("ValidMode");
+        let cause = rd.get("ValidCause");
+        let (origin, dest) = (rd.get("Origin"), rd.get("Destination"));
+        let zone_change = matches!(mode, Some("ChangesZone,ChangesZoneAll" | "ChangesZone"));
+        let attack = matches!(
+            mode,
+            Some("Attacks,AttackersDeclared,AttackersDeclaredOneTarget" | "Attacks")
+        );
+        let cause = match (mode, cause, origin, dest) {
+            (None, None, None, None) => Some(None),
+            (Some(_), Some(c), None, Some("Battlefield")) if zone_change => {
+                self.selector(c).map(|s| Some(TriggerCause::Enters(s)))
+            }
+            (Some(_), Some(c), Some("Battlefield"), Some("Graveyard")) if zone_change => {
+                self.selector(c).map(|s| Some(TriggerCause::Dies(s)))
+            }
+            (Some(_), Some(c), None, None) if attack => {
+                self.selector(c).map(|s| Some(TriggerCause::Attacks(s)))
+            }
+            (Some(m), ..) => {
+                self.block(format!("static:Panharmonicon mode {}", shape(m)));
+                None
+            }
+            _ => {
+                self.block("static:Panharmonicon shape");
+                None
+            }
+        };
+        Some(AbilityDef::AdditionalTrigger {
+            sources: sources?,
+            cause: cause?,
+        })
     }
 
     /// Is this `Mode$ Continuous` line (also) a rule about players or about where cards may
@@ -5143,6 +5196,9 @@ impl<'a> Tx<'a> {
         if event == "AddCounter" {
             return self.replace_add_counter(&rd);
         }
+        if event == "Counter" {
+            return self.cant_be_countered(&rd);
+        }
         // Not compiled yet: named by the event alone, so that it ranks as one feature.
         for key in [
             "ValidCard",
@@ -5207,6 +5263,68 @@ impl<'a> Tx<'a> {
             self.block(format!("repl:amount math {}", shape(math)));
         }
         calc
+    }
+
+    /// `R:Event$ Counter | Layer$ CantHappen` (D-073): "this spell can't be countered"
+    /// (`ValidCard$ Card.Self | ValidSA$ Spell`, no zone: it works on the stack) and
+    /// "[creature] spells you control can't be countered" (`ActiveZones$ Battlefield` and
+    /// `ValidSA$ Spell.<filter>` or `ValidCard$ <filter> | ValidSA$ Spell`).
+    fn cant_be_countered(&mut self, rd: &Rd<'a>) -> Option<AbilityDef> {
+        let cant = rd.get("Layer") == Some("CantHappen");
+        let zone = rd.get("ActiveZones");
+        let card = rd.get("ValidCard");
+        let sa = rd.get("ValidSA");
+        rd.get("Secondary");
+        rd.finish(&mut self.blockers);
+        if !cant || self.in_effect {
+            self.block("repl:Counter:shape");
+            return None;
+        }
+        // `Spell.Creature+YouCtrl` → `Creature.YouCtrl`: a card type first is the head.
+        let spell_filter = |f: &str| -> Option<String> {
+            let mut alts = Vec::new();
+            for alt in f.split(',').map(str::trim) {
+                let props = match alt.split_once('.') {
+                    Some(("Spell", p)) => p,
+                    None if alt == "Spell" => "",
+                    _ => return None,
+                };
+                let props: Vec<&str> = props.split('+').filter(|p| !p.is_empty()).collect();
+                alts.push(match props.split_first() {
+                    None => "Card".to_string(),
+                    Some((first, rest)) if card_type(first).is_some() => {
+                        if rest.is_empty() {
+                            first.to_string()
+                        } else {
+                            format!("{first}.{}", rest.join("+"))
+                        }
+                    }
+                    Some(_) => format!("Card.{}", props.join("+")),
+                });
+            }
+            Some(alts.join(","))
+        };
+        match (zone, card, sa) {
+            (None, Some("Card.Self"), Some("Spell")) => {
+                Some(AbilityDef::CantBeCountered { spells: None })
+            }
+            (Some("Battlefield"), None, Some(f)) => match spell_filter(f) {
+                Some(f) => self
+                    .selector(&f)
+                    .map(|s| AbilityDef::CantBeCountered { spells: Some(s) }),
+                None => {
+                    self.block(format!("repl:Counter:ValidSA {}", shape(f)));
+                    None
+                }
+            },
+            (Some("Battlefield"), Some(f), Some("Spell")) if f != "Card.Self" => self
+                .selector(f)
+                .map(|s| AbilityDef::CantBeCountered { spells: Some(s) }),
+            _ => {
+                self.block("repl:Counter:shape");
+                None
+            }
+        }
     }
 
     /// `R:Event$ CreateToken` (D-073): "if an effect would create one or more [creature]

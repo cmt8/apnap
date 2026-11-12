@@ -1969,6 +1969,58 @@ fn ability(a: &AbilityDef) -> String {
                 }
             }
         }
+        AbilityDef::CantBeCountered { spells: None } => "This spell can't be countered.".into(),
+        AbilityDef::CantBeCountered { spells: Some(s) } => {
+            // "Creature spells you control can't be countered."
+            let whose = match s.controller {
+                Who::Any => "",
+                Who::You => " you control",
+                Who::Opponent => " your opponents control",
+            };
+            let text = selector(
+                &Selector {
+                    controller: Who::Any,
+                    ..s.clone()
+                },
+                false,
+            );
+            let (kind, with) = match text.find(" with ") {
+                Some(i) => (&text[..i], &text[i..]),
+                None => (text.as_str(), ""),
+            };
+            let kind = kind.replace("permanent", "");
+            let kind = kind.trim();
+            let spells = if kind.is_empty() {
+                "Spells".to_string()
+            } else {
+                format!("{} spells", capitalize(kind))
+            };
+            format!("{spells}{with}{whose} can't be countered.")
+        }
+        AbilityDef::AdditionalTrigger { sources, cause } => {
+            let sources = match sources {
+                ObjFilter::Matching(s) => with_article(&selector(s, false)),
+                f => obj_filter(f),
+            };
+            let cause = cause.as_ref().map(|c| {
+                let (s, verb) = match c {
+                    crate::TriggerCause::Enters(s) => (s, "entering"),
+                    crate::TriggerCause::Dies(s) => (s, "dying"),
+                    crate::TriggerCause::Attacks(s) => (s, "attacking"),
+                };
+                format!("{} {verb}", with_article(&selector(s, false)))
+            });
+            match cause {
+                Some(c) => format!(
+                    "If {c} causes a triggered ability of {sources} to trigger, that ability \
+                     triggers an additional time."
+                ),
+                None => format!(
+                    "If a triggered ability of {sources} triggers, that ability triggers an \
+                     additional time."
+                ),
+            }
+        }
         AbilityDef::CostReduction { spells, amount: n } => {
             // "Colorless spells you cast with mana value 7 or greater cost {1} less".
             let text = selector(spells, false);

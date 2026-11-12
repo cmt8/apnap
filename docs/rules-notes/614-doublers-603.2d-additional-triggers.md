@@ -58,7 +58,24 @@
 >
 > 603.2d An ability may state that a triggered ability triggers additional times. In this case, rather than simply determining that such an ability has triggered, determine how many times it should trigger, then that ability triggers that many times. An effect that states that an ability triggers additional times doesn’t invoke itself repeatedly and doesn’t apply to other effects that affect how many times an ability triggers. An effect that states a triggered ability of an object triggers additional times refers only to triggered abilities that object has, not to any delayed or reflexive triggered abilities (see rule 603.7 and rule 603.12) that may be created by abilities the object has.
 
+### "Can't be countered"
+
+> 101.2. When a rule or effect allows or directs something to happen, and another effect states that it can’t happen, the “can’t” effect takes precedence.
+>
+> 614.17. Some effects state that something can’t happen. These effects aren’t replacement effects, but follow similar rules.
+>
+> 614.17a “Can’t” effects must exist before the appropriate event occurs—they can’t “go back in time” and change something that’s already happened.
+>
+> 701.6a To counter a spell or ability means to cancel it, removing it from the stack. It doesn’t resolve and none of its effects occur. A countered spell is put into its owner’s graveyard.
+
 ## Notes
+
+- **"Can't be countered" (101.2, 614.17).** A spell that can't be countered can still be
+  the target of a spell that counters; that spell resolves and does everything else it
+  does, and the countering instruction does nothing to it. "This spell can't be
+  countered" is an ability of the spell that works on the stack; "creature spells you
+  control can't be countered" is an ability of a permanent, judged when the countering
+  would happen.
 
 - **One event, several kinds of tokens.** An effect in this engine creates one kind of
   token per event (`Proposed::CreateTokens`). A replacement effect can turn it into

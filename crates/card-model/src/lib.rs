@@ -493,6 +493,36 @@ pub enum AbilityDef {
         zone: ActivationZone,
         ability: Box<AbilityDef>,
     },
+    /// CR 603.2d: "If [`cause`] causes a triggered ability of [`sources`] to trigger, that
+    /// ability triggers an additional time." Not a replacement effect: it is counted as the
+    /// ability triggers, from permanents on the battlefield (or, for an ability that looks
+    /// back in time, as they last existed there). `sources` is matched against the source
+    /// of the triggered ability, relative to this ability's source and controller; `cause:
+    /// None` = whatever made it trigger (D-073).
+    AdditionalTrigger {
+        sources: ObjFilter,
+        cause: Option<TriggerCause>,
+    },
+    /// CR 101.2, 701.6: "This spell can't be countered" (`spells: None`: an ability of the
+    /// spell itself, which works on the stack) or "[`spells`] can't be countered" (an
+    /// ability of a permanent; the spell is matched on the stack relative to this
+    /// ability's source and controller). Not a replacement effect (CR 614.17): a spell or
+    /// ability that would counter it does nothing to it (D-073).
+    CantBeCountered { spells: Option<Selector> },
+}
+
+/// What made a triggered ability trigger, for [`AbilityDef::AdditionalTrigger`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TriggerCause {
+    /// "[A permanent matching this] entering the battlefield": the ability triggered on its
+    /// entering (CR 603.6a), judged as it is on the battlefield.
+    Enters(Selector),
+    /// "[A creature matching this] dying": the ability triggered on its being put into a
+    /// graveyard from the battlefield (CR 700.4), judged as it last existed there.
+    Dies(Selector),
+    /// "[A creature matching this] attacking": the ability triggered on its being declared
+    /// as an attacker, alone or with others (CR 508.1m).
+    Attacks(Selector),
 }
 
 /// What an [`AbilityDef::PlayerRule`] changes for the players it is about.

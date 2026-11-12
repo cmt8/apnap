@@ -1624,6 +1624,30 @@ Rules text: docs/rules-notes/614-doublers-603.2d-additional-triggers.md (with
   to P/T saturate), and one event creates at most `MAX_TOKENS_AT_ONCE` = 10,000 tokens of
   a kind (`frames/apply.rs`) — a deliberate limit far above any board a game is played to
   (the harness abandons a game at 1,000 permanents).
+- **Triggering an additional time (CR 603.2d)** is not a replacement effect:
+  `AbilityDef::AdditionalTrigger { sources, cause }` with `TriggerCause::{Enters, Dies,
+  Attacks}` (Forge's `Mode$ Panharmonicon`). Counted where a trigger is queued
+  (`triggers::queue_caused`): each detector says what made the ability trigger
+  (`Cause::{Entered, Died, Attacked, Other}`); every such ability of a permanent on the
+  battlefield whose `sources` matches the trigger's source and whose cause matches adds one
+  instance — two effects give three instances, each put on the stack on its own (own
+  targets, own order). For a look-back trigger of a dying permanent, the effects of
+  permanents that left in the same batch count as they last existed (Teysa dying with the
+  others). Compiled: no `ValidMode` (any trigger of matching sources: Annie Joins Up,
+  Delney, Katara, Twinflame Travelers); `ChangesZone[,ChangesZoneAll]` + `ValidCause` +
+  `Destination$ Battlefield` (Panharmonicon, Yarok, Ancient Greenwarden, Naban) or `Origin$
+  Battlefield | Destination$ Graveyard` (Teysa); `Attacks[,AttackersDeclared…]` + `ValidCause`
+  (Isshin). Blocked: other modes (`static:Panharmonicon mode …`: life gained, damage,
+  cast, becomes target, turned face up, rooms), `ValidZone`, `ValidPlayer`, conditions.
+- **"Can't be countered" (CR 101.2, 614.17)** is not a replacement effect either:
+  `AbilityDef::CantBeCountered { spells }` — `None`: the spell's own ability (Forge's
+  `R:Event$ Counter | ValidCard$ Card.Self | ValidSA$ Spell | Layer$ CantHappen`); `Some`:
+  a permanent's "[creature] spells you control can't be countered" (`ValidSA$
+  Spell.<filter>` or `ValidCard$ <filter>`). `Effect::Counter` does nothing to such a
+  spell (`replacement::cant_be_countered`); the countering spell resolves and does the rest
+  of what it does. Blocked: `ValidCause` (only by some spells), abilities that can't be
+  countered (`repl:Counter:ValidSA …`), conditions (`CheckSVar`, `IsPresent`), effects
+  (`repl:Counter:shape`).
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may

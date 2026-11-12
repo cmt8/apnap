@@ -819,6 +819,402 @@ fn cr_800_4b_no_tokens_for_a_player_who_left() {
 }
 
 // ---------------------------------------------------------------------------------------
+// "Can't be countered" (CR 101.2, 701.6a, 614.17)
+
+fn counter_war_cards() -> Vec<String> {
+    vec![
+        "Name:Test Unstoppable Word\nManaCost:W\nTypes:Instant\n\
+         R:Event$ Counter | ValidCard$ Card.Self | ValidSA$ Spell | Layer$ CantHappen | Description$ Text.\n\
+         A:SP$ GainLife | LifeAmount$ 3 | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+        "Name:Test Denial\nManaCost:U\nTypes:Instant\n\
+         A:SP$ Counter | TargetType$ Spell | ValidTgts$ Card | SubAbility$ DBDraw | SpellDescription$ Text.\n\
+         SVar:DBDraw:DB$ Draw | NumCards$ 1\nOracle:Text."
+            .to_string(),
+        "Name:Test Wild Shelter\nManaCost:G\nTypes:Enchantment\n\
+         R:Event$ Counter | ValidSA$ Spell.Creature+YouCtrl | Layer$ CantHappen | ActiveZones$ Battlefield | Description$ Text.\nOracle:Text."
+            .to_string(),
+        "Name:Test Recruit\nManaCost:W\nTypes:Creature Soldier\nPT:1/1\nOracle:Text."
+            .to_string(),
+    ]
+}
+
+fn hand_size(s: &Script, p: PlayerId) -> usize {
+    s.st.zones.list(Zone::Hand, p).len()
+}
+
+// CR 101.2, 701.6a (2026-11-06): "this spell can't be countered" — a spell that would
+// counter it still resolves (it is a legal target), does nothing to it, and does the rest
+// of what it does; the spell then resolves.
+#[test]
+fn cr_101_2_this_spell_cant_be_countered() {
+    let mut sc = scenario_n(2, &counter_war_cards());
+    sc.cards(P0, Zone::Battlefield, &["Plains"]);
+    sc.cards(P1, Zone::Battlefield, &["Island"]);
+    sc.card(P0, Zone::Hand, "Test Unstoppable Word");
+    sc.card(P1, Zone::Hand, "Test Denial");
+    let mut s = Script::new(sc.build());
+    let text = card_model::describe::rules_text(
+        s.st.card_def(s.find(P0, Zone::Hand, "Test Unstoppable Word").unwrap()),
+    )
+    .join(" ");
+    assert!(text.contains("can't be countered"), "{text}");
+    s.cast("Test Unstoppable Word").pay().pass();
+    assert_eq!(s.who(), P1);
+    let cards = hand_size(&s, P1);
+    s.cast("Test Denial").target("Test Unstoppable Word").pay();
+    s.pass_all();
+    // The Denial resolved: its controller drew; the Word is still on the stack.
+    assert_eq!(hand_size(&s, P1), cards);
+    assert!(s.find(P0, Zone::Stack, "Test Unstoppable Word").is_some());
+    assert_eq!(
+        s.count(|e| matches!(e, engine_core::Event::Countered { .. })),
+        0
+    );
+    s.pass_all();
+    assert_eq!(s.st.player(P0).life, 43);
+    assert!(
+        s.find(P0, Zone::Graveyard, "Test Unstoppable Word")
+            .is_some()
+    );
+}
+
+// "Creature spells you control can't be countered": its controller's creature spells only.
+#[test]
+fn creature_spells_you_control_cant_be_countered() {
+    for (shelter_owner, countered) in [(P0, false), (P1, true)] {
+        let mut sc = scenario_n(2, &counter_war_cards());
+        sc.cards(P0, Zone::Battlefield, &["Plains"]);
+        sc.cards(P1, Zone::Battlefield, &["Island"]);
+        sc.card(shelter_owner, Zone::Battlefield, "Test Wild Shelter");
+        sc.card(P0, Zone::Hand, "Test Recruit");
+        sc.card(P1, Zone::Hand, "Test Denial");
+        let mut s = Script::new(sc.build());
+        s.cast("Test Recruit").pay().pass();
+        s.cast("Test Denial").target("Test Recruit").pay();
+        s.pass_all();
+        s.pass_all();
+        assert_eq!(
+            s.find(P0, Zone::Graveyard, "Test Recruit").is_some(),
+            countered,
+            "shelter of {shelter_owner:?}"
+        );
+        assert_eq!(
+            s.find(P0, Zone::Battlefield, "Test Recruit").is_some(),
+            !countered
+        );
+    }
+}
+
+#[test]
+fn cant_be_countered_forms_left_blocked() {
+    let blocked = |card: &str, what: &str| {
+        let b = forge_test_blockers(card);
+        assert!(b.iter().any(|x| x.contains(what)), "{what}: {b:?}");
+    };
+    // Only by some spells.
+    blocked(
+        "Name:Test Choosy\nManaCost:G\nTypes:Enchantment\n\
+         R:Event$ Counter | ValidSA$ Spell.YouCtrl | ValidCause$ Spell.Blue | Layer$ CantHappen | ActiveZones$ Battlefield | Description$ Text.\nOracle:Text.",
+        "param:repl Counter.ValidCause",
+    );
+    // Abilities too.
+    blocked(
+        "Name:Test Silence\nManaCost:G\nTypes:Enchantment\n\
+         R:Event$ Counter | ValidSA$ Spell,Activated,Triggered | Layer$ CantHappen | ActiveZones$ Battlefield | Description$ Text.\nOracle:Text.",
+        "repl:Counter:ValidSA",
+    );
+    // Under a condition.
+    blocked(
+        "Name:Test Sometimes\nManaCost:G\nTypes:Instant\n\
+         R:Event$ Counter | ValidCard$ Card.Self | ValidSA$ Spell | Layer$ CantHappen | CheckSVar$ X | SVarCompare$ GE5 | Description$ Text.\n\
+         A:SP$ GainLife | LifeAmount$ 3 | SpellDescription$ Text.\nSVar:X:Count$CardsInYourHand\nOracle:Text.",
+        "param:repl Counter.CheckSVar",
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// "That ability triggers an additional time" (CR 603.2d)
+
+fn harmonicon() -> String {
+    card(
+        "Test Harmonicon",
+        "Artifact",
+        "S:Mode$ Panharmonicon | ValidMode$ ChangesZone,ChangesZoneAll | ValidCard$ Permanent.YouCtrl | ValidCause$ Artifact,Creature | Destination$ Battlefield | Description$ Text.",
+    )
+}
+
+fn mourner() -> String {
+    card(
+        "Test Mourner",
+        "Creature Human",
+        "PT:2/2\n\
+         S:Mode$ Panharmonicon | ValidMode$ ChangesZone,ChangesZoneAll | ValidCard$ Permanent.YouCtrl | ValidCause$ Creature | Origin$ Battlefield | Destination$ Graveyard | Description$ Text.",
+    )
+}
+
+fn warcaller() -> String {
+    card(
+        "Test Warcaller",
+        "Enchantment",
+        "S:Mode$ Panharmonicon | ValidMode$ Attacks,AttackersDeclared,AttackersDeclaredOneTarget | ValidCard$ Permanent.YouCtrl | ValidCause$ Creature | Description$ Text.",
+    )
+}
+
+fn legend_echo() -> String {
+    card(
+        "Test Legend Echo",
+        "Enchantment",
+        "S:Mode$ Panharmonicon | ValidCard$ Creature.YouCtrl+Legendary | Description$ Text.",
+    )
+}
+
+/// An enchantment that gains its controller 1 life on a trigger `when`.
+fn watcher(name: &str, when: &str) -> String {
+    card(
+        name,
+        "Enchantment",
+        &format!(
+            "T:{when} | TriggerZones$ Battlefield | Execute$ TrigGain | TriggerDescription$ Text.\n\
+             SVar:TrigGain:DB$ GainLife | LifeAmount$ 1"
+        ),
+    )
+}
+
+fn trigger_cards(extra: &[String]) -> Vec<String> {
+    let mut v = extra.to_vec();
+    v.push(watcher(
+        "Test Arrival Watch",
+        "Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield | ValidCard$ Permanent",
+    ));
+    v.push(watcher(
+        "Test Death Watch",
+        "Mode$ ChangesZone | Origin$ Battlefield | Destination$ Graveyard | ValidCard$ Creature",
+    ));
+    v.push(watcher(
+        "Test Battle Watch",
+        "Mode$ Attacks | ValidCard$ Creature.YouCtrl",
+    ));
+    v.push(
+        "Name:Test Recruit\nManaCost:W\nTypes:Creature Soldier\nPT:1/1\nOracle:Text.".to_string(),
+    );
+    v.push(
+        "Name:Test Wrath\nManaCost:W\nTypes:Sorcery\n\
+         A:SP$ DestroyAll | ValidCards$ Creature | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+    );
+    v.push(
+        "Name:Test Banishing\nManaCost:W\nTypes:Instant\n\
+         A:SP$ ChangeZone | ValidTgts$ Creature | Origin$ Battlefield | Destination$ Exile | SpellDescription$ Text.\nOracle:Text."
+            .to_string(),
+    );
+    v.push(
+        "Name:Test Old King\nManaCost:W\nTypes:Legendary Creature Human\nPT:2/2\n\
+         T:Mode$ Phase | Phase$ Upkeep | ValidPlayer$ You | TriggerZones$ Battlefield | Execute$ TrigGain | TriggerDescription$ Text.\n\
+         SVar:TrigGain:DB$ GainLife | LifeAmount$ 1\nOracle:Text."
+            .to_string(),
+    );
+    v
+}
+
+fn life(s: &Script, p: PlayerId) -> i32 {
+    s.st.player(p).life
+}
+
+/// Resolve everything on the stack (each trigger instance is its own ability).
+fn resolve_all(s: &mut Script) {
+    for _ in 0..50 {
+        order_triggers(s);
+        if s.st.stack.is_empty() || s.kind() != ChoiceKind::Priority {
+            return;
+        }
+        s.pass_all();
+    }
+}
+
+/// Put triggered abilities on the stack in the order offered (CR 603.3b).
+fn order_triggers(s: &mut Script) {
+    while s.next.is_some() && s.kind() == ChoiceKind::OrderTriggers {
+        let n = s.options().len();
+        s.respond(engine_core::Response::Order((0..n).collect()));
+    }
+}
+
+// CR 603.2d (2026-11-06): "if an artifact or creature entering causes a triggered ability
+// of a permanent you control to trigger, that ability triggers an additional time" — two
+// instances, each put on the stack on its own; two such effects add (three), they don't
+// multiply.
+#[test]
+fn cr_603_2d_an_additional_time_and_two_effects_add() {
+    for (harmonicons, gained) in [(0, 1), (1, 2), (2, 3)] {
+        let mut sc = scenario_n(2, &trigger_cards(&[harmonicon()]));
+        sc.cards(P0, Zone::Battlefield, &["Test Arrival Watch", "Plains"]);
+        for _ in 0..harmonicons {
+            sc.card(P0, Zone::Battlefield, "Test Harmonicon");
+        }
+        sc.card(P0, Zone::Hand, "Test Recruit");
+        let mut s = Script::new(sc.build());
+        s.cast("Test Recruit").pay().pass_all();
+        order_triggers(&mut s);
+        let triggered = s.count(|e| matches!(e, engine_core::Event::Triggered { .. }));
+        assert_eq!(triggered, gained as usize, "{harmonicons} Harmonicons");
+        assert_eq!(s.st.stack.len(), gained as usize);
+        resolve_all(&mut s);
+        assert_eq!(life(&s, P0), 40 + gained, "{harmonicons} Harmonicons");
+    }
+}
+
+// CR 603.2d: only what it says causes it — a land entering isn't an artifact or creature;
+// and only abilities of permanents its controller controls.
+#[test]
+fn cr_603_2d_only_the_cause_and_sources_it_names() {
+    let mut sc = scenario_n(2, &trigger_cards(&[harmonicon()]));
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Test Arrival Watch", "Test Harmonicon"],
+    );
+    sc.card(P0, Zone::Hand, "Forest");
+    let mut s = Script::new(sc.build());
+    s.pick(
+        "play Forest",
+        |s, o| matches!(o, OptionDesc::PlayLand { card } if s.name(*card) == "Forest"),
+    );
+    resolve_all(&mut s);
+    assert_eq!(life(&s, P0), 41);
+
+    // The opponent's Harmonicon doesn't make P0's ability trigger again.
+    let mut sc = scenario_n(2, &trigger_cards(&[harmonicon()]));
+    sc.cards(P0, Zone::Battlefield, &["Test Arrival Watch", "Plains"]);
+    sc.card(P1, Zone::Battlefield, "Test Harmonicon");
+    sc.card(P0, Zone::Hand, "Test Recruit");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Recruit").pay().pass_all();
+    resolve_all(&mut s);
+    assert_eq!(life(&s, P0), 41);
+}
+
+// CR 603.2d, 603.10a, 700.4 (2026-11-06): "if a creature dying causes …" — a creature
+// exiled doesn't die; abilities that look back in time see the effect of a creature that
+// dies at the same time (three creatures die: three triggers, each twice).
+#[test]
+fn cr_603_2d_dying_and_looking_back() {
+    let mut sc = scenario_n(2, &trigger_cards(&[mourner()]));
+    sc.cards(P0, Zone::Battlefield, &["Test Death Watch", "Plains"]);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Test Mourner", "Test Golem", "Test Golem"],
+    );
+    sc.card(P0, Zone::Hand, "Test Wrath");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Wrath").pay().pass_all();
+    resolve_all(&mut s);
+    assert_eq!(life(&s, P0), 46);
+
+    let mut sc = scenario_n(2, &trigger_cards(&[mourner()]));
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Test Death Watch", "Test Mourner", "Plains"],
+    );
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    sc.card(P0, Zone::Hand, "Test Banishing");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Banishing")
+        .target_object(golem)
+        .pay()
+        .pass_all();
+    resolve_all(&mut s);
+    assert_eq!(life(&s, P0), 40);
+}
+
+// CR 603.2d, 508.1m: "if a creature attacking causes …".
+#[test]
+fn cr_603_2d_attacking() {
+    let mut sc = scenario_n(2, &trigger_cards(&[warcaller()]));
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Test Battle Watch", "Test Warcaller"],
+    );
+    let golem = sc.card(P0, Zone::Battlefield, "Test Golem");
+    let mut s = Script::new(sc.build());
+    let mut asked = 0;
+    for _ in 0..200 {
+        if s.next.is_none() {
+            break;
+        }
+        match s.kind() {
+            ChoiceKind::DeclareAttackers => {
+                let pick = match s.options().first() {
+                    Some(OptionDesc::Attack { attacker, .. }) if *attacker == golem => vec![0],
+                    _ => vec![],
+                };
+                asked += 1;
+                s.respond(engine_core::Response::Pick(pick));
+            }
+            ChoiceKind::OrderTriggers => order_triggers(&mut s),
+            ChoiceKind::Priority if asked > 0 && s.st.stack.is_empty() => break,
+            ChoiceKind::Priority => {
+                s.pass();
+            }
+            _ => {
+                s.respond(engine_core::Response::Pick(vec![]));
+            }
+        }
+    }
+    assert!(asked > 0, "attackers were declared");
+    assert_eq!(life(&s, P0), 42);
+}
+
+// CR 603.2d: "if a triggered ability of a legendary creature you control triggers" — any
+// trigger event ("at the beginning of your upkeep").
+#[test]
+fn cr_603_2d_any_trigger_of_a_kind_of_source() {
+    let mut sc = scenario_n(2, &trigger_cards(&[legend_echo()]));
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Test Legend Echo", "Test Old King"],
+    );
+    sc.turn(P1, engine_core::turn::Step::End);
+    let mut s = Script::new(sc.build());
+    for _ in 0..50 {
+        order_triggers(&mut s);
+        if s.st.turn.active == P0 && s.st.turn.step == engine_core::turn::Step::Upkeep {
+            break;
+        }
+        if s.kind() == ChoiceKind::Priority {
+            s.pass();
+        } else {
+            s.respond(engine_core::Response::Pick(vec![]));
+        }
+    }
+    assert_eq!(s.st.stack.len(), 2);
+    resolve_all(&mut s);
+    assert_eq!(life(&s, P0), 42);
+}
+
+#[test]
+fn additional_trigger_forms_left_blocked() {
+    let blocked = |card: &str, what: &str| {
+        let b = forge_test_blockers(card);
+        assert!(b.iter().any(|x| x.contains(what)), "{what}: {b:?}");
+    };
+    blocked(
+        "Name:Test Lifesong\nManaCost:G\nTypes:Enchantment\n\
+         S:Mode$ Panharmonicon | ValidMode$ LifeGained | ValidPlayer$ You | ValidCard$ Permanent.YouCtrl | Description$ Text.\nOracle:Text.",
+        "static:Panharmonicon mode LifeGained",
+    );
+    blocked(
+        "Name:Test Room Echo\nManaCost:G\nTypes:Enchantment\n\
+         S:Mode$ Panharmonicon | ValidMode$ RoomEntered | ValidCard$ Card.YouOwn | ValidZone$ Command | Description$ Text.\nOracle:Text.",
+        "param:static Panharmonicon.ValidZone",
+    );
+}
+
+// ---------------------------------------------------------------------------------------
 // What doesn't compile.
 
 #[test]
