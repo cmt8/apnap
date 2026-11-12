@@ -700,3 +700,77 @@ fn cr_707_6_a_copy_makes_its_own_as_enters_choice() {
     assert!(s.st.object(token).is_token);
     assert_eq!(chosen_type(&s, token), Some("Elf"));
 }
+
+// ---------------------------------------------------------------------------------------
+// Views, save/load.
+
+// CR 707.2: what a copy is, is public: the view shows the copied card (its picture and
+// text) and the card the object is itself.
+#[test]
+fn the_view_shows_a_copy_as_what_it_copies() {
+    let (clone, healer) = (test_clone(), healer());
+    let mut sc = scenario(&[&clone, &healer]);
+    sc.card(P0, Zone::Battlefield, "Plains");
+    let orig = sc.card(P1, Zone::Battlefield, "Test Healer");
+    sc.card(P0, Zone::Hand, "Test Clone");
+    sc.turn(P0, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Clone").pay().pass_all();
+    choose_copy(&mut s, orig);
+    let copy = s.find(P0, Zone::Battlefield, "Test Clone").unwrap();
+    for viewer in [P0, P1] {
+        let v = engine_core::player_view(&s.st, viewer);
+        let ov = v.battlefield.iter().find(|o| o.id == copy).unwrap();
+        assert_eq!(
+            ov.card,
+            s.st.object(orig).card,
+            "the picture of the original"
+        );
+        assert_eq!(ov.printed, Some(s.st.object(copy).card), "and what it is");
+        let plain = v.battlefield.iter().find(|o| o.id == orig).unwrap();
+        assert_eq!(plain.printed, None);
+    }
+}
+
+// Determinism (CLAUDE.md definition of done): a game with a copy on the battlefield and a
+// token copy saved and loaded — or cloned — mid-game goes on exactly as the original.
+#[test]
+fn save_load_and_clone_with_copies_replay_identically() {
+    let (goblin, healer, clone) = (mirror_goblin(), healer(), test_clone());
+    let mut sc = scenario(&[&goblin, &healer, &clone]);
+    sc.card(P0, Zone::Battlefield, "Plains");
+    let gob = sc.card(P0, Zone::Battlefield, "Test Mirror Goblin");
+    let orig = sc.card(P0, Zone::Battlefield, "Test Healer");
+    sc.card(P0, Zone::Hand, "Test Clone");
+    sc.turn(P0, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    activate_on(&mut s, gob, orig);
+    s.pass_all();
+    s.pass_all();
+    s.cast("Test Clone").pay().pass_all();
+    // Suspended on the copy choice, with a token copy on the battlefield.
+    assert!(matches!(s.kind(), ChoiceKind::AsEnters { .. }));
+    let saved = harness::save_json(&s.st);
+    let mut loaded = harness::load_json(&saved).unwrap();
+    let mut cloned = s.st.clone();
+    assert_eq!(loaded.state_hash(), s.st.state_hash());
+    let mut answers = Vec::new();
+    for _ in 0..200 {
+        let Some(d) = s.next.clone() else { break };
+        let r = match &d.prim {
+            Primitive::PickN { min, .. } => {
+                Response::Pick((0..(*min).max(1).min(d.options.len())).collect())
+            }
+            Primitive::PickNumber { min, .. } => Response::Number(*min),
+            Primitive::Allocate { per_min, .. } => Response::Allocate(per_min.clone()),
+            Primitive::Order => Response::Order((0..d.options.len()).collect()),
+        };
+        answers.push(r.clone());
+        s.respond(r);
+    }
+    for st in [&mut loaded, &mut cloned] {
+        harness::feed(st, &answers).unwrap();
+        assert_eq!(st.state_hash(), s.st.state_hash());
+        assert_eq!(st.log_hash, s.st.log_hash);
+    }
+}

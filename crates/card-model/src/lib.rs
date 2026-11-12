@@ -1287,6 +1287,8 @@ pub enum CopyExcept {
 }
 
 /// What a token copy effect copies.
+// Built once when the catalog loads, then only read: the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CopyWhat {
     /// One object: "a copy of target creature", "of this creature", "of equipped

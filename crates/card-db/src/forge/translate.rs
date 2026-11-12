@@ -9299,6 +9299,22 @@ mod tests {
             ..CardDef::default()
         });
         assert!(t.contains("an additional time"), "{t}");
+        // "except" (copy exceptions) and "token gains … until end of turn" (D-074).
+        let t = text(&spell(
+            vec![TargetFilter::Creature],
+            Effect::CopyPermanent {
+                what: card_model::CopyWhat::Obj(ObjRef::Target(0)),
+                count: Amount::Fixed(1),
+                except: vec![card_model::CopyExcept::NotLegendary],
+                gains: vec![card_model::Keyword::Haste],
+                tapped: false,
+            },
+            vec![],
+        ));
+        assert!(
+            has_word(&t, "except") && t.contains("copy") && t.contains("token gains"),
+            "{t}"
+        );
         // "unless" and "battlefield under your control" are pinned by the cards in
         // forge_features.rs (Pay unless; return under your control).
     }
