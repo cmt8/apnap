@@ -14,7 +14,7 @@ pub mod scryfall;
 use card_model::{
     AbilityDef, ActivationZone, Amount, Body, CardCatalog, CardDef, CardDefId, CardScript,
     CardType, Condition, Cost, Effect, Mode, ObjRef, PlayerRef, ReplaceWith, Replaces, Supertype,
-    TargetFilter, TargetRef, Trigger,
+    TargetFilter, TargetRef, Trigger, Who,
 };
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -295,6 +295,10 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 AbilityDef::Replacement { replaces, with } => {
                     matches!(replaces, Replaces::Damage { .. }) && *with == ReplaceWith::Prevent
                 }
+                // "You may play an additional land this turn" (CR 611.2c: a rule).
+                AbilityDef::PlayerRule { rule, .. } => {
+                    !matches!(rule, card_model::PlayerRule::PlayThisFrom(_))
+                }
                 _ => false,
             };
             if !fits {
@@ -314,7 +318,8 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 AbilityDef::Spell(_)
                 | AbilityDef::AdditionalCost(_)
                 | AbilityDef::Enchant(_)
-                | AbilityDef::SelfCostReduction(_) => false,
+                | AbilityDef::SelfCostReduction(_)
+                | AbilityDef::FromZone { .. } => false,
                 AbilityDef::Activated { from, cycling, .. } => {
                     *from == ActivationZone::Battlefield && !*cycling
                 }
@@ -328,6 +333,7 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                                 e,
                                 E::GainControl
                                     | E::AddTypes { .. }
+                                    | E::RemoveTypes(_)
                                     | E::SetColors(_)
                                     | E::SetPTBy { .. }
                             )
@@ -340,6 +346,10 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 AbilityDef::Mana { .. }
                 | AbilityDef::Triggered { .. }
                 | AbilityDef::CostReduction { .. } => true,
+                // "This card" may be cast from a zone: only its own, printed ability.
+                AbilityDef::PlayerRule { rule, .. } => {
+                    !matches!(rule, card_model::PlayerRule::PlayThisFrom(_))
+                }
             };
             if !fits {
                 p.push(at("not an ability another object can be given".into()));
@@ -426,6 +436,7 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
             }
             AbilityDef::Triggered { intervening_if, .. } => (intervening_if.as_ref(), false),
             AbilityDef::Static { only_if, .. } => (only_if.as_ref(), true),
+            AbilityDef::PlayerRule { only_if, .. } => (only_if.as_ref(), false),
             _ => (None, false),
         };
         if let Some(card_model::Condition::Compare { amount, .. }) = cond {
@@ -553,6 +564,52 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                     r.spells.is_empty() && r.abilities.is_empty() && r.sources.is_empty()
                 }) {
                     p.push(at("mana that can be spent on nothing".into()));
+                }
+            }
+            AbilityDef::FromZone { zone, ability } => {
+                let fits = *zone == ActivationZone::Graveyard
+                    && !granted
+                    && matches!(&**ability, AbilityDef::Static {
+                        affected: card_model::Affected::All(sel),
+                        effects,
+                        ..
+                    } if !sel.looks_at_pt()
+                        && effects.iter().all(|e| !matches!(
+                            e,
+                            card_model::ContinuousEffect::SetPTBy { .. }
+                        )));
+                if !fits {
+                    p.push(at(
+                        "only a static ability about permanents works from a graveyard".into(),
+                    ));
+                }
+            }
+            AbilityDef::PlayerRule { who, rule, .. } => {
+                use card_model::PlayerRule as R;
+                match rule {
+                    R::AdditionalLandPlays(0) => p.push(at("no additional land".into())),
+                    R::PlayFrom { cards, .. } => {
+                        // The cards are in the player's own zone: whose they are and what
+                        // is on the battlefield isn't asked (`card_matches`).
+                        if cards.is_empty()
+                            || cards.iter().any(|s| {
+                                s.controller != Who::Any
+                                    || s.owner != Who::Any
+                                    || s.other
+                                    || s.tapped.is_some()
+                                    || s.attacking.is_some()
+                                    || s.blocking.is_some()
+                            })
+                        {
+                            p.push(at(
+                                "cards a rule lets a player play: card properties only".into()
+                            ));
+                        }
+                    }
+                    R::PlayThisFrom(zones) if zones.is_empty() || *who != Who::You => p.push(at(
+                        "\"cast this card from …\" names zones, for its owner".into(),
+                    )),
+                    _ => {}
                 }
             }
             AbilityDef::CombatRule { affected, .. } => {
@@ -836,6 +893,15 @@ fn check_cost(cost: &Cost, p: &mut dyn FnMut(String)) {
     }
 }
 
+/// Does this instruction define X for what follows ("…where X is", `SetX`)?
+fn first_sets_x(e: &Effect) -> bool {
+    match e {
+        Effect::SetX(_) => true,
+        Effect::Seq(v) => v.iter().any(first_sets_x),
+        _ => false,
+    }
+}
+
 /// The target slots whose power, toughness or mana value an effect reads.
 fn amounts_of_targets(e: &Effect, out: &mut Vec<u8>, hands: &mut Vec<PlayerRef>) {
     // Walk the serialized form: amounts sit in many places of many effects.
@@ -953,6 +1019,10 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         }
         Effect::SetX(a) => amount(a, p),
         Effect::May(inner) => check_effect(inner, mode, has_x, p),
+        Effect::IfDone { first, then } => {
+            check_effect(first, mode, has_x, p);
+            check_effect(then, mode, has_x || first_sets_x(first), p);
+        }
         Effect::PlayerMay { who, effect } => {
             match who {
                 PlayerRef::Each | PlayerRef::EachOpponent => {
@@ -997,6 +1067,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
                     Effect::Seq(_)
                         | Effect::May(_)
                         | Effect::PlayerMay { .. }
+                        | Effect::IfDone { .. }
                         | Effect::Together(_)
                         | Effect::SetX(_)
                 ) {

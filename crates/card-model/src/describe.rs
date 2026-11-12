@@ -184,6 +184,15 @@ fn amount(a: &Amount) -> String {
 }
 
 fn target_filter(f: &TargetFilter) -> String {
+    let text = target_filter_words(f);
+    // "Another target Elf card", not "target another Elf card".
+    match text.strip_prefix("target another ") {
+        Some(rest) => format!("another target {rest}"),
+        None => text,
+    }
+}
+
+fn target_filter_words(f: &TargetFilter) -> String {
     match f {
         TargetFilter::AnyTarget => "any target".into(),
         TargetFilter::Creature => "target creature".into(),
@@ -234,7 +243,11 @@ fn spell_kind(s: &Selector) -> String {
             "or",
         ));
     }
-    words.extend(s.not_colors.iter().map(|c| format!("non{}", color(*c))));
+    if s.not_colors.len() == 5 {
+        words.push("colorless".to_string());
+    } else {
+        words.extend(s.not_colors.iter().map(|c| format!("non{}", color(*c))));
+    }
     words.extend(s.not_types.iter().map(|t| format!("non{}", card_type(*t))));
     let types: Vec<String> = s.types.iter().map(|t| card_type(*t).to_string()).collect();
     if !s.subtypes.is_empty() {
@@ -255,7 +268,10 @@ fn target(mode: &Mode, r: TargetRef) -> String {
                 .map_or("the target".to_string(), target_filter);
             // A slot that may stay empty (CR 115.3: "up to one target …").
             match mode.group_of(i as usize) {
-                Some(g) if g.count == 1 && g.min == 0 => format!("up to one {text}"),
+                Some(g) if g.count == 1 && g.min == 0 => match text.strip_prefix("another ") {
+                    Some(rest) => format!("up to one other {rest}"),
+                    None => format!("up to one {text}"),
+                },
                 _ => text,
             }
         }
@@ -324,8 +340,12 @@ fn selector(s: &Selector, plural: bool) -> String {
         out.push_str(&join(colors, "or"));
         out.push(' ');
     }
-    for c in &s.not_colors {
-        out.push_str(&format!("non{c:?} ").to_lowercase());
+    if s.not_colors.len() == 5 {
+        out.push_str("colorless ");
+    } else {
+        for c in &s.not_colors {
+            out.push_str(&format!("non{c:?} ").to_lowercase());
+        }
     }
     for st in &s.not_supertypes {
         out.push_str(&format!("non{st:?} ").to_lowercase());
@@ -483,6 +503,21 @@ fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
                 }
             }
             ContinuousEffect::SwitchPT => format!("{become_} power-and-toughness switched"),
+            ContinuousEffect::RemoveTypes(ts) => {
+                let not = if plural { "aren't" } else { "isn't" };
+                let names: Vec<String> = ts
+                    .iter()
+                    .map(|t| {
+                        let name = card_type(*t);
+                        if plural {
+                            format!("{name}s")
+                        } else {
+                            with_article(name)
+                        }
+                    })
+                    .collect();
+                format!("{not} {}", join(names, "or"))
+            }
             ContinuousEffect::SetPTBy { power, toughness } => match (power, toughness) {
                 (Some(p), Some(t)) if p == t => {
                     format!("{have} power and toughness each equal to {}", amount(p))
@@ -540,7 +575,14 @@ fn quote_granted(def: &CardDef, text: &str) -> String {
                         .replace("That permanent", about)
                         .replace("that permanent", about);
                 }
-                let text = text.trim_end_matches('.');
+                let mut text = text.trim_end_matches('.');
+                // A rule about players for one turn: "you may play an additional land
+                // this turn", not "on each of your turns this turn".
+                if matches!(a, AbilityDef::PlayerRule { .. }) {
+                    for each in [" on each of your turns", " on each of their turns"] {
+                        text = text.strip_suffix(each).unwrap_or(text);
+                    }
+                }
                 // (Lower case inside a sentence: "…. Then target creature can't …".)
                 let starts = said.is_empty() || said.ends_with(": ") || said.ends_with("• ");
                 let mut chars = text.chars();
@@ -805,6 +847,9 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 format!("you may {}", text.strip_prefix("you ").unwrap_or(&text))
             }
         }
+        Effect::IfDone { first, then } => {
+            format!("{}. If you do, {}", effect(mode, first), effect(mode, then))
+        }
         // "Its controller may draw a card": the instruction in the decider's own words.
         Effect::PlayerMay { who, effect: inner } => {
             let who = player(mode, *who);
@@ -967,7 +1012,15 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             // player reveals …" has nothing to choose.)
             let each = matches!(who, PlayerRef::Each | PlayerRef::EachOpponent);
             let owner = player(mode, *who);
-            let (who, their) = match (owner.as_str(), each) {
+            // Nothing for the effect's controller to decide: every card that qualifies goes
+            // one way, the rest the other (and is not put back in an order of their
+            // choosing). Then the library's player is the one who reveals and puts them —
+            // and controls what they put onto the battlefield (CR 110.2a).
+            let rest_unordered = *rest_random
+                || *count == Amount::Fixed(1)
+                || !matches!(rest, CardDest::LibraryTop | CardDest::LibraryBottom);
+            let theirs = *take == Take::All && rest_unordered && !(*reveal_taken && !*reveal);
+            let (who, their) = match (owner.as_str(), each || theirs) {
                 ("you", _) => ("you".to_string(), "your".to_string()),
                 (_, true) => (owner.clone(), "their".to_string()),
                 (_, false) => ("you".to_string(), format!("{owner}'s")),
@@ -1013,6 +1066,8 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             };
             let taken = if taken.starts_with("you may") {
                 format!("{taken} and put them")
+            } else if shown.is_empty() && !you {
+                format!("{who} puts {taken}")
             } else if shown.is_empty() {
                 format!("put {taken}")
             } else {
@@ -1179,7 +1234,11 @@ fn card_list(cards: &[Selector], plural: bool) -> String {
                 words.push(if plural { "other" } else { "another" }.to_string());
             }
             words.extend(s.colors.iter().map(|c| color(*c).to_string()));
-            words.extend(s.not_colors.iter().map(|c| format!("non{}", color(*c))));
+            if s.not_colors.len() == 5 {
+                words.push("colorless".to_string());
+            } else {
+                words.extend(s.not_colors.iter().map(|c| format!("non{}", color(*c))));
+            }
             words.extend(s.supertypes.iter().map(|t| format!("{t:?}").to_lowercase()));
             words.extend(s.not_subtypes.iter().map(|t| format!("non-{t}")));
             words.extend(s.not_types.iter().map(|t| format!("non{}", card_type(*t))));
@@ -1909,10 +1968,22 @@ fn ability(a: &AbilityDef) -> String {
                 }
             }
         }
-        AbilityDef::CostReduction { spells, amount: n } => format!(
-            "{} spells you cast cost {{{n}}} less to cast.",
-            capitalize(selector(spells, false).replace("permanent", "").trim())
-        ),
+        AbilityDef::CostReduction { spells, amount: n } => {
+            // "Colorless spells you cast with mana value 7 or greater cost {1} less".
+            let text = selector(spells, false);
+            let (kind, with) = match text.find(" with ") {
+                Some(i) => (&text[..i], &text[i..]),
+                None => (text.as_str(), ""),
+            };
+            let kind = kind.replace("permanent", "");
+            let kind = kind.trim();
+            let spells = if kind.is_empty() {
+                "Spells".to_string()
+            } else {
+                format!("{} spells", capitalize(kind))
+            };
+            format!("{spells} you cast{with} cost {{{n}}} less to cast.")
+        }
         AbilityDef::CombatRule { affected, rule } => {
             let (subject, plural) = match affected {
                 Affected::This => ("This creature".to_string(), false),
@@ -1956,6 +2027,137 @@ fn ability(a: &AbilityDef) -> String {
         },
         AbilityDef::Enchant(f) => {
             format!("Enchant {}", target_filter(f).trim_start_matches("target "))
+        }
+        AbilityDef::FromZone { zone, ability: a } => {
+            let place = match zone {
+                ActivationZone::Graveyard => "in your graveyard",
+                ActivationZone::Hand => "in your hand",
+                ActivationZone::Battlefield => "on the battlefield",
+            };
+            let text = ability(a);
+            let mut chars = text.chars();
+            let rest: String = match chars.next() {
+                Some(first) => first.to_lowercase().chain(chars).collect(),
+                None => String::new(),
+            };
+            format!("As long as this card is {place}, {rest}")
+        }
+        AbilityDef::PlayerRule { who, rule, only_if } => {
+            let text = player_rule(*who, rule);
+            match only_if {
+                None => format!("{text}."),
+                // "During each of your turns, you may …"
+                Some(Condition::YourTurn) => {
+                    let mut chars = text.chars();
+                    let rest: String = match chars.next() {
+                        Some(first) => first.to_lowercase().chain(chars).collect(),
+                        None => String::new(),
+                    };
+                    format!("During each of your turns, {rest}.")
+                }
+                Some(c) => {
+                    let c = condition(c);
+                    format!("{text} as long as {}.", c.strip_prefix("if ").unwrap_or(&c))
+                }
+            }
+        }
+    }
+}
+
+/// "two", "three" …: how many additional lands.
+fn number_word(n: u32) -> String {
+    match n {
+        1 => "an".into(),
+        2 => "two".into(),
+        3 => "three".into(),
+        4 => "four".into(),
+        n => n.to_string(),
+    }
+}
+
+/// A [`crate::PlayerRule`] for the players `who` names, without a full stop.
+fn player_rule(who: Who, rule: &crate::PlayerRule) -> String {
+    use crate::{PlayZone, PlayerRule as R};
+    // (subject, possessive, verb "have", "may")
+    let (subject, whose, has) = match who {
+        Who::You => ("You", "your", "have"),
+        Who::Opponent => ("Each opponent", "their", "has"),
+        Who::Any => ("Each player", "their", "has"),
+    };
+    let possessive = match who {
+        Who::You => "Your".to_string(),
+        Who::Opponent => "Each opponent's".to_string(),
+        Who::Any => "Each player's".to_string(),
+    };
+    match rule {
+        R::NoMaximumHandSize => format!("{subject} {has} no maximum hand size"),
+        R::MaximumHandSize(n) => format!("{possessive} maximum hand size is {n}"),
+        R::MaximumHandSizeBy(n) if *n >= 0 => {
+            format!("{possessive} maximum hand size is increased by {n}")
+        }
+        R::MaximumHandSizeBy(n) => {
+            format!("{possessive} maximum hand size is reduced by {}", -n)
+        }
+        R::AdditionalLandPlays(n) => format!(
+            "{subject} may play {} additional land{} on each of {whose} turns",
+            number_word(*n),
+            if *n == 1 { "" } else { "s" }
+        ),
+        R::AnyNumberOfLandPlays => {
+            format!("{subject} may play any number of lands on each of {whose} turns")
+        }
+        R::Hexproof => format!("{subject} {has} hexproof"),
+        R::Shroud => format!("{subject} {has} shroud"),
+        R::TopCardRevealed => match who {
+            Who::You => "Play with the top card of your library revealed".to_string(),
+            _ => format!("{subject} plays with the top card of their library revealed"),
+        },
+        R::LookAtTopCard => {
+            format!("{subject} may look at the top card of {whose} library any time")
+        }
+        R::PlayFrom { zone, cards } => {
+            let from = match zone {
+                PlayZone::Graveyard => format!("{whose} graveyard"),
+                PlayZone::LibraryTop => format!("the top of {whose} library"),
+                PlayZone::Exile => "exile".to_string(),
+            };
+            let lands = Selector {
+                types: alloc::vec![CardType::Land],
+                ..Selector::default()
+            };
+            let what: Vec<String> = cards
+                .iter()
+                .map(|s| {
+                    if *s == Selector::default() {
+                        "play lands and cast spells".to_string()
+                    } else if *s == lands {
+                        "play lands".to_string()
+                    } else if s.not_types.contains(&CardType::Land) {
+                        let mut spell = s.clone();
+                        spell.not_types.retain(|t| *t != CardType::Land);
+                        let cards = card_list(core::slice::from_ref(&spell), true);
+                        let spells = match cards.strip_suffix("cards") {
+                            Some(kind) => format!("{kind}spells"),
+                            None => cards.replacen(" cards ", " spells ", 1),
+                        };
+                        format!("cast {spells}")
+                    } else {
+                        format!("play {}", card_list(core::slice::from_ref(s), true))
+                    }
+                })
+                .collect();
+            format!("{subject} may {} from {from}", join(what, "and"))
+        }
+        R::PlayThisFrom(zones) => {
+            let from: Vec<String> = zones
+                .iter()
+                .map(|z| match z {
+                    PlayZone::Graveyard => format!("from {whose} graveyard"),
+                    PlayZone::LibraryTop => format!("from the top of {whose} library"),
+                    PlayZone::Exile => "from exile".to_string(),
+                })
+                .collect();
+            format!("{subject} may cast this card {}", join(from, "or"))
         }
     }
 }

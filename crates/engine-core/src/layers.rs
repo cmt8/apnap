@@ -195,6 +195,22 @@ pub(crate) fn sync_control(st: &mut GameState) {
             crate::actions::GameAction::ControlChanged { object, controller },
         );
     }
+    // CR 506.4: an attacking or blocking creature that stops being a creature (a God
+    // whose devotion fell) is removed from combat.
+    if let Some(c) = &st.combat {
+        let v = view(st);
+        let mut gone: Vec<ObjectId> = Vec::new();
+        for a in &c.attackers {
+            for id in core::iter::once(a.attacker).chain(a.blockers.iter().copied()) {
+                if v.get(&id).is_some_and(|ch| !ch.is(CardType::Creature)) && !gone.contains(&id) {
+                    gone.push(id);
+                }
+            }
+        }
+        for object in gone {
+            crate::actions::execute(st, crate::actions::GameAction::RemoveFromCombat { object });
+        }
+    }
 }
 
 /// The current controller of `id`: layered on the battlefield (CR 613.1b), the controller of
@@ -570,6 +586,7 @@ fn layer_of(e: &ContinuousEffect) -> Layer {
         ContinuousEffect::SetPT(..) => Layer::L7b,
         ContinuousEffect::ModifyPT(..) | ContinuousEffect::ModifyPTBy { .. } => Layer::L7c,
         ContinuousEffect::SwitchPT => Layer::L7d,
+        ContinuousEffect::RemoveTypes(_) => Layer::L4,
     }
 }
 
@@ -583,6 +600,12 @@ enum Key {
     Resolved(u32),
     /// A static ability an object was given in this walk (layer 6), numbered as found.
     Granted(u32),
+    /// Printed ability `index` of card `source`, a static ability that works from the zone
+    /// the card is in (`AbilityDef::FromZone`, CR 113.6b).
+    FromZone {
+        source: ObjectId,
+        index: u16,
+    },
 }
 
 /// One continuous effect taking part in the walk.
@@ -620,6 +643,9 @@ struct Walk<'a> {
 
 impl Walk<'_> {
     fn exists(&self, e: &Eff<'_>, view: &View) -> bool {
+        if matches!(e.key, Key::FromZone { .. }) {
+            return self.started.contains_key(&e.key) || self.holds(e, view);
+        }
         match e.held {
             None => true,
             Some(held) => {
@@ -746,7 +772,7 @@ impl Walk<'_> {
             Key::Static { .. } | Key::Granted(_) => {
                 view.get(&e.source).map_or(e.controller, |c| c.controller)
             }
-            Key::Resolved(_) => e.controller,
+            Key::Resolved(_) | Key::FromZone { .. } => e.controller,
         }
     }
 
@@ -851,7 +877,8 @@ impl Walk<'_> {
     /// resolved effect (it exists until it ends and its set was locked in, CR 611.2c), nor
     /// for a static effect that began applying in an earlier layer (CR 613.6).
     fn can_depend(&self, a: &Eff<'_>) -> bool {
-        a.held.is_some() && !self.started.contains_key(&a.key)
+        (a.held.is_some() || matches!(a.key, Key::FromZone { .. }))
+            && !self.started.contains_key(&a.key)
     }
 
     /// A cheap, conservative pre-check for [`Walk::depends`]: could what `b` does in this
@@ -876,7 +903,7 @@ impl Walk<'_> {
         };
         b.parts.iter().filter(|p| layer_of(p) == layer).any(|p| {
             [affected, counted].into_iter().flatten().any(|s| match p {
-                ContinuousEffect::AddTypes { .. } => true,
+                ContinuousEffect::AddTypes { .. } | ContinuousEffect::RemoveTypes(_) => true,
                 ContinuousEffect::SetColors(_) => !s.colors.is_empty(),
                 ContinuousEffect::AddKeywords(_) | ContinuousEffect::LoseKeywords(_) => {
                     !s.keywords.is_empty() || !s.not_keywords.is_empty()
@@ -960,6 +987,9 @@ fn apply_part(c: &mut Characteristics, part: &ContinuousEffect, you: PlayerId) {
         ContinuousEffect::SetPTBy { .. } => {}
         // Done by the walk, which knows the card the abilities are written on.
         ContinuousEffect::GrantAbilities(_) => {}
+        // CR 205.1: a type-removing effect; subtypes are kept (a God that isn't a
+        // creature is still a God).
+        ContinuousEffect::RemoveTypes(ts) => c.card_types.retain(|t| !ts.contains(t)),
         ContinuousEffect::SwitchPT => {
             if let (Some(p), Some(t)) = (c.power, c.toughness) {
                 c.power = Some(t);
@@ -1010,6 +1040,41 @@ fn compute(st: &GameState) -> View {
                     card: o.card,
                     held: Some(AbilityId::printed(o.card, i as u16)),
                 });
+            }
+        }
+    }
+    // CR 113.6b: static abilities of cards in graveyards that work from there ("as long as
+    // this card is in your graveyard, …"). Off the battlefield a card has only the
+    // abilities printed on it; "you" is its owner.
+    for p in 0..st.num_players() {
+        for &id in st.zones.list(Zone::Graveyard, PlayerId(p as u8)) {
+            let o = st.object(id);
+            for (i, a) in st.card_def(id).abilities.iter().enumerate() {
+                if let AbilityDef::FromZone {
+                    zone: card_model::ActivationZone::Graveyard,
+                    ability,
+                } = a
+                    && let AbilityDef::Static {
+                        affected,
+                        effects,
+                        only_if,
+                    } = &**ability
+                {
+                    effs.push(Eff {
+                        cond: only_if.as_ref(),
+                        key: Key::FromZone {
+                            source: id,
+                            index: i as u16,
+                        },
+                        timestamp: o.timestamp,
+                        source: id,
+                        controller: o.owner,
+                        parts: effects,
+                        affected: Aff::Dynamic(affected),
+                        card: o.card,
+                        held: None,
+                    });
+                }
             }
         }
     }
@@ -1128,7 +1193,7 @@ fn compute(st: &GameState) -> View {
                     }
                 }
             }
-            if effs[pick].held.is_some() {
+            if effs[pick].held.is_some() || matches!(effs[pick].key, Key::FromZone { .. }) {
                 walk.started.entry(effs[pick].key).or_insert(set);
             }
         }
@@ -1143,6 +1208,14 @@ fn compute(st: &GameState) -> View {
                     *t += n;
                 }
             }
+        }
+    }
+    // CR 208.3: "A noncreature permanent has no power or toughness, even if it's a card
+    // with a power and toughness printed on it" (a God that isn't a creature).
+    for c in view.values_mut() {
+        if !c.is(CardType::Creature) {
+            c.power = None;
+            c.toughness = None;
         }
     }
     view

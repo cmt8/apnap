@@ -176,12 +176,19 @@ fn cost_source(source: &CastSource) -> ObjectId {
 }
 
 /// The object an ability is on: what its "another target …" is other than. A spell has
-/// none (it can't target itself, CR 115.5).
-fn ability_source(source: &CastSource) -> Option<ObjectId> {
+/// none (it can't target itself, CR 115.5). For an ability that triggered on its source
+/// leaving the battlefield, the card that source became (CR 603.10a: "another target
+/// creature card" is not the dying creature's own card).
+fn ability_source(st: &GameState, source: &CastSource) -> Option<ObjectId> {
     match source {
         CastSource::Card(_) => None,
         CastSource::Ability { source, .. } | CastSource::Payment { source, .. } => Some(*source),
-        CastSource::Trigger(t) => Some(t.source),
+        CastSource::Trigger(t) => Some(crate::triggers::this_card(
+            st,
+            t.source,
+            t.subject,
+            t.facts.moved,
+        )),
     }
 }
 
@@ -536,9 +543,12 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
     match &source {
         CastSource::Card(card) => {
             let o = st.object(*card);
-            // From your hand, or your commander from the command zone (CR 903.8).
+            // From your hand, or your commander from the command zone (CR 903.8), or from
+            // where a rule lets you (CR 601.3: "you may cast … from your graveyard").
             let from_ok = o.owner == p
-                && (o.zone == Zone::Hand || (o.zone == Zone::Command && st.is_commander(*card)));
+                && (o.zone == Zone::Hand
+                    || (o.zone == Zone::Command && st.is_commander(*card))
+                    || crate::players::may_play_from(st, p, *card));
             let c = chars(st, *card);
             if !from_ok || c.is(CardType::Land) {
                 return false;
@@ -595,7 +605,7 @@ pub(crate) fn can_begin(st: &GameState, p: PlayerId, source: CastSource) -> bool
     }
     let prop = proposal(st, &source);
     if let Some(b) = &prop.body
-        && !body_possible(st, b, p, ability_source(&source))
+        && !body_possible(st, b, p, ability_source(st, &source))
     {
         return false;
     }
@@ -788,7 +798,7 @@ impl CastFrame {
                                     &body,
                                     p,
                                     self.object,
-                                    ability_source(&self.source),
+                                    ability_source(st, &self.source),
                                 );
                                 if legal.len() < min as usize {
                                     // CR 603.3c (only triggers can get here, D-019).
@@ -888,7 +898,7 @@ impl CastFrame {
                             &mode.targets[i],
                             p,
                             self.object,
-                            ability_source(&self.source),
+                            ability_source(st, &self.source),
                         )
                         .into_iter()
                         .filter(|t| !taken.contains(t))

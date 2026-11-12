@@ -425,6 +425,8 @@ fn find_object(v: &PlayerView, id: ObjectId) -> Option<&ObjectView> {
         .chain(&v.command)
         .chain(&v.exile)
         .chain(v.players.iter().flat_map(|p| &p.graveyard))
+        // The top card of a library the viewer may see (CR 401.5).
+        .chain(v.players.iter().filter_map(|p| p.library_top.as_ref()))
         // Cards the decision lets the player look at: a library being searched, a scry.
         .chain(&v.revealed)
         .find(|o| o.id == id)
@@ -545,6 +547,21 @@ pub fn option_label(
                 )
             })
             .unwrap_or_else(|| harness::text::option_line(v, o)),
+        // A card a rule lets them play from somewhere other than their hand: say where.
+        OptionDesc::PlayLand { card } | OptionDesc::CastSpell { card }
+            if !v.hand.iter().any(|o| o.id == *card)
+                && !v.command.iter().any(|o| o.id == *card) =>
+        {
+            let verb = if matches!(o, OptionDesc::PlayLand { .. }) {
+                "play"
+            } else {
+                "cast"
+            };
+            match find_object(v, *card) {
+                Some(c) => format!("{verb} {} from {}", c.name, whereabouts(v, *card)),
+                None => harness::text::option_line(v, o),
+            }
+        }
         // The ability itself, so that two abilities of one card (or casting it and
         // cycling it) can be told apart.
         OptionDesc::ActivateAbility { source, ability } => {
@@ -703,6 +720,15 @@ fn whereabouts(v: &PlayerView, id: ObjectId) -> String {
     }
     if v.exile.iter().any(|o| o.id == id) {
         return "exile".to_string();
+    }
+    for p in &v.players {
+        if p.library_top.as_ref().is_some_and(|o| o.id == id) {
+            return if p.id == v.viewer {
+                "the top of your library".to_string()
+            } else {
+                format!("the top of P{}'s library", p.id.0)
+            };
+        }
     }
     if v.revealed.iter().any(|o| o.id == id) {
         return "library".to_string();
@@ -1292,6 +1318,49 @@ fn player_area(
             None,
         )
         .on_hover_text(format!("Cards in {who} library"));
+        // CR 401.5: the top card, if it is revealed or the viewer may look at it.
+        if let Some(top) = &pl.library_top {
+            let opts = cx.options_at(Anchor::Obj(top.id));
+            let look = CardLook {
+                def: cx.cat.get(top.card),
+                label: &top.name,
+                height: 64.0,
+                tapped: false,
+                pile: 1,
+                outline: (!opts.is_empty()).then(|| Stroke::new(2.5, GOLD)),
+                badges: &[],
+                offset: egui::Vec2::ZERO,
+                motion: None,
+                draggable: false,
+            };
+            let resp = cardview::card_widget(ui, art, &look).on_hover_text(format!(
+                "The top card of {who} library{}",
+                if opts.is_empty() {
+                    ""
+                } else {
+                    " — click to play it"
+                }
+            ));
+            if resp.hovered() {
+                ptr.hovered = Some(Hover {
+                    card: Preview {
+                        card: top.card,
+                        object: Some(top.id),
+                    },
+                    rect: resp.rect,
+                    in_hand: false,
+                });
+            }
+            if resp.clicked() && !opts.is_empty() {
+                ptr.clicked = Some(opts);
+            }
+        }
+        // Rules about the player: "no maximum hand size", "hexproof", extra land plays.
+        if !pl.rules.is_empty() {
+            let text: Vec<String> = pl.rules.iter().map(player_rule_text).collect();
+            ui.label(RichText::new("ⓘ").color(BLUE))
+                .on_hover_text(text.join("\n"));
+        }
         let n = pl.graveyard.len();
         let graveyard = cardview::zone_count(
             ui,
@@ -2857,6 +2926,31 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
 impl eframe::App for App {
     fn ui(&mut self, ui_: &mut egui::Ui, _frame: &mut eframe::Frame) {
         ui(self, ui_);
+    }
+}
+
+/// A rule about a player, as the player panel lists it.
+fn player_rule_text(r: &card_model::PlayerRule) -> String {
+    use card_model::PlayerRule as R;
+    match r {
+        R::NoMaximumHandSize => "No maximum hand size".into(),
+        R::MaximumHandSize(n) => format!("Maximum hand size {n}"),
+        R::MaximumHandSizeBy(n) => format!("Maximum hand size {n:+}"),
+        R::AdditionalLandPlays(n) => format!("{n} additional land play(s) each turn"),
+        R::AnyNumberOfLandPlays => "Any number of land plays".into(),
+        R::Hexproof => "Hexproof".into(),
+        R::Shroud => "Shroud".into(),
+        R::TopCardRevealed => "Plays with the top card of their library revealed".into(),
+        R::LookAtTopCard => "May look at the top card of their library".into(),
+        R::PlayFrom { zone, .. } => format!(
+            "May play cards from {}",
+            match zone {
+                card_model::PlayZone::Graveyard => "their graveyard",
+                card_model::PlayZone::LibraryTop => "the top of their library",
+                card_model::PlayZone::Exile => "exile",
+            }
+        ),
+        R::PlayThisFrom(_) => "May cast a card from another zone".into(),
     }
 }
 

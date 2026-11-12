@@ -684,6 +684,150 @@ fn an_opponent_pays_unless_with_any_mana_ability() {
     assert_eq!(play(1, &["Test Reef"]), (true, 0, 40));
 }
 
+const REEF_BR: &str = "Name:Test Fen\nManaCost:no cost\nTypes:Land\n\
+    A:AB$ Mana | Cost$ T | Produced$ C | SpellDescription$ Add {C}.\n\
+    A:AB$ Mana | Cost$ T | Produced$ Combo B R | SubAbility$ DBPain | SpellDescription$ Add {B} or {R}. CARDNAME deals 1 damage to you.\n\
+    SVar:DBPain:DB$ DealDamage | NumDmg$ 1 | Defined$ You\n\
+    Oracle:{T}: Add {C}.\\n{T}: Add {B} or {R}. Test Fen deals 1 damage to you.";
+
+const ALTAR: &str = "Name:Test Altar\nManaCost:3\nTypes:Artifact\n\
+    A:AB$ Mana | Cost$ Sac<1/Creature> | Produced$ C | Amount$ 2 | SpellDescription$ Add {C}{C}.\n\
+    Oracle:Sacrifice a creature: Add {C}{C}.";
+
+const SIGNET: &str = "Name:Test Signet\nManaCost:2\nTypes:Artifact\n\
+    A:AB$ Mana | Cost$ 1 T | Produced$ U B | SpellDescription$ Add {U}{B}.\n\
+    Oracle:{1}, {T}: Add {U}{B}.";
+
+// D-070 × D-066: spells cast from the top of the library or from a graveyard are paid
+// like any other (CR 601.2g): with a Signet whose {1} a land pays, with a pain land's
+// colored mana (its damage dealt at once), with an altar's sacrifice.
+#[test]
+fn spells_cast_from_other_zones_are_paid_with_mana_abilities() {
+    let seer = "Name:Test Seer\nManaCost:2\nTypes:Artifact\n\
+        S:Mode$ Continuous | Affected$ Creature.TopLibrary+YouCtrl+nonLand | AffectedZone$ Library | MayPlay$ True | Description$ Text.\n\
+        Oracle:Text.";
+    let duo = creature("Test Duo", "U B");
+    let mut sc = scenario(&[seer, SIGNET, &duo]);
+    sc.card(P0, Zone::Battlefield, "Test Seer");
+    sc.card(P0, Zone::Battlefield, "Forest");
+    sc.card(P0, Zone::Battlefield, "Test Signet");
+    let top = sc.card(P0, Zone::Library, "Test Duo");
+    sc.turn(P0, engine_core::turn::Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.pick(
+        "cast from the top",
+        |_, o| matches!(o, OptionDesc::CastSpell { card } if *card == top),
+    );
+    s.tap("Forest", ManaType::Green)
+        .tap("Test Signet", ManaType::Blue);
+    s.pass_all();
+    assert!(s.find(P0, Zone::Battlefield, "Test Duo").is_some());
+
+    let crawler = "Name:Test Crawler\nManaCost:1 B\nTypes:Creature Zombie\nPT:2/1\n\
+        S:Mode$ Continuous | Affected$ Card.Self | AffectedZone$ Graveyard | EffectZone$ Graveyard | MayPlay$ True | IsPresent$ Zombie.YouCtrl | Description$ Text.\n\
+        Oracle:Text.";
+    let mut sc = scenario(&[crawler, REEF_BR, ALTAR, BEAR]);
+    let gy = sc.card(P0, Zone::Graveyard, "Test Crawler");
+    sc.card(P0, Zone::Battlefield, "Test Crawler");
+    sc.card(P0, Zone::Battlefield, "Test Fen");
+    sc.card(P0, Zone::Battlefield, "Test Altar");
+    let cub = sc.card(P0, Zone::Battlefield, "Test Cub");
+    sc.turn(P0, engine_core::turn::Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.pick(
+        "cast from the graveyard",
+        |_, o| matches!(o, OptionDesc::CastSpell { card } if *card == gy),
+    );
+    s.tap("Test Fen", ManaType::Black);
+    assert_eq!(life(&s, P0), 39, "the pain land's damage, at once");
+    s.tap("Test Altar", ManaType::Colorless);
+    pick_card(&mut s, cub);
+    s.pass_all();
+    assert_eq!(
+        s.st.zones
+            .list(Zone::Battlefield, P0)
+            .iter()
+            .filter(|&&id| s.name(id) == "Test Crawler")
+            .count(),
+        2
+    );
+    assert_eq!(zone(&s, cub), None);
+}
+
+// D-070 × D-066: a land played from the graveyard keeps its mana abilities, and a player
+// with hexproof still takes the pain land's damage — it targets no one (CR 702.11c).
+#[test]
+fn a_pain_land_from_the_graveyard_still_hurts_a_player_with_hexproof() {
+    let crucible = "Name:Test Crucible\nManaCost:3\nTypes:Artifact\n\
+        S:Mode$ Continuous | Affected$ Land.YouOwn | MayPlay$ True | AffectedZone$ Graveyard | Description$ Text.\n\
+        Oracle:Text.";
+    let veil = "Name:Test Veil\nManaCost:2\nTypes:Artifact\n\
+        S:Mode$ Continuous | Affected$ You | AddKeyword$ Hexproof | Description$ Text.\n\
+        Oracle:Text.";
+    let mut sc = scenario(&[crucible, veil, REEF_BR]);
+    sc.card(P0, Zone::Battlefield, "Test Crucible");
+    sc.card(P0, Zone::Battlefield, "Test Veil");
+    let fen = sc.card(P0, Zone::Graveyard, "Test Fen");
+    sc.turn(P0, engine_core::turn::Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    assert!(engine_core::players::has_hexproof(&s.st, P0));
+    s.pick(
+        "play from the graveyard",
+        |_, o| matches!(o, OptionDesc::PlayLand { card } if *card == fen),
+    );
+    s.tap("Test Fen", ManaType::Red);
+    assert_eq!((life(&s, P0), pool(&s, ManaType::Red)), (39, 1));
+}
+
+// D-068 × D-066: "you may sacrifice a creature. If you do, add one mana of any color"
+// (`Effect::IfDone`): the mana, and its color choice, only if the sacrifice happened.
+#[test]
+fn if_you_do_after_a_sacrifice_adds_mana() {
+    let pyre = "Name:Test Kindler\nManaCost:1 R\nTypes:Creature Elemental\nPT:1/1\n\
+        T:Mode$ ChangesZone | Origin$ Battlefield | Destination$ Graveyard | ValidCard$ Card.Self | Execute$ TrigSac | OptionalDecider$ You | TriggerDescription$ When CARDNAME dies, you may sacrifice a creature. If you do, add one mana of any color.\n\
+        SVar:TrigSac:DB$ Sacrifice | Defined$ You | SacValid$ Creature | SubAbility$ DBMana\n\
+        SVar:DBMana:DB$ Mana | Produced$ Any\n\
+        Oracle:When this creature dies, you may sacrifice a creature. If you do, add one mana of any color.";
+    let doom = "Name:Test Ruin\nManaCost:B\nTypes:Instant\n\
+        A:SP$ Destroy | ValidTgts$ Creature | SpellDescription$ Destroy target creature.\n\
+        Oracle:Destroy target creature.";
+    for others in [1, 0] {
+        let mut sc = scenario(&[pyre, doom, BEAR]);
+        let me = sc.card(P0, Zone::Battlefield, "Test Kindler");
+        for _ in 0..others {
+            sc.card(P0, Zone::Battlefield, "Test Cub");
+        }
+        sc.card(P0, Zone::Battlefield, "Swamp");
+        sc.card(P0, Zone::Hand, "Test Ruin");
+        let mut s = Script::new(sc.build());
+        s.cast("Test Ruin");
+        s.pick("target", |_, o| {
+            matches!(o, OptionDesc::Target { target: engine_core::stack::Target::Object(t) } if *t == me)
+        });
+        s.pay();
+        for _ in 0..20 {
+            match s.next.as_ref().map(|d| d.kind) {
+                Some(ChoiceKind::MayAbility) => {
+                    s.pick("yes", |_, o| matches!(o, OptionDesc::Accept));
+                }
+                Some(ChoiceKind::ChooseColor) => pick_mana(&mut s, ManaType::Green),
+                Some(ChoiceKind::Priority) if s.st.stack.is_empty() => break,
+                Some(ChoiceKind::Priority) => {
+                    s.pass();
+                }
+                _ => {
+                    s.respond(Response::Pick(vec![0]));
+                }
+            }
+        }
+        assert_eq!(
+            pool(&s, ManaType::Green),
+            others,
+            "{others} other creature(s)"
+        );
+    }
+}
+
 // What stays blocked (D-066), each with its name.
 #[test]
 fn mana_abilities_that_stay_blocked() {
