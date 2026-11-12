@@ -849,6 +849,14 @@ impl<'a> Tx<'a> {
                 "!token" | "nonToken" => s.token = Some(false),
                 "token" => s.token = Some(true),
                 "Basic" => s.supertypes.push(Supertype::Basic),
+                // "With a basic land type" (Forge's `hasABasicLandType`): at least one of
+                // the five (CR 205.3i); a selector's subtypes are "any of these".
+                "hasABasicLandType" if s.subtypes.is_empty() => {
+                    s.subtypes = ["Plains", "Island", "Swamp", "Mountain", "Forest"]
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect();
+                }
                 "Legendary" => s.supertypes.push(Supertype::Legendary),
                 "Snow" => s.supertypes.push(Supertype::Snow),
                 // Colorless (CR 105.2c): none of the five colors.
@@ -1812,6 +1820,8 @@ impl<'a> Tx<'a> {
                 "PresentZone",
                 "SorcerySpeed",
                 "ActivationZone",
+                // Read by `ability`: "this ability costs {1} less to activate …".
+                "ReduceCost",
             ] {
                 rd.get(k);
             }
@@ -4935,6 +4945,27 @@ impl<'a> Tx<'a> {
                     }
                 };
                 self.from_zone = from.unwrap_or_default();
+                // "This ability costs {1} less to activate for each …" (Forge's
+                // CostAdjustment: `ReduceCost$` less generic mana; with `ReduceAmount$` it
+                // would be other mana, not compiled). Counted as the cost is determined.
+                let reduce = match (rec.get("ReduceCost"), rec.get("ReduceAmount")) {
+                    (None, _) => Some(None),
+                    (Some(_), Some(_)) => {
+                        self.block("param:activated.ReduceAmount");
+                        None
+                    }
+                    (Some(n), None) => match n.parse::<u32>() {
+                        Ok(n) => Some(Some(Amount::Fixed(n))),
+                        Err(_) => match self.expr(n) {
+                            Some(a) if a.stands_alone() => Some(Some(a)),
+                            Some(_) => {
+                                self.block("param:activated.ReduceCost not countable");
+                                None
+                            }
+                            None => None,
+                        },
+                    },
+                };
                 let body = self.body(rec, false, "AB");
                 self.from_zone = ActivationZone::Battlefield;
                 let (cost, from) = (cost?, from?);
@@ -4960,6 +4991,7 @@ impl<'a> Tx<'a> {
                     body: body?,
                     from,
                     cycling: false,
+                    reduce: reduce?,
                 })
             }
             _ => {
@@ -8032,6 +8064,7 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
                 equips.push(AbilityDef::Activated {
                     from: ActivationZone::Battlefield,
                     cycling: false,
+                    reduce: None,
                     cost,
                     timing: Timing::Sorcery,
                     only_if: None,
@@ -8241,6 +8274,7 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
                             }),
                             from: ActivationZone::Hand,
                             cycling: true,
+                            reduce: None,
                         },
                     ));
                 }
@@ -8997,6 +9031,7 @@ mod tests {
                 }),
                 from: card_model::ActivationZone::Battlefield,
                 cycling: false,
+                reduce: None,
             }],
             ..CardDef::default()
         };
@@ -9023,6 +9058,7 @@ mod tests {
                 }),
                 from: card_model::ActivationZone::Battlefield,
                 cycling: false,
+                reduce: None,
             }],
             ..CardDef::default()
         };

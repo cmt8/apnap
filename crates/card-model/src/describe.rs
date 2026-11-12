@@ -2014,6 +2014,19 @@ fn dest(to: CardDest, whose: &str) -> String {
 /// Cards in a hand, library or graveyard: "basic land card", "creature cards with mana
 /// value 3 or less", "card named Test Elf", "artifact or enchantment cards".
 fn card_list(cards: &[Selector], plural: bool) -> String {
+    // "A land card with a basic land type" (CR 205.3i): any of the five.
+    card_list_words(cards, plural)
+        .replace(
+            "Plains or Island or Swamp or Mountain or Forest land cards",
+            "land cards with a basic land type",
+        )
+        .replace(
+            "Plains or Island or Swamp or Mountain or Forest land card",
+            "land card with a basic land type",
+        )
+}
+
+fn card_list_words(cards: &[Selector], plural: bool) -> String {
     let noun = if plural { "cards" } else { "card" };
     if cards.is_empty() {
         return noun.to_string();
@@ -2807,8 +2820,9 @@ fn ability(a: &AbilityDef) -> String {
             body: b,
             from,
             cycling: _,
+            reduce,
         } => format!(
-            "{}: {}{}{}",
+            "{}: {}{}{}{}",
             cost(c),
             // Where the ability works from, unless its cost already says (CR 113.6).
             match from {
@@ -2831,7 +2845,22 @@ fn ability(a: &AbilityDef) -> String {
             only_if.as_ref().map_or(String::new(), |c| format!(
                 " Activate only {}.",
                 condition(c)
-            ))
+            )),
+            // CR 602.2b, 601.2f: "This ability costs {1} less to activate for each …".
+            match reduce {
+                None => String::new(),
+                Some(Amount::Count(s)) => {
+                    let each = selector(s, false);
+                    let each = each
+                        .strip_prefix("another ")
+                        .map_or(each.clone(), |rest| format!("other {rest}"));
+                    format!(" This ability costs {{1}} less to activate for each {each}.")
+                }
+                Some(a) => format!(
+                    " This ability costs {{X}} less to activate, where X is {}.",
+                    amount(a)
+                ),
+            }
         ),
         AbilityDef::Mana {
             cost: c,
