@@ -134,6 +134,39 @@ fn cr_614_12a_a_creature_type_is_chosen_as_it_enters() {
     assert_eq!(o.chosen.len(), 1);
 }
 
+// The order of the options comes from the chooser's own cards, hand and library included
+// (D-014: hidden information). Only the chooser sees the decision; the events say only what
+// was chosen, once it is.
+#[test]
+fn the_order_of_the_options_is_seen_by_the_chooser_only() {
+    let b = banner("Test Kin Banner");
+    let mut sc = scenario(&[&b]);
+    sc.cards(P0, Zone::Battlefield, &["Forest"; 3]);
+    for _ in 0..3 {
+        sc.card(P0, Zone::Library, "Test Cave Goblin");
+    }
+    sc.card(P0, Zone::Hand, "Test Kin Banner");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Kin Banner").pay().pass_all();
+    assert!(matches!(s.options()[0], OptionDesc::CreatureType { name } if name.name() == "Goblin"));
+    let mine = engine_core::view::player_view(&s.st, P0);
+    assert!(mine.decision.is_some());
+    let theirs = engine_core::view::player_view(&s.st, P1);
+    assert!(
+        theirs.decision.is_none(),
+        "another player doesn't see the options"
+    );
+    let before = s.events.len();
+    choose(&mut s, "Elf");
+    // What everyone learns: the choice itself (CR 614.12a), not the list it was made from.
+    let shown: Vec<String> = s.events[before..]
+        .iter()
+        .map(|e| format!("{e:?}"))
+        .filter(|e| e.contains("Goblin"))
+        .collect();
+    assert!(shown.is_empty(), "{shown:?}");
+}
+
 // CR 607.2d: "the chosen type" of each permanent is its own choice. CR 702.73a: a
 // changeling is every creature type, so both apply to it.
 #[test]
@@ -888,6 +921,23 @@ fn chosen_references_not_read_block() {
             .any(|b| b.starts_with("invalid:")),
         "{:?}",
         forge_test_blockers(orphan)
+    );
+}
+
+// CR 603.7c: a delayed triggered ability refers to what was fixed as it was created; the
+// engine would read its source's choice when it triggers. Not built: named.
+#[test]
+fn chosen_type_in_a_delayed_trigger_blocks() {
+    let later = "Name:Test Odd Echo\nManaCost:U\nTypes:Sorcery\n\
+        A:SP$ ChooseType | Defined$ You | Type$ Creature | SubAbility$ DBDelay | SpellDescription$ Text.\n\
+        SVar:DBDelay:DB$ DelayedTrigger | Mode$ Phase | Phase$ End of Turn | Execute$ TrigDraw | TriggerDescription$ Text.\n\
+        SVar:TrigDraw:DB$ Draw | Defined$ You | NumCards$ X\n\
+        SVar:X:Count$Valid Creature.ChosenType+YouCtrl\n\
+        Oracle:Choose a creature type. At the beginning of the next end step, draw a card for each creature you control of the chosen type.";
+    let b = forge_test_blockers(later);
+    assert!(
+        b.contains(&"chosen:in a delayed trigger".to_string()),
+        "{b:?}"
     );
 }
 

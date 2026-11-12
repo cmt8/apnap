@@ -270,6 +270,10 @@ pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
     }
     // CR 614.12: an entering permanent's own "enters …" replacement effects apply too,
     // checked against the permanent as it would exist on the battlefield.
+    // (Only for a `Move`: a token's own ones — a `TokenEnters`, no object yet — are not
+    // offered, so a token with "as this enters, choose …" would enter with no choice, though
+    // `ApplyFrame::chosen` / `perform` would give it one. No token any compiled card makes
+    // has such an ability (D-076); token copies are D-074's.)
     if let Proposed::Move {
         object,
         to: Zone::Battlefield,

@@ -8424,10 +8424,27 @@ fn chosen_blockers(def: &CardDef) -> Vec<&'static str> {
     if discards {
         out.push("chosen:in a discard cost");
     }
-    // An ability given to another object would look for that object's choice.
-    if def.granted.iter().any(|a| refers(a)) {
-        out.push("chosen:in an ability given to another object");
+    // A delayed triggered ability (CR 603.7c) would have to keep the choice as it was when
+    // the ability was created; it takes its source's at the time it triggers instead. No
+    // card that compiles otherwise needs it: named, not built.
+    let text = format!("{:?}", def.abilities);
+    let delayed: Vec<usize> = text
+        .split("DelayedTrigger { ability: ")
+        .skip(1)
+        .filter_map(|r| r.split(',').next()?.trim().parse().ok())
+        .collect();
+    for (i, a) in def.granted.iter().enumerate() {
+        if refers(a) {
+            out.push(if delayed.contains(&i) {
+                "chosen:in a delayed trigger"
+            } else {
+                // An ability given to another object would look for that object's choice.
+                "chosen:in an ability given to another object"
+            });
+        }
     }
+    out.sort();
+    out.dedup();
     out
 }
 
