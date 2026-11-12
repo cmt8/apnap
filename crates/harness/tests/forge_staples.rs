@@ -255,7 +255,7 @@ fn untap_up_to_n_lands_chooses_among_tapped_lands_of_anyone() {
     let text = card_model::describe::rules_text(
         s.st.card_def(s.find(P0, Zone::Graveyard, "Test Unsnap").unwrap()),
     );
-    assert_eq!(text, ["Untap up to 2 lands."]);
+    assert_eq!(text, ["Untap up to two lands."]);
     // Chosen by another player: not compiled.
     let theirs = card(
         "Test Odd Unsnap",
