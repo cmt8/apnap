@@ -2258,9 +2258,16 @@ Rules text: docs/rules-notes/614-doublers-603.2d-additional-triggers.md (with
   `RememberTokens$` stays blocked.
 - Golden hashes: unchanged (no golden setup has any of these effects; lifelink's gain only
   moves to a batch of its own when an effect would modify it).
-- 10,524 → 10,610 of 34,463 scripts (main at ef30f04 → this branch); EDHREC tiers: top 100
-  83.2% (79 of 95, unchanged), top 300 67.1%, top 1,000 53.8% → 55.9%, top 5,000 33.2%.
-  Every newly compiled card was read against its Oracle text (86 cards).
+- 10,524 → 10,610 of 34,463 scripts on main ef30f04 (86 cards, every one read against its
+  Oracle text, none lost); merged onto main 12504fd (D-072): 10,758 → 10,845. EDHREC tiers
+  on 12504fd → this branch: top 100 88.4% (84 of 95, unchanged), top 300 69.8%, top 1,000
+  55.0% → 57.2% (546 → 567), top 5,000 34.1%. Soaks: forge-4p 300 random-agent games and
+  200 heuristic games (one abandoned at 1,000 permanents: Horn of Gondor's Human Soldiers),
+  precon-4p 100 games, no failures.
+- **Order with flashback (D-072):** main's "exiled instead" for a flashback spell is about
+  a spell leaving the stack; the effects here are about tokens being created, a permanent
+  entering, counters, damage and life — never the same event, so they never compete under
+  CR 616.1. "Can't be countered" holds for a spell cast with flashback too (tested).
 - **Next:** draw replacements (an event that becomes several: "draw two instead",
   "exile the top card instead", "you win instead"; "except the first one you draw in each
   of your draw steps"); mana doubling in `frames/mana.rs` (Nyxbloom Ancient, Mana
