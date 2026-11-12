@@ -1525,6 +1525,14 @@ Rules text: docs/rules-notes/608.2c-400.7j-those-cards.md.
   (`Defined$ Targeted` as the thing acted on) follow the moved card.
 - Save/load and clone of a game suspended in the middle of a noted resolution continue
   identically (`a_noted_resolution_saves_loads_and_clones`).
+- **Engine bug found by the soak (older than this batch, newly reachable):** when a player
+  leaves the game (CR 800.4a), the permanents they control but don't own are exiled after
+  the layered view was worked out, without a new generation; the stale view still held
+  them and the next control check panicked ("no object"). It takes a permanent of another
+  player's under your control — reanimated with `GainControl$`. `actions::leave_game` now
+  drops the derived layer cache after those moves (the serialized state, and its hash, are
+  unchanged). Test `a_reanimated_permanent_is_exiled_when_its_controller_leaves`
+  (mutation-checked: it panics without the fix).
 - State hashes changed (`Selector` gained a field: the catalog is part of the state); all
   15 event logs unchanged. Re-blessed.
 - On `04ef403`: 9,305 → 9,491 of 34,463 scripts; precons 149 → 151 of 275 deck slots.

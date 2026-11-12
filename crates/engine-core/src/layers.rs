@@ -136,6 +136,13 @@ impl fmt::Debug for LayerCache {
     }
 }
 
+impl LayerCache {
+    /// Forget the memoized view (it is worked out again when next asked for).
+    pub(crate) fn invalidate(&self) {
+        *self.0.borrow_mut() = None;
+    }
+}
+
 /// The current characteristics of object `id` (CLAUDE.md invariant 3).
 pub fn chars(st: &GameState, id: ObjectId) -> Characteristics {
     if st.object(id).zone == Zone::Battlefield

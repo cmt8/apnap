@@ -915,3 +915,40 @@ fn the_players_who_did_and_did_not_this_way() {
     assert_eq!(hand(&s, P0), p0_hand);
     assert!(s.find(P0, Zone::Graveyard, "Test Golem").is_some());
 }
+
+// CR 800.4a: a player who leaves the game while controlling another player's permanent
+// (reanimated "under your control") has it exiled, and the game goes on. (Found by the
+// D-069 soak: the layered view still had the exiled permanent.)
+#[test]
+fn a_reanimated_permanent_is_exiled_when_its_controller_leaves() {
+    let cards = [spell_saying(
+        "Test Revival",
+        "B",
+        "Sorcery",
+        "A:SP$ ChangeZone | Origin$ Graveyard | Destination$ Battlefield | GainControl$ True | ValidTgts$ Creature | ChangeNum$ 1 | RememberLKI$ True | SubAbility$ DBLoseLife | SpellDescription$ Text.\n\
+         SVar:DBLoseLife:DB$ LoseLife | Defined$ You | LifeAmount$ X | SubAbility$ DBCleanup\n\
+         SVar:DBCleanup:DB$ Cleanup | ClearRemembered$ True\n\
+         SVar:X:RememberedLKI$CardManaCost",
+        "Put target creature card from a graveyard onto the battlefield under your control. You lose life equal to its mana value.",
+    )];
+    let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
+    let mut sc = Scenario::new(
+        GameConfig::commander(3),
+        forge_test_catalog(&cards, &[SPIRIT]),
+        31,
+    );
+    sc.card(P0, Zone::Battlefield, "Swamp");
+    sc.card(P0, Zone::Hand, "Test Revival");
+    sc.card(P1, Zone::Graveyard, "Test Golem");
+    sc.life(P0, 2);
+    for p in [P0, P1, PlayerId(2)] {
+        sc.library(p, "Forest", 20);
+    }
+    let mut s = Script::new(sc.build());
+    let golem = s.find(P1, Zone::Graveyard, "Test Golem").unwrap();
+    s.cast("Test Revival").target_object(golem).pay().pass_all();
+    // P0 lost 3 life (the Golem's mana value) and the game: the Golem, P1's, is exiled.
+    assert!(!s.st.in_game(P0));
+    assert!(s.find(P1, Zone::Exile, "Test Golem").is_some());
+    assert!(s.next.is_some(), "the game goes on");
+}
