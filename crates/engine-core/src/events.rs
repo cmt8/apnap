@@ -310,4 +310,8 @@ pub enum Event {
         object: ObjectId,
         card: card_model::CardDefId,
     },
+    /// CR 115.7: the spell or ability `object` has new targets (see the stack).
+    TargetsChanged {
+        object: ObjectId,
+    },
 }

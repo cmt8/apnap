@@ -976,6 +976,10 @@ impl Narrator {
                 );
                 self.emit(l, out);
             }
+            Event::TargetsChanged { object } => {
+                let l = format!("  {} has new targets", self.name(*object));
+                self.emit(l, out);
+            }
             Event::Regenerated { object } => {
                 let l = format!("  {} regenerates", self.name(*object));
                 self.emit(l, out);

@@ -384,6 +384,14 @@ fn target_filter_plural(f: &TargetFilter, plain: bool) -> String {
         TargetFilter::Player => "target players".to_string(),
         TargetFilter::Opponent => "target opponents".to_string(),
         TargetFilter::Spell => target("spells".to_string()),
+        TargetFilter::OnStack { abilities, .. } => target(
+            if *abilities {
+                "spells or abilities"
+            } else {
+                "spells"
+            }
+            .to_string(),
+        ),
         TargetFilter::SpellMatching(s) => target(format!("{} spells", spell_kind(s))),
         TargetFilter::Permanent(selectors) => {
             let parts: Vec<String> = selectors.iter().map(|s| selector(s, true)).collect();
@@ -454,6 +462,18 @@ fn target_filter_words(f: &TargetFilter) -> String {
         TargetFilter::Player => "target player".into(),
         TargetFilter::Opponent => "target opponent".into(),
         TargetFilter::Spell => "target spell".into(),
+        TargetFilter::OnStack {
+            abilities,
+            single_target,
+        } => format!(
+            "target spell{}{}",
+            if *abilities { " or ability" } else { "" },
+            if *single_target {
+                " with a single target"
+            } else {
+                ""
+            }
+        ),
         TargetFilter::SpellMatching(s) => {
             format!("target {} spell{}", spell_kind(s), of_chosen(s, false))
         }
@@ -658,6 +678,12 @@ fn later_mention(mode: &Mode, i: usize) -> Option<String> {
             TargetFilter::Creature => "that creature".to_string(),
             TargetFilter::Player | TargetFilter::Opponent => "that player".to_string(),
             TargetFilter::Spell | TargetFilter::SpellMatching(_) => "that spell".to_string(),
+            TargetFilter::OnStack {
+                abilities: false, ..
+            } => "that spell".to_string(),
+            TargetFilter::OnStack {
+                abilities: true, ..
+            } => "it".to_string(),
             TargetFilter::AnyTarget => "it".to_string(),
             TargetFilter::CardInGraveyard { .. } => "that card".to_string(),
             TargetFilter::Permanent(sels) => match sels.as_slice() {
@@ -1545,6 +1571,9 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 ""
             }
         ),
+        // "X is this creature's power": "its" could be read as another object's.
+        Effect::SetX(Amount::SourcePower) => "X is this permanent's power".to_string(),
+        Effect::SetX(Amount::SourceToughness) => "X is this permanent's toughness".to_string(),
         Effect::SetX(a) => format!("X is {}", amount(a)),
         Effect::Tap { what } => format!("tap {}", obj(mode, *what)),
         Effect::Transform { what } => format!("transform {}", obj(mode, *what)),
@@ -1671,6 +1700,13 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             format!("{}. If you do, {}", effect(mode, first), effect(mode, then))
         }
         Effect::Proliferate => "proliferate".to_string(),
+        Effect::ChangeTargets { what, single } => {
+            if *single {
+                format!("change the target of {}", target(mode, *what))
+            } else {
+                format!("you may choose new targets for {}", target(mode, *what))
+            }
+        }
         Effect::Regenerate { what } => format!("regenerate {}", obj(mode, *what)),
         Effect::CantBeRegenerated(inner) => format!(
             "{}. {} can't be regenerated",
@@ -2114,6 +2150,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             cards,
             to,
             shuffle,
+            controller,
         } => {
             let whose_text = match whose {
                 PlayerRef::Each => String::new(),
@@ -2140,7 +2177,14 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                         CardZone::Hand => "hand",
                         _ => "graveyard",
                     };
-                    let list = card_list(cards, true);
+                    // "All land cards from your graveyard": whose they are is the zone's.
+                    let list = if whose_text.is_empty() {
+                        card_list(cards, true)
+                    } else {
+                        card_list(cards, true)
+                            .replace(" you own", "")
+                            .replace(" an opponent owns", "")
+                    };
                     if whose_text.is_empty() {
                         format!("all {list} from all {zone}s")
                     } else {
@@ -2167,11 +2211,22 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 }
                 CardDest::Stay => format!("leave {what} where they are"),
             };
+            if let Some(p) = controller {
+                out.push_str(&format!(" under {} control", possessive(&player(mode, *p))));
+            }
             if *shuffle && *to != CardDest::LibraryTop {
                 out.push_str(", then those players shuffle");
             }
             out
         }
+    }
+}
+
+/// "your", "target player's".
+fn possessive(who: &str) -> String {
+    match who {
+        "you" => "your".to_string(),
+        other => format!("{other}'s"),
     }
 }
 
@@ -2364,6 +2419,12 @@ fn power_toughness(s: &Selector) -> String {
 
 /// " with mana value 3 or less" (empty if the selector doesn't ask).
 fn mana_value(s: &Selector) -> String {
+    if let Some(a) = &s.mana_value_at_most {
+        return match &**a {
+            Amount::X => " with mana value X or less".to_string(),
+            a => format!(" with mana value less than or equal to {}", amount(a)),
+        };
+    }
     match (s.mana_value_min, s.mana_value_max) {
         (None, None) => String::new(),
         (Some(a), Some(b)) if a == b => format!(" with mana value {a}"),

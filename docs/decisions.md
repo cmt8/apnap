@@ -2743,6 +2743,56 @@ Rules text: docs/rules-notes/603-delayed.md. Tests: `crates/harness/tests/forge_
   and `AtEOT$` in a chain that already notes (Jaxis).
 - Golden: see the commit message.
 
+## D-082 The most played gaps of the EDHREC top 1,000: changing targets, mass moves from graveyards, "mana value X or less" (2026-11-12)
+Rules text: docs/rules-notes/d082-top1000.md. Tests: `crates/harness/tests/forge_top1000.rs`.
+- Text first (from the D-080 review): "X is this creature's power" for the source's power or
+  toughness in "where X is …" (was "its power", which could read as the spell's); 31 cards'
+  text, no meaning.
+- **Changing targets** (CR 115.7, 115.3, 115.5): `TargetFilter::OnStack { abilities,
+  single_target }` (a spell, or a spell or activated/triggered ability, on the stack;
+  "with a single target" = exactly one target in all), `Effect::ChangeTargets { what,
+  single }`, `ChoiceKind::NewTarget`, `GameAction::SetTargets`, `Event::TargetsChanged`
+  (all appended). The changing spell's controller goes through the targets slot by slot:
+  "you may choose new targets" (115.7d) offers the current target first (keep) and every
+  legal one; "change the target of target spell with a single target" (115.7a) only other
+  legal targets, and with none it stays. Legal is as for the changed spell or ability and its
+  controller (`targeting::candidates`, 115.5 included); a slot doesn't offer what another
+  slot of the same "target" has (115.3); the new set is written at once (115.7e). Modes, X
+  and everything else of the spell stay. Forge: `ChangeTargets` with `TargetType$ Spell` /
+  `Spell,Activated,Triggered` + `Optional$` (choose new), `Spell.singleTarget` /
+  `SpellAbility.singleTarget` without it (change the target); `UnlessCost$` works (Divert).
+  **When "becomes the target" triggers are built, they must fire here for the new targets**
+  (Forge's ChangeTargetsEffect runs BecomesTarget for each changed target). Blocked:
+  115.7b/c, a fixed new target (Spellskite, `DefinedMagnet$`), random targets, a restriction
+  on the new target (Meddle), another chooser, a target type of only activated abilities.
+  Deflecting Swat, Redirect, Misdirection, Divert, Deflection, Shunt, Swerve, Imp's Mischief.
+- **Mass moves from graveyards and hands** (CR 400.3, 110.2a, 701.24a): Forge's
+  `ChangeZoneAll` from graveyards or hands is `Effect::MoveAll` (new field `controller`, "under
+  your control", serialized only when set): every player's zone unless `Defined$` or a target
+  player says whose; a filter of "your" cards is your zone only — and then only you shuffle
+  (Forge would shuffle every library, which the cards don't say). Onto the battlefield a card
+  enters under its owner's control (the engine's default) or yours with `GainControl$`;
+  other players' cards are compiled only where the card says whose control ("under their
+  owners' control", "each player returns …"), since by 110.2a "put onto the battlefield" is
+  the instructing player's (`ChangeZoneAll:onto the battlefield under whose control`). Into a
+  library only when shuffled (`ChangeZoneAll:Graveyard->Library`). Manabond is in
+  `SCRIPT_DIFFERS` (its script doesn't reveal the hand, and discards only if a land moved).
+  40 cards: Farewell, Scavenger Grounds, Splendid Reclamation, Rise of the Dark Realms,
+  Replenish, Aftermath Analyst, Morningtide, Mnemonic Nexus, Decree of Annihilation.
+  `ChangeZone:no-target` is now named by its shape; in the top 1,000 the shapes are triggers
+  that return "this card" from a graveyard (they need triggers that work in a graveyard,
+  `trig:zone Graveyard`), "return it … as an enchantment" (`Defined
+  TriggeredNewCardLKICopy` with `StaticEffect$`), the commander from the command zone, and
+  cards remembered across a cost.
+- **"With mana value X or less"** (CR 107.3a, 608.2h): `Selector::mana_value_at_most`
+  (serialized only when set; Forge's `cmcLEX` with X a script variable) — only in the cards a
+  search or a look at the top cards chooses among, worked out as that instruction is reached
+  (`ResolveFrame::fix_mana_values`); card-db refuses it anywhere else. `AIXMax$` is a Forge AI
+  hint. Green Sun's Zenith, Wargate, Genesis Wave, Mind into Matter, Grim Servant, Loot,
+  Mausoleum Secrets. Still blocked: Finale of Devastation (`PumpAll` with a condition), Eldritch
+  Evolution (`Sacrificed$CardManaCost`), Chord of Calling (convoke).
+- Golden: see the commit.
+
 ## D-083 Delayed abilities about targets, attackers and blockers; "at end of combat"; their wording (2026-11-12)
 Rules text: docs/rules-notes/603-delayed.md. Tests: `crates/harness/tests/forge_delayed.rs`.
 - **Wording:** a delayed ability about one object says "it" (`Effect::DelayedTrigger::one`,
@@ -2774,6 +2824,54 @@ Rules text: docs/rules-notes/603-delayed.md. Tests: `crates/harness/tests/forge_
   Kaijin of the Vanishing Touch, Wall of Tears, Infernal Medusa, Lowland Basilisk, Ohran
   Viper, Sosuke, Son of Seshiro. Most other cards of these shapes wait on other blockers
   (`trig:Secondary-alone` for "blocks or becomes blocked by", Banding, Madness).
+
+## D-084 Counters of any kind; Sagas (2026-11-12)
+Rules text: docs/rules-notes/122-counters.md, docs/rules-notes/715-sagas.md (Sagas are CR
+**715** in this edition, not 714). Tests: `crates/harness/tests/forge_counters.rs`,
+`forge_sagas.rs`.
+- **One representation:** `CounterKind::Named(CounterName)` next to `PlusOne`/`MinusOne` — a
+  name (lower case, at most 24 bytes, so the kind stays `Copy` and a `BTreeMap` key). Every
+  path that knew ±1 counters takes any kind: `Proposed::PutCounters`/`RemoveCounters`, the
+  D-073 doublers, proliferate, "enters with N [kind] counters", Forge's
+  `Count$CardCounters.<KIND>` (`Amount::CountersOnThis(kind)`, read from the source — or as
+  it last existed: `Characteristics::counters` carries an object's counters, so last known
+  information has them, CR 122.2), and costs `SubCounter<n/KIND>` / `AddCounter<n/KIND>`
+  on the object itself (`Cost::remove_counters` / `add_counters`; the cost's counters are
+  put through the replacement pipeline like any others). Only +1/+1 and -1/-1 do anything
+  by themselves; only they annihilate (704.5q).
+- **Blocked by name:** kinds with rules of their own (`counter:<KIND> (rules of its own)`:
+  shield, stun, loyalty, defense, finality, hone), keyword counters (CR 122.1b,
+  `(keyword counter)`), +X/+Y other than ±1 (`(+X/+Y)`), counters on players (`(on
+  players)`: poison, energy, experience, rad, ticket), Forge's words for several kinds
+  (`(not one kind)`: ALL, Any, EachFromSource, ExistingCounter); filters "with a [kind]
+  counter on it" (`filter:.counters_…`) stay blocked (a filter's `Facts` have no counters).
+  Counter costs on mana abilities and as additional costs of spells are not built (card-db
+  rejects them).
+- **Sagas (CR 715):** a chapter symbol is `Trigger::Chapter(n)` on a triggered ability
+  (`K:Chapter:N:<SVar>,…`; "I, II — X" is two abilities, 715.2c). It triggers from a batch
+  in which lore counters were put on the permanent — by an effect, a cost, the turn-based
+  action or as it entered (122.6) — when the count went from below n to at least n
+  (715.2b): two counters at once trigger two chapters. The intrinsic "this Saga enters with
+  a lore counter" (715.3a) is compiled onto each Saga as its `ThisEnters` replacement, so
+  doublers modify it and copies have it (LIMIT: a permanent that becomes a Saga only by a
+  type-changing effect lacks it; card-db rejects a chapter ability on anything but a Saga
+  that has it). CR 505.4/715.3c: as the active player's precombat main phase begins, one
+  batch puts a lore counter on each Saga they control with a chapter ability (no stack).
+  CR 704.5s/715.4: a state-based action sacrifices a Saga whose lore count is at least its
+  final chapter number (715.2d, from the abilities it has now) unless a chapter ability of
+  it is waiting to be put on the stack or is on it. Read ahead (702.155) is blocked by name
+  (`kw:Read ahead`); Sagas that transform (exile, return transformed) are blocked by
+  `ChangeZone.Transformed`; creature Sagas (715.1a) need nothing more and compile.
+- **App:** counters of named kinds are badges "lore x2" (`describe::counter`).
+- **Script differs:** Origin of the Avengers (chapter II puts any Hero card; the card says a
+  Hero creature card).
+- **Not built — what loyalty needs beyond a counter kind:** starting loyalty as the
+  planeswalker enters (306.5b, an intrinsic "enters with" like 715.3a); loyalty abilities
+  (606): a cost of putting or removing loyalty counters (the counter costs above, plus −X),
+  sorcery timing and one loyalty ability per permanent per turn (606.3, a per-object
+  record of this turn); damage dealt to a planeswalker removes that many loyalty counters
+  (120.3c); attacking planeswalkers (506.3, 508.1b: the engine's creatures attack only
+  players); the SBA at 0 loyalty (704.5i); "loyalty" as a number read by effects.
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may

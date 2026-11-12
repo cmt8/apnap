@@ -1342,6 +1342,28 @@ fn noted_selectors(e: &Effect) -> usize {
 }
 
 fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String)) {
+    // "With mana value X or less" counted as it resolves: only where a search or a look at
+    // the top cards chooses (the resolution makes it a plain bound there).
+    let wrapper = matches!(
+        e,
+        Effect::Seq(_)
+            | Effect::Together(_)
+            | Effect::May(_)
+            | Effect::PlayerMay { .. }
+            | Effect::Note(_)
+            | Effect::If { .. }
+            | Effect::IfDone { .. }
+            | Effect::Pay { .. }
+            | Effect::CantBeRegenerated(_)
+    );
+    if !wrapper {
+        let mut counted = false;
+        let mut copy = e.clone();
+        copy.selectors_mut(&mut |s| counted |= s.mana_value_at_most.is_some());
+        if counted && !matches!(e, Effect::ChooseCards { .. } | Effect::Dig { .. }) {
+            p("a mana value counted as it resolves outside a search".into());
+        }
+    }
     let slot = |t: &TargetRef| match t {
         TargetRef::Target(i) => mode.targets.get(*i as usize),
         TargetRef::Players(_) | TargetRef::Object(_) => None,
@@ -1710,6 +1732,15 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             other => p(format!("Counter needs a Spell target slot, got {other:?}")),
         },
         Effect::EachPlayer(_) => {}
+        // CR 115.7: a spell or ability on the stack, as a target.
+        Effect::ChangeTargets { what, .. } => match slot(what) {
+            Some(
+                TargetFilter::Spell | TargetFilter::SpellMatching(_) | TargetFilter::OnStack { .. },
+            ) => {}
+            other => p(format!(
+                "ChangeTargets needs a target on the stack, got {other:?}"
+            )),
+        },
         Effect::DamageEachPlayer { amount: a } => amount(a, p),
         Effect::Destroy { what } | Effect::ReturnToHand { what } | Effect::Apply { what, .. } => {
             obj(what, p)
