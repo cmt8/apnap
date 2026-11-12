@@ -22,6 +22,9 @@ pub struct Plan {
     pub choices: BTreeMap<ObjectId, OptionDesc>,
     /// Attacks: the player a creature is sent at when it is clicked.
     pub target: Option<PlayerId>,
+    /// Attacks: the planeswalker a creature is sent at when it is clicked, rather than
+    /// `target` (CR 506.3: chosen by clicking the planeswalker).
+    pub target_planeswalker: Option<ObjectId>,
     /// Blocks: the blocker that was clicked and is waiting for its attacker.
     pub selected: Option<ObjectId>,
 }
@@ -34,6 +37,7 @@ impl Plan {
             candidates: declaration.candidates,
             choices: BTreeMap::new(),
             target: None,
+            target_planeswalker: None,
             selected: None,
         };
         plan.target = plan.defenders().first().copied();
@@ -61,12 +65,41 @@ impl Plan {
         out
     }
 
+    /// Every planeswalker that can be attacked, in the order the engine lists them.
+    pub fn planeswalkers(&self) -> Vec<ObjectId> {
+        let mut out = Vec::new();
+        for o in self.candidates.iter().flat_map(|c| &c.options) {
+            if let OptionDesc::AttackPlaneswalker { planeswalker, .. } = o
+                && !out.contains(planeswalker)
+            {
+                out.push(*planeswalker);
+            }
+        }
+        out
+    }
+
     fn attack_option(&self, creature: ObjectId, defender: PlayerId) -> Option<OptionDesc> {
         self.candidate(creature)?
             .options
             .iter()
             .find(|o| matches!(o, OptionDesc::Attack { defender: d, .. } if *d == defender))
             .cloned()
+    }
+
+    fn planeswalker_option(&self, creature: ObjectId, pw: ObjectId) -> Option<OptionDesc> {
+        self.candidate(creature)?
+            .options
+            .iter()
+            .find(|o| matches!(o, OptionDesc::AttackPlaneswalker { planeswalker, .. } if *planeswalker == pw))
+            .cloned()
+    }
+
+    /// What a clicked creature attacks: the chosen planeswalker, else the chosen player.
+    fn aimed_option(&self, creature: ObjectId) -> Option<OptionDesc> {
+        match self.target_planeswalker {
+            Some(pw) => self.planeswalker_option(creature, pw),
+            None => self.target.and_then(|t| self.attack_option(creature, t)),
+        }
     }
 
     fn block_option(&self, blocker: ObjectId, attacker: ObjectId) -> Option<OptionDesc> {
@@ -90,6 +123,14 @@ impl Plan {
         }
     }
 
+    /// The planeswalker `creature` is planned to attack.
+    pub fn attacks_planeswalker(&self, creature: ObjectId) -> Option<ObjectId> {
+        match self.choices.get(&creature) {
+            Some(OptionDesc::AttackPlaneswalker { planeswalker, .. }) => Some(*planeswalker),
+            _ => None,
+        }
+    }
+
     /// The attacker `creature` is planned to block.
     pub fn blocks(&self, creature: ObjectId) -> Option<ObjectId> {
         match self.choices.get(&creature) {
@@ -104,10 +145,9 @@ impl Plan {
             return;
         };
         if self.attacking() {
-            // Toggle: attack the chosen player, or stand down.
+            // Toggle: attack the chosen player or planeswalker, or stand down.
             let wanted = self
-                .target
-                .and_then(|t| self.attack_option(creature, t))
+                .aimed_option(creature)
                 .or_else(|| c.options.first().cloned());
             match wanted {
                 Some(o) if self.choices.get(&creature) != Some(&o) => {
@@ -142,6 +182,29 @@ impl Plan {
     pub fn click_player(&mut self, player: PlayerId) {
         if self.attacking() && self.defenders().contains(&player) {
             self.target = Some(player);
+            self.target_planeswalker = None;
+        }
+    }
+
+    /// A click on a planeswalker that can be attacked: new attackers go at it from now on
+    /// (clicking it again goes back to the player). Returns whether it was one.
+    pub fn click_planeswalker(&mut self, pw: ObjectId) -> bool {
+        if !self.attacking() || !self.planeswalkers().contains(&pw) {
+            return false;
+        }
+        self.target_planeswalker = (self.target_planeswalker != Some(pw)).then_some(pw);
+        true
+    }
+
+    /// `creature` was dragged onto the planeswalker `pw`: attack it. Returns whether that is
+    /// possible.
+    pub fn drop_on_planeswalker(&mut self, creature: ObjectId, pw: ObjectId) -> bool {
+        match self.planeswalker_option(creature, pw) {
+            Some(o) if self.attacking() => {
+                self.choices.insert(creature, o);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -175,8 +238,7 @@ impl Plan {
         }
         for c in self.candidates.clone() {
             let o = self
-                .target
-                .and_then(|t| self.attack_option(c.creature, t))
+                .aimed_option(c.creature)
                 .or_else(|| c.options.first().cloned());
             if let Some(o) = o {
                 self.choices.insert(c.creature, o);
@@ -271,6 +333,51 @@ mod tests {
         p.click_creature(ObjectId(99));
         p.click_player(PlayerId(0));
         assert_eq!((p.choices.len(), p.target), (1, Some(P2)));
+    }
+
+    /// Attackers 10 and 11 may attack P1 or P1's planeswalker 40.
+    fn planeswalker_plan() -> Plan {
+        let cand = |n: u32| Candidate {
+            creature: ObjectId(n),
+            options: vec![
+                OptionDesc::Attack {
+                    attacker: ObjectId(n),
+                    defender: P1,
+                },
+                OptionDesc::AttackPlaneswalker {
+                    attacker: ObjectId(n),
+                    planeswalker: ObjectId(40),
+                },
+            ],
+        };
+        Plan::new(
+            8,
+            Declaration {
+                kind: ChoiceKind::DeclareAttackers,
+                candidates: vec![cand(10), cand(11)],
+            },
+        )
+    }
+
+    // CR 506.3, 508.1b: a planeswalker is clicked (or a creature dropped onto it) to attack it.
+    #[test]
+    fn attacking_a_planeswalker_on_the_table() {
+        let mut p = planeswalker_plan();
+        assert_eq!(p.planeswalkers(), [ObjectId(40)]);
+        p.click_creature(ObjectId(10));
+        assert_eq!(p.attacks(ObjectId(10)), Some(P1));
+        assert!(p.click_planeswalker(ObjectId(40)));
+        p.click_creature(ObjectId(11));
+        assert_eq!(p.attacks_planeswalker(ObjectId(11)), Some(ObjectId(40)));
+        assert_eq!(p.attacks(ObjectId(11)), None);
+        // Clicking the player goes back to attacking the player.
+        p.click_player(P1);
+        p.click_creature(ObjectId(11));
+        assert_eq!(p.attacks(ObjectId(11)), Some(P1));
+        assert!(p.drop_on_planeswalker(ObjectId(10), ObjectId(40)));
+        assert_eq!(p.attacks_planeswalker(ObjectId(10)), Some(ObjectId(40)));
+        assert!(!p.click_planeswalker(ObjectId(41)), "not attackable");
+        assert!(!p.drop_on_planeswalker(ObjectId(10), ObjectId(41)));
     }
 
     #[test]

@@ -578,16 +578,17 @@ impl HeuristicAgent {
                 // "target creature").
                 let types_of = |t: &Target| -> Option<Vec<CardType>> {
                     match t {
-                        Target::Object(id) => {
-                            v.battlefield.iter().find(|o| o.id == *id).map(|o| o.card_types.clone())
-                        }
+                        Target::Object(id) => v
+                            .battlefield
+                            .iter()
+                            .find(|o| o.id == *id)
+                            .map(|o| o.card_types.clone()),
                         Target::Player(_) => None,
                     }
                 };
                 match &m.targets[0] {
-                    card_model::TargetFilter::Creature => cands.retain(|t| {
-                        types_of(t).is_some_and(|ts| ts.contains(&CardType::Creature))
-                    }),
+                    card_model::TargetFilter::Creature => cands
+                        .retain(|t| types_of(t).is_some_and(|ts| ts.contains(&CardType::Creature))),
                     card_model::TargetFilter::AnyTarget => cands.retain(|t| {
                         types_of(t).is_none_or(|ts| {
                             ts.contains(&CardType::Creature) || ts.contains(&CardType::Planeswalker)

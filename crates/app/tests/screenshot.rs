@@ -205,6 +205,61 @@ fn render_counters() {
     shot(&mut h, dir.join("counters.png"));
 }
 
+/// A planeswalker (D-086): its loyalty badge, and an attack planned at it (the attacker's
+/// arrow points at the planeswalker): `planeswalker.png`.
+#[test]
+#[ignore = "needs a renderer; writes PNGs to $APNAP_SHOT_DIR"]
+fn render_planeswalker() {
+    use card_model::CounterKind;
+    use engine_core::testing::Scenario;
+    use engine_core::zones::Zone;
+    let Some(dir) = std::env::var_os("APNAP_SHOT_DIR").map(std::path::PathBuf::from) else {
+        panic!("set APNAP_SHOT_DIR");
+    };
+    std::fs::create_dir_all(&dir).unwrap();
+    let walker = "Name:Test Sage Walker\nManaCost:2 W\nTypes:Legendary Planeswalker Ajani\nLoyalty:3\n\
+        A:AB$ GainLife | Cost$ AddCounter<1/LOYALTY> | Planeswalker$ True | LifeAmount$ 2 | SpellDescription$ You gain 2 life.\n\
+        A:AB$ DealDamage | Cost$ SubCounter<2/LOYALTY> | Planeswalker$ True | ValidTgts$ Creature | NumDmg$ 3 | SpellDescription$ CARDNAME deals 3 damage to target creature.\n\
+        Oracle:Text.";
+    let (p0, p1) = (PlayerId(0), PlayerId(1));
+    let mut sc = Scenario::new(
+        engine_core::GameConfig::commander(2),
+        harness::forge_test_catalog(&[walker], &[]),
+        5,
+    );
+    for p in [p0, p1] {
+        sc.library(p, "Forest", 20);
+    }
+    sc.cards(p1, Zone::Battlefield, &["Plains"; 2]);
+    let pw = sc.card(p1, Zone::Battlefield, "Test Sage Walker");
+    let golem = sc.card(p0, Zone::Battlefield, "Test Golem");
+    sc.card(p0, Zone::Battlefield, "Test Golem");
+    sc.turn(p0, engine_core::turn::Step::BeginningOfCombat);
+    let mut st = sc.build();
+    st.objects
+        .get_mut(&pw)
+        .unwrap()
+        .counters
+        .insert(CounterKind::LOYALTY, 4);
+    let mut app = App::with_saves_dir(dir.join("saves"));
+    app.session = Some(app::session::Session::from_state(
+        st,
+        Some(p0),
+        harness::Agents::Random,
+    ));
+    app.screen = app::ui::Screen::Game;
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .with_max_steps(64)
+        .wgpu()
+        .build_ui_state(|ui, app: &mut App| app::ui::ui(app, ui), app);
+    h.run_ok();
+    let plan = h.state_mut().plan.as_mut().expect("planning the attack");
+    assert!(plan.drop_on_planeswalker(golem, pw));
+    h.remove_cursor();
+    shot(&mut h, dir.join("planeswalker.png"));
+}
+
 /// Proxies (cards drawn from their definitions, with generated rules text) of a modal card
 /// and of a card that makes tokens, next to each other: `proxies.png`.
 #[test]
