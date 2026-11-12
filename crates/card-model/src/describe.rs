@@ -93,9 +93,6 @@ const TARGET_END: char = '\u{8}';
 /// Brackets "how many|key|amount" of a token an effect creates until [`expand_tokens`]
 /// describes it from its definition.
 const TOKEN: char = '\u{9}';
-/// Keeps "this permanent" as it is where the type of the card would be wrong or unsafe
-/// to say (removed again at the end).
-const KEEP: char = '\u{b}';
 
 /// The plural of an English noun as Oracle text has it, for the last word of `s`:
 /// "Elf" is "Elves", "Plains" are "Plains", "Eldrazi" are "Eldrazi" (CR 205.3m lists the
@@ -334,7 +331,9 @@ fn target_filter(f: &TargetFilter) -> String {
 /// "target creatures", "other target artifacts or enchantments", "targets": what a group
 /// of targets of one "target" word may be. For "one to two targets" (the first must be
 /// chosen, the second may be) it is "targets that are creatures": the word "targets" says
-/// they are different ones (CR 115.3), which "target creatures" would not.
+/// they are different ones (CR 115.3), which "target creatures" would not. (card-db's
+/// `oracle_words_missing` accepts the word "targets" as "another target": this wording is
+/// shaped for that guard, and pinned by its test.)
 fn target_filter_plural(f: &TargetFilter, plain: bool) -> String {
     let target = |what: String| {
         if plain {
@@ -471,6 +470,17 @@ fn tokens_would(token: &Selector, effect_only: bool) -> String {
     } else {
         format!("If one or more {tokens} would be created{whose}")
     }
+}
+
+/// "Clue, Food and Treasure": tokens named by their definitions (filled in by
+/// `expand_tokens`).
+fn token_names(keys: &[String]) -> String {
+    join(
+        keys.iter()
+            .map(|k| format!("{TOKEN}nm|{k}{TOKEN}"))
+            .collect(),
+        "and",
+    )
 }
 
 /// "twice that many", "that many plus 1", "half that much, rounded down".
@@ -1328,7 +1338,9 @@ fn effect(mode: &Mode, e: &Effect) -> String {
         }
         Effect::SacrificeThis => "sacrifice this permanent".to_string(),
         Effect::ControllerSacrificesThis => "its controller sacrifices it".to_string(),
-        Effect::AttachThis { to } => format!("attach this{KEEP} permanent to {}", obj(mode, *to)),
+        // (card-db's `oracle_words_missing` strips "attach this <type> to target creature you
+        // control" as Equip's reminder text: keep this wording.)
+        Effect::AttachThis { to } => format!("attach this permanent to {}", obj(mode, *to)),
         Effect::May(inner) => {
             let text = effect(mode, inner);
             // "You may draw a card", not "you may you draw a card"; and an instruction
@@ -1373,7 +1385,11 @@ fn effect(mode: &Mode, e: &Effect) -> String {
         }
         Effect::Proliferate => "proliferate".to_string(),
         Effect::UntapChosen { what, count } => {
-            format!("untap up to {} {}", amount(count), selector(what, true))
+            let n = match count {
+                Amount::Fixed(k) => num(*k),
+                a => amount(a),
+            };
+            format!("untap up to {n} {}", selector(what, true))
         }
         // "Its controller may draw a card": the instruction in the decider's own words.
         Effect::PlayerMay { who, effect: inner } => {
@@ -2929,15 +2945,15 @@ fn ability(a: &AbilityDef) -> String {
                     format!("{what}, {} {noun} instead.", scaled(*c, "that many"))
                 }
                 ReplaceWith::AddTokens { tokens, n } => {
-                    let n = n.map_or("that many".to_string(), |n| n.to_string());
+                    let n = n.map_or("that many".to_string(), num);
                     format!(
-                        "{what}, those tokens plus {n} {} token(s) are created instead.",
-                        tokens.join(" and ")
+                        "{what}, those tokens plus {n} {} tokens are created instead.",
+                        token_names(tokens)
                     )
                 }
                 ReplaceWith::ReplaceTokens(tokens) => format!(
-                    "{what}, that many {} token(s) are created instead.",
-                    join(tokens.clone(), "and")
+                    "{what}, that many {} tokens are created instead.",
+                    token_names(tokens)
                 ),
                 ReplaceWith::Exile => format!("{what}, exile it instead."),
                 ReplaceWith::ShuffleIntoLibrary => {
@@ -3309,13 +3325,29 @@ pub fn this_word(def: &CardDef) -> String {
 
 /// The text with its markers resolved: quoted abilities, the card's own type, and the
 /// tokens an effect creates (described from `tokens`).
-fn render(def: &CardDef, text: &str, tokens: TokenLookup<'_>, depth: u32, own: bool) -> String {
+fn render(
+    def: &CardDef,
+    text: &str,
+    tokens: TokenLookup<'_>,
+    depth: u32,
+    own: bool,
+    seen: &mut Vec<String>,
+) -> String {
     let text = quote_granted(def, text, own);
-    expand_tokens(&text, tokens, depth).replace(KEEP, "")
+    expand_tokens(&text, tokens, depth, seen)
 }
 
 /// Replace each token marker `effect` left with the token's description.
-fn expand_tokens(text: &str, tokens: TokenLookup<'_>, depth: u32) -> String {
+///
+/// A predefined token (Treasure, Food …) is followed, the first time `seen` hasn't got it,
+/// by Oracle's reminder, built from the token's own abilities: "(It's an artifact with
+/// "{T}, Sacrifice this token: Add one mana of any color.")".
+fn expand_tokens(
+    text: &str,
+    tokens: TokenLookup<'_>,
+    depth: u32,
+    seen: &mut Vec<String>,
+) -> String {
     let mut out = String::new();
     let mut parts = text.split(TOKEN);
     while let Some(plain) = parts.next() {
@@ -3327,12 +3359,17 @@ fn expand_tokens(text: &str, tokens: TokenLookup<'_>, depth: u32) -> String {
         out.push_str(plain);
         let Some(marker) = parts.next() else { break };
         let (how, key) = marker.split_once('|').unwrap_or((marker, ""));
-        let (before, after) = match tokens(key) {
+        let (before, after, reminder) = match tokens(key) {
             Some(def) => token_phrase(def, tokens, depth),
-            None => (format!("{key} "), String::new()),
+            None => (format!("{key} "), String::new(), None),
         };
         let desc =
             |plural: bool| format!("{before}{}{after}", if plural { "tokens" } else { "token" });
+        if how == "nm" {
+            out.push_str(before.trim_end());
+            continue;
+        }
+        let plural = how != "one";
         match how.split_once(':') {
             Some(("n", count)) => out.push_str(&format!("{count} {}", desc(true))),
             Some((_, amount)) => {
@@ -3340,13 +3377,27 @@ fn expand_tokens(text: &str, tokens: TokenLookup<'_>, depth: u32) -> String {
             }
             None => out.push_str(&with_article(&desc(false))),
         }
+        if let Some(items) = reminder
+            && !seen.iter().any(|k| k == key)
+        {
+            seen.push(key.to_string());
+            out.push_str(&if plural {
+                format!(" (They're artifacts with {items})")
+            } else {
+                format!(" (It's an artifact with {items})")
+            });
+        }
     }
     out
 }
 
 /// A token as Oracle text names it, around the word "token": "1/1 white Spirit creature
 /// " + "token" + " with flying", or "Treasure " + "token" + "".
-fn token_phrase(def: &CardDef, tokens: TokenLookup<'_>, depth: u32) -> (String, String) {
+fn token_phrase(
+    def: &CardDef,
+    tokens: TokenLookup<'_>,
+    depth: u32,
+) -> (String, String, Option<String>) {
     let subtypes: String = def
         .land_types
         .iter()
@@ -3371,7 +3422,18 @@ fn token_phrase(def: &CardDef, tokens: TokenLookup<'_>, depth: u32) -> (String, 
         && def.land_types.is_empty()
         && PREDEFINED.contains(&subtypes.as_str())
     {
-        return (format!("{subtypes} "), String::new());
+        let none: TokenLookup<'_> = &no_tokens;
+        let tokens = if depth > 4 { none } else { tokens };
+        let items: Vec<String> = def
+            .abilities
+            .iter()
+            .map(|a| {
+                let text = render(def, &ability(a), tokens, depth + 1, true, &mut Vec::new());
+                format!("\"{text}\"")
+            })
+            .collect();
+        let reminder = (!items.is_empty()).then(|| join(items, "and"));
+        return (format!("{subtypes} "), String::new(), reminder);
     }
     let mut before = String::new();
     for st in &def.supertypes {
@@ -3419,7 +3481,7 @@ fn token_phrase(def: &CardDef, tokens: TokenLookup<'_>, depth: u32) -> (String, 
     for a in &def.abilities {
         with.push(format!(
             "\"{}\"",
-            render(def, &ability(a), tokens, depth + 1, true)
+            render(def, &ability(a), tokens, depth + 1, true, &mut Vec::new())
         ));
     }
     let mut after = String::new();
@@ -3429,7 +3491,7 @@ fn token_phrase(def: &CardDef, tokens: TokenLookup<'_>, depth: u32) -> (String, 
     if !with.is_empty() {
         after.push_str(&format!(" with {}", join(with, "and")));
     }
-    (before, after)
+    (before, after, None)
 }
 
 /// One mode of a modal spell or ability, as a sentence (for the mode-choice UI).
@@ -3440,7 +3502,14 @@ pub fn mode_text(def: &CardDef, m: &Mode) -> String {
 
 /// [`mode_text`], describing the tokens it creates from `tokens`.
 pub fn mode_text_in(def: &CardDef, m: &Mode, tokens: TokenLookup<'_>) -> String {
-    render(def, &sentence(mode_effect(m)), tokens, 0, true)
+    render(
+        def,
+        &sentence(mode_effect(m)),
+        tokens,
+        0,
+        true,
+        &mut Vec::new(),
+    )
 }
 
 /// One ability as rules text ("Cycling {2}", "{T}: Add {G}."). `def` is the card the
@@ -3454,7 +3523,7 @@ pub fn ability_text_in(def: &CardDef, a: &AbilityDef, tokens: TokenLookup<'_>) -
     // An ability the card gives to something else is about that something: "this
     // permanent" is not the card.
     let own = !(def.granted.contains(a) && !def.abilities.contains(a));
-    render(def, &ability(a), tokens, 0, own)
+    render(def, &ability(a), tokens, 0, own, &mut Vec::new())
 }
 
 /// The card's rules text, one line per keyword group / ability.
@@ -3492,13 +3561,16 @@ pub fn rules_text_in(def: &CardDef, tokens: TokenLookup<'_>) -> Vec<String> {
             }
         )
     };
-    lines.extend(
-        def.abilities
-            .iter()
-            .filter(enters)
-            .chain(def.abilities.iter().filter(|a| !enters(a)))
-            .map(|a| render(def, &ability(a), tokens, 0, true)),
-    );
+    // (A token's reminder text is given the first time the card names it.)
+    let mut seen = Vec::new();
+    for a in def
+        .abilities
+        .iter()
+        .filter(enters)
+        .chain(def.abilities.iter().filter(|a| !enters(a)))
+    {
+        lines.push(render(def, &ability(a), tokens, 0, true, &mut seen));
+    }
     // What an attached permanent calls the thing it is attached to.
     let host = if def.creature_types.iter().any(|t| t == "Equipment") {
         Some("quipped creature")
@@ -4123,6 +4195,17 @@ mod tests {
         let treasure = CardDef {
             card_types: vec![CardType::Artifact],
             creature_types: vec!["Treasure".into()],
+            abilities: vec![AbilityDef::Mana {
+                cost: Cost {
+                    tap: true,
+                    sacrifice_self: true,
+                    ..Cost::default()
+                },
+                produce: ManaProduce::AnyColor,
+                only_if: None,
+                spend: None,
+                then: None,
+            }],
             ..token("Treasure Token", "c_a_treasure_sac")
         };
         let spawn = CardDef {
@@ -4174,13 +4257,35 @@ mod tests {
         // Without definitions the key is all there is to say.
         let (bare, _) = make("c_a_treasure_sac", Amount::Fixed(1));
         assert_eq!(bare, "Create a c_a_treasure_sac token.");
+        // A predefined token comes with Oracle's reminder, from its own abilities.
         assert_eq!(
             make("c_a_treasure_sac", Amount::Fixed(1)).1,
-            "Create a Treasure token."
+            "Create a Treasure token (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")."
         );
         assert_eq!(
             make("c_a_treasure_sac", Amount::Fixed(3)).1,
-            "Create three Treasure tokens."
+            "Create three Treasure tokens (They're artifacts with \"{T}, Sacrifice this token: Add one mana of any color.\")."
+        );
+        // ... the first time only.
+        let twice = spell(Mode {
+            targets: Vec::new(),
+            effect: Effect::Seq(vec![
+                Effect::CreateToken {
+                    token: "c_a_treasure_sac".into(),
+                    count: Amount::Fixed(1),
+                    who: PlayerRef::You,
+                },
+                Effect::CreateToken {
+                    token: "c_a_treasure_sac".into(),
+                    count: Amount::Fixed(1),
+                    who: PlayerRef::You,
+                },
+            ]),
+            groups: Vec::new(),
+        });
+        assert_eq!(
+            rules_text_in(&twice, &lookup).join(" / "),
+            "Create a Treasure token (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\"). Then create a Treasure token."
         );
         assert_eq!(
             make("c_0_1_eldrazi_spawn_sac", Amount::Fixed(1)).1,
