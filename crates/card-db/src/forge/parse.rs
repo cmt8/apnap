@@ -39,6 +39,10 @@ pub struct Face {
     pub text: Option<String>,
     /// Lines that never affect the rules (deck-building and AI hints).
     pub hints: Vec<String>,
+    /// Comment lines (`# …`), without the `#`, in the order written. Forge's reader skips
+    /// a line whose first character is `#` (CardRules.Reader.readCard); the compiler
+    /// reviews the text (`comments.rs`) before ignoring it.
+    pub comments: Vec<String>,
     /// Lines this reader doesn't know. A card with any of these can't be loaded.
     pub unknown: Vec<String>,
     /// The kinds (`A`, `T`, `S`, `R`) of the ability lines in the order they were written,
@@ -86,6 +90,14 @@ pub fn parse(text: &str) -> Result<Script, String> {
     let mut face = Face::default();
     let mut any = false;
     for raw in text.lines() {
+        // Forge: `line.isEmpty() || line.charAt(0) == '#'` on the raw line. Only a `#` in
+        // column 0 starts a comment; a `#` anywhere else is part of a value. (Indented
+        // `#` lines stay unknown lines: Forge would parse them as a key.)
+        if let Some(comment) = raw.strip_prefix('#') {
+            face.comments
+                .push(comment.split_whitespace().collect::<Vec<_>>().join(" "));
+            continue;
+        }
         let line = raw.trim();
         if line.is_empty() {
             continue;
@@ -200,6 +212,12 @@ mod tests {
         assert_eq!(s.faces[1].name, "Test Back");
         assert_eq!(s.faces[0].unknown, ["Mystery:1"]);
         assert!(parse("").is_err());
+        // A comment line is kept as a comment, not an unknown line; `#` inside a value stays.
+        let s = parse("# top\nName:Test C\nTypes:Creature Elf\n#  spaced   out\nSVar:X:Count$A # not a comment").unwrap();
+        assert_eq!(s.faces[0].comments, ["top", "spaced out"]);
+        assert!(s.faces[0].unknown.is_empty());
+        assert_eq!(s.faces[0].svars["X"], "Count$A # not a comment");
+        assert!(parse("# only a comment").is_err());
         assert!(parse("Types:Creature").is_err());
     }
 }
