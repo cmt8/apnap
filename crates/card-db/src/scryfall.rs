@@ -297,6 +297,48 @@ pub fn load_bulk() -> Result<ScryfallData, ScryfallError> {
     Ok(data)
 }
 
+/// The EDHREC popularity rank of every Commander-legal card in the bulk file that has one.
+pub fn load_bulk_ranks() -> Result<Vec<(String, u32)>, ScryfallError> {
+    use std::io::{BufRead, BufReader};
+    #[derive(Deserialize)]
+    struct Legalities {
+        #[serde(default)]
+        commander: String,
+    }
+    #[derive(Deserialize)]
+    struct Row {
+        name: String,
+        #[serde(default)]
+        edhrec_rank: Option<u32>,
+        #[serde(default)]
+        legalities: Option<Legalities>,
+    }
+    let path = bulk_file();
+    let file = std::fs::File::open(&path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ScryfallError::Io(BULK_HINT.to_string())
+        } else {
+            ScryfallError::Io(format!("{}: {e}", path.display()))
+        }
+    })?;
+    let mut out = Vec::new();
+    for line in BufReader::new(flate2::read::GzDecoder::new(file)).lines() {
+        let line = line.map_err(|e| ScryfallError::Io(format!("{}: {e}", path.display())))?;
+        let line = line.trim().trim_end_matches(',');
+        if !line.starts_with('{') {
+            continue;
+        }
+        let row: Row = serde_json::from_str(line)
+            .map_err(|e| ScryfallError::Io(format!("{}: {e}", path.display())))?;
+        if let (Some(rank), Some(l)) = (row.edhrec_rank, row.legalities)
+            && l.commander == "legal"
+        {
+            out.push((row.name, rank));
+        }
+    }
+    Ok(out)
+}
+
 /// Every token in the bulk file that has a picture of its own (double-faced token cards
 /// don't), in the file's order.
 pub fn load_bulk_tokens() -> Result<Vec<ScryfallCard>, ScryfallError> {
