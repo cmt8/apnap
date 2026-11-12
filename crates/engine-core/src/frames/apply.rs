@@ -6,7 +6,7 @@ use super::{Flow, Frame, Input};
 use crate::actions::{GameAction, execute};
 use crate::decision::{ChoiceKind, OptionDesc};
 use crate::events::Event;
-use crate::ids::ObjectId;
+use crate::ids::{ObjectId, PlayerId};
 use crate::layers::controller_of;
 use crate::replacement::{
     MoveCause, Pending, Proposed, RepKey, affected_player, applicable, apply, apply_chosen,
@@ -30,6 +30,11 @@ pub struct ApplyFrame {
     /// (CR 614.12a: "as this enters, you may pay 2 life").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub choosing: Option<RepKey>,
+    /// What was chosen for the permanents entering in this batch ("as this enters, choose
+    /// a creature type", CR 614.12a), by the object that is entering: each new permanent has
+    /// its choice from the moment it is on the battlefield.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen: Vec<(ObjectId, PlayerId, card_model::Chosen)>,
 }
 
 impl ApplyFrame {
@@ -61,6 +66,7 @@ impl ApplyFrame {
             queue: queue.into_iter().map(|(_, p)| p).collect(),
             ready: Vec::new(),
             choosing: None,
+            chosen: Vec::new(),
         }
     }
 
@@ -114,6 +120,15 @@ impl ApplyFrame {
                 let answer = inp.picked_one().cloned().expect("one option is picked");
                 let mut p = self.queue.remove(0);
                 p.applied.push(key);
+                // "As this enters, choose …": kept until the permanent is there.
+                if let (
+                    OptionDesc::CreatureType { .. } | OptionDesc::Color { .. },
+                    Proposed::Move { object, .. },
+                ) = (&answer, &p.event)
+                {
+                    self.chosen
+                        .push((*object, inp.decision.player, crate::chosen::answer(&answer)));
+                }
                 let (event, caused) = apply_chosen(st, key, p.event, &answer);
                 self.queue.insert(
                     0,
@@ -203,13 +218,18 @@ impl ApplyFrame {
                 }
             }
         }
-        perform(st, core::mem::take(&mut self.ready));
+        perform(st, core::mem::take(&mut self.ready), &self.chosen);
         Flow::done()
     }
 }
 
 /// Perform fully modified events simultaneously, then detect triggers (CR 603.2g).
-pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
+/// `chosen`: what was chosen for permanents entering with this batch (CR 614.12a).
+pub(crate) fn perform(
+    st: &mut GameState,
+    events: Vec<Proposed>,
+    chosen: &[(ObjectId, PlayerId, card_model::Chosen)],
+) {
     // CR 704.8 / 603.10a: last known information for everything leaving the battlefield,
     // captured before any of the batch happens.
     let mut lki: BTreeMap<ObjectId, Lki> = BTreeMap::new();
@@ -297,6 +317,20 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
                     crate::actions::ActionResult::Moved(id) => id,
                     r => unreachable!("{r:?}"),
                 };
+                // CR 614.12a, 607.2d: the choice made as it entered is the new permanent's
+                // (only if it did enter: an effect may have sent it elsewhere instead).
+                if to == Zone::Battlefield {
+                    for &(_, player, chosen) in chosen.iter().filter(|c| c.0 == object) {
+                        execute(
+                            st,
+                            GameAction::SetChosen {
+                                object: new,
+                                player,
+                                chosen,
+                            },
+                        );
+                    }
+                }
                 match cause {
                     MoveCause::Discard => st.emit(Event::Discarded {
                         player: owner,

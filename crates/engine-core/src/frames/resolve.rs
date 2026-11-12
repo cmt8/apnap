@@ -119,6 +119,9 @@ pub enum Work {
         then: Box<Effect>,
         since: u64,
     },
+    /// "Choose a creature type." (CR 608.2c): the controller chooses now; the instructions
+    /// after it read the choice (`ResolveFrame::chosen`).
+    Choose { what: card_model::ChoiceOf },
 }
 
 /// The fixed part of a [`Work::ChooseCards`] (amounts already worked out, CR 608.2h).
@@ -257,6 +260,11 @@ pub struct ResolveFrame {
     /// The card the resolving text is written on: the spell's, or the ability's (which
     /// is another card's than its source's when the ability was given to the source).
     pub card: card_model::CardDefId,
+    /// "The chosen type" of the resolving text (CR 607.2d): what it chose itself while
+    /// resolving ("choose a creature type. Destroy all creatures that aren't of the chosen
+    /// type"), else what was chosen for the ability's source as it entered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen: Vec<card_model::Chosen>,
 }
 
 impl ResolveFrame {
@@ -277,6 +285,7 @@ impl ResolveFrame {
             spell_to: None,
             target_info: Vec::new(),
             card: card_model::CardDefId(0),
+            chosen: Vec::new(),
         }
     }
 
@@ -645,6 +654,37 @@ impl ResolveFrame {
                             ]);
                         }
                         self.work.push(Work::Eval { k, effect: unpaid });
+                    }
+                },
+                Work::Choose { what } => match input.take() {
+                    None if st.in_game(self.controller) => {
+                        let controller = self.controller;
+                        let object = self.object.expect("resolving");
+                        let options = crate::chosen::options(st, controller, what);
+                        self.work.push(Work::Choose { what });
+                        return Flow::ask_one(
+                            Frame::Resolve(Box::new(self)),
+                            controller,
+                            ChoiceKind::Choose {
+                                what,
+                                object,
+                                ability: None,
+                            },
+                            options,
+                        );
+                    }
+                    // CR 800.4a: a player who has left the game chooses nothing.
+                    None => {}
+                    Some(inp) => {
+                        let chosen =
+                            crate::chosen::answer(inp.picked_one().expect("one option is picked"));
+                        st.emit(Event::Chose {
+                            player: self.controller,
+                            object: self.object.expect("resolving"),
+                            chosen,
+                        });
+                        self.chosen.retain(|c| c.of() != chosen.of());
+                        self.chosen.insert(0, chosen);
                     }
                 },
                 Work::IfDone { k, then, since } => {
@@ -1297,6 +1337,7 @@ impl ResolveFrame {
             StackKind::Ability { ability, .. } => ability.card,
         };
         self.targets = top.targets.clone();
+        self.chosen = top.chosen.clone();
         self.source_lki = top.source_lki.clone();
         self.subject = top.subject;
         self.subject_lki = top.subject_lki.clone();
@@ -1410,8 +1451,27 @@ impl ResolveFrame {
     }
 
     /// One instruction. Returns the events it would cause (empty if none or done directly).
-    fn eval(&mut self, st: &mut GameState, k: usize, effect: Effect) -> Vec<Proposed> {
+    fn eval(&mut self, st: &mut GameState, k: usize, mut effect: Effect) -> Vec<Proposed> {
+        // "Of the chosen type": this resolution's choice, or its source's (CR 607.2d) — as
+        // each instruction is carried out (instructions that only hold others hand them on
+        // to be carried out later, after a "choose" before them).
+        let holds_others = matches!(
+            effect,
+            Effect::Seq(_) | Effect::May(_) | Effect::PlayerMay { .. } | Effect::IfDone { .. }
+        );
+        if !holds_others && !self.chosen.is_empty() && effect.refers_to_chosen() {
+            let chosen = self.chosen.clone();
+            effect.selectors_mut(&mut |s| {
+                if let alloc::borrow::Cow::Owned(b) = crate::chosen::bind(s, &chosen) {
+                    *s = b;
+                }
+            });
+        }
         match effect {
+            Effect::Choose(what) => {
+                self.work.push(Work::Choose { what });
+                Vec::new()
+            }
             Effect::Seq(v) => {
                 for e in v.into_iter().rev() {
                     self.work.push(Work::Eval {

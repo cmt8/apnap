@@ -13,6 +13,7 @@ extern crate std;
 
 pub mod actions;
 pub mod agent;
+pub mod chosen;
 pub mod config;
 pub mod decision;
 pub mod effects;

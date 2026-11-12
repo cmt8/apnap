@@ -249,6 +249,20 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
             }
         }
     }
+    // CR 607.2d: "the chosen type / color" needs an ability of the card that chooses it.
+    for (refers, choice) in [
+        (
+            text.contains("chosen: Some(Type)")
+                || text.contains("chosen: Some(NotType)")
+                || text.contains("AddChosenType"),
+            "Choose(CreatureType)",
+        ),
+        (text.contains("chosen: Some(Color)"), "Choose(Color)"),
+    ] {
+        if refers && !text.contains(choice) {
+            p.push(format!("refers to a choice no ability makes ({choice})"));
+        }
+    }
     // The abilities lasting effects carry ("target creature can't be blocked this turn").
     let mut lasting: Vec<usize> = Vec::new();
     for list in text.split("Lasting { abilities: [").skip(1) {
@@ -861,7 +875,18 @@ fn amounts_of_targets(e: &Effect, out: &mut Vec<u8>, hands: &mut Vec<PlayerRef>)
 }
 
 /// A selector used where "another" has no meaning must not say it.
-fn selector(_s: &card_model::Selector, _p: &mut dyn FnMut(String)) {}
+fn selector(s: &card_model::Selector, p: &mut dyn FnMut(String)) {
+    // "Of the chosen type" is the only subtype asked for; "of the chosen color" the only color.
+    match s.chosen {
+        Some(card_model::OfChosen::Type) if !s.subtypes.is_empty() => {
+            p("a selector of the chosen type that names subtypes too".into())
+        }
+        Some(card_model::OfChosen::Color) if !s.colors.is_empty() => {
+            p("a selector of the chosen color that names colors too".into())
+        }
+        _ => {}
+    }
+}
 
 fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String)) {
     let slot = |t: &TargetRef| match t {
@@ -947,6 +972,7 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             }
         }
         Effect::SetX(a) => amount(a, p),
+        Effect::Choose(_) => {}
         Effect::May(inner) => check_effect(inner, mode, has_x, p),
         Effect::IfDone { first, then } => {
             check_effect(first, mode, has_x, p);

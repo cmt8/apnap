@@ -366,6 +366,23 @@ pub fn entry_choice(
             with: ReplaceWith::EntersTappedUnlessYou(act) | ReplaceWith::EntersOnlyIfYou(act),
             ..
         } => act,
+        // "As this enters, choose a creature type / a color" (CR 614.12a): always asked —
+        // by the player it will enter under the control of (CR 109.5).
+        AbilityDef::Replacement {
+            with: ReplaceWith::Choose(what),
+            ..
+        } => {
+            let player = entering_controller(st, ev)?;
+            return Some((
+                player,
+                ChoiceKind::Choose {
+                    what: *what,
+                    object: source,
+                    ability: Some(ability),
+                },
+                crate::chosen::options(st, player, *what),
+            ));
+        }
         _ => return None,
     };
     let player = entering_controller(st, ev)?;
@@ -424,6 +441,15 @@ pub fn apply_chosen(
         unreachable!("only an ability asks as it applies")
     };
     let (act, otherwise) = match st.catalog.ability(ability).clone() {
+        // The choice itself is kept by the Apply frame until the permanent has entered
+        // (`ApplyFrame::chosen`); the event is otherwise unchanged.
+        AbilityDef::Replacement {
+            with: ReplaceWith::Choose(_),
+            ..
+        } => {
+            st.emit(crate::events::Event::Replaced { source });
+            return (ev, Vec::new());
+        }
         AbilityDef::Replacement {
             with: ReplaceWith::EntersTappedUnlessYou(act),
             ..
@@ -506,7 +532,8 @@ fn damage_object_hit(st: &GameState, filter: &ObjFilter, id: ObjectId, who: Bear
             (c, facts)
         }
     };
-    crate::layers::matches_parts(sel, &c, facts, who.source, who.controller)
+    let sel = crate::chosen::bind_for(st, sel, who.source);
+    crate::layers::matches_parts(&sel, &c, facts, who.source, who.controller)
 }
 
 fn applies(st: &GameState, who: Bearer<'_>, replaces: &Replaces, ev: &Proposed) -> bool {
@@ -593,7 +620,7 @@ fn applies(st: &GameState, who: Bearer<'_>, replaces: &Replaces, ev: &Proposed) 
             o.zone == Zone::Battlefield && {
                 let (attacking, blocking) = crate::layers::combat_role(st, *object);
                 crate::layers::matches_parts(
-                    sel,
+                    &crate::chosen::bind_for(st, sel, source),
                     &crate::layers::chars(st, *object),
                     crate::layers::Facts {
                         id: *object,
@@ -631,7 +658,7 @@ fn applies(st: &GameState, who: Bearer<'_>, replaces: &Replaces, ev: &Proposed) 
             o.zone != Zone::Battlefield
                 && *object != source
                 && crate::layers::matches_parts(
-                    sel,
+                    &crate::chosen::bind_for(st, sel, source),
                     &crate::layers::chars(st, *object),
                     crate::layers::Facts {
                         id: *object,
@@ -839,6 +866,8 @@ fn modify(mut ev: Proposed, with: ReplaceWith) -> Proposed {
             | ReplaceWith::EntersTappedUnless(_)
             | ReplaceWith::EntersTappedUnlessYou(_),
         ) => *tapped = true,
+        // The choice is kept by the Apply frame (`entry_choice`, `apply_chosen`).
+        (Proposed::Move { .. }, ReplaceWith::Choose(_)) => {}
         (Proposed::Move { counters, .. }, ReplaceWith::EntersWithCounters { kind, n }) => {
             if *n > 0 {
                 counters.push((*kind, *n))

@@ -76,6 +76,9 @@ pub struct Lki {
     pub attacking: bool,
     #[serde(default)]
     pub blocking: bool,
+    /// What was chosen for it as it entered (CR 607.2d).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen: Vec<card_model::Chosen>,
 }
 
 pub(crate) fn snapshot(st: &GameState, id: ObjectId) -> Lki {
@@ -90,6 +93,7 @@ pub(crate) fn snapshot(st: &GameState, id: ObjectId) -> Lki {
         tapped: o.tapped,
         attacking,
         blocking,
+        chosen: o.chosen.clone(),
     }
 }
 
@@ -104,8 +108,12 @@ fn filter_hit(
     source: ObjectId,
     controller: PlayerId,
     host: Option<ObjectId>,
+    chosen: &[card_model::Chosen],
 ) -> bool {
-    let matches = |sel: &Selector| matches_parts(sel, c, facts, source, controller);
+    // "Of the chosen type": the source's choice (CR 607.2d).
+    let matches = |sel: &Selector| {
+        matches_parts(&crate::chosen::bind(sel, chosen), c, facts, source, controller)
+    };
     match filter {
         ObjFilter::This => id == source,
         ObjFilter::Matching(sel) => matches(sel),
@@ -136,7 +144,7 @@ pub(crate) fn condition_holds(
             st.zones
                 .list(crate::zones::Zone::Graveyard, controller)
                 .iter()
-                .filter(|&&id| crate::targeting::card_matches(st, id, cards))
+                .filter(|&&id| crate::targeting::card_matches(st, id, &crate::chosen::bind_for(st, cards, source)))
                 .count()
                 >= *at_least as usize
         }
@@ -180,6 +188,8 @@ struct Source<'a> {
     lki: Option<Characteristics>,
     /// What it is attached to (not known for a source that has left).
     host: Option<ObjectId>,
+    /// What was chosen for it as it entered (CR 607.2d), as it last existed.
+    chosen: Vec<card_model::Chosen>,
 }
 
 fn battlefield_sources(st: &GameState) -> Vec<Source<'_>> {
@@ -193,6 +203,7 @@ fn battlefield_sources(st: &GameState) -> Vec<Source<'_>> {
             abilities: abilities(st, id),
             lki: None,
             host: st.object(id).attached_to,
+            chosen: st.object(id).chosen.clone(),
         })
         .collect()
 }
@@ -320,7 +331,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                             attacking,
                             blocking,
                         };
-                        if filter_hit(filter, e, &c, facts, src.id, src.controller, src.host) {
+                        if filter_hit(filter, e, &c, facts, src.id, src.controller, src.host, &src.chosen) {
                             found.push(PendingTrigger {
                                 controller: src.controller,
                                 source: src.id,
@@ -355,6 +366,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                     .collect(),
                 lki: Some(l.chars.clone()),
                 host: None,
+                chosen: l.chosen.clone(),
             });
         }
         for src in &sources {
@@ -391,6 +403,7 @@ pub(crate) fn detect_events(st: &mut GameState, events: &[Event], lki: &BTreeMap
                             src.id,
                             src.controller,
                             src.host,
+                            &src.chosen,
                         ) {
                             found.push(PendingTrigger {
                                 controller: src.controller,
@@ -510,6 +523,7 @@ pub(crate) fn detect_attacks(st: &mut GameState, attackers: &[ObjectId]) {
                         src.id,
                         src.controller,
                         src.host,
+                        &src.chosen,
                     ) {
                         // "Defending player" (CR 506.2): the player it attacks.
                         let defender = st.combat.as_ref().and_then(|c| {
@@ -803,7 +817,7 @@ fn object_hit(
             .is_some_and(|o| o.zone == crate::zones::Zone::Battlefield);
     match filter {
         ObjFilter::Matching(_) if !on_battlefield => false,
-        _ => filter_hit(filter, id, &c, facts, src.id, src.controller, src.host),
+        _ => filter_hit(filter, id, &c, facts, src.id, src.controller, src.host, &src.chosen),
     }
 }
 
@@ -960,6 +974,7 @@ fn detect_cycled(st: &mut GameState, player: PlayerId, card: ObjectId) {
             abilities: abilities(st, card),
             lki: None,
             host: None,
+            chosen: st.object(card).chosen.clone(),
         });
     }
     let mut found = Vec::new();
@@ -1023,7 +1038,11 @@ pub(crate) fn detect_cast(st: &mut GameState, caster: PlayerId, spell: ObjectId)
                         || types.iter().any(|t| spell_chars.is(*t))
                         || spells
                             .iter()
-                            .any(|s| crate::targeting::card_matches(st, spell, s)))
+                            .any(|s| {
+                            // "A creature spell of the chosen type" (CR 607.2d).
+                            let s = crate::chosen::bind(s, &src.chosen);
+                            crate::targeting::card_matches(st, spell, &s)
+                        }))
                 {
                     found.push(PendingTrigger {
                         controller: src.controller,
@@ -1094,6 +1113,7 @@ mod tests {
                 source,
                 you,
                 None,
+                &[],
             )
         };
         assert!(hit(1, &["Elf"]), "the source, though it isn't a Zombie");
@@ -1111,7 +1131,8 @@ mod tests {
             facts(1),
             source,
             you,
-            None
+            None,
+            &[]
         ));
         assert!(filter_hit(
             &ObjFilter::This,
@@ -1120,7 +1141,8 @@ mod tests {
             facts(1),
             source,
             you,
-            None
+            None,
+            &[]
         ));
         assert!(!filter_hit(
             &ObjFilter::This,
@@ -1129,7 +1151,8 @@ mod tests {
             facts(2),
             source,
             you,
-            None
+            None,
+            &[]
         ));
     }
 }

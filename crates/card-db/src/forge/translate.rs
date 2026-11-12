@@ -12,6 +12,7 @@
 use super::parse::{Face, Record, Script};
 use card_model::{
     AbilityDef, ActivationZone, Affected, Amount, AsEnters, BasicLandType, Body, Calc, CardDef,
+    ChoiceOf, OfChosen,
     CardDest, CardType, CardZone, Cmp, Color, CombatRule, Condition, ContinuousEffect, Cost,
     CostChoice, CounterKind, DamageBy, DamagePer, DamageTo, EachPlayerAction, Effect, Keyword,
     ManaCost, ManaProduce, ManaRestriction, ManaType, Measure, Mode, ObjFilter, ObjRef, PlayZone,
@@ -760,6 +761,24 @@ impl<'a> Tx<'a> {
                 "untapped" => s.tapped = Some(false),
                 "attacking" => s.attacking = Some(true),
                 "blocking" => s.blocking = Some(true),
+                // "Of the chosen type", "that aren't of the chosen type", "of the chosen
+                // color" (CR 607.2d). One reference to a choice, and no subtype or color of
+                // its own beside it (`Selector::chosen`).
+                "ChosenType" | "IsNotChosenType" | "ChosenColor" => {
+                    let of = match p {
+                        "ChosenType" => OfChosen::Type,
+                        "IsNotChosenType" => OfChosen::NotType,
+                        _ => OfChosen::Color,
+                    };
+                    let clash = s.chosen.is_some()
+                        || (of == OfChosen::Type && !s.subtypes.is_empty())
+                        || (of == OfChosen::Color && !s.colors.is_empty());
+                    if clash {
+                        self.block(format!("filter:.{p} with another"));
+                        ok = false;
+                    }
+                    s.chosen = Some(of);
+                }
                 _ => {
                     if let Some(c) = color(p) {
                         // Forge's `+` is "and": "Card.Red+White" is red and white, which
@@ -1763,6 +1782,17 @@ impl<'a> Tx<'a> {
             "DestroyAll" => {
                 let sel = self.valid_cards(&rd, api);
                 Effect::DestroyAll(sel?)
+            }
+            // "Choose a creature type. [Instructions about the chosen type.]" (CR 608.2c).
+            // Forge keeps the choice on the card; the engine keeps it for the resolution
+            // only, which is the same for a spell. A permanent's ability that chooses as it
+            // resolves would leave the choice on the permanent for its other abilities.
+            "ChooseType" | "ChooseColor" => {
+                if !self.in_spell {
+                    self.block(format!("{api}:in an ability of a permanent"));
+                    return None;
+                }
+                Effect::Choose(self.choice(&rd, api)?)
             }
             "DamageAll" => {
                 let amount = rd.get("NumDmg").and_then(|n| self.amount(n, chain));
@@ -3301,8 +3331,16 @@ impl<'a> Tx<'a> {
     /// not compiled.)
     fn etb_replacement(&mut self, k: &str) -> Option<AbilityDef> {
         let parts: Vec<&str> = k.splitn(6, ':').collect();
+        // "As this enters, choose a creature type / a color" (CR 614.1c, 614.12a).
+        if let [_, "Other", svar] = parts.as_slice() {
+            return self.etb_choice(svar);
+        }
         let [_, "Other", svar, "Mandatory", "Battlefield", valid] = parts.as_slice() else {
-            self.block("kw:ETBReplacement");
+            match parts.get(1) {
+                // "Enters as a copy": another kind of entering (CR 707), not compiled.
+                Some(&"Copy") => self.block("kw:ETBReplacement:Copy"),
+                _ => self.block("kw:ETBReplacement"),
+            }
             return None;
         };
         let Some(rec) = self.records.iter().find(|(n, _)| n == svar).map(|(_, r)| r) else {
@@ -3328,6 +3366,63 @@ impl<'a> Tx<'a> {
             replaces: Replaces::OtherEnters(sel?),
             with: Self::enters_with(kind?, amount?),
         })
+    }
+
+    /// `K:ETBReplacement:Other:<SVar>` whose SVar is `DB$ ChooseType | Type$ Creature` or
+    /// `DB$ ChooseColor`, chosen by the permanent's controller: "As this enters, choose a
+    /// creature type / a color." Any other effect there is named by its API.
+    fn etb_choice(&mut self, svar: &str) -> Option<AbilityDef> {
+        let Some(rec) = self.records.iter().find(|(n, _)| n == svar).map(|(_, r)| r) else {
+            self.block("kw:ETBReplacement");
+            return None;
+        };
+        let api = match rec.head() {
+            Some(("DB", api @ ("ChooseType" | "ChooseColor"))) => api,
+            Some((_, api)) => {
+                self.block(format!("kw:ETBReplacement:{api}"));
+                return None;
+            }
+            None => {
+                self.block("kw:ETBReplacement");
+                return None;
+            }
+        };
+        let rec = self.sub(svar)?;
+        let rd = Rd::new(rec, format!("ETBReplacement {api}"));
+        let what = self.choice(&rd, api);
+        if rd.get("SubAbility").is_some() {
+            self.block(format!("kw:ETBReplacement:{api}+SubAbility"));
+            return None;
+        }
+        rd.finish(&mut self.blockers);
+        Some(AbilityDef::Replacement {
+            replaces: Replaces::ThisEnters,
+            with: ReplaceWith::Choose(what?),
+        })
+    }
+
+    /// What a `ChooseType` / `ChooseColor` record has its controller choose: a creature
+    /// type (`Type$ Creature`: any of CR 205.3m) or one of the five colors (CR 105.4). Other
+    /// families of types, restricted lists, other choosers and several colors are named.
+    fn choice(&mut self, rd: &Rd<'a>, api: &str) -> Option<ChoiceOf> {
+        match rd.get("Defined") {
+            None | Some("You") => {}
+            Some(other) => {
+                self.block(format!("{api}:chooser {}", shape(other)));
+                return None;
+            }
+        }
+        match api {
+            "ChooseType" => match rd.get("Type") {
+                Some("Creature") => Some(ChoiceOf::CreatureType),
+                other => {
+                    self.block(format!("ChooseType:{}", other.unwrap_or("?")));
+                    None
+                }
+            },
+            "ChooseColor" => Some(ChoiceOf::Color),
+            _ => unreachable!("not a choice: {api}"),
+        }
     }
 
     /// `RestrictValid$` of a mana ability: `Spell.<card filter>` and

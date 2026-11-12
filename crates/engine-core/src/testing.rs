@@ -67,6 +67,7 @@ impl Scenario {
                 deathtouch_damage: false,
                 attached_to: None,
                 last_controller: owner,
+                chosen: Vec::new(),
             },
         );
         if zone == Zone::Stack {
@@ -82,6 +83,7 @@ impl Scenario {
                 targets: Vec::new(),
                 sacrificed_power: 0,
                 facts: Default::default(),
+                chosen: Vec::new(),
             });
         } else {
             self.st.zones.list_mut(zone, owner).push(id);

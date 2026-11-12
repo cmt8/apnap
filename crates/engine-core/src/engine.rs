@@ -162,6 +162,7 @@ pub fn new_game_with_commanders(
                     deathtouch_damage: false,
                     attached_to: None,
                     last_controller: owner,
+                    chosen: Vec::new(),
                 },
             );
             if zone == Zone::Command {

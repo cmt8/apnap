@@ -406,6 +406,8 @@ pub fn option_line(v: &PlayerView, o: &OptionDesc) -> String {
                 ability.index
             )
         }
+        OptionDesc::CreatureType { name } => name.name().into(),
+        OptionDesc::Color { color } => format!("{color:?}").to_lowercase(),
     }
 }
 

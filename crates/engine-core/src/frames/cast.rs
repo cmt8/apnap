@@ -313,7 +313,7 @@ pub(crate) fn cost_reduction(st: &GameState, p: PlayerId, card: ObjectId) -> u32
         // CLAUDE.md invariant 4: only abilities the permanent currently has.
         for (_, a) in abilities(st, id) {
             if let AbilityDef::CostReduction { spells, amount } = a
-                && crate::layers::matches_parts(spells, &c, facts, id, p)
+                && crate::layers::matches_parts(&crate::chosen::bind_for(st, spells, id), &c, facts, id, p)
             {
                 total += amount;
             }
@@ -356,7 +356,16 @@ fn payee_of(source: &CastSource) -> Option<Payee> {
 }
 
 /// CR 106.6: may mana restricted by `r` pay for `payee`, as `p` spends it?
-fn may_spend(st: &GameState, p: PlayerId, r: &card_model::ManaRestriction, payee: Payee) -> bool {
+fn may_spend(
+    st: &GameState,
+    p: PlayerId,
+    r: &card_model::ManaRestriction,
+    chosen: &[card_model::Chosen],
+    payee: Payee,
+) -> bool {
+    // "A creature spell of the chosen type": the choice of the mana's source as it made
+    // the mana (CR 607.2d); with none (CR 607.5a) the restriction allows nothing of it.
+    let bound = |s| crate::chosen::bind(s, chosen);
     match payee {
         Payee::Spell(card) => {
             let c = chars(st, card);
@@ -371,16 +380,46 @@ fn may_spend(st: &GameState, p: PlayerId, r: &card_model::ManaRestriction, payee
             };
             r.spells
                 .iter()
-                .any(|s| crate::layers::matches_parts(s, &c, facts, card, p))
+                .any(|s| crate::layers::matches_parts(&bound(s), &c, facts, card, p))
         }
         Payee::Ability(source) => {
             let c = chars(st, source);
-            r.abilities
-                .iter()
-                .any(|s| crate::layers::matches(st, s, &c, st.object(source), source, p))
+            r.abilities.iter().any(|s| {
+                let s = bound(s);
+                // (Bound here: `matches` would take the choice of the ability's source.)
+                s.chosen.is_none()
+                    && crate::layers::matches(st, &s, &c, st.object(source), source, p)
+            })
         }
         Payee::Cost => false,
     }
+}
+
+/// What "the chosen type / color" of mana ability `ability`'s restriction is, as `source`
+/// makes the mana (CR 607.2d): fixed with the mana, whatever becomes of the source.
+fn restriction_choice(
+    st: &GameState,
+    ability: card_model::AbilityId,
+    source: ObjectId,
+) -> Option<card_model::Chosen> {
+    let AbilityDef::Mana {
+        spend: Some(spend), ..
+    } = st.catalog.ability(ability)
+    else {
+        return None;
+    };
+    let of = spend
+        .spells
+        .iter()
+        .chain(&spend.abilities)
+        .find_map(|s| s.chosen)?;
+    let want = match of {
+        card_model::OfChosen::Type | card_model::OfChosen::NotType => {
+            card_model::ChoiceOf::CreatureType
+        }
+        card_model::OfChosen::Color => card_model::ChoiceOf::Color,
+    };
+    st.object(source).chosen(want)
 }
 
 /// The restriction on a unit of restricted mana in a pool.
@@ -402,7 +441,7 @@ pub(crate) fn usable_pool(st: &GameState, p: PlayerId, payee: Option<Payee>) -> 
     let mut pool = st.player(p).mana_pool;
     if let Some(payee) = payee {
         for r in &st.player(p).restricted_mana {
-            if may_spend(st, p, restriction(st, r), payee) {
+            if may_spend(st, p, restriction(st, r), r.chosen.as_slice(), payee) {
                 pool.add(r.mana, r.amount);
             }
         }
@@ -482,7 +521,7 @@ pub(crate) fn mana_sources(
                 continue;
             }
             if let (Some(r), Some(payee)) = (spend, payee)
-                && !may_spend(st, p, r, payee)
+                && !may_spend(st, p, r, &st.object(id).chosen, payee)
             {
                 continue;
             }
@@ -1364,7 +1403,7 @@ impl CastFrame {
                 for (i, r) in st.player(p).restricted_mana.iter().enumerate() {
                     let n = &mut need[r.mana.index()];
                     let amount = r.amount.min(*n);
-                    if amount > 0 && may_spend(st, p, restriction(st, r), payee) {
+                    if amount > 0 && may_spend(st, p, restriction(st, r), r.chosen.as_slice(), payee) {
                         *n -= amount;
                         release.push((i as u32, amount));
                     }
@@ -1503,6 +1542,7 @@ pub(crate) fn tap_for_mana(
                     player: p,
                     mana,
                     ability,
+                    chosen: restriction_choice(st, ability, source),
                 },
                 None => GameAction::AddMana { player: p, mana },
             },

@@ -117,7 +117,8 @@ fn effect_polarity(e: &Effect) -> Polarity {
         | Effect::DamageEach { .. }
         | Effect::ApplyAll { .. }
         | Effect::Mill { .. }
-        | Effect::SetX(_) => Polarity::Neutral,
+        | Effect::SetX(_)
+        | Effect::Choose(_) => Polarity::Neutral,
     }
 }
 
@@ -156,7 +157,8 @@ fn continuous_polarity(effects: &[ContinuousEffect]) -> Polarity {
             ContinuousEffect::SetColors(_)
             | ContinuousEffect::SwitchPT
             | ContinuousEffect::SetPTBy { .. }
-            | ContinuousEffect::RemoveTypes(_) => {}
+            | ContinuousEffect::RemoveTypes(_)
+            | ContinuousEffect::AddChosenType => {}
         }
     }
     Polarity::Neutral
@@ -179,6 +181,7 @@ fn kw_value(k: Keyword) -> i64 {
         | Keyword::Reach
         | Keyword::Flash
         | Keyword::Flanking => 1,
+        Keyword::Changeling => 0,
         Keyword::Defender => -1,
     }
 }

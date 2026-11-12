@@ -11,7 +11,10 @@
 
 extern crate alloc;
 
+pub mod chosen;
 pub mod describe;
+
+pub use chosen::{CREATURE_TYPES, ChoiceOf, Chosen, CreatureType, OfChosen, is_creature_type};
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -396,6 +399,10 @@ pub enum Keyword {
     /// flanking, the blocking creature gets -1/-1 until end of turn." The keyword marks
     /// who has it; the trigger is an ability of the card.
     Flanking,
+    /// CR 702.73a: "This object is every creature type." A characteristic-defining ability
+    /// (CR 604.3): it works in every zone and is applied first in layer 4 (CR 613.3), so an
+    /// object that loses it later in the walk (layer 6) is still every creature type.
+    Changeling,
 }
 
 /// One ability printed on a card (CR 113).
@@ -623,6 +630,12 @@ pub struct Selector {
     /// Not used for cards outside the battlefield, where `controller` is the owner.
     #[serde(default)]
     pub owner: Who,
+    /// "Of the chosen type" / "that aren't of the chosen type" / "of the chosen color":
+    /// compared with the choice of the ability's source (CR 607.2d) where the selector is
+    /// used. A selector with `Type` has no `subtypes` of its own, with `Color` no `colors`
+    /// (card-db sees to that).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<OfChosen>,
 }
 
 impl Selector {
@@ -913,6 +926,10 @@ pub enum ContinuousEffect {
     /// stay, as a God that isn't a creature is still a God). CR 208.3: a permanent that
     /// isn't a creature has no power or toughness.
     RemoveTypes(Vec<CardType>),
+    /// Layer 4: "is the chosen type in addition to its other types" — the creature type
+    /// chosen for the effect's source (CR 607.2d). Nothing if none was chosen (CR 607.5a);
+    /// only a creature or kindred gains it (CR 205.3d).
+    AddChosenType,
 }
 
 /// Events a static replacement effect watches for (CR 614). M2 vocabulary.
@@ -987,6 +1004,10 @@ pub enum ReplaceWith {
     EntersOnlyIfYou(AsEnters),
     /// "… reveal it and shuffle it into its owner's library instead" (CR 701.20a).
     RevealShuffleIntoLibrary,
+    /// "As this permanent enters, choose a creature type / a color" (CR 614.1c, 614.12a):
+    /// chosen as the event is modified, by the player it will enter under the control of;
+    /// the permanent has the choice from the moment it is on the battlefield (CR 607.2d).
+    Choose(ChoiceOf),
 }
 
 /// What a player may do as a permanent enters (CR 614.12a) so that it enters untapped.
@@ -1527,6 +1548,154 @@ pub enum Effect {
         first: Box<Effect>,
         then: Box<Effect>,
     },
+    /// "Choose a creature type / a color.": the controller chooses as this resolves (CR
+    /// 608.2c); "the chosen type" in the instructions after it is that choice (CR 607.2d).
+    Choose(ChoiceOf),
+}
+
+impl Effect {
+    /// Every selector in the instruction — what it acts on, what it counts — for `f` to
+    /// look at or change ("of the chosen type" is filled in as a spell resolves).
+    pub fn selectors_mut(&mut self, f: &mut dyn FnMut(&mut Selector)) {
+        let cost = |c: &mut Cost, f: &mut dyn FnMut(&mut Selector)| {
+            for choice in [&mut c.sacrifice, &mut c.discard].into_iter().flatten() {
+                choice.what.iter_mut().for_each(&mut *f);
+            }
+        };
+        let parts = |es: &mut Vec<ContinuousEffect>, f: &mut dyn FnMut(&mut Selector)| {
+            for e in es {
+                e.selectors_mut(f);
+            }
+        };
+        match self {
+            Effect::Seq(v) | Effect::Together(v) => v.iter_mut().for_each(|e| e.selectors_mut(f)),
+            Effect::May(e) | Effect::PlayerMay { effect: e, .. } => e.selectors_mut(f),
+            Effect::IfDone { first, then } => {
+                first.selectors_mut(f);
+                then.selectors_mut(f);
+            }
+            Effect::Pay {
+                cost: c,
+                paid,
+                unpaid,
+                ..
+            } => {
+                cost(c, f);
+                paid.selectors_mut(f);
+                unpaid.selectors_mut(f);
+            }
+            Effect::DealDamage { amount, .. }
+            | Effect::Draw { amount, .. }
+            | Effect::GainLife { amount, .. }
+            | Effect::LoseLife { amount, .. }
+            | Effect::DamageEachPlayer { amount }
+            | Effect::Mill { amount, .. }
+            | Effect::SetX(amount)
+            | Effect::Discard { amount, .. }
+            | Effect::Scry { amount, .. }
+            | Effect::Surveil { amount, .. }
+            | Effect::AddMana { amount, .. }
+            | Effect::CreateToken { count: amount, .. }
+            | Effect::PutCounters { count: amount, .. } => amount.selectors_mut(f),
+            Effect::DestroyAll(s) | Effect::TapAll(s) | Effect::UntapAll(s) => f(s),
+            Effect::DamageEach { each, amount } => {
+                f(each);
+                amount.selectors_mut(f);
+            }
+            Effect::Sacrifice { what, amount, .. }
+            | Effect::PutCountersAll {
+                what,
+                count: amount,
+                ..
+            } => {
+                f(what);
+                amount.selectors_mut(f);
+            }
+            Effect::ChooseCards { cards, count, .. } | Effect::Dig { cards, count, .. } => {
+                cards.iter_mut().for_each(&mut *f);
+                count.selectors_mut(f);
+            }
+            Effect::MoveAll { cards, .. } => cards.iter_mut().for_each(&mut *f),
+            Effect::Apply { effects, .. } => parts(effects, f),
+            Effect::ApplyAll {
+                affected, effects, ..
+            } => {
+                f(affected);
+                parts(effects, f);
+            }
+            Effect::Counter { .. }
+            | Effect::EachPlayer(_)
+            | Effect::Destroy { .. }
+            | Effect::ReturnToHand { .. }
+            | Effect::PreventNext { .. }
+            | Effect::Exile { .. }
+            | Effect::ExileGraveyard { .. }
+            | Effect::ReturnToBattlefield { .. }
+            | Effect::Tap { .. }
+            | Effect::Untap { .. }
+            | Effect::DiscardHand { .. }
+            | Effect::SacrificeThis
+            | Effect::AttachThis { .. }
+            | Effect::PutInto { .. }
+            | Effect::ThisSpellTo { .. }
+            | Effect::Lasting { .. }
+            | Effect::Choose(_) => {}
+        }
+    }
+
+    /// Does any selector of the instruction refer to a choice ("of the chosen type")?
+    pub fn refers_to_chosen(&self) -> bool {
+        let mut found = false;
+        self.clone()
+            .selectors_mut(&mut |s| found |= s.chosen.is_some());
+        found
+    }
+}
+
+impl ContinuousEffect {
+    /// The selectors of the amounts in it ("+1/+1 for each Elf you control").
+    pub fn selectors_mut(&mut self, f: &mut dyn FnMut(&mut Selector)) {
+        match self {
+            ContinuousEffect::ModifyPTBy { power, toughness } => {
+                power.amount.selectors_mut(f);
+                toughness.amount.selectors_mut(f);
+            }
+            ContinuousEffect::SetPTBy { power, toughness } => {
+                for a in [power, toughness].into_iter().flatten() {
+                    a.selectors_mut(f);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Amount {
+    /// The selectors of what it counts.
+    pub fn selectors_mut(&mut self, f: &mut dyn FnMut(&mut Selector)) {
+        match self {
+            Amount::Count(s) | Amount::TotalPower(s) | Amount::Greatest { of: s, .. } => f(s),
+            Amount::CardsIn { cards, .. } => cards.iter_mut().for_each(f),
+            Amount::Calc(base, _) => base.selectors_mut(f),
+            Amount::IfAtLeast { test, .. } => test.selectors_mut(f),
+            Amount::Fixed(_)
+            | Amount::TriggeringPower
+            | Amount::TriggeringToughness
+            | Amount::X
+            | Amount::SourcePower
+            | Amount::SacrificedPower
+            | Amount::SourceToughness
+            | Amount::Domain
+            | Amount::Devotion(_)
+            | Amount::HandSize
+            | Amount::LifeTotal
+            | Amount::TriggeringAmount
+            | Amount::Players(_)
+            | Amount::LifeAmong { .. }
+            | Amount::OfTarget { .. }
+            | Amount::HandOf(_) => {}
+        }
+    }
 }
 
 /// A zone an effect takes cards out of as it resolves.
