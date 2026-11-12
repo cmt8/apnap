@@ -183,7 +183,7 @@ fn what_a_mana_ability_also_does_happens_at_once() {
     let def = s.st.catalog.get(s.st.object(reefs[0]).card);
     assert_eq!(
         card_model::describe::ability_text(def, &def.abilities[1]),
-        "{T}: Add {U} or {R}. This deals 1 damage to you."
+        "{T}: Add {U} or {R}. This land deals 1 damage to you."
     );
 }
 

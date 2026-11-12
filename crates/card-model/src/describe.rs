@@ -107,11 +107,13 @@ fn pluralize(s: &str) -> String {
     };
     let plural = match word {
         // The same in the plural.
-        "Plains" | "Aetherborn" | "Aurochs" | "Bison" | "Borg" | "Caribou" | "Djinn" | "Efreet"
-        | "Eldrazi" | "Fish" | "Hirogen" | "Jellyfish" | "Kavu" | "Kithkin" | "Kor" | "Merfolk"
-        | "Metathran" | "Moonfolk" | "Myr" | "Nephilim" | "Ocampa" | "Sheep" | "Slith"
-        | "Soltari" | "Starfish" | "Thalakos" | "Treefolk" | "Trill" | "Vedalken" | "Vorta"
-        | "Xindi" | "Zubera" | "Dauthi" | "Lammasu" | "Gorn" => word.to_string(),
+        "Plains" | "Equipment" | "Aetherborn" | "Aurochs" | "Bison" | "Borg" | "Caribou"
+        | "Djinn" | "Efreet" | "Eldrazi" | "Fish" | "Hirogen" | "Jellyfish" | "Kavu"
+        | "Kithkin" | "Kor" | "Merfolk" | "Metathran" | "Moonfolk" | "Myr" | "Nephilim"
+        | "Ocampa" | "Sheep" | "Slith" | "Soltari" | "Starfish" | "Thalakos" | "Treefolk"
+        | "Trill" | "Vedalken" | "Vorta" | "Xindi" | "Zubera" | "Dauthi" | "Lammasu" | "Gorn" => {
+            word.to_string()
+        }
         "Elf" => "Elves".to_string(),
         "Dwarf" => "Dwarves".to_string(),
         "Wolf" => "Wolves".to_string(),
@@ -1053,7 +1055,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             .join(". Then "),
         Effect::DealDamage { to, amount: a, by } => {
             let who = match by {
-                DamageBy::This => "this".to_string(),
+                DamageBy::This => "this permanent".to_string(),
                 DamageBy::Triggering => "it".to_string(),
                 DamageBy::Target(i) => target(mode, TargetRef::Target(*i)),
             };
@@ -1064,7 +1066,10 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             format!("{who} deals {} to {to}", amount_of(a, "damage"))
         }
         Effect::DamageEachPlayer { amount: a } => {
-            format!("this deals {} to each player", amount_of(a, "damage"))
+            format!(
+                "this permanent deals {} to each player",
+                amount_of(a, "damage")
+            )
         }
         Effect::Draw { who, amount: a } => {
             format!(
@@ -1196,7 +1201,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
         ),
         Effect::DestroyAll(s) => format!("destroy all {}", selector(s, true)),
         Effect::DamageEach { each, amount: a } => format!(
-            "this deals {} to each {}",
+            "this permanent deals {} to each {}",
             amount_of(a, "damage"),
             selector(each, false)
         ),
@@ -1267,8 +1272,8 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             // that is a choice already says "you may".
             if text.starts_with("you may ") {
                 text
-            } else if let Some(rest) = text.strip_prefix("this deals ") {
-                format!("you may have this deal {rest}")
+            } else if let Some(rest) = text.strip_prefix("this permanent deals ") {
+                format!("you may have this permanent deal {rest}")
             } else if let Some(who) = acting_player(inner).filter(|p| *p != PlayerRef::You) {
                 // "You may have target opponent lose 1 life", not "you may target opponent
                 // loses 1 life".
@@ -3102,8 +3107,8 @@ pub fn this_word(def: &CardDef) -> String {
 
 /// The text with its markers resolved: quoted abilities, the card's own type, and the
 /// tokens an effect creates (described from `tokens`).
-fn render(def: &CardDef, text: &str, tokens: TokenLookup<'_>, depth: u32) -> String {
-    let text = quote_granted(def, text, true);
+fn render(def: &CardDef, text: &str, tokens: TokenLookup<'_>, depth: u32, own: bool) -> String {
+    let text = quote_granted(def, text, own);
     expand_tokens(&text, tokens, depth).replace(KEEP, "")
 }
 
@@ -3212,7 +3217,7 @@ fn token_phrase(def: &CardDef, tokens: TokenLookup<'_>, depth: u32) -> (String, 
     for a in &def.abilities {
         with.push(format!(
             "\"{}\"",
-            render(def, &ability(a), tokens, depth + 1)
+            render(def, &ability(a), tokens, depth + 1, true)
         ));
     }
     let mut after = String::new();
@@ -3233,7 +3238,7 @@ pub fn mode_text(def: &CardDef, m: &Mode) -> String {
 
 /// [`mode_text`], describing the tokens it creates from `tokens`.
 pub fn mode_text_in(def: &CardDef, m: &Mode, tokens: TokenLookup<'_>) -> String {
-    render(def, &sentence(mode_effect(m)), tokens, 0)
+    render(def, &sentence(mode_effect(m)), tokens, 0, true)
 }
 
 /// One ability as rules text ("Cycling {2}", "{T}: Add {G}."). `def` is the card the
@@ -3244,7 +3249,10 @@ pub fn ability_text(def: &CardDef, a: &AbilityDef) -> String {
 
 /// [`ability_text`], describing the tokens it creates from `tokens`.
 pub fn ability_text_in(def: &CardDef, a: &AbilityDef, tokens: TokenLookup<'_>) -> String {
-    render(def, &ability(a), tokens, 0)
+    // An ability the card gives to something else is about that something: "this
+    // permanent" is not the card.
+    let own = !(def.granted.contains(a) && !def.abilities.contains(a));
+    render(def, &ability(a), tokens, 0, own)
 }
 
 /// The card's rules text, one line per keyword group / ability.
@@ -3287,7 +3295,7 @@ pub fn rules_text_in(def: &CardDef, tokens: TokenLookup<'_>) -> Vec<String> {
             .iter()
             .filter(enters)
             .chain(def.abilities.iter().filter(|a| !enters(a)))
-            .map(|a| render(def, &ability(a), tokens, 0)),
+            .map(|a| render(def, &ability(a), tokens, 0, true)),
     );
     // What an attached permanent calls the thing it is attached to.
     let host = if def.creature_types.iter().any(|t| t == "Equipment") {
@@ -4224,5 +4232,48 @@ mod tests {
             ..CardDef::default()
         };
         assert_eq!(text(&def), "This enchantment isn't a creature.");
+    }
+
+    #[test]
+    fn an_ability_given_to_others_is_not_about_the_card_that_gives_it() {
+        let ping = AbilityDef::Spell(Body::Effect(with_targets(
+            vec![TargetFilter::AnyTarget],
+            Effect::DealDamage {
+                to: TargetRef::Target(0),
+                amount: Amount::Fixed(1),
+                by: DamageBy::This,
+            },
+        )));
+        let aura = CardDef {
+            name: "Test Aura".into(),
+            card_types: vec![CardType::Enchantment],
+            creature_types: vec!["Aura".into()],
+            abilities: vec![ping.clone()],
+            granted: vec![ping.clone()],
+            ..CardDef::default()
+        };
+        // On the Aura itself it is the Aura; as the Aura gives it, it is whatever has it.
+        let given = CardDef {
+            abilities: Vec::new(),
+            ..aura.clone()
+        };
+        assert_eq!(
+            ability_text(&given, &given.granted[0]),
+            "This permanent deals 1 damage to any target."
+        );
+        assert_eq!(
+            ability_text(&aura, &aura.abilities[0]),
+            "This Aura deals 1 damage to any target."
+        );
+    }
+
+    #[test]
+    fn equipment_and_other_subtypes_with_the_same_plural() {
+        assert_eq!(pluralize("Equipment"), "Equipment");
+        let dwarves = Selector {
+            subtypes: vec!["Dwarf".into(), "Equipment".into()],
+            ..Selector::default()
+        };
+        assert_eq!(selector(&dwarves, true), "Dwarves or Equipment");
     }
 }

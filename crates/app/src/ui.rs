@@ -3174,7 +3174,7 @@ mod tests {
             .expect("the Golem's ability is offered");
         assert_eq!(
             option_label(&v, &cat, &d, option),
-            "Test Golem — {T}: This deals 1 damage to any target."
+            "Test Golem — {T}: This permanent deals 1 damage to any target."
         );
     }
 
