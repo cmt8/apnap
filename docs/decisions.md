@@ -1574,6 +1574,57 @@ Rules text: docs/rules-notes/402-305-401.5-rules-about-players.md.
   that card this turn", effects that remember the cards they exiled); protection on
   players.
 
+## D-073 Replacement effects that change how much; tokens enter the battlefield (2026-11-12)
+Rules text: docs/rules-notes/614-doublers-603.2d-additional-triggers.md (with
+614-616-replacement-prevention.md).
+- **Tokens.** `Replaces::Tokens { token, effect_only }`: "if [an effect would create] one
+  or more [creature] tokens [under your control]" — each kind of token of the event is
+  matched as it would be created (its definition's characteristics, CR 111.3; controlled
+  by its creator, 111.2). With `ReplaceWith::Scale(Calc)` ("twice that many"),
+  `AddTokens { tokens, n }` ("those tokens plus a Food" / "plus that many Squirrels") and
+  `ReplaceTokens(tokens)` ("that many 4/4 Angels instead", "instead create one of each").
+  Only the kinds the effect applies to are scaled or replaced. A replacement can make one
+  event create several kinds of token: `Proposed::CreateTokens.more` (serde default, not
+  serialized when empty) keeps them one event, so a later "plus an additional Food" adds
+  one Food (CR 614.5, 616.1f). `effect_only` only changes the text: every token in this
+  engine is created by an effect.
+- **Counters.** `Replaces::Counters { on, kind, effect_only }`: "if one or more [+1/+1]
+  counters would be put on [a creature you control]" with `ReplaceWith::Scale` ("twice
+  that many", "that many plus one", "minus one"); counters a permanent enters with count
+  (CR 122.6, 614.16), matched as it would exist on the battlefield. Counters on players
+  are blocked (`repl:AddCounter:counters on players`: the engine has none).
+- **Order (CR 616.1):** unchanged pipeline — each effect applies once per event (614.5)
+  and the affected player chooses among those that apply (`ChooseReplacement`), so "plus
+  one" then "twice" gives 4 and the other order 3. The heuristic AI orders them by what
+  they do: for what is good for it (its tokens, +1/+1 counters) add, then multiply, then
+  shrink; for what is bad (damage, -1/-1 counters) prevent, shrink, multiply, then add.
+- **Tokens enter the battlefield (a rules error on main, fixed here).** A created token
+  skipped every effect that modifies how a permanent enters ("each Dragon you control
+  enters with an additional +1/+1 counter", "creatures your opponents control enter
+  tapped"). Now a `CreateTokens` event, once its own replacement effects are applied,
+  becomes one `Proposed::TokenEnters { token, controller, tapped, counters }` per token
+  (CR 616.1g: entering is contained in creating, so doublers are chosen first); those are
+  modified like a card moved onto the battlefield (CR 111.6, 614.1c–d) — other
+  permanents' `OtherEnters` and `Counters`/`PutCountersOnYourPermanents` effects, and the
+  counters a token would enter with are doubled after an effect gives them (616.2). Each
+  token is its own event, so its controller orders effects per token. `GameAction::
+  CreateToken` carries `tapped` and `counters` (entering tapped is not becoming tapped).
+  A token definition can't carry its own "this enters …" replacement (card-db rejects it;
+  no Forge token script has one) — copy tokens of permanents that have one are the copy
+  branch's to handle.
+- **"As it would exist on the battlefield" (CR 614.12)** is now worked out on a copy of the
+  game in which the entering has happened (`replacement::as_it_would_exist`): the permanent
+  with the counters and tapped state the event has so far, its own static abilities and
+  every continuous effect that would apply ("creatures you control are Dragons"). Used for
+  tokens and for cards moved onto the battlefield (`OtherEnters`, `Counters`); before, a
+  moving card was judged by its printed characteristics.
+- **Numbers saturate:** `Calc` was already saturating; counts on objects, damage marked,
+  commander damage and life changes now saturate (`actions.rs`: `life_amount` caps a
+  damage/life amount at `i32::MAX`, `change_life` adds saturating; `layers.rs`: counters
+  to P/T saturate), and one event creates at most `MAX_TOKENS_AT_ONCE` = 10,000 tokens of
+  a kind (`frames/apply.rs`) — a deliberate limit far above any board a game is played to
+  (the harness abandons a game at 1,000 permanents).
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

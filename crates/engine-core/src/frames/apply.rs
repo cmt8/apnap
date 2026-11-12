@@ -159,6 +159,17 @@ impl ApplyFrame {
         while let Some(front) = self.queue.first() {
             let apps = applicable(st, front);
             match apps.as_slice() {
+                // CR 616.1g, 111.2: creating the tokens is modified first; then each token
+                // enters the battlefield, an event of its own that what modifies how
+                // permanents enter applies to (D-073).
+                [] if matches!(front.event, Proposed::CreateTokens { .. }) => {
+                    let p = self.queue.remove(0);
+                    let entering = token_entries(&p.event).into_iter().map(|event| Pending {
+                        event,
+                        applied: Vec::new(),
+                    });
+                    self.queue.splice(0..0, entering);
+                }
                 [] => {
                     let p = self.queue.remove(0);
                     self.ready.push(p.event);
@@ -206,6 +217,34 @@ impl ApplyFrame {
         perform(st, core::mem::take(&mut self.ready));
         Flow::done()
     }
+}
+
+/// The most tokens of one kind one event creates. Doublers make numbers grow without
+/// bound (CR 614.5 example: each applies once, but they multiply); counts saturate at
+/// `u32::MAX`, and no game can hold that many objects. A deliberate limit (D-073): far
+/// above any board a game is played to (the harness abandons a game at 1,000 permanents).
+pub const MAX_TOKENS_AT_ONCE: u32 = 10_000;
+
+/// One `TokenEnters` event for each token a fully modified `CreateTokens` event creates,
+/// kind by kind, in order (CR 111.2: each token enters the battlefield).
+fn token_entries(ev: &Proposed) -> Vec<Proposed> {
+    let Proposed::CreateTokens { controller, .. } = ev else {
+        return Vec::new();
+    };
+    let controller = *controller;
+    crate::replacement::token_kinds(ev)
+        .into_iter()
+        .flat_map(|(token, count)| {
+            // A runaway doubling can't make more objects than a game can hold; the harness
+            // abandons such a game long before this (D-073).
+            (0..count.min(MAX_TOKENS_AT_ONCE)).map(move |_| Proposed::TokenEnters {
+                token,
+                controller,
+                tapped: false,
+                counters: Vec::new(),
+            })
+        })
+        .collect()
 }
 
 /// Perform fully modified events simultaneously, then detect triggers (CR 603.2g).
@@ -373,16 +412,25 @@ pub(crate) fn perform(st: &mut GameState, events: Vec<Proposed>) {
             Proposed::Draw { player } => {
                 execute(st, GameAction::Draw { player });
             }
-            Proposed::CreateTokens {
+            // (Made into `TokenEnters` events before it is ready.)
+            Proposed::CreateTokens { .. } => {}
+            Proposed::TokenEnters {
                 token,
-                count,
                 controller,
+                tapped,
+                counters,
             } => {
                 // CR 800.4b: no tokens for a player who has left the game.
                 if st.in_game(controller) {
-                    for _ in 0..count {
-                        execute(st, GameAction::CreateToken { token, controller });
-                    }
+                    execute(
+                        st,
+                        GameAction::CreateToken {
+                            token,
+                            controller,
+                            tapped,
+                            counters,
+                        },
+                    );
                 }
             }
             Proposed::PutCounters {

@@ -38,6 +38,9 @@ pub enum GameAction {
     CreateToken {
         token: CardDefId,
         controller: PlayerId,
+        /// How it enters, as replacement effects modified it (CR 614.1c–d, 111.6).
+        tapped: bool,
+        counters: Vec<(CounterKind, u32)>,
     },
     /// CR 122.1: put counters on a permanent.
     PutCounters {
@@ -264,12 +267,18 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 let o = st.object_mut(new);
                 o.tapped = tapped;
                 for (kind, n) in counters {
-                    *o.counters.entry(kind).or_default() += n;
+                    let have = o.counters.entry(kind).or_default();
+                    *have = have.saturating_add(n);
                 }
             }
             ActionResult::Moved(new)
         }
-        GameAction::CreateToken { token, controller } => {
+        GameAction::CreateToken {
+            token,
+            controller,
+            tapped,
+            counters,
+        } => {
             let id = st.alloc_object_id();
             let timestamp = st.alloc_timestamp();
             let card_instance = crate::ids::CardInstanceId(st.next_card_instance);
@@ -284,7 +293,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                     controller,
                     zone: Zone::Battlefield,
                     timestamp,
-                    tapped: false,
+                    tapped,
                     damage_marked: 0,
                     summoning_sick: true,
                     counters: Default::default(),
@@ -294,6 +303,11 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                     last_controller: controller,
                 },
             );
+            let o = st.object_mut(id);
+            for (kind, n) in counters {
+                let have = o.counters.entry(kind).or_default();
+                *have = have.saturating_add(n);
+            }
             st.zones.battlefield.push(id);
             st.emit(Event::TokenCreated {
                 object: id,
@@ -304,7 +318,8 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
         }
         GameAction::PutCounters { object, kind, n } => {
             if n > 0 {
-                *st.object_mut(object).counters.entry(kind).or_default() += n;
+                let have = st.object_mut(object).counters.entry(kind).or_default();
+                *have = have.saturating_add(n);
                 st.emit(Event::CountersPut { object, kind, n });
             }
             ActionResult::Done
@@ -592,13 +607,14 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 && st.is_commander(source)
             {
                 let card = st.object(source).card_instance;
-                *st.player_mut(p).commander_damage.entry(card).or_default() += amount;
+                let tally = st.player_mut(p).commander_damage.entry(card).or_default();
+                *tally = tally.saturating_add(amount);
             }
             match target {
-                DamageTarget::Player(p) => change_life(st, p, -(amount as i32)),
+                DamageTarget::Player(p) => change_life(st, p, -life_amount(amount)),
                 DamageTarget::Object(o) => {
                     let obj = st.object_mut(o);
-                    obj.damage_marked += amount;
+                    obj.damage_marked = obj.damage_marked.saturating_add(amount);
                     obj.deathtouch_damage |= deathtouch;
                 }
             }
@@ -606,13 +622,13 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
         }
         GameAction::GainLife { player, amount } => {
             if amount > 0 {
-                change_life(st, player, amount as i32);
+                change_life(st, player, life_amount(amount));
             }
             ActionResult::Done
         }
         GameAction::LoseLife { player, amount } => {
             if amount > 0 {
-                change_life(st, player, -(amount as i32));
+                change_life(st, player, -life_amount(amount));
             }
             ActionResult::Done
         }
@@ -717,9 +733,15 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
     }
 }
 
+/// A damage or life amount as a change of a life total. Amounts saturate (doubled
+/// damage, D-073); a life total can't hold more than `i32::MAX`.
+fn life_amount(amount: u32) -> i32 {
+    i32::try_from(amount).unwrap_or(i32::MAX)
+}
+
 fn change_life(st: &mut GameState, p: PlayerId, delta: i32) {
     let ps = st.player_mut(p);
-    ps.life += delta;
+    ps.life = ps.life.saturating_add(delta);
     let life = ps.life;
     st.emit(Event::LifeChanged {
         player: p,

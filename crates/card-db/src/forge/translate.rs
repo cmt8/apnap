@@ -5137,6 +5137,12 @@ impl<'a> Tx<'a> {
         if event == "Moved" && rd.rec.get("Destination") == Some("Graveyard") {
             return self.moved_to_graveyard(&rd);
         }
+        if event == "CreateToken" {
+            return self.replace_create_token(&rd);
+        }
+        if event == "AddCounter" {
+            return self.replace_add_counter(&rd);
+        }
         // Not compiled yet: named by the event alone, so that it ranks as one feature.
         for key in [
             "ValidCard",
@@ -5149,6 +5155,251 @@ impl<'a> Tx<'a> {
         rd.finish(&mut self.blockers);
         self.block(format!("repl:{event}"));
         None
+    }
+
+    /// Where a replacement effect of this kind works: a permanent's from the battlefield,
+    /// an effect object's from the command zone (D-065). Anything else is a blocker.
+    fn replacement_zone(&mut self, rd: &Rd<'a>, what: &str) -> bool {
+        let ok = match rd.get("ActiveZones") {
+            Some("Battlefield") => !self.in_effect,
+            Some("Command") => self.in_effect,
+            _ => false,
+        };
+        if !ok {
+            self.block(format!("repl:{what} zone"));
+        }
+        ok
+    }
+
+    /// `ReplaceCount$<key>/<math>` (the SVar `name`): the event's number, changed —
+    /// "twice that many", "that many plus one" (D-073).
+    fn replace_count(&mut self, name: &str, key: &str) -> Option<Calc> {
+        let v = self.svar(name).unwrap_or("");
+        let Some(math) = v
+            .strip_prefix("ReplaceCount$")
+            .and_then(|r| r.strip_prefix(key))
+            .and_then(|r| r.strip_prefix('/'))
+        else {
+            self.block(format!("repl:amount {}", shape(v)));
+            return None;
+        };
+        self.replace_math(math)
+    }
+
+    /// Forge's `doXMath` operations that make a number of tokens, counters, damage or life
+    /// larger or smaller: `Twice`, `Thrice`, `Plus.N`, `Minus.N`, `HalfUp`, `HalfDown`.
+    fn replace_math(&mut self, math: &str) -> Option<Calc> {
+        let (op, n) = match math.split_once('.') {
+            Some((op, n)) => (op, n.parse::<u32>().ok()),
+            None => (math, None),
+        };
+        let calc = match (op, n) {
+            ("Twice", None) => Some(Calc::Times(2)),
+            ("Thrice", None) => Some(Calc::Times(3)),
+            ("Times", Some(n)) if n >= 2 => Some(Calc::Times(n)),
+            ("Plus", Some(n)) if n >= 1 => Some(Calc::Plus(n)),
+            ("Minus", Some(n)) if n >= 1 => Some(Calc::Minus(n)),
+            ("HalfUp", None) => Some(Calc::HalfUp),
+            ("HalfDown", None) => Some(Calc::HalfDown),
+            _ => None,
+        };
+        if calc.is_none() {
+            self.block(format!("repl:amount math {}", shape(math)));
+        }
+        calc
+    }
+
+    /// `R:Event$ CreateToken` (D-073): "if an effect would create one or more [creature]
+    /// tokens under your control, it creates twice that many / those tokens plus a Food /
+    /// that many 4/4 Angels instead" — `DB$ ReplaceToken | Type$ Amount|AddToken|ReplaceToken`
+    /// (docs/forge/triggers-statics-replacements-keywords.md §3.3).
+    fn replace_create_token(&mut self, rd: &Rd<'a>) -> Option<AbilityDef> {
+        let zone = self.replacement_zone(rd, "CreateToken");
+        // `ValidPlayer$` is who creates them; in this engine that is who controls them
+        // (CR 111.2), which `ValidToken$`'s "YouCtrl" also says.
+        let mut token = match rd.get("ValidToken") {
+            None => Some(Selector::default()),
+            Some(f) => self.selector(f),
+        };
+        match rd.get("ValidPlayer") {
+            None => {}
+            Some("You") => {
+                if let Some(t) = &mut token {
+                    t.controller = Who::You;
+                }
+            }
+            Some(p) => {
+                self.block(format!("repl:CreateToken.ValidPlayer {}", shape(p)));
+                token = None;
+            }
+        }
+        let effect_only = match rd.get("EffectOnly") {
+            None => Some(false),
+            Some("True") => Some(true),
+            Some(_) => None,
+        };
+        let with = rd.get("ReplaceWith").and_then(|n| self.sub(n));
+        rd.finish(&mut self.blockers);
+        let with = with.and_then(|w| self.replace_token_with(w));
+        if !zone {
+            return None;
+        }
+        Some(AbilityDef::Replacement {
+            replaces: Replaces::Tokens {
+                token: token?,
+                effect_only: effect_only?,
+            },
+            with: with?,
+        })
+    }
+
+    /// `DB$ ReplaceToken | Type$ Amount [| Amount$ <math>]`, `Type$ AddToken | TokenScript$
+    /// <scripts> [| Amount$ N]`, `Type$ ReplaceToken | TokenScript$ <scripts>`.
+    fn replace_token_with(&mut self, rec: &'a Record) -> Option<ReplaceWith> {
+        if rec.head() != Some(("DB", "ReplaceToken")) {
+            self.block(format!(
+                "repl:CreateToken:{}",
+                rec.head().map_or("?", |h| h.1)
+            ));
+            return None;
+        }
+        let rd = Rd::new(rec, "repl ReplaceToken");
+        let kind = rd.get("Type");
+        let scripts = |tx: &mut Self, rd: &Rd<'a>| -> Option<Vec<String>> {
+            let Some(s) = rd.get("TokenScript") else {
+                tx.block("repl:CreateToken:no TokenScript");
+                return None;
+            };
+            let v: Vec<String> = s.split(',').map(|t| t.trim().to_string()).collect();
+            if v.iter().any(|t| t.is_empty() || t == "Chosen") {
+                tx.block("repl:CreateToken:chosen token");
+                return None;
+            }
+            tx.tokens.extend(v.iter().cloned());
+            Some(v)
+        };
+        let with = match kind {
+            Some("Amount") => {
+                let math = rd.get("Amount").unwrap_or("Twice");
+                self.replace_math(math).map(ReplaceWith::Scale)
+            }
+            Some("AddToken") => {
+                let n = match rd.get("Amount") {
+                    None => Some(None),
+                    Some(n) => match n.parse::<u32>() {
+                        Ok(n) if n > 0 => Some(Some(n)),
+                        _ => {
+                            self.block(format!("repl:CreateToken:AddToken amount {}", shape(n)));
+                            None
+                        }
+                    },
+                };
+                match (scripts(self, &rd), n) {
+                    (Some(tokens), Some(n)) => Some(ReplaceWith::AddTokens { tokens, n }),
+                    _ => None,
+                }
+            }
+            Some("ReplaceToken") => scripts(self, &rd).map(ReplaceWith::ReplaceTokens),
+            other => {
+                self.block(format!("repl:CreateToken:Type {}", other.unwrap_or("?")));
+                None
+            }
+        };
+        rd.finish(&mut self.blockers);
+        with
+    }
+
+    /// `R:Event$ AddCounter` (D-073): "if one or more [+1/+1] counters would be put on a
+    /// [creature you control], twice that many / that many plus one are put on it instead"
+    /// — `DB$ ReplaceCounter | Amount$ X` with `X = ReplaceCount$CounterNum/<math>`.
+    fn replace_add_counter(&mut self, rd: &Rd<'a>) -> Option<AbilityDef> {
+        let zone = self.replacement_zone(rd, "AddCounter");
+        if rd.get("ValidPlayer").is_some() {
+            self.block("repl:AddCounter:counters on players");
+        }
+        // `inZoneBattlefield`: on a permanent — one entering too, as Forge judges the
+        // permanent as it would exist there (CR 122.6). Every counter in this engine is on
+        // a permanent, so the property changes nothing.
+        let on = match rd.get("ValidCard") {
+            Some(f) => {
+                let alts: Vec<String> = f
+                    .split(',')
+                    .map(|a| {
+                        let (head, props) = a.trim().split_once('.').unwrap_or((a.trim(), ""));
+                        let props: Vec<&str> = props
+                            .split('+')
+                            .filter(|p| !p.is_empty() && *p != "inZoneBattlefield")
+                            .collect();
+                        if props.is_empty() {
+                            head.to_string()
+                        } else {
+                            format!("{head}.{}", props.join("+"))
+                        }
+                    })
+                    .collect();
+                self.selector(&alts.join(","))
+            }
+            None => {
+                self.block("repl:AddCounter:which");
+                None
+            }
+        };
+        let kind = match rd.get("ValidCounterType") {
+            None => Some(None),
+            Some(k) => self.counter_kind(Some(k)).map(Some),
+        };
+        let effect_only = match rd.get("EffectOnly") {
+            None => Some(false),
+            Some("True") => Some(true),
+            Some(_) => None,
+        };
+        let with = rd.get("ReplaceWith").and_then(|n| self.sub(n));
+        rd.finish(&mut self.blockers);
+        let calc = with.and_then(|w| self.replace_counter_with(w, kind.flatten()));
+        if !zone {
+            return None;
+        }
+        Some(AbilityDef::Replacement {
+            replaces: Replaces::Counters {
+                on: on?,
+                kind: kind?,
+                effect_only: effect_only?,
+            },
+            with: ReplaceWith::Scale(calc?),
+        })
+    }
+
+    /// `DB$ ReplaceCounter | Amount$ X [| ValidCounterType$ <the same kind>] [| ChooseCounter$
+    /// True]`. (`ChooseCounter`: when counters from several players' effects are put at
+    /// once, the affected player picks which the "plus one" is for; an event here comes
+    /// from one effect.)
+    fn replace_counter_with(&mut self, rec: &'a Record, kind: Option<CounterKind>) -> Option<Calc> {
+        if rec.head() != Some(("DB", "ReplaceCounter")) {
+            self.block(format!(
+                "repl:AddCounter:{}",
+                rec.head().map_or("?", |h| h.1)
+            ));
+            return None;
+        }
+        let rd = Rd::new(rec, "repl ReplaceCounter");
+        let same_kind = match rd.get("ValidCounterType") {
+            None => true,
+            Some(k) => self.counter_kind(Some(k)).is_some_and(|k| Some(k) == kind),
+        };
+        rd.get("ChooseCounter");
+        let amount = rd.get("Amount");
+        rd.finish(&mut self.blockers);
+        if !same_kind {
+            self.block("repl:AddCounter:counter type differs");
+            return None;
+        }
+        match amount {
+            Some(x) => self.replace_count(x, "CounterNum"),
+            None => {
+                self.block("repl:AddCounter:no amount");
+                None
+            }
+        }
     }
 
     /// `R:Event$ Moved | Destination$ Battlefield | ReplacementResult$ Updated` — how a

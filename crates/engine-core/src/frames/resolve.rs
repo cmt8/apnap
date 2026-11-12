@@ -1591,6 +1591,7 @@ impl ResolveFrame {
                         token,
                         count,
                         controller,
+                        more: Vec::new(),
                     })
                     .collect()
             }

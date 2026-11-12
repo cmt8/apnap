@@ -216,6 +216,42 @@ fn target_filter_words(f: &TargetFilter) -> String {
     }
 }
 
+/// "If an effect would create one or more creature tokens under your control".
+fn tokens_would(token: &Selector, effect_only: bool) -> String {
+    let kind = spell_kind(token);
+    let tokens = if kind.is_empty() {
+        "tokens".to_string()
+    } else {
+        format!("{kind} tokens")
+    };
+    let whose = match token.controller {
+        Who::Any => "",
+        Who::You => " under your control",
+        Who::Opponent => " under an opponent's control",
+    };
+    if effect_only {
+        format!("If an effect would create one or more {tokens}{whose}")
+    } else {
+        format!("If one or more {tokens} would be created{whose}")
+    }
+}
+
+/// "twice that many", "that many plus 1", "half that much, rounded down".
+fn scaled(c: Calc, v: &str) -> String {
+    match c {
+        Calc::Plus(n) => format!("{v} plus {n}"),
+        Calc::Minus(n) => format!("{v} minus {n}"),
+        Calc::From(n) => format!("{n} minus {v}"),
+        Calc::Times(2) => format!("twice {v}"),
+        Calc::Times(3) => format!("three times {v}"),
+        Calc::Times(n) => format!("{n} times {v}"),
+        Calc::HalfUp => format!("half {v}, rounded up,"),
+        Calc::HalfDown => format!("half {v}, rounded down,"),
+        Calc::AtMost(n) => format!("{v} (at most {n})"),
+        Calc::AtLeast(n) => format!("{v} (at least {n})"),
+    }
+}
+
 fn with_article(s: &str) -> String {
     let vowel = s.starts_with(['a', 'e', 'i', 'o', 'u', 'A', 'E', 'I', 'O', 'U']);
     if s.starts_with("another ") {
@@ -1851,9 +1887,46 @@ fn ability(a: &AbilityDef) -> String {
                 }
                 // Written out by the arm above.
                 Replaces::Damage { .. } => "If damage would be dealt",
+                Replaces::Tokens { token, effect_only } => {
+                    others = tokens_would(token, *effect_only);
+                    others.as_str()
+                }
+                Replaces::Counters {
+                    on,
+                    kind,
+                    effect_only,
+                } => {
+                    let kind = kind.map_or(String::new(), |k| format!("{} ", counter(k)));
+                    let on = with_article(&selector(on, false));
+                    others = if *effect_only {
+                        format!("If an effect would put one or more {kind}counters on {on}")
+                    } else {
+                        format!("If one or more {kind}counters would be put on {on}")
+                    };
+                    others.as_str()
+                }
             };
             match with {
                 ReplaceWith::Twice => format!("{what}, it does so twice as many instead."),
+                ReplaceWith::Scale(c) => {
+                    let noun = match replaces {
+                        Replaces::Tokens { .. } => "of those tokens are created",
+                        Replaces::Counters { .. } => "of those counters are put on it",
+                        _ => "happen",
+                    };
+                    format!("{what}, {} {noun} instead.", scaled(*c, "that many"))
+                }
+                ReplaceWith::AddTokens { tokens, n } => {
+                    let n = n.map_or("that many".to_string(), |n| n.to_string());
+                    format!(
+                        "{what}, those tokens plus {n} {} token(s) are created instead.",
+                        tokens.join(" and ")
+                    )
+                }
+                ReplaceWith::ReplaceTokens(tokens) => format!(
+                    "{what}, that many {} token(s) are created instead.",
+                    join(tokens.clone(), "and")
+                ),
                 ReplaceWith::Exile => format!("{what}, exile it instead."),
                 ReplaceWith::ShuffleIntoLibrary => {
                     format!("{what}, shuffle it into its owner's library instead.")

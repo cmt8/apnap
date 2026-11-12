@@ -949,6 +949,23 @@ pub enum Replaces {
     /// "If this card would be put into a graveyard from anywhere" (CR 113.6b: it functions
     /// in every zone).
     ThisToGraveyard,
+    /// "If [an effect would create] one or more [`token`] tokens [would be created] [under
+    /// your control]" (CR 614.16, 111.2): each kind of token of the event is matched as it
+    /// would be created — its printed characteristics, controlled by the player creating it
+    /// — relative to this ability's source and controller. `effect_only`: "if an effect
+    /// would …" (every token in this engine is created by an effect, so it changes only
+    /// the text).
+    Tokens { token: Selector, effect_only: bool },
+    /// "If one or more [`kind`] counters would be put on [a permanent matching `on`]" (CR
+    /// 614.16, 122.6: counters a permanent enters with too, matched as it would exist on
+    /// the battlefield). `kind: None` = counters of any kind; `effect_only`: "if an effect
+    /// would put …" (every counter in this engine is put by an effect or as a permanent
+    /// enters, which 614.16 counts; it changes only the text).
+    Counters {
+        on: Selector,
+        kind: Option<CounterKind>,
+        effect_only: bool,
+    },
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -987,6 +1004,16 @@ pub enum ReplaceWith {
     EntersOnlyIfYou(AsEnters),
     /// "… reveal it and shuffle it into its owner's library instead" (CR 701.20a).
     RevealShuffleIntoLibrary,
+    /// "… [twice / that many plus one / half] that many … instead" (CR 614.1a): the number
+    /// the event is about — tokens of the kinds the effect applies to, counters of the kind
+    /// it applies to, damage, life — changed by `Calc` (D-073). Numbers saturate.
+    Scale(Calc),
+    /// "… those tokens plus [`n` / that many] [these] tokens are created instead" (CR
+    /// 614.1a): `n: None` = as many of each as there are tokens the effect applies to.
+    AddTokens { tokens: Vec<String>, n: Option<u32> },
+    /// "… that many [these] tokens are created instead" / "instead create one of each":
+    /// every token the effect applies to is replaced by one of each of these (D-073).
+    ReplaceTokens(Vec<String>),
 }
 
 /// What a player may do as a permanent enters (CR 614.12a) so that it enters untapped.

@@ -77,6 +77,11 @@ pub enum Proposed {
         token: CardDefId,
         count: u32,
         controller: PlayerId,
+        /// Other kinds of tokens created by the same event — added or substituted by
+        /// replacement effects ("those tokens plus a Food token", "instead create a Clue, a
+        /// Food and a Treasure"), so that further effects see one event (CR 616.1f, D-073).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        more: Vec<(CardDefId, u32)>,
     },
     PutCounters {
         object: ObjectId,
@@ -105,6 +110,17 @@ pub enum Proposed {
     /// CR 704.5d (not replaceable).
     CeaseToExist {
         object: ObjectId,
+    },
+    /// One token, created by a [`Proposed::CreateTokens`] event whose own replacement
+    /// effects have all been applied, entering the battlefield (CR 111.2, 616.1g: entering
+    /// is an event contained in creating it). What modifies how a permanent enters applies
+    /// to it as to a card moved there (CR 111.6, 614.1c–d, 614.12): judged as the token
+    /// would exist on the battlefield (D-073).
+    TokenEnters {
+        token: CardDefId,
+        controller: PlayerId,
+        tapped: bool,
+        counters: Vec<(CounterKind, u32)>,
     },
 }
 
@@ -185,7 +201,9 @@ pub fn affected_player(st: &GameState, ev: &Proposed) -> PlayerId {
         | Proposed::GainLife { player, .. }
         | Proposed::LoseLife { player, .. }
         | Proposed::LoseGame { player, .. } => *player,
-        Proposed::CreateTokens { controller, .. } => *controller,
+        Proposed::CreateTokens { controller, .. } | Proposed::TokenEnters { controller, .. } => {
+            *controller
+        }
     }
 }
 
@@ -547,6 +565,71 @@ fn applies(st: &GameState, who: Bearer<'_>, replaces: &Replaces, ev: &Proposed) 
                 controller, count, ..
             },
         ) => *controller == you && *count > 0,
+        // CR 614.16: at least one token of the event is of a kind the effect is about.
+        (Replaces::Tokens { token, .. }, ev @ Proposed::CreateTokens { controller, .. }) => {
+            token_kinds(ev)
+                .iter()
+                .any(|&(t, n)| n > 0 && token_hit(st, t, *controller, token, who))
+        }
+        (
+            Replaces::Counters { on, kind, .. },
+            Proposed::PutCounters {
+                object,
+                kind: k,
+                count,
+            },
+        ) => {
+            *count > 0
+                && kind.is_none_or(|kind| kind == *k)
+                && st.objects.get(object).is_some_and(|o| {
+                    o.zone == Zone::Battlefield && {
+                        let (attacking, blocking) = crate::layers::combat_role(st, *object);
+                        crate::layers::matches_parts(
+                            on,
+                            &crate::layers::chars(st, *object),
+                            crate::layers::Facts {
+                                id: *object,
+                                controller: crate::layers::controller_of(st, *object),
+                                owner: o.owner,
+                                is_token: o.is_token,
+                                tapped: o.tapped,
+                                attacking,
+                                blocking,
+                            },
+                            source,
+                            you,
+                        )
+                    }
+                })
+        }
+        // CR 122.6 / 614.12: counters it enters with, matched as it would exist on the
+        // battlefield (another permanent's effect only if that one is already there).
+        (
+            Replaces::Counters { on, kind, .. },
+            ev @ (Proposed::Move {
+                to: Zone::Battlefield,
+                ..
+            }
+            | Proposed::TokenEnters { .. }),
+        ) => {
+            entering_counters(ev)
+                .iter()
+                .any(|(k, n)| *n > 0 && kind.is_none_or(|kind| kind == *k))
+                && entering_matches(st, ev, on, source, you)
+        }
+        // A token entering (CR 111.6): as a card moved onto the battlefield (the arms for
+        // `Proposed::Move` below).
+        (Replaces::OtherEnters(sel), ev @ Proposed::TokenEnters { .. }) => {
+            entering_matches(st, ev, sel, source, you)
+        }
+        (
+            Replaces::PutCountersOnYourPermanents,
+            Proposed::TokenEnters {
+                controller,
+                counters,
+                ..
+            },
+        ) => !counters.is_empty() && *controller == you,
         (Replaces::PutCountersOnYourPermanents, Proposed::PutCounters { object, count, .. }) => {
             *count > 0
                 && st.objects.get(object).is_some_and(|o| {
@@ -621,32 +704,251 @@ fn applies(st: &GameState, who: Bearer<'_>, replaces: &Replaces, ev: &Proposed) 
         // CR 614.12: checked against the permanent as it would exist on the battlefield.
         (
             Replaces::OtherEnters(sel),
-            Proposed::Move {
-                object,
+            ev @ Proposed::Move {
                 to: Zone::Battlefield,
-                controller,
                 ..
             },
-        ) => st.objects.get(object).is_some_and(|o| {
-            o.zone != Zone::Battlefield
-                && *object != source
-                && crate::layers::matches_parts(
-                    sel,
-                    &crate::layers::chars(st, *object),
-                    crate::layers::Facts {
-                        id: *object,
-                        controller: controller.unwrap_or(o.owner),
-                        owner: o.owner,
-                        is_token: o.is_token,
-                        tapped: false,
-                        attacking: false,
-                        blocking: false,
-                    },
-                    source,
-                    you,
-                )
-        }),
+        ) => entering_matches(st, ev, sel, source, you),
         _ => false,
+    }
+}
+
+/// The counters a permanent would enter the battlefield with (CR 122.6).
+fn entering_counters(ev: &Proposed) -> &[(CounterKind, u32)] {
+    match ev {
+        Proposed::Move { counters, .. } | Proposed::TokenEnters { counters, .. } => counters,
+        _ => &[],
+    }
+}
+
+/// Does the permanent `ev` would put onto the battlefield match `sel` as it would exist
+/// there (CR 614.12), for an ability of `source` controlled by `you`? A card or token
+/// moving there from another zone, or a token being created (CR 111.2, 111.6). Never the
+/// ability's own source: its own entering is `Replaces::ThisEnters`.
+fn entering_matches(
+    st: &GameState,
+    ev: &Proposed,
+    sel: &card_model::Selector,
+    source: ObjectId,
+    you: PlayerId,
+) -> bool {
+    match ev {
+        Proposed::Move { object, .. } if *object == source => false,
+        _ => as_it_would_exist(st, ev)
+            .is_some_and(|(c, facts)| crate::layers::matches_parts(sel, &c, facts, source, you)),
+    }
+}
+
+/// The permanent `ev` would put onto the battlefield, as it would exist there (CR 614.12):
+/// with the counters and tapped state the event has so far, the continuous effects of its
+/// own static abilities and those that already exist and would apply to it. Worked out on
+/// a copy of the game in which the event has happened (D-073); `None` if `ev` puts no
+/// permanent onto the battlefield. Its id is the copy's: never an object of the game.
+fn as_it_would_exist(
+    st: &GameState,
+    ev: &Proposed,
+) -> Option<(crate::layers::Characteristics, crate::layers::Facts)> {
+    use crate::actions::{ActionResult, GameAction, execute};
+    let action = match ev {
+        Proposed::Move {
+            object,
+            to: Zone::Battlefield,
+            position,
+            controller,
+            tapped,
+            counters,
+            ..
+        } => {
+            if st.objects.get(object)?.zone == Zone::Battlefield {
+                return None;
+            }
+            GameAction::MoveZone {
+                object: *object,
+                to: Zone::Battlefield,
+                position: *position,
+                controller: *controller,
+                tapped: *tapped,
+                counters: counters.clone(),
+            }
+        }
+        // Its characteristics are those its creator defines (CR 111.3).
+        Proposed::TokenEnters {
+            token,
+            controller,
+            tapped,
+            counters,
+        } => GameAction::CreateToken {
+            token: *token,
+            controller: *controller,
+            tapped: *tapped,
+            counters: counters.clone(),
+        },
+        _ => return None,
+    };
+    let mut copy = st.clone();
+    let ActionResult::Moved(id) = execute(&mut copy, action) else {
+        return None;
+    };
+    let o = copy.object(id);
+    let facts = crate::layers::Facts {
+        id,
+        controller: crate::layers::controller_of(&copy, id),
+        owner: o.owner,
+        is_token: o.is_token,
+        tapped: false,
+        attacking: false,
+        blocking: false,
+    };
+    Some((crate::layers::chars(&copy, id), facts))
+}
+
+/// Every kind of token an event creates, with how many (CR 616.1f: one event).
+pub fn token_kinds(ev: &Proposed) -> Vec<(CardDefId, u32)> {
+    match ev {
+        Proposed::CreateTokens {
+            token, count, more, ..
+        } => core::iter::once((*token, *count))
+            .chain(more.iter().copied())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Is a token of kind `token`, about to be created under `controller`'s control, what
+/// `sel` says (for the ability of `who`)? Judged as it would be created: its printed
+/// characteristics (CR 111.4).
+fn token_hit(
+    st: &GameState,
+    token: CardDefId,
+    controller: PlayerId,
+    sel: &card_model::Selector,
+    who: Bearer<'_>,
+) -> bool {
+    let c = crate::layers::Characteristics::printed(token, st.catalog.get(token), controller);
+    crate::layers::matches_parts(
+        sel,
+        &c,
+        crate::layers::Facts {
+            // Not an object yet: never the ability's source.
+            id: ObjectId(u32::MAX),
+            controller,
+            owner: controller,
+            is_token: true,
+            tapped: false,
+            attacking: false,
+            blocking: false,
+        },
+        who.source,
+        who.controller,
+    )
+}
+
+/// The event after a token replacement effect — about tokens matching `token` — has
+/// modified it. Kinds that end up the same are merged, in first-seen order.
+fn replace_tokens(
+    st: &GameState,
+    ev: Proposed,
+    token: &card_model::Selector,
+    who: Bearer<'_>,
+    with: &ReplaceWith,
+) -> Proposed {
+    let Proposed::CreateTokens { controller, .. } = ev else {
+        unreachable!("a token replacement on {ev:?}")
+    };
+    let kinds = token_kinds(&ev);
+    let hit = |t: CardDefId| token_hit(st, t, controller, token, who);
+    let find = |key: &alloc::string::String| st.catalog.find(key).expect("validated by card-db");
+    let mut out: Vec<(CardDefId, u32)> = Vec::new();
+    let mut add = |t: CardDefId, n: u32| match out.iter_mut().find(|(k, _)| *k == t) {
+        Some((_, m)) => *m = m.saturating_add(n),
+        None => out.push((t, n)),
+    };
+    match with {
+        ReplaceWith::Scale(c) => {
+            for (t, n) in kinds {
+                add(t, if hit(t) { c.apply(n) } else { n });
+            }
+        }
+        ReplaceWith::Twice => {
+            for (t, n) in kinds {
+                add(t, if hit(t) { n.saturating_mul(2) } else { n });
+            }
+        }
+        ReplaceWith::AddTokens { tokens, n } => {
+            let those = kinds
+                .iter()
+                .filter(|(t, _)| hit(*t))
+                .fold(0u32, |a, (_, n)| a.saturating_add(*n));
+            for (t, n) in kinds {
+                add(t, n);
+            }
+            for key in tokens {
+                add(find(key), n.unwrap_or(those));
+            }
+        }
+        ReplaceWith::ReplaceTokens(tokens) => {
+            for (t, n) in kinds {
+                if hit(t) {
+                    for key in tokens {
+                        add(find(key), n);
+                    }
+                } else {
+                    add(t, n);
+                }
+            }
+        }
+        w => unreachable!("{w:?} doesn't modify tokens"),
+    }
+    let (token, count) = out.remove(0);
+    Proposed::CreateTokens {
+        token,
+        count,
+        controller,
+        more: out,
+    }
+}
+
+/// The event after a counter replacement effect — about counters of `kind` (any, if
+/// `None`) — has modified it: "twice that many", "that many plus one" of each kind.
+fn replace_counters(ev: Proposed, kind: Option<CounterKind>, c: card_model::Calc) -> Proposed {
+    let ours = |k: CounterKind| kind.is_none_or(|kind| kind == k);
+    let mut ev = ev;
+    match &mut ev {
+        Proposed::PutCounters { kind: k, count, .. } if ours(*k) => *count = c.apply(*count),
+        Proposed::Move { counters, .. } | Proposed::TokenEnters { counters, .. } => {
+            for (k, n) in counters.iter_mut() {
+                if ours(*k) && *n > 0 {
+                    *n = c.apply(*n);
+                }
+            }
+        }
+        _ => {}
+    }
+    ev
+}
+
+/// What a `Replaces` about tokens or counters makes of `with` on `ev`, if that is what
+/// it is (D-073); `None` for every other replacement effect.
+fn replace_amounts(
+    st: &GameState,
+    who: Bearer<'_>,
+    replaces: &Replaces,
+    with: &ReplaceWith,
+    ev: &Proposed,
+) -> Option<Proposed> {
+    match (replaces, with) {
+        (Replaces::Tokens { token, .. }, _) => {
+            Some(replace_tokens(st, ev.clone(), token, who, with))
+        }
+        (Replaces::Counters { kind, .. }, ReplaceWith::Scale(c)) => {
+            Some(replace_counters(ev.clone(), *kind, *c))
+        }
+        (Replaces::Counters { kind, .. }, ReplaceWith::Twice) => Some(replace_counters(
+            ev.clone(),
+            *kind,
+            card_model::Calc::Times(2),
+        )),
+        _ => None,
     }
 }
 
@@ -711,11 +1013,20 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
                 .find(|e| e.id == id)
                 .expect("a lasting effect in force");
             let source = e.source;
-            let AbilityDef::Replacement { with, .. } =
+            let AbilityDef::Replacement { with, replaces } =
                 st.catalog.ability(e.abilities[index as usize])
             else {
                 unreachable!()
             };
+            let who = Bearer {
+                source,
+                controller: e.controller,
+                about: e.about.as_slice(),
+            };
+            if let Some(ev) = replace_amounts(st, who, replaces, with, &ev) {
+                st.emit(crate::events::Event::Replaced { source });
+                return Some(ev);
+            }
             let with = with.clone();
             st.emit(crate::events::Event::Replaced { source });
             replace(st, ev, with)
@@ -723,9 +1034,24 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
         RepKey::Static {
             source, ability, ..
         } => {
-            let AbilityDef::Replacement { with, .. } = st.catalog.ability(ability) else {
+            let AbilityDef::Replacement { with, replaces } = st.catalog.ability(ability) else {
                 unreachable!()
             };
+            if st
+                .objects
+                .get(&source)
+                .is_some_and(|o| o.zone == Zone::Battlefield)
+            {
+                let who = Bearer {
+                    source,
+                    controller: crate::layers::controller_of(st, source),
+                    about: &[],
+                };
+                if let Some(ev) = replace_amounts(st, who, replaces, with, &ev) {
+                    st.emit(crate::events::Event::Replaced { source });
+                    return Some(ev);
+                }
+            }
             let mut with = with.clone();
             // "…for each …": counted now, before the permanent has entered.
             if let ReplaceWith::EntersWithCounted { kind, amount } = &with {
@@ -782,11 +1108,29 @@ fn replace(st: &mut GameState, ev: Proposed, with: ReplaceWith) -> Option<Propos
 
 fn modify(mut ev: Proposed, with: ReplaceWith) -> Proposed {
     match (&mut ev, &with) {
-        (Proposed::CreateTokens { count, .. }, ReplaceWith::Twice)
-        | (Proposed::PutCounters { count, .. }, ReplaceWith::Twice) => *count *= 2,
-        (Proposed::Move { counters, .. }, ReplaceWith::Twice) => {
+        (Proposed::CreateTokens { count, more, .. }, ReplaceWith::Twice) => {
+            *count = count.saturating_mul(2);
+            for (_, n) in more.iter_mut() {
+                *n = n.saturating_mul(2);
+            }
+        }
+        (Proposed::PutCounters { count, .. }, ReplaceWith::Twice) => {
+            *count = count.saturating_mul(2)
+        }
+        (
+            Proposed::Move { counters, .. } | Proposed::TokenEnters { counters, .. },
+            ReplaceWith::Twice,
+        ) => {
             for (_, n) in counters.iter_mut() {
-                *n *= 2;
+                *n = n.saturating_mul(2);
+            }
+        }
+        // A token entering (CR 111.6): another permanent's "[these] enter tapped / with
+        // counters" (its own "this enters …" can't be on a token: card-db, D-073).
+        (Proposed::TokenEnters { tapped, .. }, ReplaceWith::EntersTapped) => *tapped = true,
+        (Proposed::TokenEnters { counters, .. }, ReplaceWith::EntersWithCounters { kind, n }) => {
+            if *n > 0 {
+                counters.push((*kind, *n))
             }
         }
         (

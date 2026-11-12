@@ -184,6 +184,16 @@ fn token_names(def: &CardDef) -> Vec<String> {
             walk(&m.effect, &mut out);
         }
     }
+    // "… plus a Food token", "… that many Angels instead" (D-073).
+    for a in def.abilities.iter().chain(&def.granted) {
+        if let AbilityDef::Replacement {
+            with: ReplaceWith::AddTokens { tokens, .. } | ReplaceWith::ReplaceTokens(tokens),
+            ..
+        } = a
+        {
+            out.extend(tokens.iter().cloned());
+        }
+    }
     out
 }
 
@@ -684,9 +694,23 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 }
             }
             AbilityDef::Replacement { replaces, with } => {
+                // A token enters as it is created (CR 111.2), with no object yet for its
+                // own "this enters …" effect to belong to (D-073).
+                if c.token && *replaces == Replaces::ThisEnters {
+                    p.push(at(
+                        "a token's own \"enters\" replacement effect isn't supported".into(),
+                    ));
+                }
                 let ok = matches!(
                     (replaces, with),
                     (Replaces::CreateTokens, ReplaceWith::Twice)
+                        | (
+                            Replaces::Tokens { .. },
+                            ReplaceWith::Scale(_)
+                                | ReplaceWith::AddTokens { .. }
+                                | ReplaceWith::ReplaceTokens(_)
+                        )
+                        | (Replaces::Counters { .. }, ReplaceWith::Scale(_))
                         | (Replaces::Damage { .. }, ReplaceWith::Prevent)
                         | (Replaces::PutCountersOnYourPermanents, ReplaceWith::Twice)
                         | (Replaces::CardToGraveyard, ReplaceWith::Exile)
