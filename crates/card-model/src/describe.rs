@@ -2306,7 +2306,17 @@ fn card_list_words(cards: &[Selector], plural: bool) -> String {
             }
             words.extend(s.supertypes.iter().map(|t| format!("{t:?}").to_lowercase()));
             words.extend(s.not_subtypes.iter().map(|t| format!("non-{t}")));
-            words.extend(s.not_types.iter().map(|t| format!("non{}", card_type(*t))));
+            // "Permanent card" (CR 110.4a): neither instant nor sorcery.
+            let permanent_card = s.types.is_empty()
+                && s.subtypes.is_empty()
+                && s.not_types.len() == 2
+                && s.not_types.contains(&CardType::Instant)
+                && s.not_types.contains(&CardType::Sorcery);
+            if permanent_card {
+                words.push("permanent".to_string());
+            } else {
+                words.extend(s.not_types.iter().map(|t| format!("non{}", card_type(*t))));
+            }
             if !s.subtypes.is_empty() {
                 words.push(s.subtypes.join(" or "));
             }
