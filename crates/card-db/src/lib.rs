@@ -211,6 +211,14 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
     if !land && !c.token && c.mana_cost.is_none() {
         p.push("non-land, non-token cards need a mana cost".into());
     }
+    // CR 107.4e: spells can't be paid for with hybrid mana yet (D-066).
+    if c.mana_cost.as_ref().is_some_and(|m| {
+        m.symbols
+            .iter()
+            .any(|s| matches!(s, card_model::ManaSymbol::Hybrid(..)))
+    }) {
+        p.push("a hybrid mana cost (D-066: not paid for yet)".into());
+    }
     if !c.land_types.is_empty() && !land {
         p.push("basic land types on a non-land".into());
     }
@@ -347,6 +355,12 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 p.push(at("not an ability another object can be given".into()));
                 continue;
             }
+        }
+        // CR 107.4e: hybrid mana is paid only in the costs of mana abilities so far (D-066).
+        if !matches!(a, AbilityDef::Mana { .. }) && format!("{a:?}").contains("Hybrid") {
+            p.push(at(
+                "hybrid mana outside a mana ability's cost (D-066)".into()
+            ));
         }
         // "The sacrificed creature's power" needs a sacrifice chosen as its cost is paid.
         if format!("{a:?}").contains("SacrificedPower") {
@@ -492,28 +506,63 @@ pub fn validate(script: &CardScript, strictness: Strictness) -> Vec<String> {
                 cost,
                 produce,
                 spend,
+                then,
                 ..
             } => {
-                // `{T}`, optionally with "sacrifice this" (D-052). A mana ability that
-                // costs mana, or anything chosen, is not modelled.
-                let allowed = Cost {
-                    tap: true,
-                    sacrifice_self: cost.sacrifice_self,
-                    ..Cost::default()
-                };
-                if *cost != allowed {
+                // D-066: `{T}` or a sacrifice (so that every activation uses something
+                // up), and maybe mana, life, "sacrifice a [permanent]". Nothing from a
+                // hand or graveyard, no X, no discards.
+                if !(cost.tap || cost.sacrifice_self || cost.sacrifice.is_some()) {
                     p.push(at(
-                        "a mana ability must cost {T}, or {T} and sacrificing itself (D-052)"
-                            .into(),
+                        "a mana ability must tap or sacrifice something (D-066)".into()
                     ));
                 }
+                if cost.discard.is_some()
+                    || cost.discard_self
+                    || cost.exile_self
+                    || cost.mana.as_ref().is_some_and(|m| m.has_x())
+                {
+                    p.push(at("a mana ability cost that isn't modelled (D-066)".into()));
+                }
+                if cost.sacrifice.as_ref().is_some_and(|ch| ch.count != 1) {
+                    p.push(at(
+                        "a mana ability that sacrifices more than one permanent (D-066)".into(),
+                    ));
+                }
+                check_cost(cost, &mut |m| p.push(at(m)));
                 if produce.count() == 0 || produce.options().is_empty() {
                     p.push(at("a mana ability that adds nothing".into()));
                 }
-                if spend
-                    .as_ref()
-                    .is_some_and(|r| r.spells.is_empty() && r.abilities.is_empty())
+                match produce {
+                    card_model::ManaProduce::Fixed(v) if v.len() < 2 => {
+                        p.push(at("fixed mana of one symbol is `One`".into()))
+                    }
+                    // Counted as it resolves: tapping must not change the count, and
+                    // nothing it sacrifices may (the planner counts before, D-066).
+                    card_model::ManaProduce::Counted { amount, .. } => {
+                        let plain = match amount {
+                            Amount::Count(s) => s.tapped.is_none(),
+                            _ => false,
+                        };
+                        if !plain || cost.sacrifice_self || cost.sacrifice.is_some() {
+                            p.push(at("counted mana must count permanents, with no sacrifice in the cost (D-066)".into()));
+                        }
+                    }
+                    _ => {}
+                }
+                // CR 605.3b: the rest of a mana ability happens as it resolves. Only what
+                // can't make the mana abilities used to pay a cost change is allowed
+                // (D-066): damage to, life loss and life gain of its controller.
+                if let Some(e) = then
+                    && !mana_side_effect(e)
                 {
+                    p.push(at(format!(
+                        "a mana ability may only also deal damage to, or change the life of, its controller (D-066): {e:?}"
+                    )));
+                }
+                if spend.as_ref().is_some_and(|r| {
+                    r.spells.is_empty() && r.abilities.is_empty() && r.sources.is_empty()
+                }) {
                     p.push(at("mana that can be spent on nothing".into()));
                 }
             }
@@ -794,6 +843,28 @@ fn check_body(body: &Body, has_x: bool, p: &mut dyn FnMut(String)) {
 }
 
 /// The chosen parts of a cost.
+/// What a mana ability may do besides adding mana (D-066).
+pub(crate) fn mana_side_effect(e: &Effect) -> bool {
+    use card_model::{DamageBy, PlayerRef};
+    match e {
+        Effect::Seq(v) => !v.is_empty() && v.iter().all(mana_side_effect),
+        Effect::DealDamage {
+            to: TargetRef::Players(PlayerRef::You),
+            amount: Amount::Fixed(_),
+            by: DamageBy::This,
+        }
+        | Effect::LoseLife {
+            who: PlayerRef::You,
+            amount: Amount::Fixed(_),
+        }
+        | Effect::GainLife {
+            who: PlayerRef::You,
+            amount: Amount::Fixed(_),
+        } => true,
+        _ => false,
+    }
+}
+
 fn check_cost(cost: &Cost, p: &mut dyn FnMut(String)) {
     for (what, choice) in [("sacrifice", &cost.sacrifice), ("discard", &cost.discard)] {
         if let Some(ch) = choice {
@@ -1103,6 +1174,13 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
         | Effect::LoseLife { who, amount: a } => {
             player(who, p);
             amount(a, p);
+        }
+        Effect::AddManaOf { who, of, amount: a } => {
+            player(who, p);
+            amount(a, p);
+            if of.len() < 2 {
+                p("AddManaOf with no choice is AddMana".into());
+            }
         }
         Effect::Counter { what } => match slot(what) {
             Some(TargetFilter::Spell | TargetFilter::SpellMatching(_)) => {}

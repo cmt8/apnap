@@ -230,6 +230,12 @@ fn with_article(s: &str) -> String {
 /// "creature", "noncreature", "instant or sorcery", "blue Wizard".
 fn spell_kind(s: &Selector) -> String {
     let mut words: Vec<String> = Vec::new();
+    words.extend(
+        s.not_supertypes
+            .iter()
+            .map(|t| format!("non{}", format!("{t:?}").to_lowercase())),
+    );
+    words.extend(s.supertypes.iter().map(|t| format!("{t:?}").to_lowercase()));
     // Each list is "at least one of".
     if !s.colors.is_empty() {
         words.push(join(
@@ -681,6 +687,20 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 amount(a)
             ),
         },
+        Effect::AddManaOf { who, of, amount: a } => {
+            let kind = if of.len() == 5 {
+                "any one color".to_string()
+            } else {
+                join(of.iter().map(|t| t.symbol().to_string()).collect(), "or")
+            };
+            let add = verb(&player(mode, *who), "add", "adds");
+            match a {
+                Amount::Fixed(1) if of.len() == 5 => format!("{add} one mana of any color"),
+                Amount::Fixed(1) => format!("{add} {kind}"),
+                Amount::Fixed(n) => format!("{add} {n} mana of {kind}"),
+                a => format!("{add} X mana of {kind}, where X is {}", amount(a)),
+            }
+        }
         Effect::GainLife { who, amount: a } => {
             format!(
                 "{} {} life",
@@ -1709,8 +1729,9 @@ fn ability(a: &AbilityDef) -> String {
             produce,
             only_if,
             spend,
+            then,
         } => format!(
-            "{}: Add {}.{}{}",
+            "{}: Add {}.{}{}{}",
             cost(c),
             match produce {
                 ManaProduce::One(t) => t.symbol().to_string(),
@@ -1727,7 +1748,50 @@ fn ability(a: &AbilityDef) -> String {
                         join(of.iter().map(|t| t.symbol().to_string()).collect(), "or")
                     ),
                 },
+                ManaProduce::Fixed(v) => v.iter().map(|t| t.symbol()).collect::<String>(),
+                ManaProduce::Combination { of, count } if of.len() == 5 =>
+                    format!("{} mana in any combination of colors", count),
+                ManaProduce::Combination { of, count } => format!(
+                    "{} mana in any combination of {}",
+                    count,
+                    join(
+                        of.iter().map(|t| t.symbol().to_string()).collect(),
+                        "and/or"
+                    )
+                ),
+                ManaProduce::Counted { of, amount: a } => match (of.as_slice(), a) {
+                    ([t], Amount::Count(s)) =>
+                        format!("{} for each {}", t.symbol(), selector(s, false)),
+                    ([t], a) => format!("an amount of {} equal to {}", t.symbol(), amount(a)),
+                    _ if of.len() == 5 =>
+                        format!("X mana of any one color, where X is {}", amount(a)),
+                    _ => format!(
+                        "X mana of one of {}, where X is {}",
+                        join(of.iter().map(|t| t.symbol().to_string()).collect(), "or"),
+                        amount(a)
+                    ),
+                },
+                ManaProduce::Reflected { from, types } => format!(
+                    "one mana of any {} that {} could produce",
+                    if *types { "type" } else { "color" },
+                    {
+                        let what = selector(from, false);
+                        let an = what.starts_with(['a', 'e', 'i', 'o', 'u']);
+                        format!("{} {what}", if an { "an" } else { "a" })
+                    }
+                ),
             },
+            then.as_ref().map_or(String::new(), |e| {
+                let text = effect(
+                    &Mode {
+                        targets: Vec::new(),
+                        groups: Vec::new(),
+                        effect: Effect::Seq(Vec::new()),
+                    },
+                    e,
+                );
+                format!(" {}.", capitalize(&text))
+            }),
             spend.as_ref().map_or(String::new(), |r| {
                 let mut uses: Vec<String> = Vec::new();
                 if !r.spells.is_empty() {
@@ -1743,6 +1807,14 @@ fn ability(a: &AbilityDef) -> String {
                             r.abilities.iter().map(|s| selector(s, true)).collect(),
                             "or"
                         )
+                    ));
+                }
+                if r.sources.iter().any(|s| *s == Selector::default()) {
+                    uses.push("activate an ability".to_string());
+                } else if !r.sources.is_empty() {
+                    uses.push(format!(
+                        "activate abilities of {} sources",
+                        join(r.sources.iter().map(spell_kind).collect(), "or")
                     ));
                 }
                 format!(" Spend this mana only to {}.", join(uses, "or"))

@@ -1574,6 +1574,117 @@ Rules text: docs/rules-notes/402-305-401.5-rules-about-players.md.
   that card this turn", effects that remember the cards they exiled); protection on
   players.
 
+## D-066 Mana abilities that cost more than {T}, make several mana, count, reflect, or do more; the payment planner (2026-11-10)
+Rules text: docs/rules-notes/605-mana-abilities-costs-and-yields.md. Tests:
+`crates/harness/tests/forge_mana.rs` (one file per feature area from now on).
+- **Vocabulary.** `ManaProduce` gained `Fixed(types)` ("{U}{B}", "{C}{C}{R}"),
+  `Combination { of, count }` ("two mana in any combination of …", each mana chosen),
+  `Counted { of, amount }` ("{B} for each Swamp you control", "X mana of any one color";
+  counted as it resolves) and `Reflected { from, types }` ("any color that a land an
+  opponent controls could produce", CR 106.7). `AbilityDef::Mana` gained `then`: what the
+  ability also does as it resolves (CR 605.3b) — damage to, life loss and life gain of its
+  controller only (the pain lands, Talismans, Ancient Tomb, The Great Henge). A mana
+  ability's `Cost` may now hold mana, life, "sacrifice this" and one chosen sacrifice,
+  with or without `{T}`; it must tap or sacrifice something, so nothing can be activated
+  for ever. `ManaSymbol::Hybrid` (`{R/W}`, CR 107.4e) exists for the costs of mana
+  abilities only (the filter lands); card-db refuses it anywhere else, and Scryfall
+  printed costs with hybrid are refused as before. `ManaRestriction.sources`: "spend this
+  mana only to activate abilities of artifact sources / an ability" — wherever the source
+  is; `abilities` (Forge's `+inZoneBattlefield`) now really means permanents (CR 109.2:
+  before, Dragon-restricted mana could pay a Dragon card's cycling from the hand).
+  `Effect::AddManaOf { who, of, amount }`: a spell or non-mana ability adding mana of a
+  type chosen as it resolves (Lotus Cobra's landfall, which is an ordinary trigger, CR
+  605.5a; "add one mana of any color" when something enters); several types from one
+  `DB$ Mana` ("R R R G G G") are a `Seq` of `AddMana`.
+- **Engine: `frames/mana.rs`.** `mana_ways` lists every mana ability a player could
+  activate now (`ManaWay`: tap, sacrifice-self, mana cost, life, chosen sacrifice and its
+  candidates, what it makes, restricted, depends on the battlefield). Plain "{T}: Add one
+  mana" abilities of a permanent are still merged into one way. A way that is nothing but
+  a tap (and maybe "sacrifice this") is still done in one step (`tap_for_mana`, same
+  events in the same order as before); anything else runs a `ManaFrame` (new
+  `Frame::Mana`, boxed): choose what to sacrifice → choose which floating mana pays its
+  own cost (hybrid colors first, then generic, asked only when it is a real choice) → pay
+  (tap, `PayMana`, sacrifices and life through `ApplyFrame`) → choose the type of each
+  further mana (`ChoiceKind::ChooseColor` over `OptionDesc::Mana`) → add the mana → its
+  `then` runs in a `ResolveFrame::mana_ability` (no stack object, no targets). The same
+  path serves priority (CR 605.3a) and paying (CR 601.2g), including payments while
+  something resolves (D-063).
+- **Payment feasibility (replaces D-021's / D-049's / D-052's matching).** `plan` decides
+  whether a cost can be paid: one bipartite matching between units of mana wanted (each
+  symbol of the cost — specific, hybrid, generic — and of the costs of the mana-costing
+  abilities chosen) and units of mana that could be had (the pool, each permanent's
+  merged free ways, what the chosen mana-costing or sacrificing abilities make). Around
+  it: which mana-costing/sacrificing abilities to use (and how often: an altar as many
+  times as there are creatures) is enumerated (at most 4,096 combinations), their
+  sacrifices are a second matching together with the cost's own sacrifice; Treasures that
+  the cost could also sacrifice are counted by kind as before (D-052); several mana of
+  one chosen type are tried with each type for the first four such sources (D-049).
+  **Conservative rules (D-019: never offer what can't be completed; under-estimating is
+  allowed):** a mana ability's mana cost is paid only from the pool or from abilities
+  that cost no mana (a chain of Signets each paying the next is not found); mana that
+  can only be spent in certain ways never pays a mana ability's cost; an altar doesn't
+  plan to sacrifice a Treasure, a permanent with a mana-costing ability, or (when
+  Treasures are among them) what the cost itself could sacrifice; when life paid plus all
+  self-damage of mana abilities would exceed the player's life, life-paying abilities
+  aren't planned with. The planner assumes the best order (tap a mana creature before
+  sacrificing it, count Cradle before sacrificing creatures); each option offered while
+  paying is checked on the state it leads to — for a plain tap by updating the planner's
+  snapshot, for anything that sacrifices, costs mana or life, or makes mana of open types
+  by playing it out on a copy of the game (`simulate`) and planning again from there.
+  Choices inside an activation (which creature, which floating mana, which type) are
+  filtered the same way.
+- **Deviation from the rules' procedure (not their outcome):** a mana-costing mana
+  ability is offered once its cost is in the pool; the player taps the land first rather
+  than in the middle of activating the Signet (CR 605.3a allows both).
+- **Compiler.** `AB$ Mana` / `AB$ ManaReflected` go through `Tx::mana_ability`:
+  `Produced$` letters with different types, `Combo` with `Amount$ n`, a counted
+  `Amount$` (`Count$Valid …` only, no tapped/untapped filter, no sacrifice in the cost),
+  `SubAbility$` of DealDamage/LoseLife/GainLife (no target), costs with mana, `PayLife`,
+  `Sac<1/…>`, and hybrid tokens (`RW`). Blocked with names: `Mana:sub Draw` (drawing
+  moves a card from a library: not a mana ability, CR 605.1a), `Mana:sub <api>`,
+  `Mana:sub with a target`, `Mana:cost` (a mana ability that neither taps nor sacrifices:
+  "{R}: Add {B}", "{1}{G}: Add one mana of any color"), `Mana:cost sacrifice N`,
+  `Mana:counted` (other counts), `Mana:counted with sacrifice`, `ManaReflected:Is`,
+  `ManaReflected:Produced`, `Mana:produced` (`Combo AnyDifferent`, `Chosen`, `Special …`,
+  counted `Combo`), and the parameters `TriggersWhenSpent`, `AddsNoCounter`,
+  `AddsCounters`, `AddsKeywords`, `PersistentMana`, `ActivationLimit`. Hybrid mana in
+  anything but a mana ability's cost stays `cost:RW` etc.
+- **New Oracle guard `oracle:{T}`:** the card says `{T}` more often than the compiled card
+  does. Found two scripts that leave it out: Lotus Ring's given ability (newly compiled
+  without it — would have been a repeatable Black Lotus) and Letter of Acceptance's
+  "{2}, {T}, Sacrifice: Draw a card" (compiled wrongly before this batch). Both blocked.
+- **Found by the soak (precon-4p, heuristic, 3 games in 40): a payment dead-ended.** Orb of
+  Dragonkind ({1},{T}: two mana in any combination, Dragon-only) paid Lathliss's ability:
+  after the Mountain paid the Orb's {1}, the copy-of-the-game check dropped the Orb's
+  second (still untyped, restricted) mana, so the Orb was no longer offered. Untyped mana
+  now keeps its restriction in the plan. Regression test
+  `restricted_mana_of_open_types_still_pays`.
+- **Found by the soak after merging D-070 (forge-4p, 2 games in 500):** an altar could
+  plan to sacrifice the source of the ability being paid for while mana restricted to
+  abilities of such sources was in the pool; once the source is gone that mana's use
+  depends on last known information the payment doesn't keep (the engine panicked, then
+  dead-ended). Mana abilities no longer sacrifice the source of what is being paid for
+  (conservative), and restricted mana for something that is gone isn't counted on.
+  Regression test `an_altar_doesnt_sacrifice_the_source_of_the_ability_being_paid_for`.
+- **AI and app.** The heuristic agent pays with the cheapest way first (free taps, then
+  Treasure, mana-for-mana, damage, life, sacrificing another permanent last), and when it
+  has a "sacrifice a creature: add mana" ability it doesn't cast what it couldn't pay for
+  without one. The app's auto-pay only taps for mana that costs nothing else; it labels a
+  mana ability that does more than tap for one mana with its text.
+- **Old cards unchanged:** with the new code, 60 games each of real-4p, cmd-4p, m2-4p
+  (random) and 40 of real-4p (heuristic) ended exactly as with the old build; all 15
+  golden event logs are unchanged. State hashes changed (the catalog serializes the new
+  `then` field); re-blessed.
+- 9,305 → 9,571 of 34,463 scripts (27.8%); real cards 9,225 → 9,489; precons 149 → 150
+  of 275 deck slots. The `api:Mana` family fell from 356 cards blocked by it alone (708
+  at all) to about 120. All 266 newly compiled cards were read against their Oracle text.
+- **Next for mana:** "two mana of different colors" (`Combo AnyDifferent`), counted
+  combinations (Axebane Guardian), mana-for-mana abilities without `{T}` (they need a
+  loop guard), triggered mana abilities ("whenever a land is tapped for mana"), mana
+  whose spending does something (`TriggersWhenSpent`, `AddsNoCounter`, `AddsCounters`:
+  Path of Ancestry, Cavern of Souls, Opal Palace — mana that remembers its source),
+  Bloom Tender (`EachColorAmong`), hybrid mana in spells.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

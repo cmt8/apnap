@@ -499,12 +499,34 @@ pub fn option_label(
                 matches!(x, OptionDesc::TapForMana { source: s, mana: m, ability: a }
                     if s == source && m == mana && a != ability)
             });
+            // A mana ability that does more than tap for one mana: say what it is.
+            let more = ability.is_some_and(|a| match cat.ability(a) {
+                AbilityDef::Mana {
+                    cost,
+                    produce,
+                    then,
+                    ..
+                } => {
+                    !cost.tap
+                        || cost.mana.is_some()
+                        || cost.life > 0
+                        || cost.sacrifice.is_some()
+                        || then.is_some()
+                        || produce.count() > 1
+                        || matches!(
+                            produce,
+                            card_model::ManaProduce::Counted { .. }
+                                | card_model::ManaProduce::Reflected { .. }
+                        )
+                }
+                _ => false,
+            });
             match (find_object(v, *source), ability) {
-                (Some(src), Some(a)) if twice => format!(
-                    "tap {} for {} — {}",
+                (Some(src), Some(a)) if twice || more => format!(
+                    "{}: {} (first mana: {})",
                     src.name,
+                    describe::ability_text(cat.get(a.card), cat.ability(*a)),
                     mana.symbol(),
-                    describe::ability_text(cat.get(a.card), cat.ability(*a))
                 ),
                 (Some(src), _) => format!("tap {} for {}", src.name, mana.symbol()),
                 (None, _) => harness::text::option_line(v, o),
