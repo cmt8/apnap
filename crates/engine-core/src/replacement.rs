@@ -144,6 +144,9 @@ pub enum Proposed {
         /// A token that's a copy (CR 707.2): what it copied, and what comes with it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         copy: Option<alloc::boxed::Box<TokenCopy>>,
+        /// A token copy of an Aura enters attached to this (CR 303.4f).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attach_to: Option<ObjectId>,
     },
     /// CR 701.19a, 614.8: what a regeneration shield makes of the permanent's destruction —
     /// all damage marked on it is removed, its controller taps it, and if it's an
@@ -1072,6 +1075,7 @@ fn as_it_would_exist(
             tapped,
             counters,
             copy,
+            ..
         } => GameAction::CreateToken {
             token: *token,
             controller: *controller,

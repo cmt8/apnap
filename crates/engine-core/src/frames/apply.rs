@@ -36,6 +36,10 @@ pub struct ApplyFrame {
     /// choice from the moment it is on the battlefield.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen: Vec<(u32, PlayerId, card_model::Chosen)>,
+    /// The front event puts a copy of an Aura onto the battlefield, and its controller is
+    /// choosing what it enchants (CR 303.4f).
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub aura_host: bool,
 }
 
 impl ApplyFrame {
@@ -68,6 +72,7 @@ impl ApplyFrame {
             ready: Vec::new(),
             choosing: None,
             chosen: Vec::new(),
+            aura_host: false,
         }
     }
 
@@ -116,7 +121,16 @@ impl ApplyFrame {
 
     pub(crate) fn run(mut self, st: &mut GameState, input: Option<Input>) -> Flow {
         if let Some(inp) = input {
-            if let Some(key) = self.choosing.take() {
+            if core::mem::take(&mut self.aura_host) {
+                // CR 303.4f: what the copy of an Aura enchants.
+                let host = match inp.picked_one() {
+                    Some(OptionDesc::Card { card }) => *card,
+                    o => unreachable!("not an Aura host: {o:?}"),
+                };
+                let mut p = self.queue.remove(0);
+                set_host(&mut p.event, host);
+                self.ready.push(p.event);
+            } else if let Some(key) = self.choosing.take() {
                 // The answer to an "as this enters" choice.
                 let answer = inp.picked_one().cloned().expect("one option is picked");
                 let mut p = self.queue.remove(0);
@@ -186,6 +200,39 @@ impl ApplyFrame {
                     self.queue.splice(0..0, entering);
                 }
                 [] => {
+                    // CR 303.4f–g: a permanent entering as a copy of an Aura (not resolving
+                    // as an Aura spell) gets something to enchant as it enters, chosen by
+                    // its controller without targeting — or doesn't enter.
+                    if let Some((chooser, mut hosts)) = copy_aura_hosts(st, &front.event) {
+                        match hosts.len() {
+                            0 => {
+                                let p = self.queue.remove(0);
+                                if let Some(ev) = no_host(st, p.event) {
+                                    self.ready.push(ev);
+                                }
+                                continue;
+                            }
+                            1 => {
+                                let mut p = self.queue.remove(0);
+                                set_host(&mut p.event, hosts.remove(0));
+                                self.ready.push(p.event);
+                                continue;
+                            }
+                            _ => {
+                                self.aura_host = true;
+                                let options = hosts
+                                    .into_iter()
+                                    .map(|card| OptionDesc::Card { card })
+                                    .collect();
+                                return Flow::ask_one(
+                                    Frame::Apply(self),
+                                    chooser,
+                                    ChoiceKind::AuraHost,
+                                    options,
+                                );
+                            }
+                        }
+                    }
                     let p = self.queue.remove(0);
                     self.ready.push(p.event);
                 }
@@ -271,9 +318,83 @@ fn token_entries(ev: &Proposed) -> Vec<Proposed> {
                 tapped: copy.as_ref().is_some_and(|c| c.tapped),
                 counters: Vec::new(),
                 copy: copy.clone(),
+                attach_to: None,
             })
         })
         .collect()
+}
+
+/// For an event that puts a copy of an Aura onto the battlefield with nothing to enchant
+/// yet (CR 303.4f): who chooses, and the permanents it could enchant (not targeted: only
+/// what it can legally enchant, CR 303.4a). `None` for anything else.
+fn copy_aura_hosts(st: &GameState, ev: &Proposed) -> Option<(PlayerId, Vec<ObjectId>)> {
+    let copied = match ev {
+        Proposed::Move {
+            to: Zone::Battlefield,
+            attach_to: None,
+            object,
+            copy,
+            ..
+        } => copy.is_some() || st.objects.get(object).is_some_and(|o| o.copy.is_some()),
+        Proposed::TokenEnters {
+            copy: Some(_),
+            attach_to: None,
+            ..
+        } => true,
+        _ => false,
+    };
+    if !copied {
+        return None;
+    }
+    let filter = crate::replacement::entering_abilities(st, ev)
+        .into_iter()
+        .find_map(|a| match st.catalog.ability(a) {
+            card_model::AbilityDef::Enchant(f) => Some(f.clone()),
+            _ => None,
+        })?;
+    let chooser = crate::replacement::entering_controller(st, ev)?;
+    let hosts = st
+        .zones
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            crate::targeting::describes(
+                st,
+                &filter,
+                crate::stack::Target::Object(id),
+                chooser,
+                None,
+                None,
+            )
+        })
+        .collect();
+    Some((chooser, hosts))
+}
+
+fn set_host(ev: &mut Proposed, host: ObjectId) {
+    match ev {
+        Proposed::Move { attach_to, .. } | Proposed::TokenEnters { attach_to, .. } => {
+            *attach_to = Some(host)
+        }
+        _ => {}
+    }
+}
+
+/// CR 303.4g: an Aura with nothing to enchant stays in its zone — from the stack, it goes
+/// to its owner's graveyard; a token isn't created.
+fn no_host(st: &GameState, ev: Proposed) -> Option<Proposed> {
+    match ev {
+        Proposed::Move { object, .. }
+            if st
+                .objects
+                .get(&object)
+                .is_some_and(|o| o.zone == Zone::Stack) =>
+        {
+            Some(Proposed::moving(object, Zone::Graveyard, MoveCause::Rule))
+        }
+        _ => None,
+    }
 }
 
 /// Perform fully modified events simultaneously, then detect triggers (CR 603.2g).
@@ -500,6 +621,7 @@ pub(crate) fn perform(
                 tapped,
                 counters,
                 copy,
+                attach_to,
             } => {
                 // CR 800.4b: no tokens for a player who has left the game.
                 if st.in_game(controller)
@@ -520,6 +642,12 @@ pub(crate) fn perform(
                     // What the instruction says about each token copy it made.
                     if let Some(c) = &copy {
                         crate::copy::token_extras(st, c, new);
+                    }
+                    // CR 303.4f: a token copy of an Aura enters attached.
+                    if let Some(to) = attach_to
+                        && st.objects.contains_key(&to)
+                    {
+                        execute(st, GameAction::Attach { aura: new, to });
                     }
                 }
             }
