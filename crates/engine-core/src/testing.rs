@@ -70,6 +70,7 @@ impl Scenario {
                 face: 0,
                 transforms: 0,
                 adventure: None,
+                cast_with: None,
             },
         );
         if zone == Zone::Stack {
@@ -86,6 +87,7 @@ impl Scenario {
                 sacrificed_power: 0,
                 facts: Default::default(),
                 source_transforms: None,
+                alt: None,
             });
         } else {
             self.st.zones.list_mut(zone, owner).push(id);

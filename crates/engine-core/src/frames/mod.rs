@@ -8,6 +8,7 @@
 //! - All game mutation goes through `actions::execute`.
 //! - Nothing that is needed after a suspension may live in a Rust local; put it in the frame.
 
+pub(crate) mod altcost;
 mod apply;
 pub(crate) mod cast;
 mod check;
