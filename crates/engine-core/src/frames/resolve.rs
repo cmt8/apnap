@@ -2393,6 +2393,12 @@ impl ResolveFrame {
                 self.work.push(Work::Proliferate);
                 Vec::new()
             }
+            // CR 701.24a.
+            Effect::Shuffle { who } => {
+                let players = self.players_apnap(st, k, who);
+                self.work.push(Work::Shuffle { players });
+                Vec::new()
+            }
             Effect::DrawUpTo { who, amount } => {
                 let max = self.amount(st, k, &amount);
                 if let Some(player) = self.player(st, k, who) {

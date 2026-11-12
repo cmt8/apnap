@@ -704,3 +704,75 @@ fn a_cost_description_is_text_only() {
             .contains("discard a card")
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Look at the top N cards and put them back in any order
+
+// CR 401.4 (2026-11-06) and CR 701.24a ("To shuffle a library … is to randomize the
+// cards within it"). Forge: `SP$ RearrangeTopOfLibrary | Defined$ You | NumCards$ 3 |
+// MayShuffle$ True` ("look at the top three cards of your library, then put them back in
+// any order. You may shuffle."). The controller looks and orders, whoever's library it is.
+#[test]
+fn look_at_the_top_cards_put_them_back_in_any_order_then_maybe_shuffle() {
+    let ponder = card(
+        "Test Musing",
+        "U",
+        "Sorcery",
+        "A:SP$ RearrangeTopOfLibrary | Defined$ You | NumCards$ 3 | MayShuffle$ True | SubAbility$ DBDraw | SpellDescription$ Text.\n\
+         SVar:DBDraw:DB$ Draw | Defined$ You | NumCards$ 1",
+    );
+    let mut sc = scenario(&[&ponder]);
+    let island = sc.card(P0, Zone::Library, "Island");
+    let swamp = sc.card(P0, Zone::Library, "Swamp");
+    let mountain = sc.card(P0, Zone::Library, "Mountain");
+    sc.card(P0, Zone::Battlefield, "Island");
+    sc.card(P0, Zone::Hand, "Test Musing");
+    sc.turn(P0, engine_core::turn::Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Musing").pay().pass_all();
+    assert_eq!(s.kind(), ChoiceKind::ScryOrder);
+    assert_eq!(s.who(), P0);
+    let order: Vec<usize> = [swamp, island, mountain]
+        .iter()
+        .map(|c| {
+            s.options()
+                .iter()
+                .position(|o| matches!(o, OptionDesc::Card { card } if card == c))
+                .unwrap()
+        })
+        .collect();
+    s.respond(Response::Order(order));
+    // "You may shuffle": no.
+    assert_eq!(s.kind(), ChoiceKind::MayAbility);
+    s.pick("decline", |_, o| matches!(o, OptionDesc::Decline));
+    assert!(
+        s.find(P0, Zone::Hand, "Swamp").is_some(),
+        "the new top card was drawn"
+    );
+    let library = s.st.zones.list(Zone::Library, P0);
+    let top: Vec<String> = library.iter().rev().take(2).map(|&c| s.name(c)).collect();
+    assert_eq!(top, ["Island", "Mountain"]);
+    let text = card_model::describe::rules_text(
+        s.st.card_def(s.find(P0, Zone::Graveyard, "Test Musing").unwrap()),
+    );
+    assert_eq!(
+        text,
+        [
+            "You look at the top 3 cards of your library, then put them back in any order. Then you may shuffle your library. Then you draw a card."
+        ]
+    );
+    // Accepting shuffles it.
+    let mut sc = scenario(&[&ponder]);
+    sc.cards(P0, Zone::Library, &["Island", "Swamp", "Mountain"]);
+    sc.card(P0, Zone::Battlefield, "Island");
+    sc.card(P0, Zone::Hand, "Test Musing");
+    sc.turn(P0, engine_core::turn::Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Musing").pay().pass_all();
+    s.respond(Response::Order(vec![0, 1, 2]));
+    s.pick("accept", |_, o| matches!(o, OptionDesc::Accept));
+    assert_eq!(
+        s.count(|e| matches!(e, engine_core::Event::Shuffled { player } if *player == P0)),
+        1
+    );
+}

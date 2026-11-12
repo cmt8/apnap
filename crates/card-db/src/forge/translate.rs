@@ -34,7 +34,9 @@ pub struct Compiled {
 
 /// Parameters that never affect the rules: descriptions shown to players, prompts, and
 /// hints for Forge's AI. (docs/forge/script-format.md, "keys a translator can ignore".)
-const TEXT_ONLY: [&str; 20] = [
+const TEXT_ONLY: [&str; 21] = [
+    // A hint for Forge's AI (respond to its own activation): never read by forge-game.
+    "AIRespondsToOwnAbility",
     // How the cost reads in the ability's description (`SpellAbility.getDescription`):
     // the cost itself is `Cost$`.
     "CostDesc",
@@ -2134,6 +2136,40 @@ impl<'a> Tx<'a> {
                 }
                 Effect::Counter {
                     what: TargetRef::Target(slot),
+                }
+            }
+            // "Look at the top N cards of [a player's] library, then put them back in any
+            // order. You may shuffle." (docs/forge/effects.md): the activator looks and
+            // orders (CR 401.4 is about cards put there by an effect, so the order is theirs
+            // to choose), then may have that library shuffled.
+            "RearrangeTopOfLibrary" => {
+                let slot = self.target(&rd, chain, false);
+                let who = match slot {
+                    Some(i) => Some(PlayerRef::Target(i)),
+                    None => self.player(&rd, chain, triggered),
+                };
+                let count = rd.get("NumCards").and_then(|n| self.amount(n, chain));
+                let shuffle = rd.get("MayShuffle").is_some();
+                let (who, count) = (who?, count?);
+                if matches!(who, PlayerRef::Each | PlayerRef::EachOpponent) {
+                    self.block("RearrangeTopOfLibrary:several libraries");
+                    return None;
+                }
+                let dig = Effect::Dig {
+                    who,
+                    count,
+                    reveal: false,
+                    take: Take::Exactly(0),
+                    cards: Vec::new(),
+                    to: CardDest::LibraryTop,
+                    reveal_taken: false,
+                    rest: CardDest::LibraryTop,
+                    rest_random: false,
+                };
+                if shuffle {
+                    Effect::Seq(vec![dig, Effect::May(Box::new(Effect::Shuffle { who }))])
+                } else {
+                    dig
                 }
             }
             // CR 603.7: "at the beginning of the next …, [do something]".

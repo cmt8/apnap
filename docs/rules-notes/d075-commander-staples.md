@@ -120,3 +120,17 @@ cost is `Cost$`. No rule involved.
 | Test | Rule |
 |---|---|
 | `a_cost_description_is_text_only` | 601.2b (the additional cost is still compiled from `Cost$`) |
+
+## Look at the top N cards, put them back in any order; shuffle (401.4, 701.24a)
+
+> 701.24a To shuffle a library or a face-down pile of cards is to randomize the cards within
+> it so that no player knows their order.
+
+Forge's `RearrangeTopOfLibrary`: the effect's controller looks at the top N cards of a
+library and puts them back in an order they choose (Ponder, Sensei's Divining Top, Index);
+`MayShuffle$`: then the controller may have that library shuffled (`Effect::Shuffle` in a
+"may"). Compiled as a "look at the top N" that takes none and puts the rest on top.
+
+| Test | Rule |
+|---|---|
+| `look_at_the_top_cards_put_them_back_in_any_order_then_maybe_shuffle` | 401.4, 701.24a |

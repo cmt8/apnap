@@ -120,7 +120,7 @@ fn effect_polarity(e: &Effect) -> Polarity {
         Effect::Apply { effects, .. } => continuous_polarity(effects),
         // What it does is in abilities written elsewhere on the card: no preference.
         Effect::Lasting { .. } | Effect::DelayedTrigger { .. } => Polarity::Neutral,
-        Effect::DrawUpTo { .. } => Polarity::Neutral,
+        Effect::DrawUpTo { .. } | Effect::Shuffle { .. } => Polarity::Neutral,
         // Its own permanent turning over: no target to judge.
         Effect::Transform { .. } => Polarity::Neutral,
         Effect::May(inner) => effect_polarity(inner),

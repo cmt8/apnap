@@ -926,6 +926,14 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             format!("{LASTING}{ability}|{DELAYED}{when}{LASTING}")
         }
         Effect::AttachThis { to } => format!("attach this permanent to {}", obj(mode, *to)),
+        // "You may have that player shuffle."
+        Effect::May(inner) if matches!(**inner, Effect::Shuffle { who } if who != PlayerRef::You) =>
+        {
+            let Effect::Shuffle { who } = **inner else {
+                unreachable!()
+            };
+            format!("you may have {} shuffle their library", player(mode, who))
+        }
         Effect::May(inner) => {
             let text = effect(mode, inner);
             // "You may draw a card", not "you may you draw a card"; and an instruction
@@ -942,6 +950,15 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             format!("{}. If you do, {}", effect(mode, first), effect(mode, then))
         }
         Effect::Proliferate => "proliferate".to_string(),
+        Effect::Shuffle { who } => format!(
+            "{} {} library",
+            verb(&player(mode, *who), "shuffle", "shuffles"),
+            if player(mode, *who) == "you" {
+                "your"
+            } else {
+                "their"
+            }
+        ),
         Effect::DrawUpTo { who, amount: a } => format!(
             "{} draw up to {} cards",
             match player(mode, *who).as_str() {
@@ -1164,6 +1181,17 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             } else {
                 ""
             };
+            if *take == Take::Exactly(0)
+                && *rest == CardDest::LibraryTop
+                && !*rest_random
+                && !*reveal
+            {
+                return if n == "1" {
+                    format!("{who} {look} {top}")
+                } else {
+                    format!("{who} {look} {top}, then put them back in any order")
+                };
+            }
             let taken = match take {
                 Take::Exactly(1) => {
                     format!("{shown}{} from among them", with_article(&noun(false)))

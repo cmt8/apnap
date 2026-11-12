@@ -1865,6 +1865,10 @@ pub enum Effect {
         who: PlayerRef,
         amount: Amount,
     },
+    /// CR 701.24a: the players shuffle their libraries.
+    Shuffle {
+        who: PlayerRef,
+    },
 }
 
 /// When a delayed triggered ability ([`Effect::DelayedTrigger`]) can trigger.
