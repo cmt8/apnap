@@ -218,8 +218,8 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-081): 11,472 of 34,463 scripts compile (33.3%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-081: 97% of
+Status (D-083): 11,480 of 34,463 scripts compile (33.3%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-083: 97% of
 the 100 most played Commander cards compile (missing: Deflecting Swat, Path of Ancestry,
 The One Ring), 62% of the top 1,000, 37% of the top 5,000
 (`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
@@ -250,8 +250,7 @@ craft, "enters/cast transformed" and "when this transforms" triggers (modal doub
 transforming, Adventure, Omen and split cards are built, D-071), searching another player's library, "X target creatures", changing a spell's targets, delve/convoke/improvise, flashback
 given to other cards, draw and mana replacement effects, effects that change life
 loss, memory that outlives a resolution (effect objects remembering
-cards, linked abilities per CR 607, delayed triggers about targets the effect didn't move,
-attackers and blockers, or "at end of combat"), counters other than +1/+1 and
+cards, linked abilities per CR 607, delayed triggers that keep remembered cards past their chain), counters other than +1/+1 and
 -1/-1, "as this enters, choose …" other than a creature type or a color (D-076; how a permanent enters is otherwise built, D-067:
 `ReplaceWith::EntersTappedUnless…`, the choice asked inside `ApplyFrame` as
 `ChoiceKind::AsEnters`), "sacrifice … instead" lands, "lands enter untapped", "exile it
