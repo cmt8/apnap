@@ -82,7 +82,7 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
   battlefield" is `replacement::as_it_would_exist`. "Triggers an additional time" is
   `AbilityDef::AdditionalTrigger`, counted in `triggers::queue_caused` (CR 603.2d); "can't be
   countered" is `AbilityDef::CantBeCountered`. One event creates at most
-  `MAX_TOKENS_AT_ONCE` = 10,000 tokens of a kind (a deviation from the CR, silent for now).
+  `MAX_TOKENS_AT_ONCE` = 10,000 tokens of a kind (a deviation from the CR the user approved on 2026-11-12; still silent — no event says it applied).
   Tests: `forge_doublers.rs`.
 - A delayed triggered ability (CR 603.7, D-075) is `Effect::DelayedTrigger` with a
   `DelayWindow`, kept in `GameState::delayed`: it triggers once, and what it refers to (a
