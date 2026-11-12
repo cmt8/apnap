@@ -1670,6 +1670,10 @@ pub enum Effect {
         /// whether to (and one who doesn't, doesn't shuffle either).
         #[serde(default)]
         optional: bool,
+        /// "… cards that share a land type" (CR 205.3i): every card chosen has a land type
+        /// that every other chosen card has too. Chosen one at a time.
+        #[serde(default, skip_serializing_if = "is_false")]
+        share_land_type: bool,
     },
     /// CR 701.22: scry N.
     Scry {
@@ -1838,6 +1842,10 @@ pub enum Effect {
     /// once. (Players have no counters in this engine yet: no card that gives them
     /// compiles. When one does, they must be offered too.)
     Proliferate,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// A zone an effect takes cards out of as it resolves.

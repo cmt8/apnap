@@ -424,3 +424,89 @@ fn untap_up_to_n_after_a_land_was_returned_to_pay_the_cost() {
         .collect();
     assert_eq!(offered, [forest, swamp]);
 }
+
+// ---------------------------------------------------------------------------------------
+// Cards that share a land type
+
+// CR 205.3i (2026-11-06): "Lands have their own unique set of subtypes; these subtypes are
+// called land types." CR 701.23b: cards with a stated quality needn't be found. Forge:
+// `ChangeZone … | ChangeNum$ 2 | ShareLandType$ True` ("search your library for up to two
+// basic land cards that share a land type"): chosen one at a time, each further card
+// sharing a land type with each one chosen before.
+#[test]
+fn search_for_lands_that_share_a_land_type() {
+    let landscape = card(
+        "Test Vista",
+        "no cost",
+        "Land",
+        "A:AB$ ChangeZone | Cost$ 2 T Sac<1/CARDNAME> | Origin$ Library | Destination$ Battlefield | ChangeType$ Land.Basic | Tapped$ True | ChangeNum$ 2 | ShareLandType$ True | SpellDescription$ Text.",
+    );
+    let mut sc = Scenario::new(
+        GameConfig::commander(2),
+        forge_test_catalog(&[&landscape], &[]),
+        31,
+    );
+    sc.library(P1, "Forest", 20);
+    let islands = sc.cards(P0, Zone::Library, &["Island", "Island"]);
+    let mountain = sc.card(P0, Zone::Library, "Mountain");
+    sc.card(P0, Zone::Battlefield, "Test Vista");
+    sc.cards(P0, Zone::Battlefield, &["Swamp", "Swamp"]);
+    let mut s = Script::new(sc.build());
+    s.activate("Test Vista").pay();
+    s.pass_all();
+    assert_eq!(s.kind(), ChoiceKind::SearchLibrary);
+    assert!(matches!(
+        s.decision().prim,
+        Primitive::PickN { min: 0, max: 1 }
+    ));
+    assert_eq!(s.options().len(), 3);
+    pick_cards(&mut s, &[islands[0]]);
+    // The second: only a card sharing a land type with the Island.
+    assert_eq!(s.kind(), ChoiceKind::SearchLibrary);
+    let offered: Vec<ObjectId> = s
+        .options()
+        .iter()
+        .filter_map(|o| match o {
+            OptionDesc::Card { card } => Some(*card),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(offered, [islands[1]]);
+    assert!(!offered.contains(&mountain));
+    pick_cards(&mut s, &[islands[1]]);
+    let on_field: Vec<ObjectId> =
+        s.st.zones
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|&o| s.name(o) == "Island")
+            .collect();
+    assert_eq!(on_field.len(), 2);
+    assert!(on_field.iter().all(|&o| s.st.object(o).tapped));
+    assert_eq!(
+        s.count(|e| matches!(e, engine_core::Event::SearchedLibrary { .. })),
+        1
+    );
+    // Stopping after one card is allowed ("up to two").
+    let mut sc = Scenario::new(
+        GameConfig::commander(2),
+        forge_test_catalog(&[&landscape], &[]),
+        31,
+    );
+    sc.library(P1, "Forest", 20);
+    sc.cards(P0, Zone::Library, &["Island", "Island"]);
+    let mountain = sc.card(P0, Zone::Library, "Mountain");
+    sc.card(P0, Zone::Battlefield, "Test Vista");
+    sc.cards(P0, Zone::Battlefield, &["Swamp", "Swamp"]);
+    let mut s = Script::new(sc.build());
+    s.activate("Test Vista").pay();
+    s.pass_all();
+    pick_cards(&mut s, &[mountain]);
+    // Nothing else shares a land type with the Mountain: no second question.
+    assert_ne!(
+        s.next.as_ref().map(|d| d.kind),
+        Some(ChoiceKind::SearchLibrary)
+    );
+    assert!(s.find(P0, Zone::Battlefield, "Mountain").is_some());
+    assert!(s.find(P0, Zone::Battlefield, "Island").is_none());
+}

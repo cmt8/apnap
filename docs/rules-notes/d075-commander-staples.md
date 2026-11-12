@@ -60,3 +60,22 @@ all at once (one event, replaceable). `Amount$ 2` is "proliferate twice": two ch
 | Test | Rule |
 |---|---|
 | `proliferate_gives_each_chosen_permanent_another_counter_of_each_kind` | 701.34a |
+
+## Cards that share a land type (205.3i)
+
+> 205.3i Lands have their own unique set of subtypes; these subtypes are called land types.
+> The land types are Cave, Desert, Forest, Gate, Island, Lair, Locus, Mine, Mountain, Plains,
+> Planet, Power-Plant, Sphere, Swamp, Tower, Town, and Urza’s. Of that list, Forest, Island,
+> Mountain, Plains, and Swamp are the basic land types. See rule 305.6.
+
+> 701.23b If a player is searching a hidden zone for cards with a stated quality, such as a
+> card with a certain card type or color, that player isn’t required to find some or all of
+> those cards even if they’re present in that zone.
+
+"Search for up to two basic land cards that share a land type" (Myriad Landscape): the
+cards are chosen one at a time, each further card sharing a land type with each card chosen
+before it (Forge's rule; for two cards the same as having one in common).
+
+| Test | Rule |
+|---|---|
+| `search_for_lands_that_share_a_land_type` | 205.3i, 701.23b |

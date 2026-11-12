@@ -3436,6 +3436,8 @@ impl<'a> Tx<'a> {
             return None;
         }
         let shuffle = from == CardZone::Library && !no_shuffle;
+        // "… that share a land type" (CR 205.3i).
+        let share_land_type = rd.get("ShareLandType").is_some();
         // "May search": Forge asks each searching player (docs/forge/effects.md §1), before
         // anything is looked at.
         let optional = rd.get("Optional").is_some();
@@ -3449,6 +3451,7 @@ impl<'a> Tx<'a> {
             reveal,
             shuffle,
             optional: optional && who != PlayerRef::You,
+            share_land_type,
         };
         // "You may search…": one yes/no of the controller's.
         if optional {
@@ -3492,6 +3495,7 @@ impl<'a> Tx<'a> {
                     to,
                     reveal,
                     shuffle,
+                    share_land_type,
                     ..
                 } => Effect::ChooseCards {
                     who,
@@ -3503,6 +3507,7 @@ impl<'a> Tx<'a> {
                     reveal,
                     shuffle,
                     optional: true,
+                    share_land_type,
                 },
                 other => other,
             })
@@ -7285,6 +7290,7 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
                         reveal: true,
                         shuffle: true,
                         optional: false,
+                        share_land_type: false,
                     })
                 }
             };

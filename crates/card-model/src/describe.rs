@@ -951,6 +951,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             reveal,
             shuffle,
             optional,
+            share_land_type,
         } => {
             let who = player(mode, *who);
             let you = who == "you";
@@ -971,6 +972,11 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 (true, _) => with_article(&noun),
                 (false, true) => format!("{n} {noun}"),
                 (false, false) => format!("up to {n} {noun}"),
+            };
+            let what = if *share_land_type {
+                format!("{what} that share a land type")
+            } else {
+                what
             };
             let it = if one { "it" } else { "them" };
             let s = |base: &str| {
