@@ -2865,6 +2865,11 @@ Rules text: docs/rules-notes/122-counters.md, docs/rules-notes/715-sagas.md (Sag
 - **App:** counters of named kinds are badges "lore x2" (`describe::counter`).
 - **Script differs:** Origin of the Avengers (chapter II puts any Hero card; the card says a
   Hero creature card).
+- **Coverage:** 11,535 → 11,632 scripts (+97 against main, every one read against its Oracle
+  text: 63 with counters of named kinds — Walking Ballista, Devoted Druid, the Spikes,
+  Triskelion, Karlov of the Ghost Council, … — and 34 Sagas, 7 of them creature Sagas).
+  EDHREC top 1,000: 629 → 631; top 5,000: 1,863 → 1,878. Most other Sagas wait on other
+  features (transforming, `Effect:Triggers`, read ahead, fight, goad, …).
 - **Not built — what loyalty needs beyond a counter kind:** starting loyalty as the
   planeswalker enters (306.5b, an intrinsic "enters with" like 715.3a); loyalty abilities
   (606): a cost of putting or removing loyalty counters (the counter costs above, plus −X),
