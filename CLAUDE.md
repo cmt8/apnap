@@ -65,6 +65,13 @@ serialization and determinism come before UI and before AI strength.
   (what each seat may see, `object_ids`), and `crates/harness/tests/client_view.rs`
   (property test against a knowledge model) must pass. `PlayerView::waiting` tells every
   seat who decides and what kind of decision, never the options.
+- A client's whole input is the catalog, its `view::seat_view` (`player_view` for a
+  player; `Seat::Spectator` = public only, `Seat::Everyone` = every hand and library, for
+  replays), its `PendingDecision` and its `EventView` events (D-092; crate docs of
+  engine-core). Client code — app `ui.rs`/`cardview.rs`/`combat.rs`/`art.rs`,
+  `harness::text`, crate `ai` — never names `GameState` or a session's `st`;
+  `cargo xtask check-deps` enforces it. `tests/client_boundary.rs` plays whole games over
+  JSON; `tests/knowledge` is the shared model of what a seat may know.
 - Events say what a client would otherwise guess (D-090 part 2): `ResolutionBegan`,
   `SpellCast { face, alt, tax }`, `AbilityActivated { text, triggered }` (a trigger's link
   to its stack object), `AbilityRemoved { reason: StackExit }`, `ContinuousEffectBegan`
