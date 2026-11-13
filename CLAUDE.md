@@ -172,6 +172,12 @@ serialization and determinism come before UI and before AI strength.
   planner keeps offers exact: a creature tapped for mana can't also be the one tapped as
   the cost. Gaining control (`GainControl`) is a layer-2 effect on D-029's control layer.
   Tests: `forge_tap_costs.rs`.
+- An emblem (CR 114, D-088) is a `GameObject` in its owner's command zone with
+  `emblem: Some(abilities)`: no characteristics, not a permanent, its abilities read like
+  any object's through `layers::abilities` and working from the command zone; it leaves
+  with its owner. Clients see it in `PlayerView::players[p].emblems` and `EmblemCreated`.
+  It is not `effects::Lasting` (a rule a resolving spell leaves on no object for a while).
+  Tests: `forge_emblems.rs`.
 - The text of a compiled card (`card_model::describe`) is written like a printed card:
   number words, "this creature/land/Equipment", "Then" between instructions, a predefined
   token's reminder text on first mention. The Oracle guard (`oracle_words_missing`) reads
@@ -263,8 +269,8 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-087): 12,129 of 34,463 scripts compile (35.2%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-087: 98% of
+Status (D-088): 12,149 of 34,463 scripts compile (35.3%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-088: 98% of
 the 100 most played Commander cards compile (missing: Path of Ancestry, The One Ring),
 65% of the top 1,000, 39% of the top 5,000
 (`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
@@ -299,8 +305,8 @@ cards, linked abilities per CR 607, delayed triggers that keep remembered cards 
 `ReplaceWith::EntersTappedUnless…`, the choice asked inside `ApplyFrame` as
 `ChoiceKind::AsEnters`), "sacrifice … instead" lands, "lands enter untapped", "exile it
 instead. When you do, …", static regeneration and "when it regenerates this way", abilities given to cards that aren't on
-the battlefield, "becomes the target" triggers, protection, read ahead and transforming Sagas, emblems (CR 114; 95 planeswalkers wait on them), loyalty
-abilities that add mana, "can be your commander",
+the battlefield, "becomes the target" triggers, protection, read ahead and transforming Sagas, abilities that hold for a while and trigger every time (`Effect:Triggers`, CR 603.7b; 139
+scripts), loyalty abilities that add mana, "can be your commander",
 and of Forge's "Effect" objects everything but combat rules and "prevent all damage"
 (`effects::Lasting`, D-065: no triggers, no characteristic changes, nothing about
 players yet). `forge-coverage --families` ranks what is left by kind of feature.
