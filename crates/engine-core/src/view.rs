@@ -168,10 +168,8 @@ pub struct LastingView {
 /// and a replay's views can't drift apart.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayerView {
-    /// The player whose view this is. For [`Seat::Spectator`] and [`Seat::Everyone`], who
-    /// are no player, it is player 0 (the seat a table is drawn from): read `seat`.
-    pub viewer: PlayerId,
-    /// Whose view this is: a player, a spectator, or everything (D-092).
+    /// Whose view this is: a player, a spectator, or everything (D-092). The player, if it
+    /// is one, is [`PlayerView::viewer`].
     pub seat: Seat,
     pub turn_number: u32,
     pub active: PlayerId,
@@ -212,6 +210,33 @@ pub struct PlayerView {
     /// How the game ended, once it has (CR 104): `winner` is `None` for a draw.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<GameResult>,
+    /// While `decision` is a declaration of attackers or blockers (asked one creature at a
+    /// time, spec §8.5): every creature still to be asked about in it — the one asked now
+    /// first — in the order they will be asked, each with the options it will be offered
+    /// (D-093). Enough to plan the whole declaration from its first question.
+    ///
+    /// What it promises (CR 508.1, 509.1; docs/rules-notes/508.1-509.1-declarations.md):
+    /// nothing changes the game between the questions of a declaration, and no creature's
+    /// options depend on the answers given before it, so these are exactly the questions
+    /// that follow. The declaration is checked as a whole when the player has answered for
+    /// every creature — in this engine only menace (CR 702.111b) — and an illegal one is
+    /// undone (CR 734.1): `Event::BlockDeclarationIllegal` says so, and the same player is
+    /// asked again from their first creature, with a new preview. Empty for every other
+    /// decision and every other seat; blockers with nothing to block are never asked and
+    /// aren't listed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declaration: Vec<crate::frames::DeclarationAsk>,
+}
+
+impl PlayerView {
+    /// The player whose view this is, or `None` for a spectator's or everyone's (D-093): a
+    /// view that is no player's has no "me".
+    pub fn viewer(&self) -> Option<PlayerId> {
+        match self.seat {
+            Seat::Player(p) => Some(p),
+            Seat::Spectator | Seat::Everyone => None,
+        }
+    }
 }
 
 fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
@@ -302,9 +327,9 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
 ///   (`PlayerPublic::hand`/`library`), and the pending decision whoever's it is.
 pub fn seat_view(st: &GameState, seat: Seat) -> PlayerView {
     let rules = crate::players::in_force(st);
-    let (viewer, me) = match seat {
-        Seat::Player(p) => (p, Some(p)),
-        Seat::Spectator | Seat::Everyone => (PlayerId(0), None),
+    let me = match seat {
+        Seat::Player(p) => Some(p),
+        Seat::Spectator | Seat::Everyone => None,
     };
     let all = seat == Seat::Everyone;
     let decider = st.pending.as_ref().map(|d| d.player);
@@ -315,8 +340,11 @@ pub fn seat_view(st: &GameState, seat: Seat) -> PlayerView {
         Seat::Everyone => decider,
     };
     PlayerView {
-        viewer,
         seat,
+        declaration: match decides {
+            Some(_) => crate::frames::declaration_preview(st),
+            None => Vec::new(),
+        },
         decision_count: st.decision_count,
         result: st.result.clone(),
         turn_number: st.turn.turn_number,

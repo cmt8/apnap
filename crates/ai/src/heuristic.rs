@@ -346,14 +346,17 @@ impl HeuristicAgent {
         }
     }
 
+    /// The player it plays. A view that is no player's (a spectator's, a replay's) is a
+    /// mistake by whoever handed it over: it fails loudly rather than play as anyone.
     fn me(v: &PlayerView) -> PlayerId {
-        v.viewer
+        v.viewer()
+            .unwrap_or_else(|| panic!("the heuristic agent was handed a {:?} view", v.seat))
     }
 
     fn opponents(v: &PlayerView) -> Vec<PlayerId> {
         v.players
             .iter()
-            .filter(|p| p.id != v.viewer && !p.has_lost)
+            .filter(|p| p.id != Self::me(v) && !p.has_lost)
             .map(|p| p.id)
             .collect()
     }
@@ -1140,7 +1143,7 @@ impl HeuristicAgent {
         let lands_out = v
             .battlefield
             .iter()
-            .filter(|b| b.controller == v.viewer && b.card_types.contains(&CardType::Land))
+            .filter(|b| b.controller == Self::me(v) && b.card_types.contains(&CardType::Land))
             .count() as i64;
         if o.card_types.contains(&CardType::Land) {
             if lands_out >= 5 {
@@ -1603,7 +1606,7 @@ impl Agent for HeuristicAgent {
                             let has = |k| c.counters.iter().any(|(kind, n)| *kind == k && *n > 0);
                             let (plus, minus) =
                                 (has(CounterKind::PlusOne), has(CounterKind::MinusOne));
-                            if c.controller == v.viewer {
+                            if c.controller == Self::me(v) {
                                 plus && !minus
                             } else {
                                 minus && !plus
@@ -1624,7 +1627,7 @@ impl Agent for HeuristicAgent {
                     .enumerate()
                     .filter(|(_, o)| match o {
                         OptionDesc::Card { card } => {
-                            Self::find(v, *card).is_some_and(|c| c.controller == v.viewer)
+                            Self::find(v, *card).is_some_and(|c| c.controller == Self::me(v))
                         }
                         _ => false,
                     })
