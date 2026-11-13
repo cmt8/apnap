@@ -752,7 +752,7 @@ fn drive(st: &mut engine_core::GameState, steps: usize) -> Vec<Event> {
             (_, Primitive::PickNumber { min, .. }) => Response::Number(*min),
             (_, p) => panic!("not expected here: {p:?}"),
         };
-        events.extend(engine_core::step(st, r).expect("legal").events);
+        events.extend(engine_core::step(st, r).expect("legal").truth);
     }
     events
 }

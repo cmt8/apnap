@@ -4411,7 +4411,10 @@ fn token_phrase(
             .abilities
             .iter()
             .map(|a| {
-                let text = render(def, &ability(a), tokens, depth + 1, true, &mut Vec::new());
+                let text = spells_only(
+                    a,
+                    render(def, &ability(a), tokens, depth + 1, true, &mut Vec::new()),
+                );
                 format!("\"{text}\"")
             })
             .collect();
@@ -4464,7 +4467,10 @@ fn token_phrase(
     for a in &def.abilities {
         with.push(format!(
             "\"{}\"",
-            render(def, &ability(a), tokens, depth + 1, true, &mut Vec::new())
+            spells_only(
+                a,
+                render(def, &ability(a), tokens, depth + 1, true, &mut Vec::new())
+            )
         ));
     }
     let mut after = String::new();
@@ -4502,11 +4508,25 @@ pub fn ability_text(def: &CardDef, a: &AbilityDef) -> String {
 }
 
 /// [`ability_text`], describing the tokens it creates from `tokens`.
+/// A "becomes the target" trigger only spells can make counters "that spell" (ward's own
+/// words, CR 702.21a, are "that spell or ability": any spell or ability).
+fn spells_only(a: &AbilityDef, text: String) -> String {
+    match a {
+        AbilityDef::Triggered {
+            when: Trigger::BecomesTarget {
+                only_spells: true, ..
+            },
+            ..
+        } => text.replace("counter that spell or ability", "counter that spell"),
+        _ => text,
+    }
+}
+
 pub fn ability_text_in(def: &CardDef, a: &AbilityDef, tokens: TokenLookup<'_>) -> String {
     // An ability the card gives to something else is about that something: "this
     // permanent" is not the card.
     let own = !(def.granted.contains(a) && !def.abilities.contains(a));
-    render(def, &ability(a), tokens, 0, own, &mut Vec::new())
+    spells_only(a, render(def, &ability(a), tokens, 0, own, &mut Vec::new()))
 }
 
 /// The card's rules text, one line per keyword group / ability.
@@ -4552,7 +4572,10 @@ pub fn rules_text_in(def: &CardDef, tokens: TokenLookup<'_>) -> Vec<String> {
         .filter(enters)
         .chain(def.abilities.iter().filter(|a| !enters(a)))
     {
-        lines.push(render(def, &ability(a), tokens, 0, true, &mut seen));
+        lines.push(spells_only(
+            a,
+            render(def, &ability(a), tokens, 0, true, &mut seen),
+        ));
     }
     // What an attached permanent calls the thing it is attached to.
     let host = if def.creature_types.iter().any(|t| t == "Equipment") {

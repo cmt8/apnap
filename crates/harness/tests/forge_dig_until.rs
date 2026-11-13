@@ -8,7 +8,6 @@ use engine_core::zones::Zone;
 use engine_core::{ChoiceKind, Event, GameConfig, GameState, PlayerId, Primitive, Response};
 use harness::forge_test_catalog;
 use harness::script::Script;
-use harness::text::Narrator;
 
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
@@ -97,7 +96,19 @@ fn reveal_until_a_land_onto_the_battlefield() {
         "the rest at the bottom"
     );
     // Another seat sees the revealed cards by name.
-    let theirs = Narrator::new(&st0).lines(&s.events, Some(P1));
+    let theirs = harness::text::narrate(&st0, &s.events, engine_core::client::Seat::Player(P1));
+    // P1's own stream (redacted): the reveal is there, with the cards it shows.
+    let mut view = engine_core::client::EventView::new(&st0, engine_core::client::Seat::Player(P1));
+    let seen = view.redact(&s.events);
+    let shown = seen
+        .iter()
+        .find_map(|e| match e {
+            Event::Revealed { player, cards } if *player == P0 => Some(cards.clone()),
+            _ => None,
+        })
+        .expect("revealed to P1 too");
+    assert_eq!(shown.len(), 3);
+    assert!(!shown.contains(&engine_core::client::HIDDEN));
     assert!(
         theirs
             .iter()
@@ -159,4 +170,53 @@ fn each_opponent_reveals_until() {
     assert_eq!(gy, ["Island", "Test Elf", "Test Golem"]);
     assert_eq!(names(&s, Zone::Graveyard, P1).len(), 3);
     assert_eq!(s.st.zones.list(Zone::Library, P1).len(), 1);
+}
+
+// CR 701.20d: "If cards in a player's library are shuffled or otherwise reordered, any
+// revealed cards that are reordered stop being revealed." The rest put on the bottom (in a
+// random order) is no longer known to another seat: drawing one later tells P1 nothing.
+#[test]
+fn the_rest_put_on_the_bottom_stops_being_revealed() {
+    let draw = "Name:Test Glimpse\nManaCost:G\nTypes:Sorcery\n\
+        A:SP$ Draw | NumCards$ 2 | SpellDescription$ Text.\nOracle:Draw two cards.";
+    let mut sc = scenario(&[LOOKOUT, draw]);
+    // Bottom to top: Forest, Elf, Elf. The dig takes the Forest; the Elves go to the bottom.
+    sc.card(P0, Zone::Library, "Forest");
+    sc.cards(P0, Zone::Library, &["Test Elf", "Test Elf"]);
+    sc.library(P1, "Forest", 5);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Forest", "Forest", "Forest", "Forest"],
+    );
+    sc.cards(P0, Zone::Hand, &["Test Lookout", "Test Glimpse"]);
+    let st0: GameState = sc.build();
+    let mut s = Script::new(st0.clone());
+    s.cast("Test Lookout").pay();
+    settle(&mut s);
+    let before = s.events.len();
+    s.cast("Test Glimpse").pay();
+    settle(&mut s);
+    let mut view = engine_core::client::EventView::new(&st0, engine_core::client::Seat::Player(P1));
+    let seen = view.redact(&s.events);
+    // The draws, as P1 is told them: unseen moves of hidden cards.
+    let draws: Vec<&Event> = seen
+        .iter()
+        .filter(|e| {
+            matches!(e, Event::MovedUnseen { from: Zone::Library, to: Zone::Hand, old, .. }
+                if *old == engine_core::client::HIDDEN)
+        })
+        .collect();
+    assert_eq!(draws.len(), 2, "{:?}", &seen[before.min(seen.len())..]);
+    assert!(
+        !seen.iter().any(|e| matches!(
+            e,
+            Event::ZoneChange {
+                from: Zone::Library,
+                to: Zone::Hand,
+                ..
+            }
+        )),
+        "P1 doesn't follow the drawn Elves"
+    );
 }

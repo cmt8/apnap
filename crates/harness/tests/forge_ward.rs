@@ -81,7 +81,8 @@ fn ward_counters_a_spell_unless_its_controller_pays() {
     let bear = sc.card(P0, Zone::Battlefield, "Test Warded Bear");
     sc.cards(P1, Zone::Battlefield, &["Mountain"; 5]);
     sc.cards(P1, Zone::Hand, &["Test Jolt", "Test Jolt"]);
-    let mut s = Script::new(sc.build());
+    let st0 = sc.build();
+    let mut s = Script::new(st0.clone());
     s.cast("Test Jolt").target_object(bear).pay();
     let jolt = s.st.stack[0].id;
     // The ward trigger is on the stack, P0's, about the Jolt.
@@ -110,6 +111,17 @@ fn ward_counters_a_spell_unless_its_controller_pays() {
     );
     settle(&mut s);
     assert!(s.st.objects.contains_key(&bear), "the Jolt was countered");
+    // What the other seat (P0) is told: P1 didn't pay, the Jolt was countered.
+    let mut view = engine_core::client::EventView::new(&st0, engine_core::client::Seat::Player(P0));
+    let seen = view.redact(&s.events);
+    assert!(seen.iter().any(
+        |e| matches!(e, Event::PaidToSave { player, at_stake, paid: false }
+        if *player == P1 && *at_stake == jolt)
+    ));
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, Event::Countered { object } if *object == jolt))
+    );
     // Paying: the spell resolves.
     s.cast("Test Jolt").target_object(bear).pay();
     to_ward(&mut s);
@@ -291,4 +303,19 @@ fn sacrifice_it_when_it_becomes_a_target() {
         0,
         "the Jolt fizzled, it wasn't countered"
     );
+}
+
+// Text only: a trigger that only spells can make counters "that spell" (ward's own words,
+// CR 702.21a, are "that spell or ability").
+#[test]
+fn a_spell_only_ward_says_that_spell() {
+    let thorn = "Name:Test Spell Thorn\nManaCost:2 G\nTypes:Creature Plant\nPT:3/3\n\
+        T:Mode$ BecomesTarget | ValidTarget$ Card.Self | ValidSource$ Spell.OppCtrl | TriggerZones$ Battlefield | Execute$ TrigCounter | TriggerDescription$ Text.\n\
+        SVar:TrigCounter:DB$ Counter | Defined$ TriggeredSourceSA | UnlessCost$ Discard<1/Card> | UnlessPayer$ TriggeredSourceSAController\n\
+        Oracle:Whenever this creature becomes the target of a spell an opponent controls, counter that spell unless its controller discards a card."
+        .to_string();
+    let cat = forge_test_catalog(&[&thorn], &[]);
+    let text = card_model::describe::rules_text(cat.get(cat.find("Test Spell Thorn").unwrap()));
+    assert!(text[0].contains("counter that spell unless"), "{text:?}");
+    assert!(!text[0].contains("or ability"), "{text:?}");
 }

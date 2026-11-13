@@ -13,6 +13,7 @@
 //!   forge-coverage [--top N] [--ranked [N]]  how many Forge scripts compile; what blocks the rest (by EDHREC rank)
 //!   bless                              rewrite crates/harness/tests/golden/games.txt
 
+use engine_core::client::Seat;
 use engine_core::{Agent, ChoiceKind, OptionDesc, PendingDecision, PlayerId, Primitive, Response};
 use harness::text::{Narrator, board, decision_prompt};
 use harness::{GOLDEN, PlayOptions, Replay, Setup, golden_line, play_random, run_replay};
@@ -514,8 +515,9 @@ fn main() -> ExitCode {
         "watch" => {
             let seed = num(&args, "--seed", 42);
             let rec = play_random(seed, opts).expect("game");
-            let mut n = Narrator::new(&opts.setup.game(seed));
-            for line in n.lines(&rec.events, None) {
+            // Engine truth, narrated for a referee (`--seat N` would be one player's).
+            let start = opts.setup.game(seed);
+            for line in harness::text::narrate(&start, &rec.events, Seat::Everyone) {
                 println!("{line}");
             }
             ExitCode::SUCCESS
@@ -599,7 +601,8 @@ fn play(args: &[String]) -> ExitCode {
     let me = PlayerId(0);
     let setup = setup(args, Setup::M1 { players: 2 });
     let mut st = setup.game(seed);
-    let mut narrator = Narrator::new(&st);
+    let mut narrator = Narrator::new(&st, Seat::Player(me));
+    let mut seat = engine_core::client::EventView::new(&st, Seat::Player(me));
     // Opponents: the heuristic AI by default (`--agents random` for random opponents).
     let kind = flag(args, "--agents").map_or(harness::Agents::Heuristic, |a| {
         harness::Agents::parse(&a).expect("bad --agents")
@@ -617,7 +620,7 @@ fn play(args: &[String]) -> ExitCode {
     let mut lines = stdin.lock().lines();
     let mut out = engine_core::start(&mut st);
     loop {
-        for l in narrator.lines(&out.events, Some(me)) {
+        for l in narrator.lines(&seat.redact(&out.truth)) {
             println!("{l}");
         }
         let Some(d) = out.next.clone() else { break };

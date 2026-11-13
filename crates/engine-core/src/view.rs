@@ -179,6 +179,11 @@ pub struct PlayerView {
     /// The effects in force that are on no object (CR 611.2).
     #[serde(default)]
     pub lasting: Vec<LastingView>,
+    /// Who the game is waiting for, and for what kind of decision — public, to every seat
+    /// (D-090). Its options are only in `decision`, for the player deciding: they may name
+    /// cards in that player's hidden zones.
+    #[serde(default)]
+    pub waiting: Option<(PlayerId, crate::decision::ChoiceKind)>,
 }
 
 fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
@@ -248,6 +253,12 @@ fn views(st: &GameState, ids: &[ObjectId]) -> Vec<ObjectView> {
     ids.iter().map(|&id| object_view(st, id)).collect()
 }
 
+/// What `viewer` may see of the game now (D-090): every public zone, their own hand, the
+/// counts of hidden ones, the cards their own pending decision lets them look at, their own
+/// decision with its options, and — for everyone — who the game waits for and for what kind
+/// of decision (`waiting`). Never another player's hand, a library's cards (but a top card
+/// the viewer may see, CR 401.5), or another player's options. With the viewer's redacted
+/// events (`client::EventView`) it is all a client needs; agents get nothing else.
 pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
     let rules = crate::players::in_force(st);
     PlayerView {
@@ -363,6 +374,7 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
             .collect(),
         combat: st.combat.clone(),
         decision: st.pending.clone().filter(|d| d.player == viewer),
+        waiting: st.pending.as_ref().map(|d| (d.player, d.kind)),
         revealed: views(st, &shown_to(st, viewer)),
         lasting: st
             .lasting

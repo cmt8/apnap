@@ -1,6 +1,6 @@
 //! Plain-text rendering of events, views and decisions for `watch` and `play`.
-//! This is UI code: it may see the full `GameState` to name things in the event log, but
-//! a human player's prompt is built from their `PlayerView` only.
+//! This is a client: it is fed one seat's redacted events (`client::EventView`, D-090) and
+//! names only what that seat may see; a prompt is built from the `PlayerView` only.
 //!
 //! The engine's event order is not the order a reader wants (a spell's targets come before
 //! its `SpellCast`, a non-permanent spell's `Resolved` comes after its effects, a draw is a
@@ -10,6 +10,7 @@
 //! one explains it.
 
 use card_model::describe;
+use engine_core::client::{HIDDEN, Seat};
 use engine_core::events::{DamageTarget, Event};
 use engine_core::mana::ManaType;
 use engine_core::stack::Target;
@@ -17,6 +18,13 @@ use engine_core::turn::Step;
 use engine_core::view::{ObjectView, StackView};
 use engine_core::zones::Zone;
 use engine_core::{GameState, ObjectId, OptionDesc, PendingDecision, PlayerId, PlayerView};
+
+/// The log lines `seat` reads for `truth`, the engine's events since `start` (the game as it
+/// was before them): redacted for the seat, then narrated (D-090).
+pub fn narrate(start: &GameState, truth: &[Event], seat: Seat) -> Vec<String> {
+    let mut view = engine_core::client::EventView::new(start, seat);
+    Narrator::new(start, seat).lines(&view.redact(truth))
+}
 
 fn p(p: PlayerId) -> String {
     format!("P{}", p.0)
@@ -42,7 +50,13 @@ enum Pend {
     Tap(ObjectId),
     /// A zone change that a following event may already say (`Drew`, `Discarded`,
     /// `Sacrificed`, `LandPlayed`).
-    Move { new: ObjectId, from: Zone, to: Zone },
+    Move {
+        new: ObjectId,
+        from: Zone,
+        to: Zone,
+        /// Whose card (known even when which card isn't: CR 400.2).
+        owner: Option<PlayerId>,
+    },
     /// Damage to a player: a `LifeChanged` right after is the same news.
     Damage {
         source: ObjectId,
@@ -111,15 +125,29 @@ pub struct Narrator {
 }
 
 impl Narrator {
-    pub fn new(st: &GameState) -> Self {
+    /// A narrator for `seat`: it names the objects the seat may see now, and learns the
+    /// rest from the seat's redacted stream (`Event::Identified`), which is all it must be
+    /// fed (D-090).
+    pub fn new(st: &GameState, seat: Seat) -> Self {
         let creature = |id: ObjectId| {
             st.card_def(id)
                 .card_types
                 .contains(&card_model::CardType::Creature)
         };
+        let sees = |id: ObjectId| {
+            let o = st.object(id);
+            match (seat, o.zone) {
+                (Seat::Everyone, _) => true,
+                (_, Zone::Library) => false,
+                (Seat::Player(me), Zone::Hand) => o.owner == me,
+                (_, Zone::Hand) => false,
+                _ => true,
+            }
+        };
         let info = st
             .objects
             .keys()
+            .filter(|&&id| sees(id))
             .map(|&id| {
                 (
                     id,
@@ -165,6 +193,9 @@ impl Narrator {
     }
 
     pub fn name(&self, id: ObjectId) -> String {
+        if id == HIDDEN {
+            return "a card".to_string();
+        }
         self.info
             .get(&id)
             .map(|i| i.name.clone())
@@ -186,12 +217,12 @@ impl Narrator {
 
     /// Narrate a batch of events, merging consecutive draws by the same player. State
     /// carries over to the next batch (a cast or a resolution can span a decision).
-    pub fn lines(&mut self, events: &[Event], viewer: Option<PlayerId>) -> Vec<String> {
+    pub fn lines(&mut self, events: &[Event]) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut last_drawer: Option<PlayerId> = None;
         for e in events {
             let before = out.len();
-            self.feed(e, viewer, &mut out);
+            self.feed(e, &mut out);
             let drawer = match e {
                 Event::Drew { player, .. } => Some(*player),
                 _ => None,
@@ -221,15 +252,15 @@ impl Narrator {
                 last_drawer = drawer;
             }
         }
-        self.end_batch(viewer, &mut out);
+        self.end_batch(&mut out);
         out
     }
 
     /// Feed one event; returns its log line(s), joined by newlines, if any. (Some events
     /// are held back until the next one, so a line may appear one call late.)
-    pub fn line(&mut self, e: &Event, viewer: Option<PlayerId>) -> Option<String> {
+    pub fn line(&mut self, e: &Event) -> Option<String> {
         let mut out = Vec::new();
-        self.feed(e, viewer, &mut out);
+        self.feed(e, &mut out);
         if out.is_empty() {
             None
         } else {
@@ -238,12 +269,12 @@ impl Narrator {
     }
 
     /// Nothing more will be said about the held-back events of this batch.
-    fn end_batch(&mut self, viewer: Option<PlayerId>, out: &mut Vec<String>) {
+    fn end_batch(&mut self, out: &mut Vec<String>) {
         self.flush_adds(out);
         self.adds_open = false;
         // A tap may still turn into a mana tap in the next batch (a choice of color).
         if !matches!(self.pend, Some(Pend::Tap(_))) {
-            self.flush_pend(viewer, out);
+            self.flush_pend(out);
         }
         self.flush_untaps(out);
         self.drain_cast(out);
@@ -322,13 +353,18 @@ impl Narrator {
         }
     }
 
-    fn flush_pend(&mut self, viewer: Option<PlayerId>, out: &mut Vec<String>) {
+    fn flush_pend(&mut self, out: &mut Vec<String>) {
         let Some(pend) = self.pend.take() else {
             return;
         };
         let line = match pend {
             Pend::Tap(o) => Some(format!("  {} taps", self.name(o))),
-            Pend::Move { new, from, to } => self.zone_line(new, from, to, viewer),
+            Pend::Move {
+                new,
+                from,
+                to,
+                owner,
+            } => self.zone_line(new, from, to, owner),
             Pend::Damage {
                 source,
                 target,
@@ -360,7 +396,7 @@ impl Narrator {
     }
 
     /// Let the held-back event be explained by `e`. Returns true if `e` is used up.
-    fn settle(&mut self, e: &Event, viewer: Option<PlayerId>, out: &mut Vec<String>) -> bool {
+    fn settle(&mut self, e: &Event, out: &mut Vec<String>) -> bool {
         let Some(pend) = self.pend.clone() else {
             return false;
         };
@@ -372,7 +408,7 @@ impl Narrator {
             (Pend::Tap(o), Event::AttackerDeclared { attacker, .. }) if o == attacker => {
                 self.pend = None;
             }
-            (Pend::Move { new, from, to }, ev) => {
+            (Pend::Move { new, from, to, .. }, ev) => {
                 let explained = match (from, to, ev) {
                     (Zone::Library, Zone::Hand, Event::Drew { card, .. }) => card == new,
                     (Zone::Hand, Zone::Graveyard, Event::Discarded { card, .. }) => card == new,
@@ -388,7 +424,7 @@ impl Narrator {
                 if explained {
                     self.pend = None;
                 } else {
-                    self.flush_pend(viewer, out);
+                    self.flush_pend(out);
                 }
             }
             (
@@ -422,7 +458,7 @@ impl Narrator {
                 self.emit(l, out);
                 return true;
             }
-            _ => self.flush_pend(viewer, out),
+            _ => self.flush_pend(out),
         }
         false
     }
@@ -447,6 +483,29 @@ impl Narrator {
 
     fn track_names(&mut self, e: &Event) {
         match e {
+            // The seat gets to see this object (D-090): what it is.
+            Event::Identified {
+                object,
+                card,
+                face,
+                owner,
+            } => {
+                // (Already known — the same object: what it was told stands.)
+                if self.info.contains_key(object) {
+                    return;
+                }
+                let def = self.catalog.get(self.catalog.face(*card, *face));
+                self.info.insert(
+                    *object,
+                    Info {
+                        name: format!("{} ({})", def.name, p(*owner)),
+                        card: Some(*card),
+                        face: *face,
+                        owner: Some(*owner),
+                        creature: def.card_types.contains(&card_model::CardType::Creature),
+                    },
+                );
+            }
             Event::ZoneChange { old, new, .. } => {
                 if let Some(mut i) = self.info.get(old).cloned() {
                     // CR 712.6a: off the stack and battlefield a card has its front face.
@@ -552,8 +611,12 @@ impl Narrator {
         self.resolving = None;
     }
 
-    fn feed(&mut self, e: &Event, viewer: Option<PlayerId>, out: &mut Vec<String>) {
+    fn feed(&mut self, e: &Event, out: &mut Vec<String>) {
         self.track_names(e);
+        // What the seat gets to see is no news by itself (and must not end a held-back line).
+        if let Event::Identified { .. } = e {
+            return;
+        }
         if !matches!(e, Event::ManaAdded { .. }) {
             self.flush_adds(out);
             self.adds_open = false;
@@ -573,6 +636,10 @@ impl Narrator {
         if let Event::ZoneChange {
             from: Zone::Library,
             ..
+        }
+        | Event::MovedUnseen {
+            from: Zone::Library,
+            ..
         } = e
             && let Some((_, found)) = &mut self.searching
         {
@@ -581,7 +648,7 @@ impl Narrator {
         if let Event::PriorityPassed { .. } = e {
             // Nothing resolves while players pass (CR 117.3d).
             self.end_resolution();
-            self.flush_pend(viewer, out);
+            self.flush_pend(out);
             self.flush_untaps(out);
             self.flush_attack_taps(out);
             self.drain_cast(out);
@@ -598,7 +665,7 @@ impl Narrator {
             self.flush_attack_taps(out);
         }
         self.begin_resolution(e, out);
-        if self.settle(e, viewer, out) {
+        if self.settle(e, out) {
             self.last_damage = None;
             self.just_announced = None;
             return;
@@ -679,8 +746,41 @@ impl Narrator {
                         new: *new,
                         from: *from,
                         to: *to,
+                        owner: self.owner(*new),
                     });
-                } else if let Some(l) = self.zone_line(*new, *from, *to, viewer) {
+                } else if let Some(l) = self.zone_line(*new, *from, *to, self.owner(*new)) {
+                    self.emit(l, out);
+                }
+                if *from == Zone::Stack {
+                    self.stack.retain(|s| s != old);
+                }
+            }
+            // A card moved that this seat may not identify (D-090): whose, from where to
+            // where — not which.
+            Event::MovedUnseen {
+                owner,
+                old,
+                new,
+                from,
+                to,
+            } => {
+                let named = if *new == HIDDEN { *old } else { *new };
+                if *to == Zone::Stack && *from != Zone::Stack {
+                    self.casting = Some(*from);
+                } else if matches!(
+                    (from, to),
+                    (Zone::Library, Zone::Hand)
+                        | (Zone::Hand, Zone::Graveyard)
+                        | (Zone::Battlefield, Zone::Graveyard)
+                        | (Zone::Hand, Zone::Battlefield)
+                ) {
+                    self.pend = Some(Pend::Move {
+                        new: named,
+                        from: *from,
+                        to: *to,
+                        owner: Some(*owner),
+                    });
+                } else if let Some(l) = self.zone_line(named, *from, *to, Some(*owner)) {
                     self.emit(l, out);
                 }
                 if *from == Zone::Stack {
@@ -688,7 +788,7 @@ impl Narrator {
                 }
             }
             Event::Drew { player, card } => {
-                let l = if viewer.is_some_and(|v| v != *player) {
+                let l = if *card == HIDDEN {
                     format!("{} draws a card", p(*player))
                 } else {
                     format!("{} draws {}", p(*player), self.name(*card))
@@ -1179,13 +1279,14 @@ impl Narrator {
                 );
                 self.emit(l, out);
             }
-            // Hidden from everyone but the player who looked.
+            // Named only to the player who looked (the seat's stream hides them).
             Event::LookedAt { player, cards } => {
-                if viewer.is_some_and(|v| v != *player) {
-                    return;
-                }
-                let names: Vec<String> = cards.iter().map(|c| self.name(*c)).collect();
-                let l = format!("  {} looks at {}", p(*player), names.join(", "));
+                let l = if cards.iter().all(|c| *c == HIDDEN) {
+                    format!("  {} looks at {} card(s)", p(*player), cards.len())
+                } else {
+                    let names: Vec<String> = cards.iter().map(|c| self.name(*c)).collect();
+                    format!("  {} looks at {}", p(*player), names.join(", "))
+                };
                 self.emit(l, out);
             }
             Event::PlayerLost { player, reason } => {
@@ -1193,7 +1294,7 @@ impl Narrator {
                 self.emit(l, out);
             }
             Event::GameOver { winner } => {
-                self.flush_pend(viewer, out);
+                self.flush_pend(out);
                 out.push(match winner {
                     Some(w) => format!("== game over: {} wins ==", p(*w)),
                     None => "== game over: draw ==".into(),
@@ -1210,7 +1311,9 @@ impl Narrator {
             // Deliberately silent: bookkeeping with no news for a reader.
             Event::PriorityPassed { .. }
             | Event::CeasedToExist { .. }
-            | Event::DamageRemoved { .. } => {}
+            | Event::DamageRemoved { .. }
+            // (What a seat gets to see: names, kept by `track_names`.)
+            | Event::Identified { .. } => {}
         }
     }
 
@@ -1219,15 +1322,14 @@ impl Narrator {
         self.just_announced = announced;
     }
 
-    /// The line for an object changing zones; `None` if the other events say it.
-    /// Hidden-zone moves (library to hand, hand to library) are named only to players who
-    /// may know the card (its owner), CR 400.2.
+    /// The line for an object changing zones; `None` if the other events say it. A card the
+    /// seat may not identify is [`HIDDEN`]: "a card" (CR 400.2).
     fn zone_line(
         &self,
         new: ObjectId,
         from: Zone,
         to: Zone,
-        viewer: Option<PlayerId>,
+        owner: Option<PlayerId>,
     ) -> Option<String> {
         let n = self.name(new);
         let zone = |z: Zone| match z {
@@ -1239,18 +1341,11 @@ impl Narrator {
             Zone::Exile => "exile",
             Zone::Command => "the command zone",
         };
-        let owner = self.owner(new);
-        let hidden = |owner: Option<PlayerId>| viewer.is_some() && viewer != owner;
         let who = owner.map_or("a player".to_string(), p);
         Some(match (from, to) {
             (_, Zone::Stack) | (Zone::Stack, Zone::Graveyard) => return None,
             (Zone::Library, Zone::Hand) | (Zone::Hand, Zone::Library) => {
-                let what = if hidden(owner) {
-                    "a card".to_string()
-                } else {
-                    n
-                };
-                format!("  {who} puts {what} from {} into {}", zone(from), zone(to))
+                format!("  {who} puts {n} from {} into {}", zone(from), zone(to))
             }
             (Zone::Battlefield, Zone::Graveyard) => {
                 if self.info.get(&new).is_some_and(|i| i.creature) {

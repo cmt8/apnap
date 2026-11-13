@@ -2,7 +2,7 @@
 //! `GameState::log_hash` as it is emitted, so the hash is a fingerprint of the whole game.
 //!
 //! Events are engine-level truth and include hidden information (e.g. which card was
-//! drawn). UIs must render a per-player redacted log (TODO M4).
+//! drawn). A client sees them only through `client::EventView::redact` for its seat (D-090).
 
 use crate::ids::{CardInstanceId, ObjectId, PlayerId};
 use crate::mana::ManaType;
@@ -334,6 +334,26 @@ pub enum Event {
         player: PlayerId,
         card: card_model::CardDefId,
         abilities: alloc::vec::Vec<u16>,
+    },
+    /// Never emitted by the engine: added by [`crate::client::EventView::redact`] when the
+    /// seat gets to see `object` (it entered a public zone, was drawn into the seat's hand,
+    /// was revealed or looked at): it is `card`, with face `face` up.
+    Identified {
+        object: ObjectId,
+        card: card_model::CardDefId,
+        face: u8,
+        owner: PlayerId,
+    },
+    /// Never emitted by the engine: what [`crate::client::EventView::redact`] says instead
+    /// of a `ZoneChange` the seat can't follow (one side is in a hidden zone it may not see):
+    /// a card of `owner`'s moved from `from` to `to`. The unseen side's id is
+    /// [`crate::client::HIDDEN`] (CR 400.2, 400.7).
+    MovedUnseen {
+        owner: PlayerId,
+        old: ObjectId,
+        new: ObjectId,
+        from: crate::zones::Zone,
+        to: crate::zones::Zone,
     },
     /// CR 702.21a: `player` chose to pay (`paid`) or not to pay the cost that keeps the
     /// spell or ability `at_stake` from being countered.

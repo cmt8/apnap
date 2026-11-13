@@ -76,9 +76,11 @@ pub struct Session {
     agents: Vec<Box<dyn Agent>>,
     /// Every response so far, from every seat: the save file (spec §10.3).
     pub responses: Vec<Response>,
-    /// The event log from the human's point of view (opponents' draws hidden).
+    /// The event log from the viewer's seat (its redacted stream: D-090).
     pub log: Vec<String>,
     narrator: Narrator,
+    /// The viewer's seat's version of the events (all the log is made from).
+    seat: engine_core::client::EventView,
     pub stops: Stops,
     /// Pass priority automatically until this turn is over, whatever happens.
     pub pass_turn: Option<u32>,
@@ -98,7 +100,9 @@ impl std::fmt::Debug for Session {
 impl Session {
     pub fn new(setup: Setup, seed: u64, human: Option<PlayerId>, opponents: Agents) -> Self {
         let mut st = setup.game(seed);
-        let narrator = Narrator::new(&st);
+        let me = engine_core::client::Seat::Player(human.unwrap_or(PlayerId(0)));
+        let narrator = Narrator::new(&st, me);
+        let seat = engine_core::client::EventView::new(&st, me);
         let agents = (0..setup.players())
             .map(|s| opponents.make(seed, s, &st.catalog))
             .collect();
@@ -113,19 +117,22 @@ impl Session {
             responses: Vec::new(),
             log: Vec::new(),
             narrator,
+            seat,
             stops: Stops::default(),
             pass_turn: None,
             yield_turn: None,
             replay_queue: None,
         };
-        s.narrate(&out.events);
+        s.narrate(&out.truth);
         s
     }
 
     /// Wrap an existing position (a test scenario). Saving such a session isn't meaningful:
     /// it has no setup or seed to rebuild from.
     pub fn from_state(mut st: GameState, human: Option<PlayerId>, opponents: Agents) -> Self {
-        let narrator = Narrator::new(&st);
+        let me = engine_core::client::Seat::Player(human.unwrap_or(PlayerId(0)));
+        let narrator = Narrator::new(&st, me);
+        let seat = engine_core::client::EventView::new(&st, me);
         let agents = (0..st.num_players() as u8)
             .map(|s| opponents.make(st.seed, s, &st.catalog))
             .collect();
@@ -141,17 +148,20 @@ impl Session {
             responses: Vec::new(),
             log: Vec::new(),
             narrator,
+            seat,
             stops: Stops::default(),
             pass_turn: None,
             yield_turn: None,
             replay_queue: None,
         };
-        s.narrate(&out.events);
+        s.narrate(&out.truth);
         s
     }
 
-    fn narrate(&mut self, events: &[engine_core::Event]) {
-        let lines = self.narrator.lines(events, self.human);
+    /// Log what the viewer's seat may know of these engine events.
+    fn narrate(&mut self, truth: &[engine_core::Event]) {
+        let seen = self.seat.redact(truth);
+        let lines = self.narrator.lines(&seen);
         self.log.extend(
             lines
                 .into_iter()
@@ -183,7 +193,7 @@ impl Session {
     fn apply(&mut self, r: Response) -> Result<(), IllegalResponse> {
         let out = engine_core::step(&mut self.st, r.clone())?;
         self.responses.push(r);
-        self.narrate(&out.events);
+        self.narrate(&out.truth);
         Ok(())
     }
 
