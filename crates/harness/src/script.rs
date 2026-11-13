@@ -24,7 +24,7 @@ impl Script {
         let out = engine_core::start(&mut st);
         Script {
             st,
-            events: out.events,
+            events: out.truth,
             next: out.next,
             answered: Vec::new(),
         }
@@ -73,7 +73,7 @@ impl Script {
         let out = engine_core::step(&mut self.st, r.clone())
             .unwrap_or_else(|e| panic!("{r:?} rejected for {d:?}: {e}"));
         self.answered.push(d);
-        self.events.extend(out.events);
+        self.events.extend(out.truth);
         self.next = out.next;
         self
     }

@@ -770,7 +770,7 @@ fn save_load_and_clone_with_choices_made() {
             Primitive::Order => Response::Order((0..s.options().len()).collect()),
         };
         let out = engine_core::step(&mut s.st, r.clone()).expect("legal");
-        events.extend(out.events);
+        events.extend(out.truth);
         s.next = out.next;
         responses.push(r);
     }
@@ -819,7 +819,11 @@ fn heuristic_chooses_its_most_common_type_and_the_log_says_so() {
     );
     let before = s.events.len();
     s.respond(r);
-    let lines = harness::text::Narrator::new(&s.st).lines(&s.events[before..], None);
+    let lines = harness::text::narrate(
+        &s.st,
+        &s.events[before..],
+        engine_core::client::Seat::Everyone,
+    );
     assert!(
         lines
             .iter()

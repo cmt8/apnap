@@ -830,7 +830,7 @@ pub fn play_random(seed: u64, opts: PlayOptions) -> Result<GameRecord, HarnessEr
     };
     let mut out = engine_core::start(&mut st);
     loop {
-        rec.events.append(&mut out.events);
+        rec.events.append(&mut out.truth);
         if opts.check_invariants {
             st.check_invariants()
                 .map_err(|msg| HarnessError::Invariant {
@@ -919,7 +919,7 @@ pub fn play_random(seed: u64, opts: PlayOptions) -> Result<GameRecord, HarnessEr
 pub fn feed(st: &mut GameState, responses: &[Response]) -> Result<Vec<Event>, HarnessError> {
     let mut events = Vec::new();
     let StepOutput {
-        events: mut e,
+        truth: mut e,
         mut next,
     } = engine_core::start(st);
     events.append(&mut e);
@@ -929,7 +929,7 @@ pub fn feed(st: &mut GameState, responses: &[Response]) -> Result<Vec<Event>, Ha
         }
         let mut out =
             engine_core::step(st, r.clone()).map_err(|err| HarnessError::Illegal { at: i, err })?;
-        events.append(&mut out.events);
+        events.append(&mut out.truth);
         next = out.next;
     }
     Ok(events)

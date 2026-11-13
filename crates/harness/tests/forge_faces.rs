@@ -765,7 +765,7 @@ fn save_load_and_clone_with_back_faces_up() {
             Primitive::Order => Response::Order((0..s.options().len()).collect()),
         };
         let out = engine_core::step(&mut s.st, r.clone()).expect("legal");
-        events.extend(out.events);
+        events.extend(out.truth);
         s.next = out.next;
         responses.push(r);
     }

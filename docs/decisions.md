@@ -3105,6 +3105,51 @@ Rules text: docs/rules-notes/114-emblems.md. Tests: `crates/harness/tests/forge_
   (`api:Cleanup`, `line:Text`, "until your next turn", mana loyalty abilities, …);
   `emblem:activated abilities` is in 3.
 
+## D-090 What a client sees: one seat's event stream, and who the game waits for (2026-11-12)
+Rules text: docs/rules-notes/400-hidden-information.md (CR 400.2, 400.7, 401, 402, 406.3,
+701.20, 708). Tests: `crates/harness/tests/client_view.rs`.
+- **Shape:** `engine_core::client::EventView` — one seat's view of the stream, built from the
+  game as it is (`EventView::new(&st, seat)`, seat = `Seat::Player(p)`, `Spectator` or
+  `Everyone` for a referee/replay) and fed every batch in order (`redact(&truth)`). It is
+  stateful because whether an id may be shown depends on where the object was when the event
+  happened, which only the stream itself says. Plain data (serialisable), pure, no_std.
+  `StepOutput::events` is now `StepOutput::truth`, documented as engine truth with hidden
+  information, for replays and hashes: a client that reaches for "the events" meets the word
+  and the pointer to `EventView`. (Not done: making the raw stream private — the harness
+  records and hashes it everywhere.)
+- **What a seat gets:** everything about public zones; its own hand; what is revealed to
+  all or looked at by the seat (until it is shuffled away, 701.20d). Every other object of a
+  hidden zone is `client::HIDDEN`. A move the seat can't follow is `Event::MovedUnseen
+  { owner, old, new, from, to }` (whose, from where to where, the unseen side's id hidden, no
+  card instance — which would link the two objects across a hidden zone, CR 400.7); each
+  object the seat newly gets to see is named once by `Event::Identified { object, card, face,
+  owner }`. Both variants are added last and never emitted by the engine (event logs and
+  hashes don't move). Identities that become public later don't leak earlier ones: the
+  hidden ids were never handed out. `client::object_ids(&event)` lists the ids an event
+  names.
+- **Decisions:** `PlayerView::decision` (and `revealed`) were already the viewer's only;
+  `PlayerView::waiting` now says to every seat who the game waits for and the kind of
+  decision (`ChoiceKind`), never the options.
+- **Consumers:** the narrator (`harness::text::Narrator::new(&st, seat)`, `narrate(start,
+  truth, seat)`) is fed the seat's redacted stream and names only what it is told; its own
+  hiding (viewer checks on draws, looks, hidden moves) is gone. `watch` narrates as
+  `Everyone`, `play` and the app's log as the human's seat (the app spectating: seat 0, the
+  seat whose view it shows). One narration test changed meaning: a landcycling search
+  *reveals* the land, so the opponent's log now names it (CR 701.20a).
+- **Rustdoc** on `start`, `step`, `player_view` and `client` says what an embedder may rely
+  on: a pure, deterministic state machine that stops at every decision; illegal responses
+  rejected before any mutation; `truth` vs a seat's stream.
+- **Tested:** a draw, a non-revealing vs a revealing tutor, looking at the top three, mill,
+  a mulligan, determinism and serialisation of the stream, a spectator; and a property test
+  over random forge-4p and m2-4p games checking every seat's (and a spectator's) stream event
+  by event against an independent knowledge model (public zones, own hand, revealed, looked
+  at), and every seat's `PlayerView` at every decision. It found no leak in the
+  implementation; with the redaction weakened (library cards visible) it fails at once.
+- **Not built (D-090 part 5, its own landing):** the events clients were missing (the
+  wishlist: spell cast face/alternative cost, activated ability id, what a continuous effect
+  does, mana details, "may"/"unless"/search outcomes, zone change details, resolution begun,
+  trigger links and removal reasons, tap/untap causes, the token cap).
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…
