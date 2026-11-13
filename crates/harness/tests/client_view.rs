@@ -1,6 +1,9 @@
-//! What a client sees (D-090): a seat's redacted event stream (`client::EventView`) and its
-//! `PlayerView` carry no card a seat may not know. Rules text:
-//! docs/rules-notes/400-hidden-information.md (CR 400.2, 400.7, 401.2, 402.3, 701.20).
+//! What a client sees (D-090, D-092): a seat's redacted event stream (`client::EventView`)
+//! and its `PlayerView` (a player's, a spectator's, everyone's) carry no card a seat may not
+//! know. Rules text: docs/rules-notes/400-hidden-information.md (CR 400.2, 400.7, 401.2,
+//! 402.3, 701.20).
+
+mod knowledge;
 
 use engine_core::client::{EventView, HIDDEN, Seat, object_ids};
 use engine_core::events::Event;
@@ -10,153 +13,21 @@ use engine_core::zones::Zone;
 use engine_core::{Agent, GameConfig, GameState, ObjectId, OptionDesc, PlayerId, player_view};
 use harness::script::Script;
 use harness::{Setup, forge_test_catalog};
-use std::collections::{BTreeMap, BTreeSet};
+use knowledge::Model;
+use std::collections::BTreeSet;
 
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
 
-/// What one seat may know, kept independently of the engine's redaction: where each object
-/// is, and which hidden ones the seat has been shown (CR 400.2, 402.3, 701.20).
-struct Model {
-    seat: Seat,
-    objects: BTreeMap<ObjectId, (Zone, PlayerId)>,
-    shown: BTreeSet<ObjectId>,
-}
-
-impl Model {
-    fn new(st: &GameState, seat: Seat) -> Self {
-        Model {
-            seat,
-            objects: st
-                .objects
-                .values()
-                .map(|o| (o.id, (o.zone, o.owner)))
-                .collect(),
-            shown: BTreeSet::new(),
-        }
-    }
-
-    fn knows(&self, id: ObjectId) -> bool {
-        match self.objects.get(&id) {
-            // Abilities on the stack, objects made since that aren't cards in hidden zones.
-            None => true,
-            Some((Zone::Library, _)) => self.shown.contains(&id),
-            Some((Zone::Hand, owner)) => {
-                self.seat == Seat::Player(*owner) || self.shown.contains(&id)
-            }
-            Some(_) => true,
-        }
-    }
-
-    fn apply(&mut self, e: &Event) {
-        match e {
-            Event::ZoneChange { old, new, to, .. } => {
-                let owner = self.objects.remove(old).map_or(P0, |(_, o)| o);
-                self.shown.remove(old);
-                self.objects.insert(*new, (*to, owner));
-            }
-            Event::TokenCreated {
-                object, controller, ..
-            } => {
-                self.objects
-                    .insert(*object, (Zone::Battlefield, *controller));
-            }
-            Event::Revealed { cards, .. } => self.shown.extend(cards.iter().copied()),
-            Event::LookedAt { player, cards } if self.seat == Seat::Player(*player) => {
-                self.shown.extend(cards.iter().copied())
-            }
-            // CR 701.23a: the searcher looked through the library and knows what it found.
-            Event::SearchFound { player, cards } if self.seat == Seat::Player(*player) => {
-                self.shown.extend(cards.iter().copied())
-            }
-            // CR 701.20d: shuffled or otherwise reordered (put on the top or the bottom).
-            Event::Shuffled { player } | Event::LibraryArranged { player, .. } => {
-                let lib: Vec<ObjectId> = self
-                    .objects
-                    .iter()
-                    .filter(|(_, (z, o))| *z == Zone::Library && o == player)
-                    .map(|(id, _)| *id)
-                    .collect();
-                for id in lib {
-                    self.shown.remove(&id);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Check what the seat was told of the engine event `truth`, then learn it.
-    fn check(&mut self, truth: &Event, told: &[Event]) {
-        let before: Vec<(ObjectId, bool)> = told
-            .iter()
-            .flat_map(object_ids)
-            .map(|id| (id, id == HIDDEN || self.knows(id)))
-            .collect();
-        self.apply(truth);
-        for e in told {
-            match e {
-                Event::Identified { object, .. } => {
-                    assert!(self.knows(*object), "{:?} told {e:?}", self.seat)
-                }
-                Event::ZoneChange { old, new, .. } | Event::MovedUnseen { old, new, .. } => {
-                    let old_ok = *old == HIDDEN || before.iter().any(|(id, k)| id == old && *k);
-                    assert!(old_ok, "{:?} told {e:?} for {truth:?}", self.seat);
-                    assert!(
-                        *new == HIDDEN || self.knows(*new),
-                        "{:?} told {e:?} for {truth:?}",
-                        self.seat
-                    );
-                }
-                _ => {
-                    for id in object_ids(e) {
-                        let ok = id == HIDDEN
-                            || before.iter().any(|(i, k)| *i == id && *k)
-                            || self.knows(id);
-                        assert!(ok, "{:?} told {e:?} for {truth:?}", self.seat);
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Every card a `PlayerView` names is one its viewer may know.
-fn check_view(st: &GameState, viewer: PlayerId) {
-    let v = player_view(st, viewer);
-    let decides = st.pending.as_ref().is_some_and(|d| d.player == viewer);
-    let mut named: Vec<ObjectId> = Vec::new();
-    named.extend(v.battlefield.iter().map(|o| o.id));
-    named.extend(v.exile.iter().map(|o| o.id));
-    named.extend(v.command.iter().map(|o| o.id));
-    for p in &v.players {
-        named.extend(p.graveyard.iter().map(|o| o.id));
-    }
-    for id in named {
-        let z = st.object(id).zone;
-        assert!(
-            !matches!(z, Zone::Library | Zone::Hand),
-            "public lists name a hidden card"
-        );
-    }
-    for o in &v.hand {
-        assert_eq!(st.object(o.id).owner, viewer, "only the viewer's own hand");
-        assert_eq!(st.object(o.id).zone, Zone::Hand);
-    }
-    if !decides {
-        assert!(v.decision.is_none() && v.revealed.is_empty());
-    }
-    // Who the game waits for is public; what they may choose from isn't.
-    assert_eq!(v.waiting, st.pending.as_ref().map(|d| (d.player, d.kind)));
-}
-
-/// A whole random game: every seat's stream (and a spectator's) checked event by event
-/// against the knowledge model, and every seat's view at every decision.
+/// A whole random game: every seat's stream (and a spectator's, and everyone's) checked event
+/// by event against the knowledge model, and every seat's view at every decision against what
+/// its stream has made known.
 fn play_and_check(setup: Setup, seed: u64) -> usize {
     let mut st = setup.game(seed);
     let n = st.num_players();
     let seats: Vec<Seat> = (0..n)
         .map(|p| Seat::Player(PlayerId(p as u8)))
-        .chain([Seat::Spectator])
+        .chain([Seat::Spectator, Seat::Everyone])
         .collect();
     let mut views: Vec<EventView> = seats.iter().map(|s| EventView::new(&st, *s)).collect();
     let mut models: Vec<Model> = seats.iter().map(|s| Model::new(&st, *s)).collect();
@@ -177,12 +48,12 @@ fn play_and_check(setup: Setup, seed: u64) -> usize {
                 m.check(e, &told);
             }
         }
-        for p in 0..n {
-            check_view(&st, PlayerId(p as u8));
+        for m in &models {
+            m.check_view(&st, &engine_core::seat_view(&st, m.seat));
         }
         let Some(d) = out.next.clone() else { break };
         decisions += 1;
-        if decisions > 3_000 {
+        if decisions > 100_000 {
             break;
         }
         let r = agents[d.player.index()].decide(&player_view(&st, d.player), &d);
@@ -192,21 +63,52 @@ fn play_and_check(setup: Setup, seed: u64) -> usize {
     decisions
 }
 
+/// `forge` games of every compiled card and `m2` of the M2 test decks, on four threads.
+fn many(forge: u64, m2: u64) {
+    let f = Setup::parse("forge-4p").expect("forge setup");
+    let m = Setup::parse("m2-4p").expect("m2");
+    let games: Vec<(Setup, u64)> = (1..=forge)
+        .map(|s| (f, s))
+        .chain((1..=m2).map(|s| (m, s)))
+        .collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let total: usize = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut decisions = 0;
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&(setup, seed)) = games.get(i) else {
+                            break decisions;
+                        };
+                        decisions += play_and_check(setup, seed);
+                    }
+                })
+            })
+            .collect();
+        workers.into_iter().map(|w| w.join().expect("a game")).sum()
+    });
+    assert!(total > 100 * games.len());
+}
+
 // CR 400.2, 400.7, 402.3, 701.20 (2026-11-06): over random games of every compiled card, no
-// seat's stream names an object of a hidden zone it may not know, and no id links a hidden
-// card to what it was or becomes.
+// seat's stream names an object of a hidden zone it may not know, no id links a hidden card
+// to what it was or becomes, and no seat's view names what its stream hasn't made known.
 #[test]
 fn random_games_leak_nothing() {
-    let setup = Setup::parse("forge-4p").expect("forge setup");
-    let mut total = 0;
-    for seed in 1..=4 {
-        total += play_and_check(setup, seed);
-    }
-    assert!(total > 100);
-    let m2 = Setup::parse("m2-4p").expect("m2");
-    for seed in 1..=3 {
-        play_and_check(m2, seed);
-    }
+    many(24, 6);
+}
+
+/// The long run, for the soak: `APNAP_LEAK_GAMES` forge-4p games (default 200).
+#[test]
+#[ignore]
+fn random_games_leak_nothing_long() {
+    let n = std::env::var("APNAP_LEAK_GAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200);
+    many(n, n / 10);
 }
 
 fn scenario(cards: &[&str]) -> Scenario {
@@ -465,4 +367,65 @@ fn library_position_is_public_the_card_is_not() {
                 if *owner == P0 && *old == HIDDEN && *new == HIDDEN)),
         "{theirs:#?}"
     );
+}
+
+// D-092, CR 400.2, 701.23a: one search, four views of it. The searcher gets the decision and
+// the library it searches; the opponent and a spectator get neither — only who decides and
+// what kind of decision, and how many cards each hidden zone has; everyone (a replay) gets
+// every hand and library and the decision.
+#[test]
+fn each_seat_sees_its_own_view_of_a_search() {
+    let mut sc = scenario(&[DIG]);
+    sc.cards(P0, Zone::Battlefield, &["Swamp"]);
+    sc.card(P0, Zone::Hand, "Test Quiet Tutor");
+    sc.card(P0, Zone::Hand, "Test Golem");
+    sc.card(P0, Zone::Library, "Plains");
+    sc.turn(P0, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Quiet Tutor").pay().pass_all();
+    let d = s.st.pending.clone().expect("the search");
+    assert_eq!(d.player, P0);
+    let names = |l: &[engine_core::view::ObjectView]| -> Vec<String> {
+        l.iter().map(|o| o.name.clone()).collect()
+    };
+    let searcher = engine_core::seat_view(&s.st, Seat::Player(P0));
+    assert_eq!(searcher.decision.as_ref(), Some(&d));
+    assert!(names(&searcher.revealed).contains(&"Plains".to_string()));
+    assert_eq!(names(&searcher.hand), ["Test Golem"]);
+    for seat in [Seat::Player(P1), Seat::Spectator] {
+        let v = engine_core::seat_view(&s.st, seat);
+        assert_eq!(v.seat, seat);
+        assert!(v.decision.is_none(), "{seat:?} gets no options");
+        assert!(
+            v.revealed.is_empty(),
+            "{seat:?} sees nothing of the library"
+        );
+        assert_eq!(
+            v.waiting,
+            Some((P0, d.kind)),
+            "but who decides, and what kind"
+        );
+        let p0 = &v.players[0];
+        assert!(
+            p0.hand.is_none() && p0.library.is_none(),
+            "{seat:?}: counts only"
+        );
+        assert_eq!(p0.hand_size, 1);
+        assert!(p0.library_top.is_none());
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(
+            !json.contains("Test Golem"),
+            "{seat:?} never reads P0's hand"
+        );
+        assert!(!json.contains("Plains"), "or the library searched");
+        if seat == Seat::Spectator {
+            assert!(v.hand.is_empty(), "a spectator has no hand");
+        }
+    }
+    let all = engine_core::seat_view(&s.st, Seat::Everyone);
+    assert_eq!(all.decision.as_ref(), Some(&d));
+    let p0 = &all.players[0];
+    assert_eq!(names(p0.hand.as_deref().unwrap()), ["Test Golem"]);
+    assert!(names(p0.library.as_deref().unwrap()).contains(&"Plains".to_string()));
+    assert_eq!(all.decision_count, s.st.decision_count);
 }
