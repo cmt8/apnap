@@ -5,6 +5,15 @@ Rust workspace. `docs/spec.md` is the architecture source of truth; deviations a
 Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules.txt`
 (gitignored — never commit it). When the spec and the CR disagree, **the CR wins**: flag it.
 
+## What this project is for (the user, 2026-11-12)
+The product is the **engine**: a pure state machine advanced one `step` at a time, correct
+by the Comprehensive Rules, that many different apps can embed. The desktop app is only a
+reference client. So: no app polish and no app-only features; keep the app building and
+its tests passing as a consumer of the public API. Everything a client needs must come
+out of `PendingDecision`, `PlayerView` and events — a feature is not done if a client
+would have to read `GameState` to use it. Correctness, the step/decision API, events,
+serialization and determinism come before UI and before AI strength.
+
 ## Invariants (never violate)
 1. engine-core has NO I/O, threads, wall clock, or ambient RNG. Randomness = `state.rng`
    only. engine-core and card-model are `#![no_std]` (D-003); keep them that way.
