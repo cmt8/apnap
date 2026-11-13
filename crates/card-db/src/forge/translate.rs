@@ -9758,6 +9758,11 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
         if has_word(plain, "damage") && !has_word(compiled, "damage") {
             missing.push("says damage");
         }
+        // "You get an emblem with …" (CR 114): an object of its own in the command zone, not
+        // an effect that ends — which a script could make with the same Forge `Effect`.
+        if has_word(plain, "emblem") && !has_word(compiled, "emblem") {
+            missing.push("says emblem");
+        }
         // "A copy of …, except it has haste": the exceptions of a copy effect (CR 707.9)
         // are part of what the copy is.
         let sentences = |text: &str, all: &[&str]| {
@@ -10151,6 +10156,23 @@ mod tests {
             vec![],
         ));
         assert!(has_word(&t, "damage") && t.contains("it deals"), "{t}");
+        // "emblem"
+        let t = text(&CardDef {
+            granted: vec![AbilityDef::Triggered {
+                when: Trigger::GainsLife(Who::You),
+                intervening_if: None,
+                body: Body::Effect(Mode {
+                    targets: vec![],
+                    effect: draw.clone(),
+                    groups: vec![],
+                }),
+            }],
+            ..spell(vec![], Effect::Emblem { abilities: vec![0] }, vec![])
+        });
+        assert!(
+            has_word(&t, "emblem") && t.contains("you get an emblem with \"whenever you gain life"),
+            "{t}"
+        );
         // "you may choose new targets for the copy"
         let t = text(&spell(
             vec![TargetFilter::Spell],
