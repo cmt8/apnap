@@ -53,6 +53,10 @@ pub struct ObjectView {
     /// this is the card or token it is itself ("Test Clone"). Public (CR 707.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed: Option<card_model::CardDefId>,
+    /// CR 114: an emblem (in the command zone): its abilities are `granted` (written on
+    /// `card`, the card whose effect made it); it has no other characteristics. Public.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub emblem: bool,
 }
 
 /// A commander designation (CR 903.3): public for the whole game, wherever the card is.
@@ -192,6 +196,7 @@ fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
         },
         chosen: o.chosen.clone(),
         printed: o.copy.as_ref().map(|_| o.card),
+        emblem: o.emblem.is_some(),
     }
 }
 

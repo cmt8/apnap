@@ -277,7 +277,15 @@ pub fn affected_player(st: &GameState, ev: &Proposed) -> PlayerId {
 /// order, then the entering object, then shields), minus those already applied.
 pub fn applicable(st: &GameState, p: &Pending) -> Vec<RepKey> {
     let mut out = Vec::new();
-    for &source in &st.zones.battlefield {
+    // Permanents, then emblems (CR 114.4: their abilities work from the command zone).
+    let sources: Vec<ObjectId> = st
+        .zones
+        .battlefield
+        .iter()
+        .copied()
+        .chain(crate::effects::emblems(st))
+        .collect();
+    for source in sources {
         // CLAUDE.md invariant 4: only abilities the source currently has.
         let has = abilities(st, source);
         for (k, (ability, a)) in has.iter().enumerate() {
@@ -1463,10 +1471,11 @@ pub fn apply(st: &mut GameState, key: RepKey, ev: Proposed) -> Option<Proposed> 
             let AbilityDef::Replacement { with, replaces } = st.catalog.ability(ability) else {
                 unreachable!()
             };
+            // (A permanent's ability, or an emblem's, CR 114.4.)
             if st
                 .objects
                 .get(&source)
-                .is_some_and(|o| o.zone == Zone::Battlefield)
+                .is_some_and(|o| o.zone == Zone::Battlefield || o.emblem.is_some())
             {
                 let who = Bearer {
                     source,

@@ -2429,6 +2429,18 @@ impl ResolveFrame {
                     })
                     .collect()
             }
+            // CR 114.2: the controller gets an emblem.
+            Effect::Emblem { abilities } => {
+                execute(
+                    st,
+                    GameAction::CreateEmblem {
+                        card: self.card,
+                        abilities,
+                        owner: self.controller,
+                    },
+                );
+                Vec::new()
+            }
             Effect::Lasting {
                 abilities,
                 about,

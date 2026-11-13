@@ -38,7 +38,15 @@ struct Rule<'a> {
 /// creature can't be blocked this turn", CR 611.2).
 fn combat_rules(st: &GameState) -> Vec<Rule<'_>> {
     let mut out = Vec::new();
-    for &id in &st.zones.battlefield {
+    // Permanents, then emblems (CR 114.4).
+    let sources: Vec<ObjectId> = st
+        .zones
+        .battlefield
+        .iter()
+        .copied()
+        .chain(crate::effects::emblems(st))
+        .collect();
+    for id in sources {
         for (_, a) in crate::layers::abilities(st, id) {
             if let AbilityDef::CombatRule { affected, rule } = a {
                 out.push(Rule {

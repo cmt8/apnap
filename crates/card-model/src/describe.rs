@@ -1187,6 +1187,8 @@ const GRANTED: char = '\u{1}';
 const LASTING: char = '\u{2}';
 /// Starts the "what it is about" of a delayed triggered ability: when it can trigger.
 const DELAYED: char = '\u{3}';
+/// Comes right before the marker of an emblem's ability (CR 114).
+const EMBLEM: char = '\u{4}';
 
 /// The text of a delayed ability about objects (CR 603.7c), worded as cards say it: "it"
 /// for one object, "those cards" for several; a card put onto the battlefield with no
@@ -1332,16 +1334,28 @@ fn quote_granted(def: &CardDef, text: &str, top: bool) -> String {
     // A quotation that ends a sentence ends it with its own full stop.
     let mut ends_sentence = false;
     while let Some(plain) = parts.next() {
-        out.push_str(match plain.strip_prefix('.') {
+        let plain = match plain.strip_prefix('.') {
             Some(rest) if ends_sentence => rest,
             _ => plain,
-        });
+        };
+        // An emblem's ability: "this" in it is the emblem (CR 114.4).
+        let (plain, emblem) = match plain.strip_suffix(EMBLEM) {
+            Some(rest) => (rest, true),
+            None => (plain, false),
+        };
+        out.push_str(plain);
         ends_sentence = false;
         let Some(index) = parts.next() else { break };
         match index.parse::<usize>().ok().and_then(|i| def.granted.get(i)) {
             Some(a) => {
                 out.push('"');
-                out.push_str(&quote_granted(def, &ability(a), false));
+                let mut quoted = quote_granted(def, &ability(a), false);
+                if emblem {
+                    quoted = quoted
+                        .replace("this permanent", "this emblem")
+                        .replace("This permanent", "This emblem");
+                }
+                out.push_str(&quoted);
                 out.push('"');
                 ends_sentence = out.ends_with(".\"");
             }
@@ -1461,6 +1475,15 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             format!("{}{turn}", join(parts, "and"))
         }
         Effect::Choose(what) => format!("choose {}", choice_of(*what)),
+        // CR 114.2: "You get an emblem with "…"" (the texts are filled in by
+        // `quote_granted`).
+        Effect::Emblem { abilities } => {
+            let parts = abilities
+                .iter()
+                .map(|i| format!("{EMBLEM}{GRANTED}{i}{GRANTED}"))
+                .collect();
+            format!("you get an emblem with {}", join(parts, "and"))
+        }
         Effect::Seq(v) => v
             .iter()
             .map(|x| effect(mode, x))

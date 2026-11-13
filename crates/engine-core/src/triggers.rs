@@ -216,11 +216,15 @@ struct Source<'a> {
     chosen: Vec<card_model::Chosen>,
 }
 
+/// Every object whose triggered abilities work now: permanents, then emblems (CR 114.4: in
+/// the command zone).
 fn battlefield_sources(st: &GameState) -> Vec<Source<'_>> {
     st.zones
         .battlefield
         .iter()
-        .map(|&id| Source {
+        .copied()
+        .chain(crate::effects::emblems(st))
+        .map(|id| Source {
             id,
             card: st.face_card(id),
             controller: crate::layers::controller_of(st, id),

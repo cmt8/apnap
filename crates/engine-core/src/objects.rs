@@ -67,6 +67,11 @@ pub struct GameObject {
     /// stack (CR 704.5e).
     #[serde(default, skip_serializing_if = "core::ops::Not::not")]
     pub spell_copy: bool,
+    /// CR 114: an emblem — in the command zone, neither a card nor a permanent, with no
+    /// characteristics but these abilities (indices into `card`'s granted list: the card
+    /// whose effect made it, CR 114.3). Its abilities work from the command zone (114.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emblem: Option<alloc::vec::Vec<u16>>,
 }
 
 fn is_front(face: &u8) -> bool {

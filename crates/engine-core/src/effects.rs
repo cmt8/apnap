@@ -108,6 +108,17 @@ pub struct Bearer<'a> {
     pub about: &'a [ObjectId],
 }
 
+/// CR 114: the emblems in the command zone, in the order they were made (CR 114.4: their
+/// abilities work from there).
+pub fn emblems(st: &crate::state::GameState) -> Vec<ObjectId> {
+    st.zones
+        .command
+        .iter()
+        .copied()
+        .filter(|id| st.object(*id).emblem.is_some())
+        .collect()
+}
+
 /// The lasting effects in force, with each ability they carry.
 pub fn lasting_abilities(
     st: &crate::state::GameState,
