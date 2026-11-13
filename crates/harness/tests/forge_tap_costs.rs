@@ -311,3 +311,91 @@ fn an_uncrewed_vehicle_cant_attack() {
     );
     let _ = P1;
 }
+
+fn can_attack_with(s: &Script, id: ObjectId) -> bool {
+    s.options()
+        .iter()
+        .any(|o| matches!(o, OptionDesc::Attack { attacker, .. } if *attacker == id))
+}
+
+// CR 613.1b (layer 2) and 611.2a: "Gain control of target creature until end of turn. Untap
+// that creature. It gains haste until end of turn." CR 302.6: a creature that came under its
+// controller's control this turn can't attack unless it has haste. Control returns as the
+// effect ends. Without a duration the control change lasts (CR 611.2a). Forge:
+// `GainControl | LoseControl$ EOT | Untap$ True | AddKWs$ Haste`.
+#[test]
+fn gain_control_until_end_of_turn_or_for_good() {
+    let treason = card(
+        "Test Treason",
+        "2 R",
+        "Sorcery",
+        "A:SP$ GainControl | ValidTgts$ Creature | LoseControl$ EOT | Untap$ True | AddKWs$ Haste | SpellDescription$ Text.",
+    )
+    .replace(
+        "Oracle:Text.",
+        "Oracle:Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn.",
+    );
+    let piper = card(
+        "Test Piper",
+        "2 B B",
+        "Sorcery",
+        "A:SP$ GainControl | ValidTgts$ Creature | SpellDescription$ Text.",
+    )
+    .replace("Oracle:Text.", "Oracle:Gain control of target creature.");
+    let mut sc = scenario(&[&treason, &piper, &bear()]);
+    sc.cards(P0, Zone::Battlefield, &["Mountain"; 3]);
+    sc.cards(P0, Zone::Battlefield, &["Swamp"; 4]);
+    sc.cards(P0, Zone::Hand, &["Test Treason", "Test Piper"]);
+    let theirs = sc.card(P1, Zone::Battlefield, "Test Grizzly");
+    sc.tapped(theirs);
+    let other = sc.card(P1, Zone::Battlefield, "Test Grizzly");
+    let mut s = Script::new(sc.build());
+    s.cast("Test Treason").target_object(theirs).pay();
+    settle(&mut s);
+    assert_eq!(chars(&s.st, theirs).controller, P0);
+    assert!(!s.st.object(theirs).tapped, "untapped");
+    assert!(chars(&s.st, theirs).has(card_model::Keyword::Haste));
+    // For good, without haste: it can't attack this turn (CR 302.6).
+    s.cast("Test Piper").target_object(other).pay();
+    settle(&mut s);
+    assert_eq!(chars(&s.st, other).controller, P0);
+    drive_until(&mut s, |s| s.kind() == ChoiceKind::DeclareAttackers);
+    assert!(can_attack_with(&s, theirs), "haste");
+    assert!(!can_attack_with(&s, other), "summoning sick");
+    drive_until(&mut s, |s| s.st.turn.active == P1);
+    assert_eq!(chars(&s.st, theirs).controller, P1, "until end of turn");
+    assert_eq!(chars(&s.st, other).controller, P0, "for good");
+    let cat = forge_test_catalog(&[&treason, &piper], &[]);
+    let text = |n: &str| card_model::describe::rules_text(cat.get(cat.find(n).unwrap()));
+    assert_eq!(
+        text("Test Treason"),
+        [
+            "Gain control of target creature until end of turn. Then untap that creature. Then that creature has haste until end of turn."
+        ]
+    );
+    assert_eq!(text("Test Piper"), ["Gain control of target creature."]);
+}
+
+// Text only: a delayed "at the beginning of the next combat this turn" triggers once (CR
+// 603.7c), so it doesn't read "each combat".
+#[test]
+fn gain_control_at_the_next_combat_reads_next() {
+    let khan = card(
+        "Test Khan Wrath",
+        "2 R",
+        "Sorcery",
+        "A:SP$ DealDamage | ValidTgts$ Creature | NumDmg$ 4 | SubAbility$ DBDelTrig | SpellDescription$ Text.\n\
+         SVar:DBDelTrig:DB$ DelayedTrigger | ThisTurn$ True | Mode$ Phase | Phase$ BeginCombat | RememberObjects$ Targeted | Execute$ TrigGainControl | TriggerDescription$ Text.\n\
+         SVar:TrigGainControl:DB$ GainControl | Defined$ DelayTriggerRememberedLKI | LoseControl$ EOT | Untap$ True | AddKWs$ Haste",
+    )
+    .replace(
+        "Oracle:Text.",
+        "Oracle:Test Khan Wrath deals 4 damage to target creature. At the beginning of the next combat this turn, gain control of that creature until end of turn. Untap it. It gains haste until end of turn.",
+    );
+    let cat = forge_test_catalog(&[&khan], &[]);
+    let text = card_model::describe::rules_text(cat.get(cat.find("Test Khan Wrath").unwrap()));
+    assert!(
+        text[0].contains("at the beginning of the next combat this turn, gain control of it"),
+        "{text:?}"
+    );
+}

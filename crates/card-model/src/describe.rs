@@ -1300,6 +1300,11 @@ fn quote_granted(def: &CardDef, text: &str, top: bool) -> String {
                             "At the beginning of each opponent's ",
                             "at the beginning of the next opponent's ",
                         )
+                        // (It triggers once, CR 603.7c.)
+                        .replace(
+                            "At the beginning of each combat",
+                            "at the beginning of the next combat",
+                        )
                         .replace(
                             "At the beginning of your ",
                             "at the beginning of your next ",
@@ -1641,6 +1646,33 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             "put {} on {}",
             counters_phrase(count, *kind),
             obj(mode, *what)
+        ),
+        // CR 613.1b: "gain control of target creature [until end of turn]".
+        Effect::Apply {
+            what,
+            effects,
+            until_end_of_turn,
+        } if effects.as_slice() == [ContinuousEffect::GainControl] => format!(
+            "gain control of {}{}",
+            obj(mode, *what),
+            if *until_end_of_turn {
+                " until end of turn"
+            } else {
+                ""
+            }
+        ),
+        Effect::ApplyAll {
+            affected,
+            effects,
+            until_end_of_turn,
+        } if effects.as_slice() == [ContinuousEffect::GainControl] => format!(
+            "gain control of all {}{}",
+            selector(affected, true),
+            if *until_end_of_turn {
+                " until end of turn"
+            } else {
+                ""
+            }
         ),
         Effect::Apply {
             what,

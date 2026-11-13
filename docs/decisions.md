@@ -2943,6 +2943,50 @@ Rules text: docs/rules-notes/707-spell-copies.md. Tests: `crates/harness/tests/f
   you activate" triggers (Rings of Brighthearth, Illusionist's Bracers).
 - Golden: see the commit.
 
+## D-087 Tapping permanents as a cost; convoke and improvise; crew; gaining control (2026-11-12)
+Rules text: docs/rules-notes/d087-tap-costs.md. Tests: `crates/harness/tests/forge_tap_costs.rs`.
+- **Follow-ups first (D-085):** Thousand-Year Storm's count tested against an opponent's
+  instant ("you've cast" in its text); a counted bonus reads "+1/+0 for each artifact you
+  control"; CR 303.4f is one function, `replacement::aura_hosts`, called by `Work::Move`
+  (D-050) and the replacement pipeline (D-081), same behaviour (golden unchanged).
+- **"Tap N untapped [permanents] you control"** (Forge's `tapXType`): `Cost::tap_others`,
+  chosen in `CastStage::ChooseTap` after the mana abilities (CR 601.2g–h; `ChoiceKind::
+  TapForCost`); never the permanent `{T}` taps; not `{T}`, so CR 302.6 doesn't stop a
+  creature that arrived this turn. The payment planner keeps that many candidates untapped
+  (`PlanInput::tap`: a candidate used to make mana counts against them, the "limited"
+  mechanism D-066 has for sacrifices), so an ability is offered only if a payment exists.
+  Also in alternative costs (flashback "tap three untapped white creatures"), "unless"
+  costs and "you may tap … If you do". Not yet in mana abilities' costs (`Mana:cost
+  tapXType`: Springleaf Drum, Relic of Legends) nor with a chosen sacrifice in the same
+  cost (card-db). Oracle guard `oracle:says other untapped` (Tidal Terror's script lets it
+  tap itself).
+- **Convoke and improvise** (CR 702.51, 702.126; printed keywords only): while the total
+  cost is paid, `OptionDesc::TapToPay { source, mana }` taps an untapped creature for a mana
+  of one of its colors or one generic mana (convoke), or an artifact for one generic mana
+  (improvise); never `{C}`. The planner counts each as a unit of mana that pays only the
+  spell (a `GENERIC` mask bit every generic unit accepts), next to the permanent's mana
+  abilities (it is one or the other), so a spell is offered only if a payment exists and a
+  `TapToPay` only if the rest stays payable. `CastFrame::convoked` reduces the requirement.
+- **Crew** (CR 702.122a): `Cost::crew`, an activated ability whose effect is "is also an
+  artifact creature until end of turn" (layer 4); text "Crew N". Paid one creature at a time
+  (other untapped creatures; summoning sickness doesn't matter), each offered only if total
+  power N can still be reached; once it is, `Decline` stops (or tap more). Vehicles keep
+  their printed power and toughness (card-db allows it, CR 301.7a); `layers::chars` already
+  drops it while they aren't creatures (CR 208.3), and a noncreature can't attack.
+- **Gaining control** (Forge's `GainControl`): `Effect::Apply`/`ApplyAll` with
+  `ContinuousEffect::GainControl` (layer 2, D-029/D-030), until end of turn
+  (`LoseControl$ EOT`) or for good; `Untap$`; `AddKWs$` until end of turn. Text "gain
+  control of …". Not built, by name: `GainControl:LoseControl <kind>` (for as long as you
+  control this, end of combat, until it untaps …), `GainControl:NewController`,
+  `param:GainControl.Choices`, `GainControl:AllValid with Untap`.
+- Text: a delayed "at the beginning of the next combat this turn" no longer reads "each
+  combat" (it triggers once, CR 603.7c).
+- New variants appended: `Keyword::Convoke`, `Keyword::Improvise`, `OptionDesc::TapToPay`,
+  `ChoiceKind::TapForCost`, `CastStage::ChooseTap`; new skipped fields `Cost::tap_others`,
+  `Cost::crew`, `PayGoal::tap_cost`, `PayGoal::tap_pays`, `CastFrame::pay_tap`,
+  `CastFrame::convoked`.
+- Golden: see the commit.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

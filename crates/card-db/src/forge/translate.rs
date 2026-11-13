@@ -2602,6 +2602,103 @@ impl<'a> Tx<'a> {
                     except: except?,
                 }
             }
+            // CR 613.1b (layer 2): "gain control of target creature [until end of turn].
+            // Untap that creature. It gains haste until end of turn." (Forge's
+            // ControlGainEffect: the activator gains control; without `LoseControl$` for
+            // good; `Untap$`; `AddKWs$` always until end of turn.)
+            "GainControl" => {
+                for k in [
+                    "Choices",
+                    "Optional",
+                    "RememberControlled",
+                    "ForgetControlled",
+                    "StaticCommandCheckSVar",
+                ] {
+                    if rd.rec.get(k).is_some() {
+                        self.block(format!("param:GainControl.{k}"));
+                        return None;
+                    }
+                }
+                if !matches!(rd.get("NewController"), None | Some("You")) {
+                    self.block(format!(
+                        "GainControl:NewController {}",
+                        shape(rd.get("NewController").unwrap_or("?"))
+                    ));
+                    return None;
+                }
+                let until_end_of_turn = match rd.get("LoseControl") {
+                    None => false,
+                    Some("EOT") => true,
+                    Some(other) => {
+                        self.block(format!("GainControl:LoseControl {other}"));
+                        return None;
+                    }
+                };
+                let keywords = match rd.get("AddKWs") {
+                    None => Vec::new(),
+                    Some(ks) => {
+                        let mut out = Vec::new();
+                        for k in ks.split('&').map(str::trim) {
+                            match keyword(k) {
+                                Some(k) => out.push(k),
+                                None => {
+                                    self.block(format!("GainControl:keyword {k}"));
+                                    return None;
+                                }
+                            }
+                        }
+                        out
+                    }
+                };
+                let untap = rd.get("Untap").is_some();
+                let mut parts = Vec::new();
+                if let Some(all) = rd.get("AllValid") {
+                    // "Gain control of all creatures …": those on the battlefield now
+                    // (CR 611.2c). "Untap them" is not built for a set.
+                    if untap {
+                        self.block("GainControl:AllValid with Untap");
+                        return None;
+                    }
+                    let sel = self.selector(all)?;
+                    parts.push(Effect::ApplyAll {
+                        affected: sel.clone(),
+                        effects: vec![ContinuousEffect::GainControl],
+                        until_end_of_turn,
+                    });
+                    if !keywords.is_empty() {
+                        parts.push(Effect::ApplyAll {
+                            affected: sel,
+                            effects: vec![ContinuousEffect::AddKeywords(keywords)],
+                            until_end_of_turn: true,
+                        });
+                    }
+                } else {
+                    let what = match self.target(&rd, chain, false) {
+                        Some(i) => Some(ObjRef::Target(i)),
+                        None => self.object(&rd, chain, triggered),
+                    }?;
+                    parts.push(Effect::Apply {
+                        what,
+                        effects: vec![ContinuousEffect::GainControl],
+                        until_end_of_turn,
+                    });
+                    if untap {
+                        parts.push(Effect::Untap { what });
+                    }
+                    if !keywords.is_empty() {
+                        parts.push(Effect::Apply {
+                            what,
+                            effects: vec![ContinuousEffect::AddKeywords(keywords)],
+                            until_end_of_turn: true,
+                        });
+                    }
+                }
+                if parts.len() == 1 {
+                    parts.remove(0)
+                } else {
+                    Effect::Seq(parts)
+                }
+            }
             // CR 603.7: "at the beginning of the next …, [do something]".
             "DelayedTrigger" => self.delayed_trigger(&rd, chain)?,
             "DestroyAll" => {
