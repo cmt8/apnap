@@ -1,3 +1,5 @@
+//! `cargo xtask bundle`: see `bundle.rs` (a folder to zip and send, D-095).
+//!
 //! `cargo xtask check-deps`
 //!
 //! 1. Internal edges: each workspace crate may depend (any kind) only on the crates listed in
@@ -13,6 +15,8 @@
 //!    make from it (`player_view`, `seat_view`, `EventView::new`). A client is handed its
 //!    view, its decision, its events and the catalog. The host side (`app/src/session.rs`,
 //!    the harness driver, tests, and a file's `#[cfg(test)]` module) owns the engine.
+
+mod bundle;
 
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -138,11 +142,14 @@ fn boundary_violations(text: &str) -> Vec<(usize, &'static str)> {
 }
 
 fn main() -> ExitCode {
-    let cmd = std::env::args().nth(1).unwrap_or_default();
-    match cmd.as_str() {
-        "check-deps" => check_deps(),
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("check-deps") => check_deps(),
+        Some("bundle") => bundle::bundle(&args[1..]),
         _ => {
-            eprintln!("usage: cargo xtask check-deps");
+            eprintln!(
+                "usage: cargo xtask check-deps\n       cargo xtask bundle [--out DIR] [--target TRIPLE] [--with-images]"
+            );
             ExitCode::FAILURE
         }
     }

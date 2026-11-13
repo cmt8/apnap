@@ -3342,6 +3342,38 @@ and the knowledge model's view checks).
 - The app watching with no human seat still shows seat 0's player view (unchanged, out of
   scope); `Seat::Spectator` exists for it.
 
+## D-095 A portable copy: one folder to zip and send (2026-11-12)
+The user asked for something to hand to another person. (D-094 is reserved for attack and
+block requirements, briefed but not started.)
+- **Why a directly run binary found no cards:** nothing is embedded in the programs; they
+  read Forge's scripts, Scryfall's Oracle file and the printed data from the cache
+  directory, which depends on the environment (`$XDG_CACHE_HOME`/`$HOME`). The app itself
+  downloads only printed data and images; the scripts and the Oracle file come from
+  `harness fetch-forge` / `fetch-bulk`. Run from another home directory (outside the dev
+  container), the cache is empty and stays without them.
+- **Portable folder:** `card_db::scryfall::cache_dir` is now `$APNAP_CACHE_DIR`, else an
+  `apnap-data` directory next to the executable if one exists (`PORTABLE_DIR`), else the
+  platform cache. Saved games go there too (`ui::saves_dir`). Without that directory
+  nothing changes.
+- **`cargo xtask bundle [--out DIR] [--target TRIPLE] [--with-images]`** (default
+  `dist/apnap`, git-ignored): builds the app and the harness, copies them as `apnap` and
+  `apnap-harness`, fills `apnap-data` from this machine's cache through
+  `harness bundle-data` (cards and token scripts with Forge's LICENSE, the Oracle file,
+  the precons' printed data; not Forge's `.git`), adds LICENSE, a README and
+  `apnap-source.tar.gz` (`git archive HEAD`: the bundle hands on GPL binaries and scripts,
+  so the source goes with them), then proves the folder stands alone: the bundled harness
+  plays a precon game with an empty user cache. It replaces only a folder it made.
+- **Images** are not bundled unless `--with-images`: they are Wizards of the Coast's art,
+  under no licence we can pass on; the app downloads what it shows into `apnap-data`.
+  Invariant 13 is about the repository and still holds (`/dist/` is ignored).
+- **Not a single executable:** embedding 35,000 scripts and the Oracle file would tie every
+  build to a filled cache; a folder needs no build change. Not done: a Windows or macOS
+  bundle (the command takes `--target`, the toolchains aren't installed here), a build
+  against an older glibc (a bundle made on a new Linux may not start on an older one).
+- Tests: `scryfall::tests::the_cache_is_the_portable_folder_when_there_is_one`,
+  `a_portable_folder_is_a_directory_next_to_the_executable`, `harness::bundle::tests`,
+  `xtask::bundle::tests`.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

@@ -251,6 +251,7 @@ cargo run --release -p harness -- fuzz --setup precon-4p --games 200 --threads 8
 cargo run -p harness -- fetch-cards                       # printed data for the precons + basics -> ~/.cache/apnap (tests need it)
 cargo run -p harness -- coverage [--verbose]              # which precon cards are scripted/verified
 cargo run --release -p harness -- fetch-forge             # Forge's card scripts (pinned commit) -> ~/.cache/apnap/forge (git, network)
+cargo xtask bundle [--out DIR] [--with-images]           # one folder to zip and send (D-095): app + harness + apnap-data (scripts, card data from the local cache) -> dist/apnap; the programs read an apnap-data folder next to them before any cache
 cargo run --release -p harness -- forge-coverage [--top N] [--families] [--sample N [--with TEXT]] [--why TEXT [--all]]   # how many of ALL cards compile; what blocks the rest (--families: by kind of feature); --why lists the cards behind a blocker
 cargo run --release -p harness -- forge-coverage --top 0 --ranked [N]   # compile rate by EDHREC rank tiers; blockers and most played blocked cards in the top N (default 1000); needs the bulk file (fetch-bulk)
 cargo run --release -p harness -- fuzz --setup forge-4p --games 400 --threads 8      # random decks drawn from EVERY compiled card (finds what precon decks never reach)

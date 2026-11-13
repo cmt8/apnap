@@ -6,3 +6,5 @@
 # Worktrees of parallel agents
 /.claude/worktrees/
 **/target/
+# `cargo xtask bundle` output: binaries plus fetched card data (never committed)
+/dist/

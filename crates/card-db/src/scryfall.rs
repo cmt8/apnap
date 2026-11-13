@@ -1,7 +1,8 @@
 //! Printed card data from Scryfall (spec §12), fetched at runtime into the user's cache
 //! directory. **Nothing fetched here is ever written into the repository** (CLAUDE.md
-//! invariant 13): the cache lives under `$APNAP_CACHE_DIR`, or the platform cache directory
-//! (`$XDG_CACHE_HOME/apnap`, i.e. `~/.cache/apnap` on Linux).
+//! invariant 13): the cache lives under `$APNAP_CACHE_DIR`, or in an `apnap-data` folder next
+//! to the executable if there is one (a portable copy, D-095), or the platform cache
+//! directory (`$XDG_CACHE_HOME/apnap`, i.e. `~/.cache/apnap` on Linux).
 //!
 //! Scryfall's API guidelines: identify the client with a `User-Agent`, send `Accept`, keep
 //! to ~10 requests/second, and cache for at least 24 hours. We fetch only the cards the
@@ -254,14 +255,42 @@ impl std::fmt::Display for ScryfallError {
 
 impl std::error::Error for ScryfallError {}
 
-/// The apnap cache directory (not created).
+/// The folder that makes a copy of the program portable (D-095): if a directory of this
+/// name sits next to the executable, it is the cache — card scripts, printed data, images
+/// — and nothing is read from or written to the user's own cache directory.
+pub const PORTABLE_DIR: &str = "apnap-data";
+
+/// The portable data folder next to the running executable, if there is one.
+pub fn portable_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    portable_dir_beside(exe.parent()?)
+}
+
+fn portable_dir_beside(exe_dir: &std::path::Path) -> Option<PathBuf> {
+    let dir = exe_dir.join(PORTABLE_DIR);
+    dir.is_dir().then_some(dir)
+}
+
+/// The apnap cache directory (not created): `$APNAP_CACHE_DIR`, else the portable folder
+/// next to the executable ([`PORTABLE_DIR`]), else the platform cache directory.
 pub fn cache_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("APNAP_CACHE_DIR") {
-        return PathBuf::from(dir);
-    }
-    dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from(".cache"))
-        .join("apnap")
+    choose_cache_dir(
+        std::env::var_os("APNAP_CACHE_DIR").map(PathBuf::from),
+        portable_dir(),
+        dirs::cache_dir(),
+    )
+}
+
+fn choose_cache_dir(
+    env: Option<PathBuf>,
+    portable: Option<PathBuf>,
+    platform: Option<PathBuf>,
+) -> PathBuf {
+    env.or(portable).unwrap_or_else(|| {
+        platform
+            .unwrap_or_else(|| PathBuf::from(".cache"))
+            .join("apnap")
+    })
 }
 
 /// True if every one of `names` is cached with everything [`fetch`] would store.
@@ -643,6 +672,45 @@ pub fn fetch(names: &[String]) -> Result<(ScryfallData, usize), ScryfallError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // D-095: an explicit `$APNAP_CACHE_DIR` wins, then the portable folder next to the
+    // executable, then the platform cache directory.
+    #[test]
+    fn the_cache_is_the_portable_folder_when_there_is_one() {
+        let env = Some(PathBuf::from("/env"));
+        let portable = Some(PathBuf::from("/exe/apnap-data"));
+        let platform = Some(PathBuf::from("/home/u/.cache"));
+        assert_eq!(
+            choose_cache_dir(env, portable.clone(), platform.clone()),
+            PathBuf::from("/env")
+        );
+        assert_eq!(
+            choose_cache_dir(None, portable, platform.clone()),
+            PathBuf::from("/exe/apnap-data")
+        );
+        assert_eq!(
+            choose_cache_dir(None, None, platform),
+            PathBuf::from("/home/u/.cache/apnap")
+        );
+        assert_eq!(
+            choose_cache_dir(None, None, None),
+            PathBuf::from(".cache/apnap")
+        );
+    }
+
+    #[test]
+    fn a_portable_folder_is_a_directory_next_to_the_executable() {
+        let root = std::env::temp_dir().join(format!("apnap-portable-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(portable_dir_beside(&root), None);
+        // A file of that name is not a data folder.
+        std::fs::write(root.join(PORTABLE_DIR), b"").unwrap();
+        assert_eq!(portable_dir_beside(&root), None);
+        std::fs::remove_file(root.join(PORTABLE_DIR)).unwrap();
+        std::fs::create_dir(root.join(PORTABLE_DIR)).unwrap();
+        assert_eq!(portable_dir_beside(&root), Some(root.join(PORTABLE_DIR)));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
     use card_model::{CardDef, CardType, Color, Keyword};
 
     fn printed(

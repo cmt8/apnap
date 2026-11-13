@@ -157,10 +157,12 @@ impl Default for App {
     }
 }
 
-/// Where saved games live: `$APNAP_DATA_DIR/saves` or the platform data directory.
+/// Where saved games live: `$APNAP_DATA_DIR/saves`, the portable folder next to the
+/// executable if there is one (D-095), or the platform data directory.
 pub fn saves_dir() -> PathBuf {
     let base = std::env::var_os("APNAP_DATA_DIR")
         .map(PathBuf::from)
+        .or_else(card_db::scryfall::portable_dir)
         .unwrap_or_else(|| {
             dirs::data_dir()
                 .unwrap_or_else(|| PathBuf::from("."))

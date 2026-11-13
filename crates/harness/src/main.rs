@@ -10,6 +10,7 @@
 //!   coverage [--verbose]               per-precon script/verification status
 //!   fetch-forge                        clone Forge's card scripts (pinned commit) into the cache
 //!   fetch-bulk                         Scryfall's Oracle card file (every card) into the cache
+//!   bundle-data --out DIR [--with-images]  copy what a game needs from the cache into a portable data folder (D-095)
 //!   forge-coverage [--top N] [--ranked [N]]  how many Forge scripts compile; what blocks the rest (by EDHREC rank)
 //!   bless                              rewrite crates/harness/tests/golden/games.txt
 
@@ -210,6 +211,30 @@ fn main() -> ExitCode {
                 }
                 Err(e) => {
                     eprintln!("fetch failed: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        // D-095: copy what a game needs from the local cache into a portable data folder.
+        "bundle-data" => {
+            let Some(out) = flag(&args, "--out") else {
+                eprintln!("usage: harness bundle-data --out <folder> [--with-images]");
+                return ExitCode::FAILURE;
+            };
+            let images = args.iter().any(|a| a == "--with-images");
+            let from = card_db::scryfall::cache_dir();
+            match harness::bundle::copy_data(&from, std::path::Path::new(&out), images) {
+                Ok(c) => {
+                    println!(
+                        "{} files, {:.1} MB copied from {} to {out}",
+                        c.files,
+                        c.bytes as f64 / 1e6,
+                        from.display()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("{e}");
                     ExitCode::FAILURE
                 }
             }
