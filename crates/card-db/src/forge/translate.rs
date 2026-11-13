@@ -881,6 +881,14 @@ pub fn keyword(name: &str) -> Option<Keyword> {
     })
 }
 
+/// A hidden zone (CR 400.2): a card put there is seen by nobody else unless revealed.
+fn hidden_dest(d: CardDest) -> bool {
+    matches!(
+        d,
+        CardDest::Hand | CardDest::LibraryTop | CardDest::LibraryBottom
+    )
+}
+
 /// `ManaCost:` → our cost text. `Ok(None)` for "no cost".
 pub fn mana_cost(text: &str) -> Result<Option<ManaCost>, String> {
     if text == "no cost" {
@@ -1182,6 +1190,15 @@ impl<'a> Tx<'a> {
 
     /// The filter of a trigger's `ValidCard$`.
     /// Is the card a permanent card (not an instant or sorcery)?
+    /// Does the card say "reveal" anywhere (CR 701.20)? Without known Oracle text, what
+    /// the script says stands.
+    fn oracle_reveals(&self) -> bool {
+        self.face
+            .oracle
+            .as_ref()
+            .is_none_or(|o| o.to_lowercase().contains("reveal"))
+    }
+
     fn permanent(&self) -> bool {
         // What is given an ability is on the battlefield.
         self.granting > 0
@@ -2898,8 +2915,13 @@ impl<'a> Tx<'a> {
                     reveal,
                     take,
                     // Cards picked for what they are are shown, unless the script says
-                    // not ("put a card into your hand" needs no proof).
-                    reveal_taken: valid.is_some() && !no_reveal,
+                    // not ("put a card into your hand" needs no proof) — on the way to a
+                    // hidden zone, where the card says so (CR 701.20; onto the battlefield,
+                    // into a graveyard or exile they become public by arriving).
+                    reveal_taken: valid.is_some()
+                        && !no_reveal
+                        && hidden_dest(to)
+                        && self.oracle_reveals(),
                     cards: cards?,
                     to,
                     rest,
@@ -4273,12 +4295,15 @@ impl<'a> Tx<'a> {
             return None;
         }
         // Forge reveals what was found when a quality was asked for and the cards don't
-        // go to the battlefield ("search for a creature card, reveal it, …").
+        // go to the battlefield ("search for a creature card, reveal it, …"). Revealing is
+        // an action of its own (CR 701.20): only on the way to a hidden zone (a card put
+        // into a graveyard or exile becomes public by arriving there), and only where the
+        // card says so.
         let restricted = filter.is_some_and(|f| f.trim() != "Card");
-        let reveal = !public
-            && rd.get("NoReveal").is_none()
+        let forge_reveals = rd.get("NoReveal").is_none()
             && (rd.get("Reveal").is_some()
                 || (restricted && !matches!(to, CardDest::Battlefield { .. })));
+        let reveal = !public && forge_reveals && hidden_dest(to) && self.oracle_reveals();
         // A library that was searched is shuffled (CR 701.23, the effects all say so)
         // unless the script says not to. `ShuffleNonMandatory$` only matters when a player
         // can't search at all, which nothing in this engine causes.
@@ -9906,6 +9931,12 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
         if other_untapped(plain) && !other_untapped(compiled) && !compiled.contains("{t}, tap ") {
             missing.push("says other untapped");
         }
+        // Revealing is an action other players see (CR 701.20): never one the card doesn't
+        // take.
+        // (Reminder text counts: "Plainscycling {2} (… reveal it …)".)
+        if has_word(compiled, "reveal") && !oracle.to_lowercase().contains("reveal") {
+            missing.push("reveals");
+        }
         // "You may choose new targets for the copy": some scripts allow it where the card
         // doesn't (Reflections of Littjara).
         if compiled.contains("you may choose new targets for the cop")
@@ -10289,6 +10320,27 @@ mod tests {
             vec![],
         ));
         assert!(has_word(&t, "damage") && t.contains("it deals"), "{t}");
+        // "reveal" (a search that shows what it found)
+        let t = text(&spell(
+            vec![],
+            Effect::ChooseCards {
+                who: PlayerRef::You,
+                from: card_model::CardZone::Library,
+                cards: vec![Selector {
+                    types: vec![CardType::Creature],
+                    ..Selector::default()
+                }],
+                count: Amount::Fixed(1),
+                must: false,
+                to: card_model::CardDest::Hand,
+                reveal: true,
+                shuffle: true,
+                optional: false,
+                share_land_type: false,
+            },
+            vec![],
+        ));
+        assert!(has_word(&t, "reveal"), "{t}");
         // "other untapped" (a cost that taps other permanents than its source)
         let t = text(&CardDef {
             name: "Test".into(),

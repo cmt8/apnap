@@ -309,7 +309,10 @@ const CULTIVATION: &str = "A:SP$ ChangeZone | Origin$ Library | Destination$ Lib
 // then shuffle" — one search, the choice among the cards found, one shuffle.
 #[test]
 fn search_two_put_one_onto_the_battlefield_and_the_other_into_hand() {
-    let cards = [spell("Test Cultivation", "G", "Sorcery", CULTIVATION)];
+    let cards = [spell("Test Cultivation", "G", "Sorcery", CULTIVATION).replace(
+        "Oracle:Text.",
+        "Oracle:Search your library for up to two basic land cards, reveal those cards, put one onto the battlefield tapped and the other into your hand, then shuffle.",
+    )];
     let mut s = build(&cards, |sc| {
         sc.card(P0, Zone::Battlefield, "Forest");
         sc.card(P0, Zone::Hand, "Test Cultivation");

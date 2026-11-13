@@ -404,7 +404,7 @@ fn a_mana_value_bound_worked_out_as_it_resolves() {
     assert_eq!(
         text,
         [
-            "Search your library for a creature card with mana value less than or equal to the number of lands you control, reveal it, put it into your hand, then shuffle."
+            "Search your library for a creature card with mana value less than or equal to the number of lands you control, put it into your hand, then shuffle."
         ]
     );
     // "Permanent cards" (CR 110.4a), not "noninstant nonsorcery cards".

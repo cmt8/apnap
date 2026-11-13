@@ -1816,6 +1816,10 @@ fn tutoring_to_the_top_of_the_library_and_to_hand() {
             "G",
             "Sorcery",
             "A:SP$ ChangeZone | Origin$ Library | Destination$ Hand | ChangeType$ Creature | ChangeNum$ 1 | SpellDescription$ Text.",
+        )
+        .replace(
+            "Oracle:Text.",
+            "Oracle:Search your library for a creature card, reveal it, put it into your hand, then shuffle.",
         ),
     ];
     let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
@@ -2533,6 +2537,10 @@ fn looking_at_the_top_cards_and_taking_one() {
         "G",
         "Sorcery",
         "A:SP$ Dig | DigNum$ 3 | ChangeNum$ 1 | Optional$ True | ChangeValid$ Creature | SpellDescription$ Text.",
+    )
+    .replace(
+        "Oracle:Text.",
+        "Oracle:Look at the top three cards of your library. You may reveal a creature card from among them and put it into your hand. Put the rest on the bottom of your library in any order.",
     )];
     let cards: Vec<&str> = cards.iter().map(String::as_str).collect();
     let mut sc = scenario(&cards);
