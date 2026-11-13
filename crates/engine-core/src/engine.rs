@@ -22,7 +22,11 @@ use serde::{Deserialize, Serialize};
 /// Result of advancing the engine.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepOutput {
-    pub events: Vec<Event>,
+    /// What happened, as engine truth: **hidden information included** (which card was
+    /// drawn, what a player looked at). For replays, hashes and referees only. Anything a
+    /// player or spectator sees must go through their seat's
+    /// [`crate::client::EventView::redact`] (D-090).
+    pub truth: Vec<Event>,
     /// `None` = the game is over.
     pub next: Option<PendingDecision>,
 }
@@ -201,7 +205,7 @@ pub fn new_game_with_commanders(
 pub fn start(st: &mut GameState) -> StepOutput {
     if st.pending.is_some() || st.is_over() {
         return StepOutput {
-            events: Vec::new(),
+            truth: Vec::new(),
             next: st.pending.clone(),
         };
     }
@@ -251,7 +255,7 @@ fn run(st: &mut GameState, mut input: Option<Input>) -> StepOutput {
         debug_assert!(input.is_none(), "input not consumed by the suspended frame");
     }
     StepOutput {
-        events: core::mem::take(&mut st.out),
+        truth: core::mem::take(&mut st.out),
         next: st.pending.clone(),
     }
 }

@@ -175,6 +175,11 @@ pub struct PlayerView {
     /// The effects in force that are on no object (CR 611.2).
     #[serde(default)]
     pub lasting: Vec<LastingView>,
+    /// Who the game is waiting for, and for what kind of decision — public, to every seat
+    /// (D-090). Its options are only in `decision`, for the player deciding: they may name
+    /// cards in that player's hidden zones.
+    #[serde(default)]
+    pub waiting: Option<(PlayerId, crate::decision::ChoiceKind)>,
 }
 
 fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
@@ -348,6 +353,7 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
             .collect(),
         combat: st.combat.clone(),
         decision: st.pending.clone().filter(|d| d.player == viewer),
+        waiting: st.pending.as_ref().map(|d| (d.player, d.kind)),
         revealed: views(st, &shown_to(st, viewer)),
         lasting: st
             .lasting
