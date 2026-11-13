@@ -57,7 +57,14 @@ serialization and determinism come before UI and before AI strength.
 - Library: index 0 = bottom, last = top. Stack/graveyard: last = top. Battlefield: timestamp order.
 - `Response::Pick` is a set; ordered answers use `Order`. `MulliganBottom/Order`: last listed
   ends up bottom-most.
-- Events contain hidden info (engine truth); redact before showing to a player (D-014).
+- `StepOutput::truth` is engine truth with hidden information (D-014): for replays and
+  hashes only. A client gets events only through `engine_core::client::EventView` for its
+  seat (`Seat::Player | Spectator | Everyone`, D-090): hidden objects become
+  `client::HIDDEN`, unseen moves `Event::MovedUnseen`, each newly visible object is named
+  once by `Event::Identified`. Every new `Event` variant must be handled in `client.rs`
+  (what each seat may see, `object_ids`), and `crates/harness/tests/client_view.rs`
+  (property test against a knowledge model) must pass. `PlayerView::waiting` tells every
+  seat who decides and what kind of decision, never the options.
 - An ability is named by `AbilityId { card, index, granted }` — where its text is written —
   never by a bare index into its object's card: an object can have abilities of other
   cards (`CardDef::granted`, `ContinuousEffect::GrantAbilities`, D-064), and have one twice.
