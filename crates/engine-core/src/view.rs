@@ -59,6 +59,9 @@ pub struct ObjectView {
     /// `card`, the card whose effect made it); it has no other characteristics. Public.
     #[serde(default, skip_serializing_if = "core::ops::Not::not")]
     pub emblem: bool,
+    /// CR 111.1: a token (a token copy of a card included). Public.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub token: bool,
 }
 
 /// A commander designation (CR 903.3): public for the whole game, wherever the card is.
@@ -248,6 +251,7 @@ fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
         chosen: o.chosen.clone(),
         printed: o.copy.as_ref().map(|_| o.card),
         emblem: o.emblem.is_some(),
+        token: o.is_token,
     }
 }
 

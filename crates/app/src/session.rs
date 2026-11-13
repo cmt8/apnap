@@ -301,7 +301,11 @@ impl Session {
     /// Signet) or a token that sacrifices itself (Treasure); never life, damage to the
     /// player, a chosen sacrifice, or a nontoken permanent sacrificing itself (D-066).
     /// Which floating mana pays a mana ability's own cost is chosen for them.
-    fn auto_pay_price(&self, o: &OptionDesc) -> Option<u32> {
+    fn auto_pay_price(
+        v: &PlayerView,
+        cat: &card_model::CardCatalog,
+        o: &OptionDesc,
+    ) -> Option<u32> {
         match o {
             OptionDesc::Mana { .. } => Some(0),
             OptionDesc::TapForMana { ability: None, .. } => Some(0),
@@ -309,9 +313,9 @@ impl Session {
                 source,
                 ability: Some(a),
                 ..
-            } => match self.st.catalog.ability(*a) {
+            } => match cat.ability(*a) {
                 card_model::AbilityDef::Mana { cost, then, .. } => {
-                    let token = self.st.objects.get(source).is_some_and(|x| x.is_token);
+                    let token = v.battlefield.iter().any(|x| x.id == *source && x.token);
                     if cost.life > 0
                         || then.is_some()
                         || cost.sacrifice.is_some()
@@ -329,11 +333,14 @@ impl Session {
     }
 
     /// The response the session gives on the human's behalf, if the decision is trivial
-    /// under the current stops.
+    /// under the current stops. Worked out as a client would (D-092): from the player's
+    /// view, the decision and the catalog.
     pub fn auto_response(&self, d: &PendingDecision) -> Option<Response> {
+        let v = player_view(&self.st, d.player);
+        let cat = &self.st.catalog;
         let n = d.options.len();
         // Passing the rest of the turn includes not attacking. (Blocks are always asked.)
-        let turn = Some(self.st.turn.turn_number);
+        let turn = Some(v.turn_number);
         if d.kind == ChoiceKind::DeclareAttackers
             && (self.pass_turn == turn || self.yield_turn == turn)
             && matches!(d.prim, Primitive::PickN { min: 0, .. })
@@ -351,15 +358,16 @@ impl Session {
                 if kind == ChoiceKind::PayMana {
                     if !self.stops.auto_pay {
                         // The only way left is taken, unless it costs more than mana.
-                        let only =
-                            n == 1 && *min == 1 && self.auto_pay_price(&d.options[0]).is_some();
+                        let only = n == 1
+                            && *min == 1
+                            && Self::auto_pay_price(&v, cat, &d.options[0]).is_some();
                         return only.then(|| Response::Pick(vec![0]));
                     }
                     return d
                         .options
                         .iter()
                         .enumerate()
-                        .filter_map(|(i, o)| self.auto_pay_price(o).map(|p| (p, i)))
+                        .filter_map(|(i, o)| Self::auto_pay_price(&v, cat, o).map(|p| (p, i)))
                         .min()
                         .map(|(_, i)| Response::Pick(vec![i]));
                 }
@@ -396,26 +404,26 @@ impl Session {
             .options
             .iter()
             .all(|o| matches!(o, OptionDesc::Pass | OptionDesc::TapForMana { .. }));
-        if only_pass_or_mana || self.pass_turn == Some(self.st.turn.turn_number) {
+        if only_pass_or_mana || self.pass_turn == turn {
             return pass;
         }
-        let top = self.top_is_mine();
+        let top = v.stack.last().map(|s| Some(s.controller) == self.human);
         // Yielding the turn: everything but an opponent's spell or ability.
-        if self.yield_turn == Some(self.st.turn.turn_number) && top != Some(false) {
+        if self.yield_turn == turn && top != Some(false) {
             return pass;
         }
         // Their own spell or ability is on top: let it resolve (unless holding priority).
         if top == Some(true) && !self.stops.hold_priority {
             return pass;
         }
-        if self.st.stack.is_empty() {
-            let mine = Some(self.st.turn.active) == self.human;
+        if v.stack.is_empty() {
+            let mine = Some(v.active) == self.human;
             let stops = if mine {
                 &self.stops.mine
             } else {
                 &self.stops.theirs
             };
-            if !stops.contains(&self.st.turn.step) {
+            if !stops.contains(&v.step) {
                 return pass;
             }
         }
