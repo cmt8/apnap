@@ -205,7 +205,10 @@ impl Model {
         assert_eq!(v.decision.is_some(), gets, "{seat:?}");
         if !gets {
             assert!(v.revealed.is_empty(), "{seat:?} is shown nothing");
-            assert!(v.declaration.is_empty(), "{seat:?} sees no one's plan of attack");
+            assert!(
+                v.declaration.is_empty(),
+                "{seat:?} sees no one's plan of attack"
+            );
         }
         // The preview names only objects every seat may know (creatures on the battlefield,
         // players, planeswalkers).

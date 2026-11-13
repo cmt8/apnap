@@ -429,3 +429,28 @@ fn each_seat_sees_its_own_view_of_a_search() {
     assert!(names(p0.library.as_deref().unwrap()).contains(&"Plains".to_string()));
     assert_eq!(all.decision_count, s.st.decision_count);
 }
+
+// D-093: a view that is no player's has no "me" — `viewer()` is `None` for a spectator and
+// for everyone, and an agent handed one fails loudly instead of playing as player 0.
+#[test]
+fn only_a_players_view_has_a_viewer() {
+    let mut st = Setup::parse("m1-2p").expect("m1").game(3);
+    engine_core::start(&mut st);
+    assert_eq!(
+        engine_core::seat_view(&st, Seat::Player(P1)).viewer(),
+        Some(P1)
+    );
+    for seat in [Seat::Spectator, Seat::Everyone] {
+        assert_eq!(engine_core::seat_view(&st, seat).viewer(), None, "{seat:?}");
+    }
+}
+
+#[test]
+#[should_panic(expected = "heuristic agent was handed a Spectator view")]
+fn an_agent_handed_a_spectators_view_fails_loudly() {
+    let mut st = Setup::parse("m1-2p").expect("m1").game(3);
+    let d = engine_core::start(&mut st).next.expect("a decision");
+    let view = engine_core::seat_view(&st, Seat::Spectator);
+    let mut ai = ai::HeuristicAgent::new(1, st.catalog.clone());
+    ai.decide(&view, &d);
+}

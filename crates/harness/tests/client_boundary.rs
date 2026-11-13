@@ -206,7 +206,11 @@ fn forge_games_over_the_wire() {
 }
 
 /// What a `Planner` plans for one creature: who, the options previewed, and its pick.
-type Planned = (engine_core::ObjectId, Vec<engine_core::OptionDesc>, Option<usize>);
+type Planned = (
+    engine_core::ObjectId,
+    Vec<engine_core::OptionDesc>,
+    Option<usize>,
+);
 
 /// A client that declares attacks and blocks as a whole (D-093): at the first question of a
 /// declaration it plans every creature from `PlayerView::declaration` alone, then answers
@@ -273,7 +277,10 @@ impl Planner {
             assert_eq!(v.declaration.len(), self.plan.len() + 1);
             Response::Pick(pick.into_iter().collect())
         } else {
-            assert!(self.plan.is_empty(), "a declaration ends when its plan does");
+            assert!(
+                self.plan.is_empty(),
+                "a declaration ends when its plan does"
+            );
             self.inner.decide(&v, &d)
         };
         serde_json::to_string(&r).unwrap()
@@ -345,5 +352,10 @@ fn whole_declarations_planned_from_the_first_question() {
         "attacks {a}+{ca}, blocks {b}+{cb} of two or more"
     );
     // Menace restarts happen when a random plan breaks it: counted, not required.
-    println!("whole attacks {}, whole blocks {}, restarts {}", a + ca, b + cb, r + cr);
+    println!(
+        "whole attacks {}, whole blocks {}, restarts {}",
+        a + ca,
+        b + cb,
+        r + cr
+    );
 }
