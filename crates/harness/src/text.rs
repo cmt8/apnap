@@ -1119,6 +1119,19 @@ impl Narrator {
                 let l = format!("  {} has new targets", self.name(*object));
                 self.emit(l, out);
             }
+            Event::PaidToSave {
+                player,
+                at_stake,
+                paid,
+            } => {
+                let l = format!(
+                    "  {} {} to keep {} from being countered",
+                    p(*player),
+                    if *paid { "pays" } else { "doesn't pay" },
+                    self.name(*at_stake)
+                );
+                self.emit(l, out);
+            }
             Event::CopiedOnStack {
                 copy, controller, ..
             } => {
@@ -1505,6 +1518,7 @@ pub fn option_line(v: &PlayerView, o: &OptionDesc) -> String {
             view_name(v, *card),
             ability.index
         ),
+        OptionDesc::PayCost { cost } => format!("pay {}", card_model::describe::cost_text(cost)),
         OptionDesc::TapToPay { source, mana } => match mana {
             Some(m) => format!("tap {} to pay {m:?}", view_name(v, *source)),
             None => format!("tap {} to pay {{1}}", view_name(v, *source)),

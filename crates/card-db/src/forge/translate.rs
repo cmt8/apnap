@@ -513,6 +513,8 @@ struct TrigCtx {
     died_self: bool,
     /// A spell was cast: `TriggeredSpellAbility` is that spell.
     spell: bool,
+    /// A spell or ability targeted this: `TriggeredSourceSA` is it (D-089).
+    targeting: bool,
 }
 
 /// What one of Forge's `Triggered…` names stands for.
@@ -534,6 +536,7 @@ impl Default for TrigCtx {
             died: false,
             died_self: false,
             spell: false,
+            targeting: false,
         }
     }
 }
@@ -549,6 +552,7 @@ impl TrigCtx {
         died: false,
         died_self: false,
         spell: false,
+        targeting: false,
     };
 
     fn named(&self, name: &str) -> Option<Named> {
@@ -604,6 +608,13 @@ impl TrigCtx {
             },
             // Forge's `SpellCast`: `TriggeredActivator` is who cast it, and so is the
             // controller of the spell (`TriggeredCard`). The spell itself is no "it" here.
+            // Forge's `BecomesTarget`: `TriggeredSourceSA` is the spell or ability,
+            // `TriggeredSourceSAController` its controller.
+            Trigger::BecomesTarget { .. } => TrigCtx {
+                players: &["TriggeredSourceSAController", "TriggeredActivator"],
+                targeting: true,
+                ..TrigCtx::NOTHING
+            },
             Trigger::Cast { by, .. } => TrigCtx {
                 players: &["TriggeredActivator", "TriggeredCardController"],
                 player_is_you: *by == Who::You,
@@ -879,6 +890,14 @@ pub fn keyword(name: &str) -> Option<Keyword> {
         "Landwalk:Forest" => Keyword::Landwalk(BasicLandType::Forest),
         _ => return None,
     })
+}
+
+/// A hidden zone (CR 400.2): a card put there is seen by nobody else unless revealed.
+fn hidden_dest(d: CardDest) -> bool {
+    matches!(
+        d,
+        CardDest::Hand | CardDest::LibraryTop | CardDest::LibraryBottom
+    )
 }
 
 /// `ManaCost:` → our cost text. `Ok(None)` for "no cost".
@@ -1182,6 +1201,15 @@ impl<'a> Tx<'a> {
 
     /// The filter of a trigger's `ValidCard$`.
     /// Is the card a permanent card (not an instant or sorcery)?
+    /// Does the card say "reveal" anywhere (CR 701.20)? Without known Oracle text, what
+    /// the script says stands.
+    fn oracle_reveals(&self) -> bool {
+        self.face
+            .oracle
+            .as_ref()
+            .is_none_or(|o| o.to_lowercase().contains("reveal"))
+    }
+
     fn permanent(&self) -> bool {
         // What is given an ability is on the battlefield.
         self.granting > 0
@@ -2348,6 +2376,21 @@ impl<'a> Tx<'a> {
                     _ => Effect::UntapAll(sel?),
                 }
             }
+            // "Counter that spell or ability" of a "becomes the target" trigger (ward).
+            "Counter"
+                if rd.rec.get("Defined") == Some("TriggeredSourceSA")
+                    && self.in_trigger
+                    && self.trig.targeting =>
+            {
+                rd.get("Defined");
+                if rd.get("Destination").is_some_and(|d| d != "Graveyard") {
+                    self.block("param:Counter.Destination");
+                    return None;
+                }
+                Effect::CounterIt {
+                    what: ObjRef::Triggering,
+                }
+            }
             "Counter" => {
                 // Only spells, and only as a target.
                 if rd.get("TargetType") != Some("Spell") {
@@ -2772,6 +2815,64 @@ impl<'a> Tx<'a> {
             }
             // "Look at / reveal the top N cards of your library; put some of them
             // somewhere and the rest somewhere else" (docs/forge/effects.md §16).
+            // CR 701.20: "reveal cards from the top of your library until you reveal a [card].
+            // Put that card [somewhere] and the rest [somewhere else]" (Forge's
+            // DigUntilEffect: found cards move first, then the rest; without
+            // `FoundDestination$` the found cards go with the rest).
+            "DigUntil" => {
+                if rd.rec.get("ValidTgts").is_some() {
+                    self.block("DigUntil:target");
+                    return None;
+                }
+                let who = self.player(&rd, chain, triggered);
+                rd.get("ValidDescription");
+                let until = self.card_alts(rd.get("Valid").unwrap_or("Card"), true);
+                let count = self.amount(rd.get("Amount").unwrap_or("1"), chain);
+                let tapped = rd.get("Tapped").is_some();
+                let place = |tx: &mut Self, zone: Option<&str>, pos: Option<&str>| match (zone, pos)
+                {
+                    (Some("Hand"), None) => Some(CardDest::Hand),
+                    (Some("Graveyard"), None) => Some(CardDest::Graveyard),
+                    (Some("Exile"), None) => Some(CardDest::Exile),
+                    (Some("Battlefield"), None) => Some(CardDest::Battlefield { tapped }),
+                    (Some("Library"), Some("-1")) => Some(CardDest::LibraryBottom),
+                    (Some("Library"), None | Some("0")) => Some(CardDest::LibraryTop),
+                    (z, _) => {
+                        tx.block(format!("DigUntil:to {}", z.unwrap_or("?")));
+                        None
+                    }
+                };
+                let rest_to = place(
+                    self,
+                    rd.get("RevealedDestination"),
+                    rd.get("RevealedLibraryPosition"),
+                );
+                let found_to = match rd.get("FoundDestination") {
+                    None => rest_to,
+                    Some(z) => place(self, Some(z), rd.get("FoundLibraryPosition")),
+                };
+                if tapped && !matches!(found_to, Some(CardDest::Battlefield { .. })) {
+                    self.block("DigUntil:Tapped");
+                    return None;
+                }
+                // `GainControl$`: onto the battlefield under the activator's control — the
+                // same as the owner's when it is your own library.
+                if rd.get("GainControl").is_some() && who != Some(PlayerRef::You) {
+                    self.block("DigUntil:GainControl of another player's cards");
+                    return None;
+                }
+                let shuffle = rd.get("Shuffle").is_some();
+                let rest_random = rd.get("RevealRandomOrder").is_some();
+                Effect::DigUntil {
+                    who: who?,
+                    until: until?,
+                    count: count?,
+                    found_to: found_to?,
+                    rest_to: rest_to?,
+                    rest_random,
+                    shuffle,
+                }
+            }
             "Dig" => {
                 let slot = self.target(&rd, chain, false);
                 let who = match slot {
@@ -2898,8 +2999,13 @@ impl<'a> Tx<'a> {
                     reveal,
                     take,
                     // Cards picked for what they are are shown, unless the script says
-                    // not ("put a card into your hand" needs no proof).
-                    reveal_taken: valid.is_some() && !no_reveal,
+                    // not ("put a card into your hand" needs no proof) — on the way to a
+                    // hidden zone, where the card says so (CR 701.20; onto the battlefield,
+                    // into a graveyard or exile they become public by arriving).
+                    reveal_taken: valid.is_some()
+                        && !no_reveal
+                        && hidden_dest(to)
+                        && self.oracle_reveals(),
                     cards: cards?,
                     to,
                     rest,
@@ -4276,12 +4382,15 @@ impl<'a> Tx<'a> {
             return None;
         }
         // Forge reveals what was found when a quality was asked for and the cards don't
-        // go to the battlefield ("search for a creature card, reveal it, …").
+        // go to the battlefield ("search for a creature card, reveal it, …"). Revealing is
+        // an action of its own (CR 701.20): only on the way to a hidden zone (a card put
+        // into a graveyard or exile becomes public by arriving there), and only where the
+        // card says so.
         let restricted = filter.is_some_and(|f| f.trim() != "Card");
-        let reveal = !public
-            && rd.get("NoReveal").is_none()
+        let forge_reveals = rd.get("NoReveal").is_none()
             && (rd.get("Reveal").is_some()
                 || (restricted && !matches!(to, CardDest::Battlefield { .. })));
+        let reveal = !public && forge_reveals && hidden_dest(to) && self.oracle_reveals();
         // A library that was searched is shuffled (CR 701.23, the effects all say so)
         // unless the script says not to. `ShuffleNonMandatory$` only matters when a player
         // can't search at all, which nothing in this engine causes.
@@ -6272,6 +6381,37 @@ impl<'a> Tx<'a> {
                     nth: nth?,
                     copies,
                 })
+            }
+            // "Whenever this permanent becomes the target of a spell or ability [an opponent
+            // controls]" (Forge's TriggerBecomesTarget: `ValidSource$` is the spell or
+            // ability, `ValidTarget$` what it targets).
+            "BecomesTarget" => {
+                if rd.get("ValidTarget") != Some("Card.Self") {
+                    self.block(format!(
+                        "trig:BecomesTarget target {}",
+                        shape(rd.get("ValidTarget").unwrap_or("?"))
+                    ));
+                    return None;
+                }
+                for k in ["FirstTime", "Valiant"] {
+                    if rd.rec.get(k).is_some() {
+                        self.block(format!("param:trig BecomesTarget.{k}"));
+                        return None;
+                    }
+                }
+                let (by, only_spells) = match rd.get("ValidSource") {
+                    None | Some("Card" | "Card,Emblem" | "SpellAbility") => (Who::Any, false),
+                    Some(
+                        "SpellAbility.OppCtrl" | "Card.OppCtrl,Emblem.OppCtrl" | "Card.OppCtrl",
+                    ) => (Who::Opponent, false),
+                    Some("Spell") => (Who::Any, true),
+                    Some("Spell.OppCtrl") => (Who::Opponent, true),
+                    Some(other) => {
+                        self.block(format!("trig:BecomesTarget source {}", shape(other)));
+                        return None;
+                    }
+                };
+                Some(Trigger::BecomesTarget { by, only_spells })
             }
             "Attacks" => {
                 let filter = rd.get("ValidCard").and_then(|f| self.obj_filter(f));
@@ -9354,6 +9494,54 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
             }
             continue;
         }
+        // CR 702.21a: "Ward [cost]" means "Whenever this permanent becomes the target of a
+        // spell or ability an opponent controls, counter that spell or ability unless that
+        // player pays [cost]." (Forge's `K:Ward:<cost>`; several costs, one chosen by the
+        // payer, are `Ward:<c1>:<c2>`.)
+        if let Some(rest) = k.strip_prefix("Ward:") {
+            if rest.contains(':') {
+                tx.block("kw:Ward several costs");
+                continue;
+            }
+            let before = tx.blockers.len();
+            match tx.cost(rest) {
+                Some(cost)
+                    if !cost.tap
+                        && !cost.sacrifice_self
+                        && !cost.mana.as_ref().is_some_and(|m| m.has_x()) =>
+                {
+                    abilities.push((
+                        0,
+                        AbilityDef::Triggered {
+                            when: Trigger::BecomesTarget {
+                                by: Who::Opponent,
+                                only_spells: false,
+                            },
+                            intervening_if: None,
+                            body: Body::Effect(Mode {
+                                targets: Vec::new(),
+                                effect: Effect::Pay {
+                                    who: PlayerRef::TriggeringPlayer,
+                                    cost,
+                                    paid: Box::new(Effect::Seq(Vec::new())),
+                                    unpaid: Box::new(Effect::CounterIt {
+                                        what: ObjRef::Triggering,
+                                    }),
+                                },
+                                groups: Vec::new(),
+                            }),
+                        },
+                    ));
+                }
+                Some(_) => tx.block(format!("kw:Ward cost {}", shape(rest))),
+                None => {
+                    if tx.blockers.len() == before {
+                        tx.block(format!("kw:Ward cost {}", shape(rest)));
+                    }
+                }
+            }
+            continue;
+        }
         // Keywords that are shorthand for an ability the engine has.
         let pump_one = |what: ObjRef| {
             Body::Effect(Mode {
@@ -9962,6 +10150,12 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
         if other_untapped(plain) && !other_untapped(compiled) && !compiled.contains("{t}, tap ") {
             missing.push("says other untapped");
         }
+        // Revealing is an action other players see (CR 701.20): never one the card doesn't
+        // take.
+        // (Reminder text counts: "Plainscycling {2} (… reveal it …)".)
+        if has_word(compiled, "reveal") && !oracle.to_lowercase().contains("reveal") {
+            missing.push("reveals");
+        }
         // "You may choose new targets for the copy": some scripts allow it where the card
         // doesn't (Reflections of Littjara).
         if compiled.contains("you may choose new targets for the cop")
@@ -10345,6 +10539,27 @@ mod tests {
             vec![],
         ));
         assert!(has_word(&t, "damage") && t.contains("it deals"), "{t}");
+        // "reveal" (a search that shows what it found)
+        let t = text(&spell(
+            vec![],
+            Effect::ChooseCards {
+                who: PlayerRef::You,
+                from: card_model::CardZone::Library,
+                cards: vec![Selector {
+                    types: vec![CardType::Creature],
+                    ..Selector::default()
+                }],
+                count: Amount::Fixed(1),
+                must: false,
+                to: card_model::CardDest::Hand,
+                reveal: true,
+                shuffle: true,
+                optional: false,
+                share_land_type: false,
+            },
+            vec![],
+        ));
+        assert!(has_word(&t, "reveal"), "{t}");
         // "other untapped" (a cost that taps other permanents than its source)
         let t = text(&CardDef {
             name: "Test".into(),

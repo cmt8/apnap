@@ -355,4 +355,11 @@ pub enum Event {
         from: crate::zones::Zone,
         to: crate::zones::Zone,
     },
+    /// CR 702.21a: `player` chose to pay (`paid`) or not to pay the cost that keeps the
+    /// spell or ability `at_stake` from being countered.
+    PaidToSave {
+        player: PlayerId,
+        at_stake: ObjectId,
+        paid: bool,
+    },
 }

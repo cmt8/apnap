@@ -959,6 +959,16 @@ pub enum Trigger {
     /// the stack. "That much" is the number of spells every player cast this turn before
     /// it (storm).
     CastThis,
+    /// "Whenever this permanent becomes the target of a spell or ability [an opponent
+    /// controls]" (ward, CR 702.21a): a spell or ability whose controller is `by` (relative
+    /// to this permanent's controller) is put on the stack with it as a target, or has it
+    /// as a new target (D-089). `only_spells`: "of a spell". "It"/"that spell or ability"
+    /// (`ObjRef::Triggering`) is the spell or ability; "that player" its controller.
+    BecomesTarget {
+        by: Who,
+        #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+        only_spells: bool,
+    },
 }
 
 /// What a damage trigger's damage was dealt to.
@@ -2293,6 +2303,27 @@ pub enum Effect {
     Emblem {
         abilities: Vec<u16>,
     },
+    /// CR 701.6a: "counter that spell or ability" — the spell or ability `what` names (a
+    /// "becomes the target" trigger's), if it is still on the stack. A countered spell goes
+    /// to its owner's graveyard; a countered ability is removed from the stack.
+    CounterIt {
+        what: ObjRef,
+    },
+    /// CR 701.20: "[who] reveals cards from the top of their library until they reveal
+    /// `count` [cards matching `until`]. Put those cards `found_to` and the rest `rest_to`"
+    /// (in a random order with `rest_random`), then (`shuffle`) shuffle. With fewer such
+    /// cards, every card is revealed and the found ones go `found_to` all the same.
+    DigUntil {
+        who: PlayerRef,
+        until: Vec<Selector>,
+        count: Amount,
+        found_to: CardDest,
+        rest_to: CardDest,
+        #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+        rest_random: bool,
+        #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+        shuffle: bool,
+    },
 }
 
 /// When a delayed triggered ability ([`Effect::DelayedTrigger`]) can trigger.
@@ -2432,6 +2463,13 @@ impl Effect {
             | Effect::BecomeCopy { .. }
             | Effect::SacrificeIt { .. } => {}
             Effect::CopySpell { count, .. } => count.selectors_mut(f),
+            Effect::CounterIt { .. } => {}
+            Effect::DigUntil { until, count, .. } => {
+                for s in until {
+                    f(s);
+                }
+                count.selectors_mut(f);
+            }
         }
     }
 

@@ -404,7 +404,7 @@ fn a_mana_value_bound_worked_out_as_it_resolves() {
     assert_eq!(
         text,
         [
-            "Search your library for a creature card with mana value less than or equal to the number of lands you control, reveal it, put it into your hand, then shuffle."
+            "Search your library for a creature card with mana value less than or equal to the number of lands you control, put it into your hand, then shuffle."
         ]
     );
     // "Permanent cards" (CR 110.4a), not "noninstant nonsorcery cards".
@@ -413,6 +413,10 @@ fn a_mana_value_bound_worked_out_as_it_resolves() {
         "X G G G",
         "Sorcery",
         "A:SP$ Dig | DigNum$ X | Reveal$ True | ChangeNum$ Any | ChangeValid$ Permanent.cmcLEX | DestinationZone$ Battlefield | DestinationZone2$ Graveyard | SpellDescription$ Text.\nSVar:X:Count$xPaid",
+    )
+    .replace(
+        "Oracle:Text.",
+        "Oracle:Reveal the top X cards of your library. You may put any number of permanent cards with mana value X or less from among them onto the battlefield. Then put all cards revealed this way that weren't put onto the battlefield into your graveyard.",
     );
     let cat = forge_test_catalog(&[&wave], &[]);
     let text = card_model::describe::rules_text(cat.get(cat.find("Test Wave").unwrap()));
@@ -557,5 +561,28 @@ fn a_counted_bonus_reads_for_each() {
     assert_eq!(
         text("Test Elf Bane"),
         ["This creature gets -1/-1 for each creature on the battlefield."]
+    );
+}
+
+// Text only: "you may have this Vehicle become an artifact creature until end of turn" (one
+// object, base verbs; the types it gains in addition to its own, CR 205.1b), and "your
+// fourth noncreature spell".
+#[test]
+fn you_may_have_it_become_an_artifact_creature() {
+    let car = "Name:Test Fanta Car\nManaCost:3\nTypes:Legendary Artifact Vehicle\nPT:4/4\n\
+        T:Mode$ SpellCast | ValidCard$ Card.nonCreature | ValidActivatingPlayer$ You | TriggerZones$ Battlefield | Execute$ TrigAnimate | OptionalDecider$ You | TriggerDescription$ Text.\n\
+        SVar:TrigAnimate:DB$ Animate | Defined$ Self | Types$ Creature,Artifact\n\
+        T:Mode$ SpellCast | ValidCard$ Card.nonCreature | ValidActivatingPlayer$ You | ActivatorThisTurnCast$ EQ4 | TriggerZones$ Battlefield | Execute$ TrigDraw | TriggerDescription$ Text.\n\
+        SVar:TrigDraw:DB$ Draw | NumCards$ 1\n\
+        Oracle:Whenever you cast a noncreature spell, you may have Test Fanta Car become an artifact creature until end of turn.\\nWhenever you cast your fourth noncreature spell each turn, draw a card."
+        .to_string();
+    let cat = forge_test_catalog(&[&car], &[]);
+    let text = card_model::describe::rules_text(cat.get(cat.find("Test Fanta Car").unwrap()));
+    assert_eq!(
+        text,
+        [
+            "Whenever you cast a noncreature spell, you may have this Vehicle become an artifact creature in addition to its other types until end of turn.",
+            "Whenever you cast your fourth noncreature spell each turn, draw a card."
+        ]
     );
 }

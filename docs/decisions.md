@@ -3105,6 +3105,63 @@ Rules text: docs/rules-notes/114-emblems.md. Tests: `crates/harness/tests/forge_
   (`api:Cleanup`, `line:Text`, "until your next turn", mana loyalty abilities, …);
   `emblem:activated abilities` is in 3.
 
+## D-089 Reveals the card makes; "becomes the target" and ward; revealing until (2026-11-12)
+Rules text: docs/rules-notes/d089-ward-dig-until.md. Tests: `crates/harness/tests/forge_ward.rs`,
+`forge_dig_until.rs`, narration.rs `no_reveal_the_card_doesnt_make`.
+- **Reveals (CR 701.20):** Forge reveals what a search or a look finds when a quality is
+  asked; the engine now reveals a card only on its way to a hidden zone (hand, library) and
+  only where the card says "reveal". Onto the battlefield, into a graveyard or exile a card
+  is simply moved (public by arriving). 19 cards changed text and behaviour (Collected
+  Company, Buried Alive, Goblin Engineer, Genesis Ultimatum, Deploy the Gatewatch, Mana
+  Severance, N'Yami-Class Mother Ship, Loot, …). New Oracle guard `oracle:reveals` (the
+  compiled text reveals, the card — reminder text included — never says "reveal"), pinned;
+  it blocks none of the real cards after the fix. Golden unchanged.
+- **Text:** "you may have this Vehicle become an artifact creature in addition to its other
+  types" (The Fantasticar; base verbs after "have"), "becomes an artifact creature in
+  addition to its other types" for every type-adding effect of card types only, "fourth",
+  "nonlegendary", "nonland permanent card"; 66 cards' text, no meaning.
+- **"Becomes the target"** (`Trigger::BecomesTarget { by, only_spells }`, on the permanent
+  itself): when a spell is cast or an activated or triggered ability is put on the stack with
+  it as a target, when a copy is put on the stack targeting it (707.10c), and when it becomes
+  a new target of a changed spell or ability (115.7; a kept target doesn't); once per spell
+  or ability and permanent (603.2c). "It" is the spell or ability, "that player" its
+  controller (Forge's MagicStack.add and ChangeTargetsEffect run `BecomesTarget` the same
+  way). Forge's `Mode$ BecomesTarget | ValidTarget$ Card.Self` compiles; other targets
+  (`trig:BecomesTarget target …`), `FirstTime$`, `Valiant$` are named.
+- **Ward** (CR 702.21a): `K:Ward:<cost>` with any cost `Cost` expresses (mana, life,
+  discard, sacrifice) is that trigger with "counter that spell or ability unless that player
+  pays [cost]" (`Effect::CounterIt`: a spell to its owner's graveyard, an ability removed;
+  "can't be countered" respected). Text "Ward {2}", "Ward—Pay 3 life". Several costs to
+  choose from (`kw:Ward several costs`) aren't built.
+- **What a client sees** (the engine is the product): `StackView::about` names what a
+  triggered ability is about when it is public (the spell or ability a ward trigger would
+  counter); the payment is `ChoiceKind::PayToSave { at_stake }` with `OptionDesc::PayCost
+  { cost }` stating the cost (other "unless" payments keep `PayUnlessCost`);
+  `Event::PaidToSave { player, at_stake, paid }` and `Event::Countered` say what happened.
+- **Revealing until** (Forge's `DigUntil`, CR 701.20): `Effect::DigUntil`: each player
+  reveals from the top until N matching cards (all revealed to every player, `Event::
+  Revealed`), the found cards go first, then the rest (a random order, or ordered by the
+  owner), then an optional shuffle. Not built, by name: `MinTotalCMC$` (Tasha's Hideous
+  Laughter), `OptionalFoundMove$`, `NoMoveRevealed$`, `MaxRevealed$`, `Remember…$`,
+  `GainControl$` of another player's cards, a targeted player.
+- Not built: heroic ("whenever you cast a spell that targets this") — a cast trigger with a
+  condition on the targets, not this event.
+- **With D-090's client view:** `PaidToSave` is public (`client::map_ids`/`object_ids`
+  know it). CR 701.20d ("shuffled or otherwise reordered … stop being revealed"): a
+  library put in order on its top or bottom (`Event::LibraryArranged`: the rest of a
+  reveal-until in a random order, a scry, a look) now ends what was revealed of that
+  library, in `EventView` and in client_view's knowledge model alike — both had kept the
+  revealed cards known, so a seat could follow one later drawn from the bottom (a leak on
+  both sides, which the property test couldn't see; tested in `forge_dig_until.rs`). And
+  `EventView` names revealed and looked-at cards (`Identified`) before the `Revealed`
+  /`LookedAt` that shows them, so a narrator can say what was revealed.
+- A "becomes the target" trigger that only spells can make reads "counter that spell" (ward
+  itself keeps CR 702.21a's "that spell or ability").
+- New variants appended: `Trigger::BecomesTarget`, `Effect::CounterIt`, `Effect::DigUntil`,
+  `ChoiceKind::PayToSave`, `OptionDesc::PayCost`, `Event::PaidToSave`; `StackView::about`,
+  `Work::ChangeTargets::fresh` (skipped when unset).
+- Golden: see the commit.
+
 ## D-090 What a client sees: one seat's event stream, and who the game waits for (2026-11-12)
 Rules text: docs/rules-notes/400-hidden-information.md (CR 400.2, 400.7, 401, 402, 406.3,
 701.20, 708). Tests: `crates/harness/tests/client_view.rs`.

@@ -65,7 +65,8 @@ impl Model {
             Event::LookedAt { player, cards } if self.seat == Seat::Player(*player) => {
                 self.shown.extend(cards.iter().copied())
             }
-            Event::Shuffled { player } => {
+            // CR 701.20d: shuffled or otherwise reordered (put on the top or the bottom).
+            Event::Shuffled { player } | Event::LibraryArranged { player, .. } => {
                 let lib: Vec<ObjectId> = self
                     .objects
                     .iter()

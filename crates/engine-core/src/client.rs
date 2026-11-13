@@ -177,8 +177,10 @@ impl EventView {
                     self.identified(*new, out);
                 }
             }
-            Event::Shuffled { player } => {
-                // CR 701.20d: revealed cards that are shuffled stop being revealed.
+            // CR 701.20d: "If cards in a player's library are shuffled or otherwise
+            // reordered, any revealed cards that are reordered stop being revealed" — put on
+            // its top or bottom (in a random order or not) as much as shuffled.
+            Event::Shuffled { player } | Event::LibraryArranged { player, .. } => {
                 for k in self.objects.values_mut() {
                     if k.zone == Zone::Library && k.owner == *player {
                         k.shown = false;
@@ -193,10 +195,12 @@ impl EventView {
                         k.shown = true;
                     }
                 }
-                out.push(e.clone());
+                // Each card is named before the reveal that shows it, so a client can say
+                // what was revealed.
                 for c in cards {
                     self.identified(*c, out);
                 }
+                out.push(e.clone());
                 let _ = player;
             }
             Event::LookedAt { player, cards } => {
@@ -210,15 +214,15 @@ impl EventView {
                         }
                     }
                 }
-                out.push(Event::LookedAt {
-                    player: *player,
-                    cards: cards.iter().map(|c| self.id(*c)).collect(),
-                });
                 if mine {
                     for c in cards {
                         self.identified(*c, out);
                     }
                 }
+                out.push(Event::LookedAt {
+                    player: *player,
+                    cards: cards.iter().map(|c| self.id(*c)).collect(),
+                });
             }
             Event::TokenCreated { object, card, .. } => {
                 self.objects.insert(
@@ -451,6 +455,16 @@ fn map_ids(e: &Event, f: &mut dyn FnMut(ObjectId) -> ObjectId) -> Event {
             player: *player,
             card: *card,
             abilities: abilities.clone(),
+        },
+        // Public: a spell or ability on the stack, and whether its controller paid.
+        E::PaidToSave {
+            player,
+            at_stake,
+            paid,
+        } => E::PaidToSave {
+            player: *player,
+            at_stake: f(*at_stake),
+            paid: *paid,
         },
         E::Identified {
             object,

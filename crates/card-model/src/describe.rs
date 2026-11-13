@@ -1080,6 +1080,30 @@ fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
         .enumerate()
         .map(|(i, e)| match e {
             ContinuousEffect::GainControl => "is under your control".to_string(),
+            // "Becomes an artifact creature in addition to its other types".
+            ContinuousEffect::AddTypes {
+                card_types,
+                subtypes,
+                land_types,
+            } if subtypes.is_empty() && land_types.is_empty() && !card_types.is_empty() => {
+                let mut ts = card_types.clone();
+                // "artifact creature", "enchantment creature": the creature type last.
+                ts.sort_by_key(|t| *t == CardType::Creature);
+                let mut words: Vec<String> = ts.iter().map(|t| card_type(*t).to_string()).collect();
+                if plural {
+                    let last = words.pop().unwrap_or_default();
+                    words.push(format!("{last}s"));
+                    format!(
+                        "{become_} {} in addition to their other types",
+                        words.join(" ")
+                    )
+                } else {
+                    format!(
+                        "{become_} {} in addition to its other types",
+                        with_article(&words.join(" "))
+                    )
+                }
+            }
             ContinuousEffect::AddTypes {
                 card_types,
                 subtypes,
@@ -1456,6 +1480,57 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             out
         }
         Effect::SacrificeIt { what } => format!("you sacrifice {}", obj(mode, *what)),
+        Effect::DigUntil {
+            who,
+            until,
+            count,
+            found_to,
+            rest_to,
+            rest_random,
+            shuffle,
+        } => {
+            let p = player(mode, *who);
+            let you = p == "you";
+            let (reveals, their) = if you {
+                ("reveal", "your")
+            } else {
+                ("reveals", "their")
+            };
+            let they = if you { "you" } else { "they" };
+            let n = amount(count);
+            let one = n == "1";
+            let what = if one {
+                with_article(&card_list(until, false))
+            } else {
+                format!("{n} {}", card_list(until, true))
+            };
+            // "Reveal cards …" (you), "each opponent reveals cards …".
+            let subject = if you { String::new() } else { format!("{p} ") };
+            let mut t = format!(
+                "{subject}{reveals} cards from the top of {their} library until {they} reveal {what}. Put {} {}",
+                if one { "that card" } else { "those cards" },
+                dest(*found_to, their)
+            );
+            if found_to == rest_to {
+                t = format!(
+                    "{subject}{reveals} cards from the top of {their} library until {they} reveal {what}. Put all cards revealed this way {}",
+                    dest(*found_to, their)
+                );
+            } else {
+                t.push_str(&format!(" and the rest {}", dest(*rest_to, their)));
+                if *rest_random {
+                    t.push_str(" in a random order");
+                }
+            }
+            if *shuffle {
+                t.push_str(", then shuffle");
+            }
+            t
+        }
+        Effect::CounterIt { what } => match what {
+            ObjRef::Triggering => "counter that spell or ability".to_string(),
+            other => format!("counter {}", obj(mode, *other)),
+        },
         Effect::CopySpell {
             what,
             count,
@@ -1858,10 +1933,34 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 until_end_of_turn,
             } = &**inner
             {
+                // "You may have this Vehicle become an artifact creature": one object, the
+                // verbs in their base form.
+                let mut verbs = continuous(effects, false);
+                if let Some((first, rest)) = verbs.split_once(' ') {
+                    let base = match first {
+                        "has" => "have".to_string(),
+                        "is" => "be".to_string(),
+                        v => base_verb(v),
+                    };
+                    verbs = format!("{base} {rest}");
+                }
+                for (third, base) in [
+                    ("gets ", "get "),
+                    ("has ", "have "),
+                    ("loses ", "lose "),
+                    ("is ", "be "),
+                    ("becomes ", "become "),
+                ] {
+                    for joint in [" and ", ", "] {
+                        verbs =
+                            verbs.replace(&format!("{joint}{third}"), &format!("{joint}{base}"));
+                    }
+                }
+                verbs = verbs.replace("be also ", "also be ");
                 format!(
                     "you may have {} {}{}",
                     obj(mode, *what),
-                    continuous(effects, true),
+                    verbs,
                     if *until_end_of_turn {
                         " until end of turn"
                     } else {
@@ -2511,16 +2610,25 @@ fn card_list_words(cards: &[Selector], plural: bool) -> String {
             } else {
                 words.extend(s.not_colors.iter().map(|c| format!("non{}", color(*c))));
             }
+            words.extend(
+                s.not_supertypes
+                    .iter()
+                    .map(|t| format!("non{}", format!("{t:?}").to_lowercase())),
+            );
             words.extend(s.supertypes.iter().map(|t| format!("{t:?}").to_lowercase()));
             words.extend(s.not_subtypes.iter().map(|t| format!("non-{t}")));
             // "Permanent card" (CR 110.4a): neither instant nor sorcery.
             let permanent_card = s.types.is_empty()
-                && s.not_types.len() == 2
                 && s.not_types.contains(&CardType::Instant)
                 && s.not_types.contains(&CardType::Sorcery);
-            if !permanent_card {
-                words.extend(s.not_types.iter().map(|t| format!("non{}", card_type(*t))));
-            }
+            words.extend(
+                s.not_types
+                    .iter()
+                    .filter(|t| {
+                        !(permanent_card && matches!(t, CardType::Instant | CardType::Sorcery))
+                    })
+                    .map(|t| format!("non{}", card_type(*t))),
+            );
             if !s.subtypes.is_empty() {
                 words.push(s.subtypes.join(" or "));
             }
@@ -2677,6 +2785,11 @@ fn capitalize(s: &str) -> String {
         Some(first) => first.to_uppercase().chain(chars).collect(),
         None => String::new(),
     }
+}
+
+/// A cost as a client shows it: "{2}", "Pay 3 life", "Discard a card".
+pub fn cost_text(c: &Cost) -> String {
+    cost(c)
 }
 
 fn cost(c: &Cost) -> String {
@@ -3113,6 +3226,15 @@ fn trigger_event(t: &Trigger) -> String {
             }
         ),
         Trigger::CastThis => "When you cast this spell".to_string(),
+        Trigger::BecomesTarget { by, only_spells } => format!(
+            "Whenever this permanent becomes the target of a spell{}{}",
+            if *only_spells { "" } else { " or ability" },
+            match by {
+                Who::Any => "",
+                Who::You => " you control",
+                Who::Opponent => " an opponent controls",
+            }
+        ),
         Trigger::Cast {
             by,
             types: ts,
@@ -3162,12 +3284,7 @@ fn trigger_event(t: &Trigger) -> String {
                         Who::You => "you cast your",
                         Who::Opponent => "an opponent casts their",
                     },
-                    match n {
-                        1 => "first".to_string(),
-                        2 => "second".to_string(),
-                        3 => "third".to_string(),
-                        n => format!("{n}th"),
-                    }
+                    ordinal(*n)
                 ),
             }
         }
@@ -3322,6 +3439,47 @@ pub fn loyalty_cost(c: &Cost) -> String {
 fn ability(a: &AbilityDef) -> String {
     match a {
         AbilityDef::Spell(b) => body(b),
+        // CR 702.21a: "Ward [cost]" means "Whenever this permanent becomes the target of a
+        // spell or ability an opponent controls, counter that spell or ability unless that
+        // player pays [cost]."
+        AbilityDef::Triggered {
+            when:
+                Trigger::BecomesTarget {
+                    by: Who::Opponent,
+                    only_spells: false,
+                },
+            intervening_if: None,
+            body:
+                Body::Effect(Mode {
+                    targets,
+                    effect:
+                        Effect::Pay {
+                            who: PlayerRef::TriggeringPlayer,
+                            cost: c,
+                            paid,
+                            unpaid,
+                        },
+                    ..
+                }),
+        } if targets.is_empty()
+            && matches!(&**paid, Effect::Seq(v) if v.is_empty())
+            && matches!(
+                &**unpaid,
+                Effect::CounterIt {
+                    what: ObjRef::Triggering
+                }
+            ) =>
+        {
+            let only_mana = Cost {
+                mana: c.mana.clone(),
+                ..Cost::default()
+            } == *c;
+            if only_mana {
+                format!("Ward {}", cost(c))
+            } else {
+                format!("Ward—{}", cost(c))
+            }
+        }
         // CR 702.29a: "Cycling [cost]" means "[Cost], Discard this card: Draw a card."
         AbilityDef::Activated {
             cost: c,
@@ -4253,7 +4411,10 @@ fn token_phrase(
             .abilities
             .iter()
             .map(|a| {
-                let text = render(def, &ability(a), tokens, depth + 1, true, &mut Vec::new());
+                let text = spells_only(
+                    a,
+                    render(def, &ability(a), tokens, depth + 1, true, &mut Vec::new()),
+                );
                 format!("\"{text}\"")
             })
             .collect();
@@ -4306,7 +4467,10 @@ fn token_phrase(
     for a in &def.abilities {
         with.push(format!(
             "\"{}\"",
-            render(def, &ability(a), tokens, depth + 1, true, &mut Vec::new())
+            spells_only(
+                a,
+                render(def, &ability(a), tokens, depth + 1, true, &mut Vec::new())
+            )
         ));
     }
     let mut after = String::new();
@@ -4344,11 +4508,25 @@ pub fn ability_text(def: &CardDef, a: &AbilityDef) -> String {
 }
 
 /// [`ability_text`], describing the tokens it creates from `tokens`.
+/// A "becomes the target" trigger only spells can make counters "that spell" (ward's own
+/// words, CR 702.21a, are "that spell or ability": any spell or ability).
+fn spells_only(a: &AbilityDef, text: String) -> String {
+    match a {
+        AbilityDef::Triggered {
+            when: Trigger::BecomesTarget {
+                only_spells: true, ..
+            },
+            ..
+        } => text.replace("counter that spell or ability", "counter that spell"),
+        _ => text,
+    }
+}
+
 pub fn ability_text_in(def: &CardDef, a: &AbilityDef, tokens: TokenLookup<'_>) -> String {
     // An ability the card gives to something else is about that something: "this
     // permanent" is not the card.
     let own = !(def.granted.contains(a) && !def.abilities.contains(a));
-    render(def, &ability(a), tokens, 0, own, &mut Vec::new())
+    spells_only(a, render(def, &ability(a), tokens, 0, own, &mut Vec::new()))
 }
 
 /// The card's rules text, one line per keyword group / ability.
@@ -4394,7 +4572,10 @@ pub fn rules_text_in(def: &CardDef, tokens: TokenLookup<'_>) -> Vec<String> {
         .filter(enters)
         .chain(def.abilities.iter().filter(|a| !enters(a)))
     {
-        lines.push(render(def, &ability(a), tokens, 0, true, &mut seen));
+        lines.push(spells_only(
+            a,
+            render(def, &ability(a), tokens, 0, true, &mut seen),
+        ));
     }
     // What an attached permanent calls the thing it is attached to.
     let host = if def.creature_types.iter().any(|t| t == "Equipment") {

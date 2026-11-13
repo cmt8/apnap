@@ -85,6 +85,7 @@ fn effect_polarity(e: &Effect) -> Polarity {
         Effect::DealDamage { .. }
         | Effect::Destroy { .. }
         | Effect::Counter { .. }
+        | Effect::CounterIt { .. }
         | Effect::LoseLife { .. }
         | Effect::ReturnToHand { .. }
         | Effect::Exile { .. }
@@ -130,7 +131,8 @@ fn effect_polarity(e: &Effect) -> Polarity {
         Effect::DrawUpTo { .. }
         | Effect::Shuffle { .. }
         | Effect::ChangeTargets { .. }
-        | Effect::CopySpell { .. } => Polarity::Neutral,
+        | Effect::CopySpell { .. }
+        | Effect::DigUntil { .. } => Polarity::Neutral,
         // Its own permanent turning over: no target to judge.
         Effect::Transform { .. } => Polarity::Neutral,
         Effect::May(inner) | Effect::CantBeRegenerated(inner) => effect_polarity(inner),

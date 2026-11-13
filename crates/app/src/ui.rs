@@ -392,6 +392,7 @@ pub fn prompt(kind: ChoiceKind) -> &'static str {
         ChoiceKind::ReturnToHand => "Return to its owner's hand to pay the cost",
         ChoiceKind::DrawUpTo => "How many cards do you draw?",
         ChoiceKind::TapForCost => "Choose what to tap for the cost",
+        ChoiceKind::PayToSave { .. } => "Pay, or your spell or ability is countered (ward)",
         ChoiceKind::NewTarget { .. } => {
             "Choose a new target (the first option keeps the current one)"
         }
@@ -436,6 +437,7 @@ pub fn anchor(o: &OptionDesc) -> Option<Anchor> {
         OptionDesc::Player { player } => Anchor::Player(*player),
         OptionDesc::Lasting { .. }
         | OptionDesc::Pass
+        | OptionDesc::PayCost { .. }
         | OptionDesc::Keep
         | OptionDesc::Mulligan
         | OptionDesc::Mode { .. }
@@ -535,6 +537,7 @@ pub fn option_label(
         OptionDesc::Color { color } => format!("{color:?}"),
         OptionDesc::Accept => "Yes".into(),
         OptionDesc::Decline if d.kind == ChoiceKind::TapForCost => "Tap no more".into(),
+        OptionDesc::PayCost { cost } => format!("Pay {}", card_model::describe::cost_text(cost)),
         OptionDesc::Decline => "No".into(),
         OptionDesc::TapToPay { mana: Some(m), .. } => format!("Tap to pay one {m:?} mana"),
         OptionDesc::TapToPay { mana: None, .. } => "Tap to pay {1}".into(),

@@ -78,7 +78,7 @@ const GEYSER: &str = "Name:Test Geyser\nManaCost:2\nTypes:Artifact\n\
     A:AB$ Mana | Cost$ T | Produced$ R | Amount$ 3 | SpellDescription$ Add RRR.\nOracle:Text.";
 const MIND: &str = "Name:Test Upkeeper\nManaCost:1\nTypes:Artifact\n\
     A:AB$ Draw | Cost$ 1 | NumCards$ 1 | SpellDescription$ Text.\nOracle:Text.";
-const LANDCYCLER: &str = "Name:Test Dune Strider\nManaCost:5 W\nTypes:Creature Camel\nPT:4/4\nK:TypeCycling:Plains:2\nOracle:Text.";
+const LANDCYCLER: &str = "Name:Test Dune Strider\nManaCost:5 W\nTypes:Creature Camel\nPT:4/4\nK:TypeCycling:Plains:2\nOracle:Plainscycling {2} ({2}, Discard this card: Search your library for a Plains card, reveal it, put it into your hand, then shuffle.)";
 
 // Problem 1: no targets chosen prints a line that says so, not a bare "targeting ".
 #[test]
@@ -696,4 +696,48 @@ fn a_transformed_permanent_is_named_by_its_face() {
     ];
     let lines = harness::text::narrate(&st, &ev, Seat::Everyone);
     assert!(lines[1].contains("Test Moth (P0) attacks P1"), "{lines:#?}");
+}
+
+// CR 701.20 (D-089 A.1): a card found or looked at is revealed only where the card says so.
+// "Look at the top six cards … put up to two creature cards … onto the battlefield" and
+// "search your library for up to three creature cards, put them into your graveyard": the
+// cards become public by arriving; nothing is revealed on the way, and another seat's log
+// shows no reveal and none of the cards left behind.
+#[test]
+fn no_reveal_the_card_doesnt_make() {
+    let company = "Name:Test Company\nManaCost:3 G\nTypes:Instant\n\
+        A:SP$ Dig | DigNum$ 6 | ChangeNum$ 2 | Optional$ True | ChangeValid$ Creature.cmcLE3 | DestinationZone$ Battlefield | SpellDescription$ Text.\n\
+        Oracle:Look at the top six cards of your library. Put up to two creature cards with mana value 3 or less from among them onto the battlefield. Put the rest on the bottom of your library in any order.";
+    let buried = "Name:Test Burial\nManaCost:2 B\nTypes:Sorcery\n\
+        A:SP$ ChangeZone | Origin$ Library | Destination$ Graveyard | ChangeType$ Creature | ChangeNum$ 3 | SpellDescription$ Text.\n\
+        Oracle:Search your library for up to three creature cards, put them into your graveyard, then shuffle.";
+    let mut sc = scenario(&[company, buried]);
+    sc.cards(
+        P0,
+        Zone::Battlefield,
+        &["Forest", "Forest", "Forest", "Forest"],
+    );
+    sc.cards(P0, Zone::Battlefield, &["Swamp", "Swamp", "Swamp"]);
+    sc.cards(P0, Zone::Hand, &["Test Company", "Test Burial"]);
+    sc.cards(P0, Zone::Library, &["Test Elf", "Test Elf", "Test Elf"]);
+    let (mut s, st) = game(sc);
+    s.cast("Test Company").pay().pass_all();
+    s.respond(engine_core::Response::Pick(vec![0]));
+    while s.kind() != engine_core::ChoiceKind::Priority {
+        let n = s.options().len();
+        s.respond(engine_core::Response::Order((0..n).collect()));
+    }
+    s.cast("Test Burial").pay().pass_all();
+    s.respond(engine_core::Response::Pick(vec![0]));
+    assert_eq!(
+        s.count(|e| matches!(e, Event::Revealed { .. })),
+        0,
+        "nothing revealed"
+    );
+    let theirs = log(&st, &s, Some(P1));
+    assert!(!theirs.iter().any(|l| l.contains("reveal")), "{theirs:#?}");
+    // P1's redacted stream: no reveal at all.
+    let mut view = engine_core::client::EventView::new(&st, Seat::Player(P1));
+    let seen = view.redact(&s.events);
+    assert!(!seen.iter().any(|e| matches!(e, Event::Revealed { .. })));
 }
