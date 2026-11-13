@@ -219,7 +219,7 @@ fn kw_value(k: Keyword) -> i64 {
         | Keyword::Reach
         | Keyword::Flash
         | Keyword::Flanking => 1,
-        Keyword::Changeling => 0,
+        Keyword::Changeling | Keyword::Convoke | Keyword::Improvise => 0,
         Keyword::Defender => -1,
     }
 }

@@ -2605,6 +2605,103 @@ impl<'a> Tx<'a> {
                     except: except?,
                 }
             }
+            // CR 613.1b (layer 2): "gain control of target creature [until end of turn].
+            // Untap that creature. It gains haste until end of turn." (Forge's
+            // ControlGainEffect: the activator gains control; without `LoseControl$` for
+            // good; `Untap$`; `AddKWs$` always until end of turn.)
+            "GainControl" => {
+                for k in [
+                    "Choices",
+                    "Optional",
+                    "RememberControlled",
+                    "ForgetControlled",
+                    "StaticCommandCheckSVar",
+                ] {
+                    if rd.rec.get(k).is_some() {
+                        self.block(format!("param:GainControl.{k}"));
+                        return None;
+                    }
+                }
+                if !matches!(rd.get("NewController"), None | Some("You")) {
+                    self.block(format!(
+                        "GainControl:NewController {}",
+                        shape(rd.get("NewController").unwrap_or("?"))
+                    ));
+                    return None;
+                }
+                let until_end_of_turn = match rd.get("LoseControl") {
+                    None => false,
+                    Some("EOT") => true,
+                    Some(other) => {
+                        self.block(format!("GainControl:LoseControl {other}"));
+                        return None;
+                    }
+                };
+                let keywords = match rd.get("AddKWs") {
+                    None => Vec::new(),
+                    Some(ks) => {
+                        let mut out = Vec::new();
+                        for k in ks.split('&').map(str::trim) {
+                            match keyword(k) {
+                                Some(k) => out.push(k),
+                                None => {
+                                    self.block(format!("GainControl:keyword {k}"));
+                                    return None;
+                                }
+                            }
+                        }
+                        out
+                    }
+                };
+                let untap = rd.get("Untap").is_some();
+                let mut parts = Vec::new();
+                if let Some(all) = rd.get("AllValid") {
+                    // "Gain control of all creatures …": those on the battlefield now
+                    // (CR 611.2c). "Untap them" is not built for a set.
+                    if untap {
+                        self.block("GainControl:AllValid with Untap");
+                        return None;
+                    }
+                    let sel = self.selector(all)?;
+                    parts.push(Effect::ApplyAll {
+                        affected: sel.clone(),
+                        effects: vec![ContinuousEffect::GainControl],
+                        until_end_of_turn,
+                    });
+                    if !keywords.is_empty() {
+                        parts.push(Effect::ApplyAll {
+                            affected: sel,
+                            effects: vec![ContinuousEffect::AddKeywords(keywords)],
+                            until_end_of_turn: true,
+                        });
+                    }
+                } else {
+                    let what = match self.target(&rd, chain, false) {
+                        Some(i) => Some(ObjRef::Target(i)),
+                        None => self.object(&rd, chain, triggered),
+                    }?;
+                    parts.push(Effect::Apply {
+                        what,
+                        effects: vec![ContinuousEffect::GainControl],
+                        until_end_of_turn,
+                    });
+                    if untap {
+                        parts.push(Effect::Untap { what });
+                    }
+                    if !keywords.is_empty() {
+                        parts.push(Effect::Apply {
+                            what,
+                            effects: vec![ContinuousEffect::AddKeywords(keywords)],
+                            until_end_of_turn: true,
+                        });
+                    }
+                }
+                if parts.len() == 1 {
+                    parts.remove(0)
+                } else {
+                    Effect::Seq(parts)
+                }
+            }
             // CR 603.7: "at the beginning of the next …, [do something]".
             "DelayedTrigger" => self.delayed_trigger(&rd, chain)?,
             "DestroyAll" => {
@@ -5605,6 +5702,12 @@ impl<'a> Tx<'a> {
             return None;
         };
         let (cost, only_if, spend, then) = (cost?, only_if?, spend?, then?);
+        // Tapping other permanents in a mana ability's cost (Springleaf Drum): the payment
+        // planner doesn't know such abilities yet.
+        if cost.tap_others.is_some() {
+            self.block("Mana:cost tapXType");
+            return None;
+        }
         // D-066: `{T}` or a sacrifice, maybe mana and life; one permanent sacrificed.
         let uses_up = cost.tap || cost.sacrifice_self || cost.sacrifice.is_some();
         let other = cost.discard.is_some() || cost.discard_self || cost.exile_self;
@@ -5831,6 +5934,32 @@ impl<'a> Tx<'a> {
                         return None;
                     }
                     *slot = Some(CostChoice { count, what });
+                }
+                // "Tap N untapped [permanents] you control" (`tapXType<N/Type>`; Forge's
+                // CostTapType: untapped permanents the activator controls matching the
+                // type, the ability's source included unless the type says `Other`).
+                ("tapXType", true) => {
+                    let (Some(count), Some(types)) = (count.filter(|n| *n > 0), args.get(1)) else {
+                        self.block("cost:tapXType-amount");
+                        return None;
+                    };
+                    let mut what = Vec::new();
+                    for alt in types.split(';') {
+                        match self.alt(alt.trim())? {
+                            Alt::Sel(s) if s.controller == Who::Any && s.owner == Who::Any => {
+                                what.push(s)
+                            }
+                            _ => {
+                                self.block("cost:tapXType-filter");
+                                return None;
+                            }
+                        }
+                    }
+                    if cost.tap_others.is_some() {
+                        self.block("cost:tapXType-twice");
+                        return None;
+                    }
+                    cost.tap_others = Some(CostChoice { count, what });
                 }
                 ("PayLife", true) => match count {
                     Some(n) if cost.life == 0 && n > 0 => cost.life = n,
@@ -9527,6 +9656,54 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
             def.keywords.push(Keyword::Changeling);
             continue;
         }
+        // CR 702.51, 702.126: printed on the spell (one given by another effect isn't
+        // known: `keyword` doesn't name them).
+        if k == "Convoke" || k == "Improvise" {
+            def.keywords.push(if k == "Convoke" {
+                Keyword::Convoke
+            } else {
+                Keyword::Improvise
+            });
+            continue;
+        }
+        // CR 702.122a: "Crew N" means "Tap any number of other untapped creatures you
+        // control with total power N or greater: This permanent becomes an artifact
+        // creature until end of turn."
+        if let Some(n) = k.strip_prefix("Crew:") {
+            match n.trim().parse::<u32>() {
+                Ok(n) if n > 0 => {
+                    abilities.push((
+                        0,
+                        AbilityDef::Activated {
+                            cost: Cost {
+                                crew: Some(n),
+                                ..Cost::default()
+                            },
+                            timing: Timing::Instant,
+                            only_if: None,
+                            body: Body::Effect(Mode {
+                                targets: Vec::new(),
+                                effect: Effect::Apply {
+                                    what: ObjRef::This,
+                                    effects: vec![ContinuousEffect::AddTypes {
+                                        card_types: vec![CardType::Artifact, CardType::Creature],
+                                        subtypes: Vec::new(),
+                                        land_types: Vec::new(),
+                                    }],
+                                    until_end_of_turn: true,
+                                },
+                                groups: Vec::new(),
+                            }),
+                            from: ActivationZone::Battlefield,
+                            cycling: false,
+                            reduce: None,
+                        },
+                    ));
+                }
+                _ => tx.block(format!("kw:Crew {}", shape(n))),
+            }
+            continue;
+        }
         match keyword(k) {
             Some(k) => def.keywords.push(k),
             None => {
@@ -9777,6 +9954,13 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
         };
         if sentences(plain, &["copy", "except"]) > 0 && !has_word(compiled, "except") {
             missing.push("says except");
+        }
+        // "Tap two other untapped creatures you control": a script may let the source
+        // itself be tapped (Tidal Terror). (With `{T}` in the same cost it can't be.)
+        let other_untapped =
+            |t: &str| t.contains("other untapped") || t.contains("another untapped");
+        if other_untapped(plain) && !other_untapped(compiled) && !compiled.contains("{t}, tap ") {
+            missing.push("says other untapped");
         }
         // "You may choose new targets for the copy": some scripts allow it where the card
         // doesn't (Reflections of Littjara).
@@ -10161,6 +10345,38 @@ mod tests {
             vec![],
         ));
         assert!(has_word(&t, "damage") && t.contains("it deals"), "{t}");
+        // "other untapped" (a cost that taps other permanents than its source)
+        let t = text(&CardDef {
+            name: "Test".into(),
+            card_types: vec![CardType::Creature],
+            power: Some(1),
+            toughness: Some(1),
+            abilities: vec![AbilityDef::Activated {
+                cost: Cost {
+                    tap_others: Some(card_model::CostChoice {
+                        count: 2,
+                        what: vec![Selector {
+                            types: vec![CardType::Creature],
+                            other: true,
+                            ..Selector::default()
+                        }],
+                    }),
+                    ..Cost::default()
+                },
+                timing: card_model::Timing::Instant,
+                only_if: None,
+                body: Body::Effect(Mode {
+                    targets: vec![],
+                    effect: draw.clone(),
+                    groups: vec![],
+                }),
+                from: card_model::ActivationZone::Battlefield,
+                cycling: false,
+                reduce: None,
+            }],
+            ..CardDef::default()
+        });
+        assert!(t.contains("other untapped"), "{t}");
         // "emblem"
         let t = text(&CardDef {
             granted: vec![AbilityDef::Triggered {

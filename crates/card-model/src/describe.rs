@@ -38,6 +38,8 @@ pub fn keyword(k: Keyword) -> &'static str {
         Keyword::Horsemanship => "Horsemanship",
         Keyword::Flanking => "Flanking",
         Keyword::Changeling => "Changeling",
+        Keyword::Convoke => "Convoke",
+        Keyword::Improvise => "Improvise",
         Keyword::Landwalk(crate::BasicLandType::Plains) => "Plainswalk",
         Keyword::Landwalk(crate::BasicLandType::Island) => "Islandwalk",
         Keyword::Landwalk(crate::BasicLandType::Swamp) => "Swampwalk",
@@ -1117,6 +1119,44 @@ fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
                 let part = |s: &crate::Signed| format!("{}{}", sign(s), amount(&s.amount));
                 // "+X/+X, where X is the number of …" when one count is used for both.
                 let counted = |s: &crate::Signed| !matches!(s.amount, Amount::Fixed(_) | Amount::X);
+                // "+1/+0 for each artifact you control", "-1/-1 for each Elf": each half is
+                // a count of the same permanents, or zero.
+                fn each(s: &crate::Signed) -> Option<Option<&Selector>> {
+                    match &s.amount {
+                        Amount::Count(sel) => Some(Some(sel)),
+                        Amount::Fixed(0) => Some(None),
+                        _ => None,
+                    }
+                }
+                if let (Some(p), Some(t)) = (each(power), each(toughness))
+                    && let Some(sel) = p.or(t)
+                    && p.is_none_or(|x| x == sel)
+                    && t.is_none_or(|x| x == sel)
+                {
+                    let half = |s: &crate::Signed, n: Option<&Selector>, other: &crate::Signed| {
+                        let negative = if n.is_some() {
+                            s.negative
+                        } else {
+                            other.negative
+                        };
+                        format!(
+                            "{}{}",
+                            if negative { "-" } else { "+" },
+                            if n.is_some() { 1 } else { 0 }
+                        )
+                    };
+                    let place = if sel.controller == Who::Any && sel.owner == Who::Any {
+                        " on the battlefield"
+                    } else {
+                        ""
+                    };
+                    return format!(
+                        "{get} {}/{} for each {}{place}",
+                        half(power, p, toughness),
+                        half(toughness, t, power),
+                        selector(sel, false)
+                    );
+                }
                 if power.amount == toughness.amount && counted(power) {
                     format!(
                         "{get} {}X/{}X, where X is {}",
@@ -1261,6 +1301,11 @@ fn quote_granted(def: &CardDef, text: &str, top: bool) -> String {
                         .replace(
                             "At the beginning of each opponent's ",
                             "at the beginning of the next opponent's ",
+                        )
+                        // (It triggers once, CR 603.7c.)
+                        .replace(
+                            "At the beginning of each combat",
+                            "at the beginning of the next combat",
                         )
                         .replace(
                             "At the beginning of your ",
@@ -1434,7 +1479,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                     true,
                 ),
                 Amount::TriggeringAmount => (
-                    " for each other such spell cast before it this turn".to_string(),
+                    " for each other such spell you've cast before it this turn".to_string(),
                     true,
                 ),
                 n => (format!(" {} times", amount(n)), true),
@@ -1624,6 +1669,33 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             "put {} on {}",
             counters_phrase(count, *kind),
             obj(mode, *what)
+        ),
+        // CR 613.1b: "gain control of target creature [until end of turn]".
+        Effect::Apply {
+            what,
+            effects,
+            until_end_of_turn,
+        } if effects.as_slice() == [ContinuousEffect::GainControl] => format!(
+            "gain control of {}{}",
+            obj(mode, *what),
+            if *until_end_of_turn {
+                " until end of turn"
+            } else {
+                ""
+            }
+        ),
+        Effect::ApplyAll {
+            affected,
+            effects,
+            until_end_of_turn,
+        } if effects.as_slice() == [ContinuousEffect::GainControl] => format!(
+            "gain control of all {}{}",
+            selector(affected, true),
+            if *until_end_of_turn {
+                " until end of turn"
+            } else {
+                ""
+            }
         ),
         Effect::Apply {
             what,
@@ -2713,6 +2785,32 @@ fn cost_parts(c: &Cost) -> Vec<String> {
             format!("Exile {} {what}s from your hand", number_word(e.count))
         });
     }
+    if let Some(t) = &c.tap_others {
+        // "Tap another untapped Citizen you control".
+        let other = t.what.iter().all(|s| s.other);
+        let what: Vec<String> = t
+            .what
+            .iter()
+            .map(|s| {
+                let mut s = s.clone();
+                s.controller = Who::You;
+                s.other = false;
+                selector(&s, t.count != 1)
+            })
+            .collect();
+        let what = join(what, "or");
+        parts.push(match (t.count, other) {
+            (1, false) => format!("Tap an untapped {what}"),
+            (1, true) => format!("Tap another untapped {what}"),
+            (n, false) => format!("Tap {} untapped {what}", num(n)),
+            (n, true) => format!("Tap {} other untapped {what}", num(n)),
+        });
+    }
+    if let Some(n) = c.crew {
+        parts.push(format!(
+            "Tap any number of other untapped creatures you control with total power {n} or greater"
+        ));
+    }
     if let Some(r) = &c.return_to_hand {
         let mut what: Vec<String> = Vec::new();
         for s in &r.what {
@@ -3248,6 +3346,38 @@ fn ability(a: &AbilityDef) -> String {
             body: b,
             ..
         } => format!("[{}]: {}", loyalty_cost(c), body(b)),
+        // CR 702.122a: "Crew N" means "Tap any number of other untapped creatures you
+        // control with total power N or greater: This permanent becomes an artifact creature
+        // until end of turn."
+        AbilityDef::Activated {
+            cost: Cost { crew: Some(n), .. },
+            body:
+                Body::Effect(Mode {
+                    effect:
+                        Effect::Apply {
+                            what: ObjRef::This,
+                            effects,
+                            until_end_of_turn: true,
+                        },
+                    targets,
+                    ..
+                }),
+            timing: Timing::Instant,
+            only_if: None,
+            from: ActivationZone::Battlefield,
+            reduce: None,
+            ..
+        } if targets.is_empty()
+            && matches!(effects.as_slice(), [ContinuousEffect::AddTypes {
+                card_types,
+                subtypes,
+                land_types,
+            }] if subtypes.is_empty()
+                && land_types.is_empty()
+                && card_types.as_slice() == [CardType::Artifact, CardType::Creature]) =>
+        {
+            format!("Crew {n}")
+        }
         AbilityDef::Activated {
             cost: c,
             timing,

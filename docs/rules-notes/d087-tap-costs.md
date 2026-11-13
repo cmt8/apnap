@@ -1,0 +1,135 @@
+# Tapping permanents as a cost; convoke, improvise; crew (D-087) — 2026-11-06
+
+Extracted from docs/rules/MagicCompRules.txt (effective 2026-11-06).
+
+## Costs that tap other permanents
+
+> 118.3. A player can’t pay a cost without having the necessary resources to pay it fully.
+> For example, a player with only 1 life can’t pay a cost of 2 life, and a permanent that’s
+> already tapped can’t be tapped to pay a cost. …
+
+> 601.2g If the total cost includes a mana payment, the player then has a chance to activate
+> mana abilities (see rule 605, “Mana Abilities”). Mana abilities must be activated before
+> costs are paid.
+
+> 601.2h The player pays the total cost. First, they pay all costs that don’t involve random
+> elements or moving objects from the library to a public zone, in any order. Then they pay
+> all remaining costs in any order. Partial payments are not allowed. Unpayable costs can’t
+> be paid.
+
+> 602.2b The remainder of the process for activating an ability is identical to the process
+> for casting a spell listed in rules 601.2b–i. …
+
+> 302.6. A creature’s activated ability with the tap symbol or the untap symbol in its
+> activation cost can’t be activated unless the creature has been under its controller’s
+> control continuously since their most recent turn began. A creature can’t attack unless it
+> has been under its controller’s control continuously since their most recent turn began. …
+
+So "tap an untapped creature you control" in another permanent's cost may tap a creature
+that came under its controller's control this turn: 302.6 restricts only the creature's own
+`{T}` abilities (and attacking). A permanent tapped for mana (601.2g, before the cost is
+paid) is no longer untapped, and can't be tapped for the cost.
+
+Engine: `Cost::tap_others` (Forge's `tapXType<N/Type>`), chosen in `CastStage::ChooseTap`
+after the mana abilities; the payment planner (`frames/mana.rs`) keeps that many candidates
+untapped — a candidate used to make mana counts against them — so an ability is offered only
+if some payment exists. Not yet in mana abilities' costs (Springleaf Drum: `Mana:cost
+tapXType`).
+
+## Convoke and improvise
+
+> 702.51a Convoke is a static ability that functions while the spell with convoke is on the
+> stack. “Convoke” means “For each colored mana in this spell’s total cost, you may tap an
+> untapped creature of that color you control rather than pay that mana. For each generic
+> mana in this spell’s total cost, you may tap an untapped creature you control rather than
+> pay that mana.”
+
+> 702.51b The convoke ability isn’t an additional or alternative cost and applies only after
+> the total cost of the spell with convoke is determined.
+
+> 702.51c A creature tapped to pay for mana in a spell’s total cost this way is said to have
+> “convoked” that spell.
+
+> 702.51d Multiple instances of convoke on the same spell are redundant.
+
+> 702.126a Improvise is a static ability that functions while the spell with improvise is on
+> the stack. “Improvise” means “For each generic mana in this spell’s total cost, you may tap
+> an untapped artifact you control rather than pay that mana.”
+
+> 702.126b The improvise ability isn’t an additional or alternative cost and applies only
+> after the total cost of the spell with improvise is determined.
+
+Engine: while the total cost (after reductions and tax, 702.51b) is paid, an untapped
+creature (convoke) or artifact (improvise) may be tapped for one mana of the cost:
+`OptionDesc::TapToPay { source, mana }` — a mana of one of the creature's colors, or
+(`None`) one generic mana; never `{C}`. It isn't a mana ability and isn't `{T}`, so a
+creature that came under its controller's control this turn may convoke. The planner
+counts each such permanent as one unit of mana that pays only the spell (a creature that
+can also tap for mana is one or the other), so the spell is offered only if a payment
+exists, and each `TapToPay` only if the rest stays payable.
+
+## Crew
+
+> 702.122a Crew is an activated ability of Vehicle cards. “Crew N” means “Tap any number of
+> other untapped creatures you control with total power N or greater: This permanent becomes
+> an artifact creature until end of turn.”
+
+> 702.122b A creature “crews a Vehicle” when it’s tapped to pay the cost to activate a
+> Vehicle’s crew ability.
+
+> 301.7a Each Vehicle has a printed power and toughness, but it has these characteristics
+> only if it’s also a creature. See rule 208.3.
+
+> 301.7b If a Vehicle becomes a creature, it immediately has its printed power and
+> toughness. Other effects, including the effect that makes it a creature, may modify these
+> values or set them to different values.
+
+> 208.3. A noncreature permanent has no power or toughness, even if it’s a card with a power
+> and toughness printed on it (such as a Vehicle). …
+
+> 613.1d Layer 4: Type-changing effects are applied. …
+
+> 611.2a A continuous effect generated by the resolution of a spell or ability lasts as long
+> as stated by the spell or ability creating it (such as “until end of turn”). …
+
+Engine: `Cost::crew` (Forge's `K:Crew:N`), an activated ability (any time the player has
+priority; not a mana ability) whose effect is a layer-4 "is also an artifact creature" until
+end of turn. Its cost is paid one creature at a time (other untapped creatures; summoning
+sickness doesn't matter, it isn't `{T}`), each offered only if total power N can still be
+reached; once it is, the player may stop (`Decline`) or tap more. A Vehicle that isn't a
+creature can't attack or block (it isn't a creature).
+
+## Gaining control
+
+> 613.1b Layer 2: Control-changing effects are applied.
+
+> 611.2c If a continuous effect generated by the resolution of a spell or ability modifies
+> the characteristics or changes the controller of any objects, the set of objects it
+> affects is determined when that continuous effect begins. After that point, the set won’t
+> change. …
+
+> 302.6 … A creature can’t attack unless it has been under its controller’s control
+> continuously since their most recent turn began. …
+
+Engine: Forge's `GainControl` is a resolved continuous effect (`Effect::Apply` / `ApplyAll`
+with `ContinuousEffect::GainControl`, layer 2, D-029/D-030's control layer and its
+summoning-sickness tracking): "until end of turn" (`LoseControl$ EOT`) or for good (no
+`LoseControl$`); `Untap$` untaps it; `AddKWs$` (haste) until end of turn. Not built,
+by name (`GainControl:LoseControl …`): "for as long as you control [this]" (`LeavesPlay`,
+`LoseControl`), until end of combat, until the source untaps or becomes unattached, until
+the end of your next turn; another player gaining control (`NewController$`); a chosen
+permanent (`Choices$`); untapping a whole set.
+
+## Tests (crates/harness/tests/forge_tap_costs.rs)
+
+| Test | Rule |
+|---|---|
+| `tap_an_untapped_creature_you_control` | 601.2g–h, 118.3, 302.6 |
+| `convoke_pays_with_creatures` | 702.51a–b |
+| `improvise_pays_generic_with_artifacts` | 702.126a |
+| `crew_makes_a_vehicle_a_creature_until_end_of_turn` | 702.122a, 301.7a–b, 302.6, 613.1d |
+| `an_uncrewed_vehicle_cant_attack` | 301.7, 208.3 |
+| `a_crewed_vehicle_attacks_a_planeswalker` | 702.122a, 508.1b |
+| `other_untapped_is_read_against_the_card` | — (Oracle guard) |
+| `gain_control_until_end_of_turn_or_for_good` | 613.1b, 611.2a, 302.6 |
+| `gain_control_at_the_next_combat_reads_next` | 603.7c (text) |

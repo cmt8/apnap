@@ -203,7 +203,9 @@ impl ApplyFrame {
                     // CR 303.4f–g: a permanent entering as a copy of an Aura (not resolving
                     // as an Aura spell) gets something to enchant as it enters, chosen by
                     // its controller without targeting — or doesn't enter.
-                    if let Some((chooser, mut hosts)) = copy_aura_hosts(st, &front.event) {
+                    if let Some((chooser, mut hosts)) =
+                        crate::replacement::aura_hosts(st, &front.event)
+                    {
                         match hosts.len() {
                             0 => {
                                 let p = self.queue.remove(0);
@@ -322,54 +324,6 @@ fn token_entries(ev: &Proposed) -> Vec<Proposed> {
             })
         })
         .collect()
-}
-
-/// For an event that puts a copy of an Aura onto the battlefield with nothing to enchant
-/// yet (CR 303.4f): who chooses, and the permanents it could enchant (not targeted: only
-/// what it can legally enchant, CR 303.4a). `None` for anything else.
-fn copy_aura_hosts(st: &GameState, ev: &Proposed) -> Option<(PlayerId, Vec<ObjectId>)> {
-    let copied = match ev {
-        Proposed::Move {
-            to: Zone::Battlefield,
-            attach_to: None,
-            object,
-            copy,
-            ..
-        } => copy.is_some() || st.objects.get(object).is_some_and(|o| o.copy.is_some()),
-        Proposed::TokenEnters {
-            copy: Some(_),
-            attach_to: None,
-            ..
-        } => true,
-        _ => false,
-    };
-    if !copied {
-        return None;
-    }
-    let filter = crate::replacement::entering_abilities(st, ev)
-        .into_iter()
-        .find_map(|a| match st.catalog.ability(a) {
-            card_model::AbilityDef::Enchant(f) => Some(f.clone()),
-            _ => None,
-        })?;
-    let chooser = crate::replacement::entering_controller(st, ev)?;
-    let hosts = st
-        .zones
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|&id| {
-            crate::targeting::describes(
-                st,
-                &filter,
-                crate::stack::Target::Object(id),
-                chooser,
-                None,
-                None,
-            )
-        })
-        .collect();
-    Some((chooser, hosts))
 }
 
 fn set_host(ev: &mut Proposed, host: ObjectId) {

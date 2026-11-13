@@ -285,7 +285,11 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
         p.push("empty name".into());
     }
     let creature = c.has_type(CardType::Creature);
-    if creature != (c.power.is_some() && c.toughness.is_some()) {
+    // CR 301.7a: a Vehicle has a printed power and toughness, which it has only while it is
+    // a creature (CR 208.3; `layers::chars` drops them otherwise).
+    let vehicle = c.creature_types.iter().any(|t| t == "Vehicle");
+    let pt = c.power.is_some() && c.toughness.is_some();
+    if (creature != pt && !(vehicle && pt)) || c.power.is_some() != c.toughness.is_some() {
         p.push("power/toughness must be given exactly for creatures".into());
     }
     let land = c.has_type(CardType::Land);
@@ -1317,6 +1321,23 @@ fn check_cost(cost: &Cost, p: &mut dyn FnMut(String)) {
     // choice of permanents, not for two (D-072).
     if cost.sacrifice.is_some() && cost.return_to_hand.is_some() {
         p("a cost that both sacrifices and returns permanents".into());
+    }
+    // The payment planner keeps enough permanents for one chosen kind of use (D-087).
+    if cost.tap_others.is_some() && (cost.sacrifice.is_some() || cost.return_to_hand.is_some()) {
+        p("a cost that both taps and sacrifices or returns chosen permanents".into());
+    }
+    if cost.tap_others.as_ref().is_some_and(|t| t.count == 0) {
+        p("a cost to tap nothing".into());
+    }
+    // CR 702.122a: crew is a cost of its own (and no mana: the planner doesn't see it).
+    if let Some(n) = cost.crew {
+        let alone = Cost {
+            crew: Some(n),
+            ..Cost::default()
+        };
+        if *cost != alone || n == 0 {
+            p("crew with anything else in the cost".into());
+        }
     }
     for (kind, n) in [cost.remove_counters, cost.add_counters]
         .into_iter()

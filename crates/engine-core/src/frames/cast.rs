@@ -86,6 +86,9 @@ pub enum CastStage {
     /// hand, for the cost (after `ChooseDiscard`).
     ChooseExile,
     ChooseReturn,
+    /// CR 601.2h: the permanents to tap for the cost ("tap an untapped creature you
+    /// control", crew), after `ChooseReturn`: what was tapped for mana can't be chosen.
+    ChooseTap,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +131,14 @@ pub struct CastFrame {
     pub pay_exile: Vec<ObjectId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pay_return: Vec<ObjectId>,
+    /// The permanents chosen to be tapped for the cost ("tap two untapped artifacts you
+    /// control", crew).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pay_tap: Vec<ObjectId>,
+    /// CR 702.51, 702.126: the creatures and artifacts tapped while paying the mana, each
+    /// for one mana of a color or (`None`) one generic mana of the total cost.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub convoked: Vec<(ObjectId, Option<ManaType>)>,
 }
 
 /// CR 903.8: the commander tax `p` would pay to cast `card` from the command zone now.
@@ -156,6 +167,46 @@ struct Proposal {
     /// The parts of the cost that aren't mana or this permanent: chosen sacrifices and
     /// discards, life. For a spell, its additional cost.
     extra: Cost,
+}
+
+/// What `p` could tap to pay "tap N untapped [permanents] you control" (CR 118.3: not one
+/// that is tapped already; never the permanent the cost taps with `{T}`, `not`).
+pub(crate) fn tap_candidates(
+    st: &GameState,
+    p: PlayerId,
+    choice: &card_model::CostChoice,
+    source: ObjectId,
+    not: Option<ObjectId>,
+) -> Vec<ObjectId> {
+    sacrifice_candidates(st, p, choice, source, not)
+        .into_iter()
+        .filter(|&id| !st.object(id).tapped)
+        .collect()
+}
+
+/// CR 702.122a: the creatures `p` could tap to crew `vehicle` — other untapped creatures
+/// they control — with their power now.
+pub(crate) fn crew_candidates(
+    st: &GameState,
+    p: PlayerId,
+    vehicle: ObjectId,
+) -> Vec<(ObjectId, i32)> {
+    st.zones
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| id != vehicle && !st.object(id).tapped && controller_of(st, id) == p)
+        .filter_map(|id| {
+            let c = chars(st, id);
+            c.is(card_model::CardType::Creature)
+                .then(|| (id, c.power.unwrap_or(0)))
+        })
+        .collect()
+}
+
+/// Could creatures with these powers be tapped for a total power of `n` or greater?
+fn crew_reachable(n: u32, have: i32, rest: &[(ObjectId, i32)]) -> bool {
+    have + rest.iter().map(|(_, p)| (*p).max(0)).sum::<i32>() >= n as i32
 }
 
 /// What `p` could sacrifice to pay `choice` for a cost whose source is `source`.
@@ -264,6 +315,13 @@ fn extra_payable(st: &GameState, p: PlayerId, source: &CastSource, prop: &Propos
                 .get(&this)
                 .is_some_and(|o| o.zone == Zone::Battlefield)
         })
+        && prop.extra.tap_others.as_ref().is_none_or(|ch| {
+            tap_candidates(st, p, ch, this, prop.tap).len() >= ch.count as usize
+        })
+        && prop
+            .extra
+            .crew
+            .is_none_or(|n| crew_reachable(n, 0, &crew_candidates(st, p, this)))
 }
 
 /// [`proposal`], with the alternative cost `alt` chosen (CR 601.2b, 118.9).
@@ -585,6 +643,7 @@ pub(crate) fn identity_mask(st: &GameState, p: PlayerId) -> ManaMask {
 
 /// What paying for `source` asks (CR 601.2f–h), for the planner (`frames::mana`).
 fn goal(
+    st: &GameState,
     source: &CastSource,
     prop: &Proposal,
     payee: Option<Payee>,
@@ -604,6 +663,29 @@ fn goal(
             .or_else(|| prop.extra.return_to_hand.clone()),
         sac_source: cost_source(source),
         life: prop.extra.life,
+        tap_cost: prop.extra.tap_others.clone(),
+        tap_pays: tap_pays(st, payee),
+    }
+}
+
+/// CR 702.51, 702.126: what may be tapped to pay the mana of the spell `payee` (convoke:
+/// creatures; improvise: artifacts).
+fn tap_pays(st: &GameState, payee: Option<Payee>) -> super::mana::TapPays {
+    let spell = match payee {
+        Some(Payee::Spell(card)) => Some((card, None)),
+        Some(Payee::SpellFace(card, face)) => Some((card, Some(face))),
+        _ => None,
+    };
+    let Some((card, face)) = spell else {
+        return super::mana::TapPays::default();
+    };
+    let c = match face {
+        Some(face) => crate::layers::chars_as(st, card, face),
+        None => chars(st, card),
+    };
+    super::mana::TapPays {
+        creatures: c.has(card_model::Keyword::Convoke),
+        artifacts: c.has(card_model::Keyword::Improvise),
     }
 }
 
@@ -617,7 +699,7 @@ fn feasible(
     payee: Option<Payee>,
     req: &ManaRequirement,
 ) -> bool {
-    goal_feasible(st, p, &goal(source, prop, payee, req))
+    goal_feasible(st, p, &goal(st, source, prop, payee, req))
 }
 
 /// CR 118.3: can `p` pay `cost` right now — for an ability of `source` that is resolving?
@@ -853,6 +935,8 @@ impl CastFrame {
             alt: None,
             pay_exile: Vec::new(),
             pay_return: Vec::new(),
+            pay_tap: Vec::new(),
+            convoked: Vec::new(),
         }
     }
 
@@ -908,6 +992,19 @@ impl CastFrame {
             ),
             s => proposal(st, s),
         }
+    }
+
+    /// CR 601.2f: the mana of the total cost still to pay — less what creatures and
+    /// artifacts tapped for convoke or improvise paid (CR 702.51a, 702.126a).
+    fn requirement(&self, prop: &Proposal) -> ManaRequirement {
+        let mut r = total(&prop.cost, self.x, self.tax, self.discount);
+        for (_, mana) in &self.convoked {
+            match mana {
+                Some(t) => r.specific[t.index()] = r.specific[t.index()].saturating_sub(1),
+                None => r.generic = r.generic.saturating_sub(1),
+            }
+        }
+        r
     }
 
     /// What the mana is spent on: the spell as it is now (on the stack), or the ability's
@@ -1333,15 +1430,99 @@ impl CastFrame {
                     if exiling {
                         self.stage = CastStage::ChooseReturn;
                     } else {
-                        let prop = self.proposal(st);
-                        return self.finish(st, prop);
+                        self.stage = CastStage::ChooseTap;
                     }
+                }
+                // CR 601.2h: the permanents tapped for the cost, chosen once the mana
+                // abilities are done (CR 601.2g: what was tapped for mana can't be).
+                CastStage::ChooseTap => {
+                    let prop = self.proposal(st);
+                    let this = cost_source(&self.source);
+                    let answer: Option<Vec<OptionDesc>> = input
+                        .take()
+                        .map(|inp| inp.picked().into_iter().cloned().collect());
+                    let declined = answer
+                        .as_ref()
+                        .is_some_and(|a| a.contains(&OptionDesc::Decline));
+                    let picked: Vec<ObjectId> = answer
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|o| match o {
+                            OptionDesc::Card { card } => Some(card),
+                            _ => None,
+                        })
+                        .collect();
+                    if let Some(ch) = &prop.extra.tap_others {
+                        if picked.is_empty() {
+                            let pool = tap_candidates(st, p, ch, this, prop.tap);
+                            let n = ch.count as usize;
+                            assert!(pool.len() >= n, "cost not payable: D-019 violated");
+                            let options = pool
+                                .into_iter()
+                                .map(|card| OptionDesc::Card { card })
+                                .collect();
+                            return self.ask(
+                                ChoiceKind::TapForCost,
+                                Primitive::PickN { min: n, max: n },
+                                options,
+                            );
+                        }
+                        self.pay_tap = picked;
+                    } else if let Some(n) = prop.extra.crew
+                        && !declined
+                    {
+                        // CR 702.122a: one creature at a time, until their total power is N
+                        // or greater (then the player may stop, or tap more).
+                        self.pay_tap.extend(picked);
+                        let mut cands = crew_candidates(st, p, this);
+                        let power = |id: ObjectId| {
+                            cands
+                                .iter()
+                                .find(|(c, _)| *c == id)
+                                .map_or(0, |(_, pw)| *pw)
+                        };
+                        let have: i32 = self.pay_tap.iter().map(|&id| power(id)).sum();
+                        cands.retain(|(c, _)| !self.pay_tap.contains(c));
+                        let enough = have >= n as i32;
+                        {
+                            // Only a creature after which N can still be reached.
+                            let mut options: Vec<OptionDesc> = cands
+                                .iter()
+                                .filter(|(c, pw)| {
+                                    let rest: Vec<(ObjectId, i32)> =
+                                        cands.iter().filter(|(x, _)| x != c).copied().collect();
+                                    crew_reachable(n, have + pw, &rest)
+                                })
+                                .map(|(card, _)| OptionDesc::Card { card: *card })
+                                .collect();
+                            if enough {
+                                options.insert(0, OptionDesc::Decline);
+                            }
+                            if !options.is_empty() && !(enough && options.len() == 1) {
+                                return self.ask(
+                                    ChoiceKind::TapForCost,
+                                    Primitive::PickN { min: 1, max: 1 },
+                                    options,
+                                );
+                            }
+                        }
+                    }
+                    return self.finish(st, prop);
                 }
                 CastStage::Pay => {
                     // CR 601.2f: total cost, locked in. CR 601.2g: mana abilities.
                     let prop = self.proposal(st);
-                    let req = total(&prop.cost, self.x, self.tax, self.discount);
+                    let req = self.requirement(&prop);
                     let payee = self.payee();
+                    // CR 702.51a / 702.126a: a creature or artifact tapped to pay one mana.
+                    if let Some(OptionDesc::TapToPay { source, mana }) =
+                        input.as_ref().and_then(|i| i.picked_one()).cloned()
+                    {
+                        input = None;
+                        execute(st, GameAction::Tap { object: source });
+                        self.convoked.push((source, mana));
+                        continue;
+                    }
                     if let Some(inp) = input.take() {
                         let Some(OptionDesc::TapForMana {
                             source,
@@ -1353,7 +1534,7 @@ impl CastFrame {
                         };
                         // CR 605.3b: the mana ability resolves at once (its own costs and
                         // choices first, D-066); this frame carries on after.
-                        let g = goal(&self.source, &prop, payee, &req);
+                        let g = goal(st, &self.source, &prop, payee, &req);
                         return super::mana::activate(
                             st,
                             p,
@@ -1396,7 +1577,7 @@ impl CastFrame {
                             }
                         }
                     }
-                    let options = pay_options(st, p, &goal(&self.source, &prop, payee, &req));
+                    let options = pay_options(st, p, &goal(st, &self.source, &prop, payee, &req));
                     assert!(
                         !options.is_empty(),
                         "payment dead-ended (D-019 violated): {p:?} paying {req:?} for {:?} \
@@ -1431,7 +1612,7 @@ impl CastFrame {
     /// CR 601.2h: pay; CR 601.2i: the spell becomes cast / the ability becomes activated.
     fn finish(self, st: &mut GameState, prop: Proposal) -> Flow {
         let p = self.player;
-        let req = total(&prop.cost, self.x, self.tax, self.discount);
+        let req = self.requirement(&prop);
         let (tap, sacrifice, life) = (prop.tap, prop.sacrifice, prop.extra.life);
         if req.total() > 0 {
             // CR 106.6: restricted mana that may pay for this is spent first (it is the
@@ -1475,6 +1656,10 @@ impl CastFrame {
         }
         if let Some(source) = tap {
             execute(st, GameAction::Tap { object: source });
+        }
+        // "Tap an untapped creature you control", crew (CR 601.2h, 702.122a).
+        for &object in &self.pay_tap {
+            execute(st, GameAction::Tap { object });
         }
         if let Some(card) = self.from_command {
             execute(st, GameAction::CommanderCast { player: p, card });
