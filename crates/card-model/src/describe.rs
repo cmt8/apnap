@@ -1493,15 +1493,13 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             // "Reveal cards …" (you), "each opponent reveals cards …".
             let subject = if you { String::new() } else { format!("{p} ") };
             let mut t = format!(
-                "{subject}{reveals} cards from the top of {their} library until {they} reveal{} {what}. Put {} {}",
-                if you { "" } else { "s" },
+                "{subject}{reveals} cards from the top of {their} library until {they} reveal {what}. Put {} {}",
                 if one { "that card" } else { "those cards" },
                 dest(*found_to, their)
             );
             if found_to == rest_to {
                 t = format!(
-                    "{subject}{reveals} cards from the top of {their} library until {they} reveal{} {what}. Put all cards revealed this way {}",
-                    if you { "" } else { "s" },
+                    "{subject}{reveals} cards from the top of {their} library until {they} reveal {what}. Put all cards revealed this way {}",
                     dest(*found_to, their)
                 );
             } else {
@@ -2589,16 +2587,25 @@ fn card_list_words(cards: &[Selector], plural: bool) -> String {
             } else {
                 words.extend(s.not_colors.iter().map(|c| format!("non{}", color(*c))));
             }
+            words.extend(
+                s.not_supertypes
+                    .iter()
+                    .map(|t| format!("non{}", format!("{t:?}").to_lowercase())),
+            );
             words.extend(s.supertypes.iter().map(|t| format!("{t:?}").to_lowercase()));
             words.extend(s.not_subtypes.iter().map(|t| format!("non-{t}")));
             // "Permanent card" (CR 110.4a): neither instant nor sorcery.
             let permanent_card = s.types.is_empty()
-                && s.not_types.len() == 2
                 && s.not_types.contains(&CardType::Instant)
                 && s.not_types.contains(&CardType::Sorcery);
-            if !permanent_card {
-                words.extend(s.not_types.iter().map(|t| format!("non{}", card_type(*t))));
-            }
+            words.extend(
+                s.not_types
+                    .iter()
+                    .filter(|t| {
+                        !(permanent_card && matches!(t, CardType::Instant | CardType::Sorcery))
+                    })
+                    .map(|t| format!("non{}", card_type(*t))),
+            );
             if !s.subtypes.is_empty() {
                 words.push(s.subtypes.join(" or "));
             }

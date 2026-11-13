@@ -64,4 +64,12 @@ crates/harness/tests/forge_ward.rs, crates/harness/tests/forge_dig_until.rs:
 
 | Test | Rule |
 |---|---|
-| (filled in as the tests are written) | |
+| `ward_counters_a_spell_unless_its_controller_pays` (stack view, decision, events) | 702.21a, 701.6a |
+| `ward_triggers_once_per_spell_and_counters_abilities` | 603.2c, 701.6a |
+| `ward_sees_changed_targets_and_copies` | 115.7, 707.10c |
+| `ward_pay_life` | 702.21a |
+| `sacrifice_it_when_it_becomes_a_target` | 603.2 |
+| `reveal_until_a_land_onto_the_battlefield` (another seat's log) | 701.20a |
+| `reveal_until_into_hand_rest_to_graveyard` | 701.20a |
+| `each_opponent_reveals_until` | 701.20a |
+| narration.rs `no_reveal_the_card_doesnt_make` (A.1) | 701.20 |
