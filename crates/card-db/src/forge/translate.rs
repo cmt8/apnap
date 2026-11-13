@@ -513,6 +513,8 @@ struct TrigCtx {
     died_self: bool,
     /// A spell was cast: `TriggeredSpellAbility` is that spell.
     spell: bool,
+    /// A spell or ability targeted this: `TriggeredSourceSA` is it (D-089).
+    targeting: bool,
 }
 
 /// What one of Forge's `Triggered…` names stands for.
@@ -534,6 +536,7 @@ impl Default for TrigCtx {
             died: false,
             died_self: false,
             spell: false,
+            targeting: false,
         }
     }
 }
@@ -549,6 +552,7 @@ impl TrigCtx {
         died: false,
         died_self: false,
         spell: false,
+        targeting: false,
     };
 
     fn named(&self, name: &str) -> Option<Named> {
@@ -604,6 +608,13 @@ impl TrigCtx {
             },
             // Forge's `SpellCast`: `TriggeredActivator` is who cast it, and so is the
             // controller of the spell (`TriggeredCard`). The spell itself is no "it" here.
+            // Forge's `BecomesTarget`: `TriggeredSourceSA` is the spell or ability,
+            // `TriggeredSourceSAController` its controller.
+            Trigger::BecomesTarget { .. } => TrigCtx {
+                players: &["TriggeredSourceSAController", "TriggeredActivator"],
+                targeting: true,
+                ..TrigCtx::NOTHING
+            },
             Trigger::Cast { by, .. } => TrigCtx {
                 players: &["TriggeredActivator", "TriggeredCardController"],
                 player_is_you: *by == Who::You,
@@ -2363,6 +2374,21 @@ impl<'a> Tx<'a> {
                 match api {
                     "TapAll" => Effect::TapAll(sel?),
                     _ => Effect::UntapAll(sel?),
+                }
+            }
+            // "Counter that spell or ability" of a "becomes the target" trigger (ward).
+            "Counter"
+                if rd.rec.get("Defined") == Some("TriggeredSourceSA")
+                    && self.in_trigger
+                    && self.trig.targeting =>
+            {
+                rd.get("Defined");
+                if rd.get("Destination").is_some_and(|d| d != "Graveyard") {
+                    self.block("param:Counter.Destination");
+                    return None;
+                }
+                Effect::CounterIt {
+                    what: ObjRef::Triggering,
                 }
             }
             "Counter" => {
@@ -6254,6 +6280,37 @@ impl<'a> Tx<'a> {
                     copies,
                 })
             }
+            // "Whenever this permanent becomes the target of a spell or ability [an opponent
+            // controls]" (Forge's TriggerBecomesTarget: `ValidSource$` is the spell or
+            // ability, `ValidTarget$` what it targets).
+            "BecomesTarget" => {
+                if rd.get("ValidTarget") != Some("Card.Self") {
+                    self.block(format!(
+                        "trig:BecomesTarget target {}",
+                        shape(rd.get("ValidTarget").unwrap_or("?"))
+                    ));
+                    return None;
+                }
+                for k in ["FirstTime", "Valiant"] {
+                    if rd.rec.get(k).is_some() {
+                        self.block(format!("param:trig BecomesTarget.{k}"));
+                        return None;
+                    }
+                }
+                let (by, only_spells) = match rd.get("ValidSource") {
+                    None | Some("Card" | "Card,Emblem" | "SpellAbility") => (Who::Any, false),
+                    Some(
+                        "SpellAbility.OppCtrl" | "Card.OppCtrl,Emblem.OppCtrl" | "Card.OppCtrl",
+                    ) => (Who::Opponent, false),
+                    Some("Spell") => (Who::Any, true),
+                    Some("Spell.OppCtrl") => (Who::Opponent, true),
+                    Some(other) => {
+                        self.block(format!("trig:BecomesTarget source {}", shape(other)));
+                        return None;
+                    }
+                };
+                Some(Trigger::BecomesTarget { by, only_spells })
+            }
             "Attacks" => {
                 let filter = rd.get("ValidCard").and_then(|f| self.obj_filter(f));
                 // "Attacks alone" (CR 506.5): Forge only tests that the key is there.
@@ -9325,6 +9382,54 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
                         groups: Vec::new(),
                     }),
                 });
+            }
+            continue;
+        }
+        // CR 702.21a: "Ward [cost]" means "Whenever this permanent becomes the target of a
+        // spell or ability an opponent controls, counter that spell or ability unless that
+        // player pays [cost]." (Forge's `K:Ward:<cost>`; several costs, one chosen by the
+        // payer, are `Ward:<c1>:<c2>`.)
+        if let Some(rest) = k.strip_prefix("Ward:") {
+            if rest.contains(':') {
+                tx.block("kw:Ward several costs");
+                continue;
+            }
+            let before = tx.blockers.len();
+            match tx.cost(rest) {
+                Some(cost)
+                    if !cost.tap
+                        && !cost.sacrifice_self
+                        && !cost.mana.as_ref().is_some_and(|m| m.has_x()) =>
+                {
+                    abilities.push((
+                        0,
+                        AbilityDef::Triggered {
+                            when: Trigger::BecomesTarget {
+                                by: Who::Opponent,
+                                only_spells: false,
+                            },
+                            intervening_if: None,
+                            body: Body::Effect(Mode {
+                                targets: Vec::new(),
+                                effect: Effect::Pay {
+                                    who: PlayerRef::TriggeringPlayer,
+                                    cost,
+                                    paid: Box::new(Effect::Seq(Vec::new())),
+                                    unpaid: Box::new(Effect::CounterIt {
+                                        what: ObjRef::Triggering,
+                                    }),
+                                },
+                                groups: Vec::new(),
+                            }),
+                        },
+                    ));
+                }
+                Some(_) => tx.block(format!("kw:Ward cost {}", shape(rest))),
+                None => {
+                    if tx.blockers.len() == before {
+                        tx.block(format!("kw:Ward cost {}", shape(rest)));
+                    }
+                }
             }
             continue;
         }

@@ -1466,6 +1466,10 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             out
         }
         Effect::SacrificeIt { what } => format!("you sacrifice {}", obj(mode, *what)),
+        Effect::CounterIt { what } => match what {
+            ObjRef::Triggering => "counter that spell or ability".to_string(),
+            other => format!("counter {}", obj(mode, *other)),
+        },
         Effect::CopySpell {
             what,
             count,
@@ -2704,6 +2708,11 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+/// A cost as a client shows it: "{2}", "Pay 3 life", "Discard a card".
+pub fn cost_text(c: &Cost) -> String {
+    cost(c)
+}
+
 fn cost(c: &Cost) -> String {
     cost_parts(c).join(", ")
 }
@@ -3138,6 +3147,15 @@ fn trigger_event(t: &Trigger) -> String {
             }
         ),
         Trigger::CastThis => "When you cast this spell".to_string(),
+        Trigger::BecomesTarget { by, only_spells } => format!(
+            "Whenever this permanent becomes the target of a spell{}{}",
+            if *only_spells { "" } else { " or ability" },
+            match by {
+                Who::Any => "",
+                Who::You => " you control",
+                Who::Opponent => " an opponent controls",
+            }
+        ),
         Trigger::Cast {
             by,
             types: ts,
@@ -3342,6 +3360,47 @@ pub fn loyalty_cost(c: &Cost) -> String {
 fn ability(a: &AbilityDef) -> String {
     match a {
         AbilityDef::Spell(b) => body(b),
+        // CR 702.21a: "Ward [cost]" means "Whenever this permanent becomes the target of a
+        // spell or ability an opponent controls, counter that spell or ability unless that
+        // player pays [cost]."
+        AbilityDef::Triggered {
+            when:
+                Trigger::BecomesTarget {
+                    by: Who::Opponent,
+                    only_spells: false,
+                },
+            intervening_if: None,
+            body:
+                Body::Effect(Mode {
+                    targets,
+                    effect:
+                        Effect::Pay {
+                            who: PlayerRef::TriggeringPlayer,
+                            cost: c,
+                            paid,
+                            unpaid,
+                        },
+                    ..
+                }),
+        } if targets.is_empty()
+            && matches!(&**paid, Effect::Seq(v) if v.is_empty())
+            && matches!(
+                &**unpaid,
+                Effect::CounterIt {
+                    what: ObjRef::Triggering
+                }
+            ) =>
+        {
+            let only_mana = Cost {
+                mana: c.mana.clone(),
+                ..Cost::default()
+            } == *c;
+            if only_mana {
+                format!("Ward {}", cost(c))
+            } else {
+                format!("Ward—{}", cost(c))
+            }
+        }
         // CR 702.29a: "Cycling [cost]" means "[Cost], Discard this card: Draw a card."
         AbilityDef::Activated {
             cost: c,

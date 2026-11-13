@@ -153,6 +153,12 @@ pub enum ChoiceKind {
     /// CR 601.2h: the permanents to tap for a cost ("tap two untapped artifacts you
     /// control"; crew, one creature at a time, `Decline` once enough power is tapped).
     TapForCost,
+    /// CR 702.21a: pay the cost (`OptionDesc::PayCost` states it) or the spell or ability
+    /// `at_stake` is countered (ward: "counter that spell or ability unless that player
+    /// pays [cost]").
+    PayToSave {
+        at_stake: ObjectId,
+    },
 }
 
 /// A structured description of one option. Frames read the chosen option back from the
@@ -281,6 +287,10 @@ pub enum OptionDesc {
     TapToPay {
         source: ObjectId,
         mana: Option<crate::mana::ManaType>,
+    },
+    /// Pay this cost (CR 118.12: a cost paid as a spell or ability resolves).
+    PayCost {
+        cost: alloc::boxed::Box<card_model::Cost>,
     },
 }
 

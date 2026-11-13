@@ -1376,6 +1376,72 @@ pub(crate) fn detect_copy(st: &mut GameState, player: PlayerId, copy: ObjectId) 
     detect_spell(st, player, copy, true);
 }
 
+/// "Whenever this permanent becomes the target of a spell or ability" (ward, CR 702.21a):
+/// the spell or ability `stack` was put on the stack with these targets, or has them as new
+/// targets (D-089). One event per permanent, however many times it is targeted (CR 603.2c).
+pub(crate) fn detect_becomes_target(
+    st: &mut GameState,
+    stack: ObjectId,
+    targets: &[crate::stack::Target],
+) {
+    let Some(so) = st.stack_object(stack) else {
+        return;
+    };
+    let (by_player, spell) = (so.controller, so.kind == crate::stack::StackKind::Spell);
+    let mut seen: Vec<ObjectId> = Vec::new();
+    let mut found = Vec::new();
+    let mut conds = Vec::new();
+    for t in targets {
+        let crate::stack::Target::Object(id) = *t else {
+            continue;
+        };
+        if seen.contains(&id)
+            || !st
+                .objects
+                .get(&id)
+                .is_some_and(|o| o.zone == crate::zones::Zone::Battlefield)
+        {
+            continue;
+        }
+        seen.push(id);
+        let controller = crate::layers::controller_of(st, id);
+        for (ability, a) in abilities(st, id) {
+            let AbilityDef::Triggered {
+                when,
+                intervening_if,
+                ..
+            } = a
+            else {
+                continue;
+            };
+            let hit = when.events().iter().any(|e| {
+                matches!(e, Trigger::BecomesTarget { by, only_spells }
+                    if (!*only_spells || spell) && who_matches(*by, by_player, controller))
+            });
+            if hit {
+                found.push(PendingTrigger {
+                    remembered: Vec::new(),
+                    controller,
+                    source: id,
+                    source_card: st.face_card(id),
+                    ability,
+                    source_lki: None,
+                    // "That spell or ability".
+                    subject: Some(stack),
+                    subject_lki: None,
+                    // "That player": its controller.
+                    facts: EventFacts {
+                        player: Some(by_player),
+                        ..EventFacts::default()
+                    },
+                });
+                conds.push(intervening_if.clone());
+            }
+        }
+    }
+    queue_matching(st, found, conds);
+}
+
 fn detect_spell(st: &mut GameState, caster: PlayerId, spell: ObjectId, copied: bool) {
     let spell_chars = chars(st, spell);
     let mut found = Vec::new();

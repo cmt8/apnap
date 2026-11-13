@@ -1684,6 +1684,17 @@ impl CastFrame {
             // CR 601.2i: "whenever ... casts" abilities trigger now.
             triggers::detect_cast(st, p, spell);
         }
+        // D-089: what the spell or ability targets "becomes the target" (ward) as it is put
+        // on the stack with its targets.
+        if !matches!(self.source, CastSource::Payment { .. })
+            && let Some(object) = self.object
+        {
+            let targets: Vec<Target> = st
+                .stack_object(object)
+                .map(|s| s.all_targets().copied().collect())
+                .unwrap_or_default();
+            triggers::detect_becomes_target(st, object, &targets);
+        }
         // The rest of the cost, paid at once (CR 601.2h). Sacrifices (CR 701.21a), discards
         // and life are events like any other: they go through the replacement pipeline
         // and can trigger ("dies", "whenever you discard", "whenever you lose life").

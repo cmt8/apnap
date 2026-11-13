@@ -83,6 +83,10 @@ pub struct StackView {
     /// The face of the spell's card that is up (CR 712.8): `catalog.face(card, face)`.
     #[serde(default)]
     pub face: u8,
+    /// For a triggered ability: the public object whose event triggered it — the spell or
+    /// ability a ward trigger would counter (D-089).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<ObjectId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,6 +279,17 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
                     StackKind::Spell => st.object(so.id).face,
                     StackKind::Ability { .. } => 0,
                 },
+                // What a triggered ability is about, where everyone can see it: the spell
+                // or ability a ward trigger would counter, a permanent that entered.
+                about: so.subject.filter(|id| {
+                    st.stack_object(*id).is_some()
+                        || st.objects.get(id).is_some_and(|o| {
+                            matches!(
+                                o.zone,
+                                Zone::Battlefield | Zone::Graveyard | Zone::Exile | Zone::Stack
+                            )
+                        })
+                }),
             })
             .collect(),
         exile: views(st, &st.zones.exile),

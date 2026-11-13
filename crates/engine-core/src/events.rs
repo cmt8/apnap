@@ -327,4 +327,11 @@ pub enum Event {
         attacker: ObjectId,
         planeswalker: ObjectId,
     },
+    /// CR 702.21a: `player` chose to pay (`paid`) or not to pay the cost that keeps the
+    /// spell or ability `at_stake` from being countered.
+    PaidToSave {
+        player: PlayerId,
+        at_stake: ObjectId,
+        paid: bool,
+    },
 }

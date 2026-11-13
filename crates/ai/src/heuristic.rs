@@ -85,6 +85,7 @@ fn effect_polarity(e: &Effect) -> Polarity {
         Effect::DealDamage { .. }
         | Effect::Destroy { .. }
         | Effect::Counter { .. }
+        | Effect::CounterIt { .. }
         | Effect::LoseLife { .. }
         | Effect::ReturnToHand { .. }
         | Effect::Exile { .. }
