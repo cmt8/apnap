@@ -7,8 +7,7 @@
 //! checked during resolution: only when a player would receive priority (CR 117.5) and in
 //! the cleanup step (CR 514.3a).
 //!
-//! Implemented: 704.5a, b, d, f, g, h, j, q, s. (704.5i and 704.5m–p need planeswalkers and
-//! attachments: D-023.)
+//! Implemented: 704.5a, b, d, f, g, h, i, j, m, n, q, s.
 
 use crate::actions::{GameAction, execute};
 use crate::events::{Event, LossReason};
@@ -107,6 +106,11 @@ pub(crate) fn gather(st: &mut GameState) -> Gathered {
                 g.events
                     .push(Proposed::moving(id, Zone::Graveyard, MoveCause::Destroy));
             }
+        }
+        // CR 704.5i, 306.9: a planeswalker with loyalty 0 goes to its owner's graveyard.
+        if c.is(CardType::Planeswalker) && o.counters_of(CounterKind::LOYALTY) == 0 {
+            g.events
+                .push(Proposed::moving(id, Zone::Graveyard, MoveCause::Rule));
         }
         if c.supertypes.contains(&Supertype::Legendary) {
             legends

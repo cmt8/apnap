@@ -872,6 +872,13 @@ pub(crate) fn can_begin_with(
             if *timing == Timing::Sorcery && !sorcery_timing(st, p) {
                 return false;
             }
+            // CR 606.3: a loyalty ability — as a sorcery, and only if no loyalty ability of
+            // this permanent has been activated this turn.
+            if *timing == Timing::Loyalty
+                && (!sorcery_timing(st, p) || st.loyalty_activated.contains(&source))
+            {
+                return false;
+            }
             if cost.tap && !can_tap_for_ability(st, source) {
                 return false;
             }
@@ -966,6 +973,12 @@ impl CastFrame {
         let mut prop = self.proposal_as_written(st);
         if prop.extra.life_x {
             prop.extra.life += self.x;
+        }
+        // "Remove X [kind] counters" (a planeswalker's −X): X counters, as announced.
+        if let Some(kind) = prop.extra.remove_x_counters
+            && prop.extra.remove_counters.is_none()
+        {
+            prop.extra.remove_counters = Some((kind, self.x));
         }
         prop
     }
@@ -1175,7 +1188,10 @@ impl CastFrame {
                     let mut prop = self.proposal(st);
                     // CR 107.3a: an X in the mana cost, or in an additional cost ("pay X
                     // life").
-                    if prop.cost.as_ref().is_some_and(|c| c.has_x()) || prop.extra.life_x {
+                    if prop.cost.as_ref().is_some_and(|c| c.has_x())
+                        || prop.extra.life_x
+                        || prop.extra.remove_x_counters.is_some()
+                    {
                         if let Some(inp) = input.take() {
                             let Response::Number(x) = inp.response else {
                                 unreachable!()
@@ -1196,6 +1212,17 @@ impl CastFrame {
                                     if st.player(p).life < prop.extra.life as i32 {
                                         break;
                                     }
+                                }
+                                // CR 606.6: no more counters than it has.
+                                if let Some(kind) = prop.extra.remove_x_counters {
+                                    let have = st
+                                        .objects
+                                        .get(&cost_source(&self.source))
+                                        .map_or(0, |o| o.counters_of(kind));
+                                    if have < max + 1 {
+                                        break;
+                                    }
+                                    prop.extra.remove_counters = Some((kind, max + 1));
                                 }
                                 if !feasible(
                                     st,
@@ -1637,6 +1664,19 @@ impl CastFrame {
         if let Some(card) = self.from_command {
             execute(st, GameAction::CommanderCast { player: p, card });
         }
+        // CR 606.3: a loyalty ability of this permanent has been activated this turn.
+        if let CastSource::Ability { source, ability } = &self.source
+            && matches!(
+                st.catalog.ability(*ability),
+                AbilityDef::Activated {
+                    timing: Timing::Loyalty,
+                    ..
+                }
+            )
+            && !st.loyalty_activated.contains(source)
+        {
+            st.loyalty_activated.push(*source);
+        }
         if let CastSource::Card(_) = self.source {
             let spell = self.object.unwrap();
             st.emit(Event::SpellCast { player: p, spell });
@@ -1718,7 +1758,9 @@ impl CastFrame {
                 .get(source)
                 .is_some_and(|o| o.zone == Zone::Battlefield)
         {
-            if let Some((kind, n)) = prop.extra.remove_counters {
+            if let Some((kind, n)) = prop.extra.remove_counters
+                && n > 0
+            {
                 execute(
                     st,
                     GameAction::RemoveCounters {
@@ -1728,7 +1770,10 @@ impl CastFrame {
                     },
                 );
             }
-            if let Some((kind, count)) = prop.extra.add_counters {
+            // ("[0]": a loyalty ability that puts no counter.)
+            if let Some((kind, count)) = prop.extra.add_counters
+                && count > 0
+            {
                 events.push(Proposed::PutCounters {
                     object: *source,
                     kind,

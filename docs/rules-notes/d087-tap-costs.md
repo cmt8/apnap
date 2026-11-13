@@ -129,6 +129,7 @@ permanent (`Choices$`); untapping a whole set.
 | `improvise_pays_generic_with_artifacts` | 702.126a |
 | `crew_makes_a_vehicle_a_creature_until_end_of_turn` | 702.122a, 301.7a–b, 302.6, 613.1d |
 | `an_uncrewed_vehicle_cant_attack` | 301.7, 208.3 |
+| `a_crewed_vehicle_attacks_a_planeswalker` | 702.122a, 508.1b |
 | `other_untapped_is_read_against_the_card` | — (Oracle guard) |
 | `gain_control_until_end_of_turn_or_for_good` | 613.1b, 611.2a, 302.6 |
 | `gain_control_at_the_next_combat_reads_next` | 603.7c (text) |

@@ -427,6 +427,7 @@ pub fn anchor(o: &OptionDesc) -> Option<Anchor> {
         | OptionDesc::Trigger { source, .. } => Anchor::Obj(*source),
         OptionDesc::DamageRecipient { object } => Anchor::Obj(*object),
         OptionDesc::Attack { defender, .. } => Anchor::Player(*defender),
+        OptionDesc::AttackPlaneswalker { planeswalker, .. } => Anchor::Obj(*planeswalker),
         OptionDesc::Block { attacker, .. } => Anchor::Obj(*attacker),
         OptionDesc::Target { target } => match target {
             Target::Object(id) => Anchor::Obj(*id),
@@ -502,6 +503,10 @@ pub fn option_label(
             text.unwrap_or_else(|| format!("mode {index}"))
         }
         OptionDesc::Attack { defender, .. } => format!("attack P{}", defender.0),
+        OptionDesc::AttackPlaneswalker { planeswalker, .. } => format!(
+            "attack {}",
+            find_object(v, *planeswalker).map_or("a planeswalker", |o| o.name.as_str())
+        ),
         // CR 614.12a: "As this enters, you may pay 2 life. If you don't, it enters tapped."
         OptionDesc::Accept if matches!(d.kind, ChoiceKind::AsEnters { .. }) => match d.kind {
             ChoiceKind::AsEnters { ability, .. } => match cat.ability(ability) {
@@ -915,16 +920,28 @@ fn badges(cx: &Ctx<'_>, o: &ObjectView, place: Place) -> Vec<Badge> {
     let creature = o.card_types.contains(&CardType::Creature);
     let combat = v.combat.as_ref();
     // Declared (the engine's combat state) or planned (not confirmed yet).
+    // What it attacks: a player, or a planeswalker (CR 506.3).
     let attacking = combat
         .and_then(|c| c.attackers.iter().find(|a| a.attacker == o.id))
-        .map(|a| a.defender)
-        .or_else(|| cx.plan.and_then(|p| p.attacks(o.id)));
+        .map(|a| (a.defender, a.planeswalker))
+        .or_else(|| {
+            cx.plan.and_then(|p| {
+                p.attacks(o.id).map(|d| (d, None)).or_else(|| {
+                    p.attacks_planeswalker(o.id)
+                        .map(|pw| (o.controller, Some(pw)))
+                })
+            })
+        });
     let blocking = combat.is_some_and(|c| c.attackers.iter().any(|a| a.blockers.contains(&o.id)))
         || cx.plan.is_some_and(|p| p.blocks(o.id).is_some());
-    if let Some(defender) = attacking {
+    if let Some((defender, pw)) = attacking {
+        let at = match pw.and_then(|pw| find_object(v, pw)) {
+            Some(pw) => pw.name.clone(),
+            None => format!("P{}", defender.0),
+        };
         out.push(Badge::new(
             Corner::TopRight,
-            format!("ATK P{}", defender.0),
+            format!("ATK {at}"),
             RED,
             Color32::WHITE,
         ));
@@ -1010,7 +1027,10 @@ fn card(
     let planned = plan.is_some_and(|p| p.choices.contains_key(&o.id));
     let waiting = plan.is_some_and(|p| p.selected == Some(o.id));
     let blockable = plan.is_some_and(|p| p.selected.is_some_and(|b| p.can_block(b, o.id)));
-    let outline = if focused || chosen || waiting {
+    // A planeswalker that can be attacked (CR 506.3); white while attackers are sent at it.
+    let attackable = plan.is_some_and(|p| p.planeswalkers().contains(&o.id));
+    let aimed_at = plan.is_some_and(|p| p.target_planeswalker == Some(o.id));
+    let outline = if focused || chosen || waiting || aimed_at {
         Some(Stroke::new(3.0, Color32::WHITE))
     } else if planned {
         let color = if plan.is_some_and(Plan::attacking) {
@@ -1019,7 +1039,7 @@ fn card(
             BLUE
         };
         Some(Stroke::new(3.0, color))
-    } else if !opts.is_empty() || candidate || blockable {
+    } else if !opts.is_empty() || candidate || blockable || attackable {
         Some(Stroke::new(2.5, GOLD))
     } else {
         None
@@ -1027,7 +1047,8 @@ fn card(
     // Attackers step forward, blockers half as far (declared or planned).
     let combat = cx.view.combat.as_ref().filter(|_| on_battlefield);
     let attacking = combat.is_some_and(|c| c.attackers.iter().any(|a| a.attacker == o.id))
-        || plan.is_some_and(|p| p.attacks(o.id).is_some());
+        || plan
+            .is_some_and(|p| p.attacks(o.id).is_some() || p.attacks_planeswalker(o.id).is_some());
     let blocking = combat.is_some_and(|c| c.attackers.iter().any(|a| a.blockers.contains(&o.id)))
         || plan.is_some_and(|p| p.blocks(o.id).is_some());
     let step = if attacking {
@@ -1439,7 +1460,7 @@ fn player_area(
         // Rules about the player: "no maximum hand size", "hexproof", extra land plays.
         if !pl.rules.is_empty() {
             let text: Vec<String> = pl.rules.iter().map(player_rule_text).collect();
-            ui.label(RichText::new("ⓘ").color(BLUE))
+            ui.label(RichText::new("(i)").color(BLUE))
                 .on_hover_text(text.join("\n"));
         }
         let n = pl.graveyard.len();
@@ -2091,14 +2112,26 @@ fn plan_panel(app: &mut App, ui: &mut egui::Ui, cx: &Ctx<'_>, actions: &mut Vec<
     };
     let name = |id: ObjectId| find_object(cx.view, id).map_or("it", |o| o.name.as_str());
     let (title, hint) = if plan.attacking() {
-        let hint = match (plan.defenders().len(), plan.target) {
-            (n, Some(t)) if n > 1 => format!(
+        let mut hint = match (
+            plan.target_planeswalker,
+            plan.defenders().len(),
+            plan.target,
+        ) {
+            (Some(pw), _, _) => format!(
+                "Click your creatures to attack {}. Click it again, or a player's name, to \
+                 attack a player.",
+                name(pw)
+            ),
+            (None, n, Some(t)) if n > 1 => format!(
                 "Click your creatures to attack P{}. Click another player's name — or drag a \
                  creature onto their side — to attack someone else.",
                 t.0
             ),
             _ => "Click the creatures that attack.".to_string(),
         };
+        if plan.target_planeswalker.is_none() && !plan.planeswalkers().is_empty() {
+            hint.push_str(" Click a planeswalker (or drag a creature onto it) to attack it.");
+        }
         ("Declare attackers", hint)
     } else {
         let hint = match plan.selected {
@@ -2853,7 +2886,7 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
         if let Some(id) = ptr.plan_click {
             if plan.candidate(id).is_some() {
                 plan.click_creature(id);
-            } else {
+            } else if !plan.click_planeswalker(id) {
                 plan.click_attacker(id);
             }
         }
@@ -2862,8 +2895,15 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
         }
         if let Some((id, pos)) = ptr.dropped {
             if plan.attacking() {
+                // Onto a planeswalker that can be attacked (CR 506.3), else onto a player.
+                let pw = plan
+                    .planeswalkers()
+                    .into_iter()
+                    .find(|pw| ptr.cards.get(pw).is_some_and(|r| r.contains(pos)));
                 let onto = ptr.players.iter().find(|(_, r)| r.contains(pos));
-                if let Some((&p, _)) = onto {
+                if let Some(pw) = pw {
+                    plan.drop_on_planeswalker(id, pw);
+                } else if let Some((&p, _)) = onto {
                     plan.drop_on_player(id, p);
                 }
             } else {
@@ -3082,7 +3122,10 @@ fn combat_arrows(ctx: &egui::Context, view: &PlayerView, plan: Option<&Plan>, pt
             let Some(&attacker) = ptr.cards.get(&a.attacker) else {
                 continue;
             };
-            if several_to_attack && let Some(&header) = ptr.headers.get(&a.defender) {
+            // CR 506.3: the planeswalker it attacks, or the player.
+            if let Some(&pw) = a.planeswalker.and_then(|pw| ptr.cards.get(&pw)) {
+                between(attacker, pw, soft(RED), 3.5);
+            } else if several_to_attack && let Some(&header) = ptr.headers.get(&a.defender) {
                 between(attacker, header, soft(RED), 3.5);
             }
             for b in &a.blockers {
@@ -3101,6 +3144,11 @@ fn combat_arrows(ctx: &egui::Context, view: &PlayerView, plan: Option<&Plan>, pt
                 OptionDesc::Attack { defender, .. } if plan.defenders().len() > 1 => {
                     if let Some(&header) = ptr.headers.get(defender) {
                         between(from, header, RED, 4.5);
+                    }
+                }
+                OptionDesc::AttackPlaneswalker { planeswalker, .. } => {
+                    if let Some(&to) = ptr.cards.get(planeswalker) {
+                        between(from, to, RED, 4.5);
                     }
                 }
                 OptionDesc::Block { attacker, .. } => {

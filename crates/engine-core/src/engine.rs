@@ -109,6 +109,7 @@ pub fn new_game_with_commanders(
         lasting: Vec::new(),
         delayed: Vec::new(),
         left_stack: Vec::new(),
+        loyalty_activated: Vec::new(),
         next_effect_id: 0,
         commanders: Vec::new(),
         commander_cards: BTreeMap::new(),

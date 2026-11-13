@@ -270,6 +270,12 @@ pub enum OptionDesc {
     Color {
         color: card_model::Color,
     },
+    /// Attack a planeswalker (CR 506.3, 508.1b); its controller is the defending player.
+    /// Offered after `Attack` on that player, the player's planeswalkers in timestamp order.
+    AttackPlaneswalker {
+        attacker: ObjectId,
+        planeswalker: ObjectId,
+    },
     /// CR 702.51a, 702.126a: tap this untapped creature or artifact to pay one mana of the
     /// spell's total cost — a mana of `mana`'s color, or (`None`) one generic mana.
     TapToPay {

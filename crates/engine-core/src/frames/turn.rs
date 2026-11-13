@@ -38,6 +38,8 @@ pub(crate) fn begin_turn(st: &mut GameState, active: PlayerId) {
     st.turn.step = Step::Untap;
     // "During your turn, …": static abilities can look at whose turn it is.
     st.generation += 1;
+    // CR 606.3: loyalty abilities are counted per turn.
+    st.loyalty_activated.clear();
     for p in &mut st.players {
         p.lands_played_this_turn = 0;
         p.drawn_this_turn = 0;

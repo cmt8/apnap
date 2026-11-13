@@ -399,3 +399,46 @@ fn gain_control_at_the_next_combat_reads_next() {
         "{text:?}"
     );
 }
+
+// CR 702.122a, 508.1b: a crewed Vehicle is a creature and attacks like one — a player or a
+// planeswalker (D-086).
+#[test]
+fn a_crewed_vehicle_attacks_a_planeswalker() {
+    let cart = "Name:Test Cart\nManaCost:2\nTypes:Artifact Vehicle\nPT:3/3\nK:Crew:2\n\
+        Oracle:Crew 2 (Tap any number of untapped creatures you control with total power 2 or greater: This Vehicle becomes an artifact creature until end of turn.)"
+        .to_string();
+    let walker = "Name:Test Sage Walker\nManaCost:2 W\nTypes:Legendary Planeswalker Ajani\nLoyalty:3\n\
+        A:AB$ GainLife | Cost$ AddCounter<1/LOYALTY> | Planeswalker$ True | LifeAmount$ 2 | SpellDescription$ You gain 2 life.\n\
+        Oracle:[+1]: You gain 2 life."
+        .to_string();
+    let mut sc = scenario(&[&cart, &bear(), &walker]);
+    let vehicle = sc.card(P0, Zone::Battlefield, "Test Cart");
+    sc.card(P0, Zone::Battlefield, "Test Grizzly");
+    let pw = sc.card(P1, Zone::Battlefield, "Test Sage Walker");
+    let mut st = sc.build();
+    st.objects
+        .get_mut(&pw)
+        .unwrap()
+        .counters
+        .insert(card_model::CounterKind::LOYALTY, 5);
+    let mut s = Script::new(st);
+    s.activate("Test Cart");
+    s.respond(Response::Pick(vec![0]));
+    settle(&mut s);
+    drive_until(&mut s, |s| {
+        s.kind() == ChoiceKind::DeclareAttackers
+            && s.options()
+                .iter()
+                .any(|o| matches!(o, OptionDesc::Attack { attacker, .. } if *attacker == vehicle))
+    });
+    s.pick("attack the planeswalker", |_, o| {
+        matches!(o, OptionDesc::AttackPlaneswalker { attacker, planeswalker }
+            if *attacker == vehicle && *planeswalker == pw)
+    });
+    drive_until(&mut s, |s| s.st.turn.step == Step::EndOfCombat);
+    assert_eq!(
+        s.st.object(pw)
+            .counters_of(card_model::CounterKind::LOYALTY),
+        2
+    );
+}

@@ -2704,6 +2704,12 @@ fn cost_parts(c: &Cost) -> Vec<String> {
             counters_phrase(&Amount::Fixed(n), kind)
         ));
     }
+    if let Some(kind) = c.remove_x_counters {
+        parts.push(format!(
+            "Remove {} from this permanent",
+            counters_phrase(&Amount::X, kind)
+        ));
+    }
     let chosen = |c: &crate::CostChoice, cards: bool| {
         let what: Vec<String> = c
             .what
@@ -3279,6 +3285,17 @@ fn as_enters(act: &AsEnters) -> String {
     }
 }
 
+/// The loyalty symbol of a loyalty ability's cost (CR 209.1): "+1", "−2", "0", "−X".
+pub fn loyalty_cost(c: &Cost) -> String {
+    match (c.add_counters, c.remove_counters, c.remove_x_counters) {
+        (Some((_, 0)), None, None) => "0".to_string(),
+        (Some((_, n)), None, None) => format!("+{n}"),
+        (None, Some((_, n)), None) => format!("\u{2212}{n}"),
+        (None, None, Some(_)) => "\u{2212}X".to_string(),
+        _ => cost(c),
+    }
+}
+
 fn ability(a: &AbilityDef) -> String {
     match a {
         AbilityDef::Spell(b) => body(b),
@@ -3299,6 +3316,13 @@ fn ability(a: &AbilityDef) -> String {
                 format!("Cycling—{rest}")
             }
         }
+        // CR 606.2, 209.1: a loyalty ability, "[+1]: …", "[−2]: …", "[0]: …", "[−X]: …".
+        AbilityDef::Activated {
+            cost: c,
+            timing: Timing::Loyalty,
+            body: b,
+            ..
+        } => format!("[{}]: {}", loyalty_cost(c), body(b)),
         // CR 702.122a: "Crew N" means "Tap any number of other untapped creatures you
         // control with total power N or greater: This permanent becomes an artifact creature
         // until end of turn."
@@ -3358,7 +3382,7 @@ fn ability(a: &AbilityDef) -> String {
             },
             match timing {
                 Timing::Instant => "",
-                Timing::Sorcery => " Activate only as a sorcery.",
+                Timing::Sorcery | Timing::Loyalty => " Activate only as a sorcery.",
             },
             only_if.as_ref().map_or(String::new(), |c| format!(
                 " Activate only {}.",

@@ -2045,6 +2045,9 @@ impl<'a> Tx<'a> {
                 "ActivationZone",
                 // Read by `ability`: "this ability costs {1} less to activate …".
                 "ReduceCost",
+                // Read by `ability`: a loyalty ability (CR 606.2).
+                "Planeswalker",
+                "Ultimate",
             ] {
                 rd.get(k);
             }
@@ -3279,14 +3282,8 @@ impl<'a> Tx<'a> {
                 }
             }
             "PutCounter" => {
-                let kind = match rd.get("CounterType") {
-                    Some("P1P1") => CounterKind::PlusOne,
-                    Some("M1M1") => CounterKind::MinusOne,
-                    other => {
-                        self.block(format!("counter:{}", other.unwrap_or("?")));
-                        return None;
-                    }
-                };
+                // Counters of any one kind (D-084); kinds with rules of their own are named.
+                let kind = self.counter_kind(rd.get("CounterType"))?;
                 let slot = self.target(&rd, chain, false);
                 let what = match slot {
                     Some(i) => Some(ObjRef::Target(i)),
@@ -3422,6 +3419,12 @@ impl<'a> Tx<'a> {
             }
             // An effect object: abilities that work for a while on no permanent.
             "Effect" => {
+                // CR 114: "you get an emblem with …" — an object in the command zone that
+                // lasts the whole game. Not built.
+                if rd.get("Name").is_some_and(|n| n.starts_with("Emblem")) {
+                    self.block("emblem (CR 114)");
+                    return None;
+                }
                 let own_target = self.target(&rd, chain, false);
                 let last = (chain.targets.len() as u8).checked_sub(1);
                 let about = match rd.get("RememberObjects") {
@@ -5160,9 +5163,7 @@ impl<'a> Tx<'a> {
             Some("keyword counter")
         } else {
             match name {
-                "SHIELD" | "STUN" | "LOYALTY" | "DEFENSE" | "FINALITY" | "HONE" => {
-                    Some("rules of its own")
-                }
+                "SHIELD" | "STUN" | "DEFENSE" | "FINALITY" | "HONE" => Some("rules of its own"),
                 "POISON" | "ENERGY" | "EXPERIENCE" | "Experience" | "RAD" | "TICKET" => {
                     Some("on players")
                 }
@@ -5750,6 +5751,29 @@ impl<'a> Tx<'a> {
                 {
                     cost.exile_self = true
                 }
+                // A loyalty ability's "[0]" (CR 606.4: put zero counters on it; some
+                // scripts write it as removing zero).
+                ("AddCounter" | "SubCounter", true)
+                    if count == Some(0)
+                        && args.len() == 2
+                        && args.get(1) == Some(&"LOYALTY")
+                        && cost.add_counters.is_none() =>
+                {
+                    cost.add_counters = Some((CounterKind::LOYALTY, 0));
+                }
+                // "Remove X [kind] counters from this" (a planeswalker's "−X"), X announced
+                // as it is activated (`SVar:X:Count$xPaid`).
+                ("SubCounter", true)
+                    if args.first() == Some(&"X")
+                        && args.len() == 2
+                        && cost.remove_x_counters.is_none() =>
+                {
+                    if self.face.svars.get("X").map(String::as_str) != Some("Count$xPaid") {
+                        self.block("cost:SubCounter X defined by the script");
+                        return None;
+                    }
+                    cost.remove_x_counters = Some(self.counter_kind(args.get(1).copied())?);
+                }
                 // "Remove N [kind] counters from this" / "put N [kind] counters on this"
                 // (`SubCounter<N/TYPE>`, `AddCounter<N/TYPE>`; on this card only — a third
                 // argument names something else).
@@ -5975,12 +5999,18 @@ impl<'a> Tx<'a> {
                 self.in_spell = false;
                 body.map(AbilityDef::Spell)
             }
+            // CR 605.1a: a loyalty ability that adds mana isn't a mana ability; it uses the
+            // stack. Not built.
+            "AB" if rec.get("Planeswalker").is_some() && api.starts_with("Mana") => {
+                self.block("loyalty:adds mana (not a mana ability, CR 605.1a)");
+                None
+            }
             "AB" if api == "Mana" || api == "ManaReflected" => self.mana_ability(rec, api),
             "AB" => {
                 let rd = Rd::new(rec, "activated");
                 let cost = rd.get("Cost").and_then(|c| self.cost(c));
                 let only_if = self.condition(&rd);
-                let timing = match rd.get("SorcerySpeed") {
+                let mut timing = match rd.get("SorcerySpeed") {
                     None => Timing::Instant,
                     Some("True") => Timing::Sorcery,
                     Some(_) => {
@@ -5988,6 +6018,38 @@ impl<'a> Tx<'a> {
                         return None;
                     }
                 };
+                // CR 606.2: a loyalty ability (`Planeswalker$`, tested for presence). Its
+                // cost is exactly one loyalty symbol: "+N", "−N", "0" or "−X". `Ultimate$`
+                // is an AI and achievement tag only.
+                rd.get("Ultimate");
+                if rd.get("Planeswalker").is_some() {
+                    let one_symbol = cost.as_ref().is_none_or(|c| {
+                        let loyalty = |k: CounterKind| k == CounterKind::LOYALTY;
+                        let symbols = [
+                            c.add_counters.is_some_and(|(k, _)| loyalty(k)),
+                            c.remove_counters.is_some_and(|(k, _)| loyalty(k)),
+                            c.remove_x_counters.is_some_and(loyalty),
+                        ];
+                        symbols.iter().filter(|b| **b).count() == 1
+                            && *c
+                                == Cost {
+                                    add_counters: c.add_counters,
+                                    remove_counters: c.remove_counters,
+                                    remove_x_counters: c.remove_x_counters,
+                                    ..Cost::default()
+                                }
+                    });
+                    if !one_symbol || timing != Timing::Instant {
+                        self.block("loyalty:cost other than one loyalty symbol");
+                        return None;
+                    }
+                    timing = Timing::Loyalty;
+                }
+                // "−X": X is the number of counters removed (CR 107.3a), for the text too.
+                let outer_x = self.has_x_cost;
+                if cost.as_ref().is_some_and(|c| c.remove_x_counters.is_some()) {
+                    self.has_x_cost = true;
+                }
                 // Where the card must be (CR 113.6); the battlefield unless stated.
                 let from = match rd.get("ActivationZone") {
                     None | Some("Battlefield") => Some(ActivationZone::Battlefield),
@@ -6021,6 +6083,7 @@ impl<'a> Tx<'a> {
                     },
                 };
                 let body = self.body(rec, false, "AB");
+                self.has_x_cost = outer_x;
                 self.from_zone = ActivationZone::Battlefield;
                 let (cost, from) = (cost?, from?);
                 // The engine never lets a card be exiled for its own cost; from the hand a
@@ -9044,7 +9107,6 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
         tx.block("script:differs from the card");
     }
     for (what, present) in [
-        ("line:Loyalty", face.loyalty.is_some()),
         ("line:Defense", face.defense.is_some()),
         ("line:Text", face.text.is_some()),
     ] {
@@ -9144,6 +9206,29 @@ fn compile_face(face: &Face, known: &Known) -> Result<Compiled, Blockers> {
                 },
             },
         ));
+    }
+    // CR 306.5a–b: a planeswalker's printed loyalty, and its intrinsic ability "This
+    // permanent enters with a number of loyalty counters on it equal to its printed loyalty
+    // number" (a replacement effect, CR 614.1c).
+    if let Some(l) = &face.loyalty {
+        let planeswalker = def.card_types.contains(&CardType::Planeswalker);
+        match l.trim().parse::<u32>() {
+            Ok(n) if planeswalker => {
+                def.loyalty = Some(n);
+                abilities.push((
+                    0,
+                    AbilityDef::Replacement {
+                        replaces: Replaces::ThisEnters,
+                        with: ReplaceWith::EntersWithCounters {
+                            kind: CounterKind::LOYALTY,
+                            n,
+                        },
+                    },
+                ));
+            }
+            Ok(_) => tx.block("line:Loyalty on a card that isn't a planeswalker"),
+            Err(_) => tx.block("line:Loyalty not a number"),
+        }
     }
     // Equip abilities are printed last.
     let mut equips: Vec<AbilityDef> = Vec::new();

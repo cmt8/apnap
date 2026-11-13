@@ -182,7 +182,7 @@ fn counter_kinds_with_rules_of_their_own_are_named() {
     for (kind, why) in [
         ("SHIELD", "rules of its own"),
         ("STUN", "rules of its own"),
-        ("LOYALTY", "rules of its own"),
+        ("DEFENSE", "rules of its own"),
         ("P1P0", "+X/+Y"),
         ("Flying", "keyword counter"),
         ("POISON", "on players"),
