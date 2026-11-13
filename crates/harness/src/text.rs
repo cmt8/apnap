@@ -5,9 +5,9 @@
 //! The engine's event order is not the order a reader wants (a spell's targets come before
 //! its `SpellCast`, a non-permanent spell's `Resolved` comes after its effects, a draw is a
 //! `ZoneChange` followed by `Drew`). The [`Narrator`] therefore keeps a little state: it
-//! counts priority passes to know when the top of the stack starts to resolve, buffers the
-//! details of a cast until the cast is announced, and holds back one event when the next
-//! one explains it.
+//! buffers the details of a cast until the cast is announced, and holds back one event when
+//! the next one explains it. What it used to guess (when a resolution begins, which mana was
+//! paid, what a search found) the events say (D-090 part 2).
 
 use card_model::describe;
 use engine_core::client::{HIDDEN, Seat};
@@ -79,9 +79,8 @@ pub struct Narrator {
     catalog: std::sync::Arc<card_model::CardCatalog>,
     pend: Option<Pend>,
     /// Consecutive `PriorityPassed` events since anything else happened.
-    passes: usize,
-    /// Players still in the game (a full round of passes is this many).
-    alive: usize,
+    /// A resolution that began (`ResolutionBegan`), to be said once it doesn't fizzle.
+    announce: Option<ObjectId>,
     /// Spells and abilities on the stack, bottom first, as announced.
     stack: Vec<ObjectId>,
     /// The stack object whose resolution is being narrated (its effects are indented).
@@ -165,8 +164,7 @@ impl Narrator {
             info,
             catalog: st.catalog.clone(),
             pend: None,
-            passes: 0,
-            alive: st.players_in_game(),
+            announce: None,
             stack: Vec::new(),
             resolving: None,
             casting: None,
@@ -270,6 +268,14 @@ impl Narrator {
 
     /// Nothing more will be said about the held-back events of this batch.
     fn end_batch(&mut self, out: &mut Vec<String>) {
+        // (Nothing fizzles after a suspension: the resolution has really begun.)
+        if let Some(top) = self.announce.take() {
+            if let Some(h) = self.pending_step.take() {
+                self.last_heading = Some(h);
+                out.push(h.to_string());
+            }
+            out.push(format!("  {} resolves", self.name(top)));
+        }
         self.flush_adds(out);
         self.adds_open = false;
         // A tap may still turn into a mana tap in the next batch (a choice of color).
@@ -465,20 +471,18 @@ impl Narrator {
 
     /// CR 117.4: when every player passes in a row with something on the stack, its top
     /// object starts to resolve, and everything until its `Resolved` belongs to it.
+    /// "X resolves", once the event after `ResolutionBegan` shows it didn't fizzle (a
+    /// spell whose targets are all illegal doesn't resolve, CR 608.2b).
     fn begin_resolution(&mut self, e: &Event, out: &mut Vec<String>) {
-        if self.passes >= self.alive
-            && self.resolving.is_none()
-            && let Some(&top) = self.stack.last()
+        if let Some(top) = self.announce.take()
             && !matches!(e, Event::Fizzled { object } if *object == top)
         {
-            self.resolving = Some(top);
             if let Some(h) = self.pending_step.take() {
                 self.last_heading = Some(h);
                 out.push(h.to_string());
             }
             out.push(format!("  {} resolves", self.name(top)));
         }
-        self.passes = 0;
     }
 
     fn track_names(&mut self, e: &Event) {
@@ -506,8 +510,12 @@ impl Narrator {
                     },
                 );
             }
-            Event::ZoneChange { old, new, .. } => {
+            Event::ZoneChange {
+                old, new, creature, ..
+            } => {
                 if let Some(mut i) = self.info.get(old).cloned() {
+                    // As it last existed (D-090 part 2): what "dies" needs.
+                    i.creature |= *creature;
                     // CR 712.6a: off the stack and battlefield a card has its front face.
                     if i.face != 0
                         && let Some(c) = i.card
@@ -652,7 +660,6 @@ impl Narrator {
             self.flush_untaps(out);
             self.flush_attack_taps(out);
             self.drain_cast(out);
-            self.passes += 1;
             self.triggers.clear();
             self.just_announced = None;
             self.last_damage = None;
@@ -763,6 +770,7 @@ impl Narrator {
                 new,
                 from,
                 to,
+                ..
             } => {
                 let named = if *new == HIDDEN { *old } else { *new };
                 if *to == Zone::Stack && *from != Zone::Stack {
@@ -803,15 +811,32 @@ impl Narrator {
                 let l = format!("{} plays {}", p(*player), self.name(*land));
                 self.emit(l, out);
             }
-            Event::SpellCast { player, spell } => {
+            Event::SpellCast {
+                player, spell, alt, ..
+            } => {
                 let from = self.casting.take();
-                let tail = match from {
+                let mut tail = match from {
                     Some(Zone::Command) => " from the command zone",
                     Some(Zone::Graveyard) => " from the graveyard",
                     Some(Zone::Exile) => " from exile",
                     Some(Zone::Library) => " from the library",
                     _ => "",
-                };
+                }
+                .to_string();
+                // CR 118.9: how it was paid for, when not its mana cost.
+                if let Some(a) = alt
+                    && let card_model::AbilityDef::AlternativeCost(c) = self.catalog.ability(*a)
+                {
+                    tail.push_str(match &c.kind {
+                        card_model::AltKind::Flashback => " for its flashback cost",
+                        card_model::AltKind::Evoke => " for its evoke cost",
+                        card_model::AltKind::Overload(_) => " with overload",
+                        card_model::AltKind::Rather if c.cost.mana.is_none() => {
+                            " without paying its mana cost"
+                        }
+                        card_model::AltKind::Rather => " for an alternative cost",
+                    });
+                }
                 let l = format!("{} casts {}{tail}", p(*player), self.name(*spell));
                 self.emit(l, out);
                 out.append(&mut self.cast_buf);
@@ -929,6 +954,7 @@ impl Narrator {
                 player,
                 ability,
                 source,
+                ..
             } => {
                 let trig = self
                     .triggers
@@ -1014,7 +1040,7 @@ impl Narrator {
                 let l = format!("  {} is countered", self.name(*object));
                 self.emit(l, out);
             }
-            Event::AbilityRemoved { ability } => {
+            Event::AbilityRemoved { ability, .. } => {
                 if self.resolving == Some(*ability) {
                     self.end_resolution();
                 }
@@ -1041,7 +1067,6 @@ impl Narrator {
                 self.emit(l, out);
             }
             Event::PlayerLeftGame { player } => {
-                self.alive = self.alive.saturating_sub(1);
                 let l = format!("{} leaves the game", p(*player));
                 self.emit(l, out);
             }
@@ -1181,22 +1206,22 @@ impl Narrator {
                 );
                 self.emit(l, out);
             }
-            Event::Tapped { object } => {
-                if self.step == Some(Step::DeclareAttackers) {
+            Event::Tapped { object, cause } => {
+                if *cause == engine_core::events::TapCause::Attack {
                     self.attack_taps.push(*object);
                 } else {
                     self.pend = Some(Pend::Tap(*object));
                 }
             }
-            Event::Untapped { object } => {
-                if self.step == Some(Step::Untap) {
+            Event::Untapped { object, cause } => {
+                if *cause == engine_core::events::TapCause::UntapStep {
                     self.untapped.push(*object);
                 } else {
                     let l = format!("  {} untaps", self.name(*object));
                     self.emit(l, out);
                 }
             }
-            Event::ManaAdded { player, mana } => {
+            Event::ManaAdded { player, mana, .. } => {
                 let src = self.tap_src.take();
                 // A second mana straight after the first is the same source's.
                 if src.is_some() || !self.adds_open {
@@ -1208,17 +1233,27 @@ impl Narrator {
                 self.adds_open = true;
                 self.pool.entry(*player).or_default().0.push(*mana);
             }
-            Event::ManaPaid { player, amount } => {
-                let (known, unknown) = self.pool.remove(player).unwrap_or_default();
+            // Which mana was spent: in the event (D-090 part 2).
+            Event::ManaPaid {
+                player,
+                amount,
+                mana,
+            } => {
+                let (mut known, unknown) = self.pool.remove(player).unwrap_or_default();
                 let total = known.len() as u32 + unknown;
-                let l = if total == *amount && unknown == 0 && !known.is_empty() {
-                    let syms: String = known.iter().map(|m| m.symbol()).collect();
-                    format!("  (paid {amount} from the pool: {syms})")
-                } else if total > *amount {
-                    self.pool.insert(*player, (Vec::new(), total - amount));
-                    format!("  (paid {amount}; {} left floating)", total - amount)
+                for m in mana {
+                    if let Some(i) = known.iter().position(|k| k == m) {
+                        known.remove(i);
+                    }
+                }
+                let syms: String = mana.iter().map(|m| m.symbol()).collect();
+                let left = total.saturating_sub(*amount);
+                let l = if left > 0 {
+                    let unknown_left = left.saturating_sub(known.len() as u32);
+                    self.pool.insert(*player, (known, unknown_left));
+                    format!("  (paid {amount}: {syms}; {left} left floating)")
                 } else {
-                    format!("  (paid {amount})")
+                    format!("  (paid {amount} from the pool: {syms})")
                 };
                 self.emit(l, out);
             }
@@ -1303,9 +1338,86 @@ impl Narrator {
             Event::ObjectLeftGame { object } => {
                 self.stack.retain(|s| s != object);
             }
-            Event::ContinuousEffectBegan { source, .. } => {
-                // The event carries only an id; what the effect does is in the state.
-                let l = format!("  {} starts a continuous effect", self.name(*source));
+            // What the effect does, to what, for how long: all in the event (D-090 part 2).
+            Event::ContinuousEffectBegan {
+                effects,
+                affected,
+                abilities,
+                about,
+                until_end_of_turn,
+                ..
+            } => {
+                let turn = if *until_end_of_turn {
+                    " until end of turn"
+                } else {
+                    ""
+                };
+                if !effects.is_empty() {
+                    let names: Vec<String> = affected.iter().map(|o| self.short(*o)).collect();
+                    let what = describe::continuous_text(effects, names.len() != 1);
+                    let who = if names.is_empty() {
+                        "nothing".to_string()
+                    } else {
+                        names.join(", ")
+                    };
+                    let l = format!("  {who} {what}{turn}");
+                    self.emit(l, out);
+                }
+                for a in abilities {
+                    let def = self.catalog.get(a.card);
+                    let text = describe::ability_text(def, self.catalog.ability(*a));
+                    let text = match about {
+                        Some(o) => text
+                            .replace("That permanent", &self.short(*o))
+                            .replace("that permanent", &self.short(*o)),
+                        None => text,
+                    };
+                    let l = format!("  {}{turn}", text.trim_end_matches('.'));
+                    self.emit(l, out);
+                }
+            }
+            // CR 608.2 (said once it shows it didn't fizzle).
+            Event::ResolutionBegan { object } => {
+                self.resolving = Some(*object);
+                self.announce = Some(*object);
+            }
+            Event::MayChosen { player, yes, .. } => {
+                if !*yes {
+                    let l = format!("  {} chooses not to", p(*player));
+                    self.emit(l, out);
+                }
+            }
+            Event::UnlessPaid { player, paid, .. } => {
+                let l = if *paid {
+                    format!("  {} pays", p(*player))
+                } else {
+                    format!("  {} doesn't pay", p(*player))
+                };
+                self.emit(l, out);
+            }
+            // CR 701.23a: what a search found — named to the searcher, counted to the rest.
+            Event::SearchFound { player, cards } => {
+                self.searching = None;
+                let l = if cards.is_empty() {
+                    format!("  {} finds nothing", p(*player))
+                } else if cards.iter().all(|c| *c == HIDDEN) {
+                    format!("  {} finds {} card(s)", p(*player), cards.len())
+                } else {
+                    let names: Vec<String> = cards.iter().map(|c| self.name(*c)).collect();
+                    format!("  {} finds {}", p(*player), names.join(", "))
+                };
+                self.emit(l, out);
+            }
+            Event::TokensCapped {
+                token,
+                wanted,
+                made,
+                ..
+            } => {
+                let l = format!(
+                    "  (only {made} of {wanted} {} tokens are made: the engine's limit)",
+                    self.catalog.get(*token).name
+                );
                 self.emit(l, out);
             }
             // Deliberately silent: bookkeeping with no news for a reader.

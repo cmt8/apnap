@@ -19,6 +19,49 @@ pub enum DamageTarget {
     Object(ObjectId),
 }
 
+/// Why a permanent became tapped or untapped (D-090 part 2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TapCause {
+    /// Paying a cost ({T}, "tap an untapped creature you control", crew).
+    Cost,
+    /// Tapped for mana: a mana ability, or as part of the payment planner's choices.
+    Mana,
+    /// Declared as an attacker (CR 508.1f).
+    Attack,
+    /// A resolving spell or ability ("tap target creature", "untap all lands").
+    #[default]
+    Effect,
+    /// The untap step (CR 502.3).
+    UntapStep,
+}
+
+/// Why an ability left the stack (D-090 part 2).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StackExit {
+    /// It resolved.
+    #[default]
+    Resolved,
+    /// It didn't: all its targets were illegal (CR 608.2b, `Fizzled`).
+    NoLegalTargets,
+    /// A spell or ability countered it (CR 701.6).
+    Countered,
+    /// Its controller left the game (CR 800.4a).
+    ControllerLeft,
+    /// Putting it on the stack was abandoned: a triggered ability with no legal mode or
+    /// target (CR 603.3c–d).
+    Abandoned,
+    /// Its intervening "if" was false as it would resolve (CR 603.4): it did nothing.
+    ConditionFalse,
+}
+
+fn no_ability() -> card_model::AbilityId {
+    card_model::AbilityId::printed(card_model::CardDefId(0), 0)
+}
+
+fn no_card() -> card_model::CardDefId {
+    card_model::CardDefId(0)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LossReason {
     /// CR 704.5a
@@ -59,6 +102,16 @@ pub enum Event {
         card_instance: CardInstanceId,
         from: Zone,
         to: Zone,
+        /// As it last existed where it was (CR 608.2h): a creature (it "dies" if it went
+        /// from the battlefield to a graveyard, CR 700.4), and the face it had up there
+        /// (CR 712.6). D-090 part 2.
+        #[serde(default)]
+        creature: bool,
+        #[serde(default)]
+        face: u8,
+        /// Where in the library it went (top or bottom), if it went to one (CR 401.4).
+        #[serde(default)]
+        position: Option<crate::zones::LibraryPosition>,
     },
     Drew {
         player: PlayerId,
@@ -71,10 +124,17 @@ pub enum Event {
         player: PlayerId,
     },
     /// CR 602.2a: an ability object was created on the stack.
+    /// An activated or (`triggered`) triggered ability was put on the stack as the object
+    /// `ability`; its text is `text` (CR 602.2a, 603.3). A triggered one is the one a
+    /// `Triggered` event of the same `source` and `text` announced.
     AbilityActivated {
         player: PlayerId,
         ability: ObjectId,
         source: ObjectId,
+        #[serde(default = "no_ability")]
+        text: card_model::AbilityId,
+        #[serde(default)]
+        triggered: bool,
     },
     /// CR 601.2b / 700.2a
     ModesChosen {
@@ -100,8 +160,11 @@ pub enum Event {
         object: ObjectId,
     },
     /// An ability left the stack (CR 608.2n) or ceased to exist (CR 800.4a).
+    /// The ability `ability` left the stack without resolving, or after resolving: why.
     AbilityRemoved {
         ability: ObjectId,
+        #[serde(default)]
+        reason: StackExit,
     },
     /// CR 701.21a
     Sacrificed {
@@ -138,9 +201,25 @@ pub enum Event {
         object: ObjectId,
     },
     /// CR 611.2
+    /// CR 611.2: a resolving spell or ability made a continuous effect: `effects` on the
+    /// objects `affected` (locked in, CR 611.2c), or rules that hold on no object
+    /// (`abilities` of `card`, about `about`: "can't be blocked this turn"), until end of
+    /// turn or for good. What it does is written in `effects` / `abilities`.
     ContinuousEffectBegan {
         id: u32,
         source: ObjectId,
+        #[serde(default = "no_card")]
+        card: card_model::CardDefId,
+        #[serde(default)]
+        effects: Vec<card_model::ContinuousEffect>,
+        #[serde(default)]
+        affected: Vec<ObjectId>,
+        #[serde(default)]
+        abilities: Vec<card_model::AbilityId>,
+        #[serde(default)]
+        about: Option<ObjectId>,
+        #[serde(default)]
+        until_end_of_turn: bool,
     },
     /// CR 615: `amount` damage that would have been dealt to `target` was prevented.
     DamagePrevented {
@@ -175,26 +254,49 @@ pub enum Event {
         player: PlayerId,
         land: ObjectId,
     },
+    /// CR 601.2i: `spell` became cast, with face `face` up (CR 712.8), for its alternative
+    /// cost `alt` if one was chosen (CR 118.9: flashback, evoke, overload, "without paying
+    /// its mana cost"), and `tax` generic mana of commander tax in its total cost (CR 903.8).
     SpellCast {
         player: PlayerId,
         spell: ObjectId,
+        #[serde(default)]
+        face: u8,
+        #[serde(default)]
+        alt: Option<card_model::AbilityId>,
+        #[serde(default)]
+        tax: u32,
     },
     Resolved {
         spell: ObjectId,
     },
     Tapped {
         object: ObjectId,
+        #[serde(default)]
+        cause: TapCause,
     },
     Untapped {
         object: ObjectId,
+        #[serde(default)]
+        cause: TapCause,
     },
+    /// One mana added to `player`'s pool, by `source` (a mana ability's permanent, or the
+    /// source of the resolving spell or ability); `restricted`: it can be spent only as its
+    /// ability says (CR 106.6).
     ManaAdded {
         player: PlayerId,
         mana: ManaType,
+        #[serde(default)]
+        source: Option<ObjectId>,
+        #[serde(default)]
+        restricted: bool,
     },
+    /// `player` paid `amount` mana from their pool: these (one entry per mana).
     ManaPaid {
         player: PlayerId,
         amount: u32,
+        #[serde(default)]
+        mana: Vec<ManaType>,
     },
     ManaEmptied {
         player: PlayerId,
@@ -335,6 +437,36 @@ pub enum Event {
         card: card_model::CardDefId,
         abilities: alloc::vec::Vec<u16>,
     },
+    /// CR 608.2: the spell or ability `object` (on top of the stack) begins to resolve.
+    ResolutionBegan {
+        object: ObjectId,
+    },
+    /// "You may …" (CR 608.2d): `player` chose, as `object` resolved, whether to do it.
+    MayChosen {
+        player: PlayerId,
+        object: ObjectId,
+        yes: bool,
+    },
+    /// "… unless [player] pays …" (CR 118.12): whether they paid, as `object` resolved.
+    UnlessPaid {
+        player: PlayerId,
+        object: ObjectId,
+        paid: bool,
+    },
+    /// What `player`'s search of a library found (CR 701.23a), possibly nothing: those cards,
+    /// still in the library. Another seat may learn only how many, unless they are revealed.
+    SearchFound {
+        player: PlayerId,
+        cards: Vec<ObjectId>,
+    },
+    /// An effect would have created `wanted` tokens of one kind at once; at most `made` were
+    /// (`effects::MAX_TOKENS_AT_ONCE`, a limit of this engine the user approved, not a rule).
+    TokensCapped {
+        controller: PlayerId,
+        token: card_model::CardDefId,
+        wanted: u64,
+        made: u32,
+    },
     /// Never emitted by the engine: added by [`crate::client::EventView::redact`] when the
     /// seat gets to see `object` (it entered a public zone, was drawn into the seat's hand,
     /// was revealed or looked at): it is `card`, with face `face` up.
@@ -354,6 +486,9 @@ pub enum Event {
         new: ObjectId,
         from: crate::zones::Zone,
         to: crate::zones::Zone,
+        /// Where in the library it went, if it went to one: public (CR 401.4).
+        #[serde(default)]
+        position: Option<crate::zones::LibraryPosition>,
     },
     /// CR 702.21a: `player` chose to pay (`paid`) or not to pay the cost that keeps the
     /// spell or ability `at_stake` from being countered.

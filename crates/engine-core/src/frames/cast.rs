@@ -1026,6 +1026,7 @@ impl CastFrame {
             st,
             GameAction::RemoveAbility {
                 ability: self.object.expect("announced"),
+                reason: crate::events::StackExit::Abandoned,
             },
         );
         Flow::done()
@@ -1519,7 +1520,13 @@ impl CastFrame {
                         input.as_ref().and_then(|i| i.picked_one()).cloned()
                     {
                         input = None;
-                        execute(st, GameAction::Tap { object: source });
+                        execute(
+                            st,
+                            GameAction::Tap {
+                                object: source,
+                                cause: crate::events::TapCause::Mana,
+                            },
+                        );
                         self.convoked.push((source, mana));
                         continue;
                     }
@@ -1655,11 +1662,23 @@ impl CastFrame {
             );
         }
         if let Some(source) = tap {
-            execute(st, GameAction::Tap { object: source });
+            execute(
+                st,
+                GameAction::Tap {
+                    object: source,
+                    cause: crate::events::TapCause::Cost,
+                },
+            );
         }
         // "Tap an untapped creature you control", crew (CR 601.2h, 702.122a).
         for &object in &self.pay_tap {
-            execute(st, GameAction::Tap { object });
+            execute(
+                st,
+                GameAction::Tap {
+                    object,
+                    cause: crate::events::TapCause::Cost,
+                },
+            );
         }
         if let Some(card) = self.from_command {
             execute(st, GameAction::CommanderCast { player: p, card });
@@ -1679,7 +1698,17 @@ impl CastFrame {
         }
         if let CastSource::Card(_) = self.source {
             let spell = self.object.unwrap();
-            st.emit(Event::SpellCast { player: p, spell });
+            // Which face, for what alternative cost, and how much commander tax.
+            let (face, alt) = st
+                .stack_object(spell)
+                .map_or((0, None), |so| (st.object(spell).face, so.alt));
+            st.emit(Event::SpellCast {
+                player: p,
+                spell,
+                face,
+                alt,
+                tax: self.tax,
+            });
             execute(st, GameAction::NoteCast { player: p, spell });
             // CR 601.2i: "whenever ... casts" abilities trigger now.
             triggers::detect_cast(st, p, spell);

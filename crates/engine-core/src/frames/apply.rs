@@ -193,6 +193,19 @@ impl ApplyFrame {
                 // permanents enter applies to (D-073).
                 [] if matches!(front.event, Proposed::CreateTokens { .. }) => {
                     let p = self.queue.remove(0);
+                    // A count the engine's limit cuts is said, not silent (D-090 part 2).
+                    if let Proposed::CreateTokens { controller, .. } = &p.event {
+                        for (token, count) in crate::replacement::token_kinds(&p.event) {
+                            if count > MAX_TOKENS_AT_ONCE {
+                                st.emit(crate::events::Event::TokensCapped {
+                                    controller: *controller,
+                                    token,
+                                    wanted: u64::from(count),
+                                    made: MAX_TOKENS_AT_ONCE,
+                                });
+                            }
+                        }
+                    }
                     let entering = token_entries(&p.event).into_iter().map(|event| Pending {
                         event,
                         applied: Vec::new(),

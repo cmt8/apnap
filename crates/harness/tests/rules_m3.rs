@@ -364,7 +364,7 @@ fn cr_903_8_commander_tax_across_three_casts() {
         .events
         .iter()
         .filter_map(|e| match e {
-            Event::ManaPaid { player, amount } if *player == P0 => Some(*amount),
+            Event::ManaPaid { player, amount, .. } if *player == P0 => Some(*amount),
             _ => None,
         })
         .collect();

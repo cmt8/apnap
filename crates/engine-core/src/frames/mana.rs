@@ -1102,7 +1102,13 @@ fn simulate(
 ) -> (GameState, Vec<Have>) {
     let mut sim = st.clone();
     if w.tap {
-        execute(&mut sim, GameAction::Tap { object: w.id });
+        execute(
+            &mut sim,
+            GameAction::Tap {
+                object: w.id,
+                cause: crate::events::TapCause::Mana,
+            },
+        );
     }
     if w.cost.total() > 0 {
         let (requirement, generic) = payment(&w.cost, paid);
@@ -1148,11 +1154,19 @@ fn simulate(
                     mana: t,
                     ability,
                     chosen: super::cast::restriction_choice(st, ability, w.id),
+                    source: Some(w.id),
                 },
             );
         }
         _ => {
-            execute(sim, GameAction::AddMana { player: p, mana: t });
+            execute(
+                sim,
+                GameAction::AddMana {
+                    player: p,
+                    mana: t,
+                    source: Some(w.id),
+                },
+            );
         }
     };
     match &w.yields {
@@ -1366,7 +1380,13 @@ pub(crate) fn tap_for_mana(
     };
     // CR 106.6: mana with a spending restriction is kept apart.
     let restricted = way.ability.filter(|_| way.restricted);
-    execute(st, GameAction::Tap { object: way.id });
+    execute(
+        st,
+        GameAction::Tap {
+            object: way.id,
+            cause: crate::events::TapCause::Mana,
+        },
+    );
     for _ in 0..count {
         execute(
             st,
@@ -1376,8 +1396,13 @@ pub(crate) fn tap_for_mana(
                     mana,
                     ability,
                     chosen: super::cast::restriction_choice(st, ability, way.id),
+                    source: Some(way.id),
                 },
-                None => GameAction::AddMana { player: p, mana },
+                None => GameAction::AddMana {
+                    player: p,
+                    mana,
+                    source: Some(way.id),
+                },
             },
         );
     }
@@ -1593,6 +1618,7 @@ impl ManaFrame {
                             st,
                             GameAction::Tap {
                                 object: self.source,
+                                cause: crate::events::TapCause::Mana,
                             },
                         );
                     }
@@ -1716,9 +1742,14 @@ impl ManaFrame {
                                         self.ability,
                                         self.source,
                                     ),
+                                    source: Some(self.source),
                                 }
                             } else {
-                                GameAction::AddMana { player: p, mana }
+                                GameAction::AddMana {
+                                    player: p,
+                                    mana,
+                                    source: Some(self.source),
+                                }
                             },
                         );
                     }
