@@ -148,6 +148,14 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
   player's spells in `PlayerState::cast_this_turn`; "cast or copy" is `Trigger::Cast::copies`.
   Not built: replicate, casualty, conspire, cascade, "cast a copy". Tests:
   `forge_spell_copies.rs`.
+- Planeswalkers (CR 306, 606; D-086): loyalty is the LOYALTY counter kind; starting loyalty
+  is a compiled "enters with N loyalty counters" (so doublers and copies apply); loyalty
+  abilities are `Timing::Loyalty` with exactly one loyalty cost (+N, 0, −N,
+  `Cost::remove_x_counters` for −X), once per permanent per turn
+  (`GameState::loyalty_activated`). Damage to one removes loyalty (120.3c). An attacker's
+  options are each opponent, then that player's planeswalkers
+  (`OptionDesc::AttackPlaneswalker`, `AttackInfo::planeswalker`; `defender` stays the
+  player). Tests: `forge_planeswalkers.rs`, `crates/app/tests/planeswalkers.rs`.
 - The text of a compiled card (`card_model::describe`) is written like a printed card:
   number words, "this creature/land/Equipment", "Then" between instructions, a predefined
   token's reminder text on first mention. The Oracle guard (`oracle_words_missing`) reads
@@ -239,8 +247,8 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-085): 11,689 of 34,463 scripts compile (33.9%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-085: 98% of
+Status (D-086): 11,803 of 34,463 scripts compile (34.2%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-086: 98% of
 the 100 most played Commander cards compile (missing: Path of Ancestry, The One Ring),
 64% of the top 1,000, 38% of the top 5,000
 (`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
@@ -271,11 +279,12 @@ craft, "enters/cast transformed" and "when this transforms" triggers (modal doub
 transforming, Adventure, Omen and split cards are built, D-071), searching another player's library, "X target creatures", changing a target to a fixed or restricted one (CR 115.7b/c), delve/convoke/improvise, flashback
 given to other cards, draw and mana replacement effects, effects that change life
 loss, memory that outlives a resolution (effect objects remembering
-cards, linked abilities per CR 607, delayed triggers that keep remembered cards past their chain), keyword, loyalty, shield, stun and player counters (other named counters are built, D-084), "as this enters, choose …" other than a creature type or a color (D-076; how a permanent enters is otherwise built, D-067:
+cards, linked abilities per CR 607, delayed triggers that keep remembered cards past their chain), keyword, shield, stun and player counters (other named counters are built, D-084), "as this enters, choose …" other than a creature type or a color (D-076; how a permanent enters is otherwise built, D-067:
 `ReplaceWith::EntersTappedUnless…`, the choice asked inside `ApplyFrame` as
 `ChoiceKind::AsEnters`), "sacrifice … instead" lands, "lands enter untapped", "exile it
 instead. When you do, …", static regeneration and "when it regenerates this way", abilities given to cards that aren't on
-the battlefield, "becomes the target" triggers, protection, read ahead and transforming Sagas, planeswalkers,
+the battlefield, "becomes the target" triggers, protection, read ahead and transforming Sagas, emblems (CR 114; 95 planeswalkers wait on them), loyalty
+abilities that add mana, "can be your commander",
 and of Forge's "Effect" objects everything but combat rules and "prevent all damage"
 (`effects::Lasting`, D-065: no triggers, no characteristic changes, nothing about
 players yet). `forge-coverage --families` ranks what is left by kind of feature.
