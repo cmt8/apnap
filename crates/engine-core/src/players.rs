@@ -147,12 +147,18 @@ pub fn library_top(st: &GameState, owner: PlayerId) -> Option<ObjectId> {
 /// new top card is not revealed until the spell becomes cast). The engine doesn't remember
 /// which card was on top as the cast began, so it shows none until the cast is complete.
 pub fn sees_library_top(st: &GameState, viewer: PlayerId, owner: PlayerId) -> bool {
+    library_top_seen_by(st, Some(viewer), owner)
+}
+
+/// [`sees_library_top`] for a viewer who may not be a player (`None`: a spectator, who sees
+/// it only if it is revealed to everyone).
+pub fn library_top_seen_by(st: &GameState, viewer: Option<PlayerId>, owner: PlayerId) -> bool {
     if casting(st) {
         return false;
     }
     about(st, owner).any(|r| match r.rule {
         PlayerRule::TopCardRevealed => true,
-        PlayerRule::LookAtTopCard => viewer == owner,
+        PlayerRule::LookAtTopCard => viewer == Some(owner),
         _ => false,
     })
 }

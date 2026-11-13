@@ -517,7 +517,7 @@ fn main() -> ExitCode {
             let rec = play_random(seed, opts).expect("game");
             // Engine truth, narrated for a referee (`--seat N` would be one player's).
             let start = opts.setup.game(seed);
-            for line in harness::text::narrate(&start, &rec.events, Seat::Everyone) {
+            for line in harness::narrate(&start, &rec.events, Seat::Everyone) {
                 println!("{line}");
             }
             ExitCode::SUCCESS
@@ -601,7 +601,7 @@ fn play(args: &[String]) -> ExitCode {
     let me = PlayerId(0);
     let setup = setup(args, Setup::M1 { players: 2 });
     let mut st = setup.game(seed);
-    let mut narrator = Narrator::new(&st, Seat::Player(me));
+    let mut narrator = Narrator::new(st.catalog.clone(), &engine_core::player_view(&st, me));
     let mut seat = engine_core::client::EventView::new(&st, Seat::Player(me));
     // Opponents: the heuristic AI by default (`--agents random` for random opponents).
     let kind = flag(args, "--agents").map_or(harness::Agents::Heuristic, |a| {

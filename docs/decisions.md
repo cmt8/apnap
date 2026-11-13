@@ -3250,6 +3250,57 @@ are `#[serde(default)]`.
   the mana spent, what a continuous effect does, declined "may"s, unless payments, search
   results and the token cap, and tap causes instead of guessing from the step.
 
+## D-092 The client boundary: what a client gets, enforced and proved by wire (2026-11-12)
+Tests: `crates/harness/tests/client_boundary.rs`, `client_view.rs` (property test and
+`each_seat_sees_its_own_view_of_a_search`), `tests/knowledge/mod.rs` (the shared knowledge
+model); `cargo xtask check-deps` (the source check, with its own unit test).
+- **A client's whole input**, stated once in engine-core's crate docs ("Host and client"): the
+  card catalog (shared, read-only), its view (`seat_view`), the `PendingDecision` when it
+  decides, and its `EventView` of each step's events. It answers with a `Response`. The host
+  owns the `GameState` and makes these.
+- **One view for every seat:** `view::seat_view(st, Seat)`; `player_view(st, p)` is
+  `seat_view(st, Seat::Player(p))`, so the three can't drift apart. A spectator gets public
+  information only: no hand, no decision, no `revealed`, a library's top card only when it is
+  revealed to everyone (CR 401.5, `players::library_top_seen_by(st, None, owner)`), and — like
+  every seat — `waiting`. `Seat::Everyone` (replays, a referee) gets every hand and library
+  (`PlayerPublic::hand` / `library`, `None` for every other seat) and the pending decision
+  whoever's it is. `PlayerView::seat` says whose view it is; `viewer` stays (player 0 for the
+  two seats that are no player) so the AI and the app keep reading it.
+- **Moved into the view** (what the reference clients read from the state): the decision
+  counter (`PlayerView::decision_count`: answers so far — public, since `waiting` tells every
+  seat who decides each time), the result (`PlayerView::result`), whether an object is a token
+  (`ObjectView::token`, CR 111.1). Turn, step and active player were already there. No state
+  field was added: golden state hashes don't move.
+- **Clients rewired:** the app's UI reads `session.view()`, `session.catalog()` and the
+  human's decision — no `session.st`. The narrator is built from what a client has
+  (`Narrator::new(catalog, &PlayerView)`); `harness::narrate(start, truth, seat)` is the
+  host-side shortcut that makes the seat's view and redacted events from a state. The
+  session's automatic answers (stops, auto-pay; D-054, D-066) are worked out from the
+  player's view, as a client would.
+- **Enforced:** `cargo xtask check-deps` fails if client code — the app's `ui.rs`,
+  `cardview.rs`, `combat.rs`, `art.rs`, `harness/src/text.rs`, the `ai` crate — names
+  `GameState`, a session's `.st`, or what only the host makes from a state (`player_view`,
+  `seat_view`, `EventView::new`), outside the file's `#[cfg(test)]` module. Host side: the
+  app's `session.rs`, the harness driver, tests; later the search AI's Determinizer (spec, M5:
+  a host-made sample consistent with the agent's view).
+- **Proved by wire:** `client_boundary.rs` plays whole m2-4p (random), cmd-4p (heuristic vs
+  random) and forge-4p (random) games where every seat's agent and narrator get only JSON text
+  (its view, its decision, its redacted events) and answer with JSON; each game ends in the
+  same state, after the same number of decisions, as the same seed played directly. What
+  crosses the wire to a seat is checked against the knowledge model: the ids of its view and
+  events, and no JSON string that is the name only a card it may not know has (the
+  decision's own cards — a scry, a search — and a rule-revealed top card excepted, the latter
+  checked by the model). Both checks were seen to fail with a library's top card leaked.
+- **Property test:** the knowledge model now checks every seat's view at every decision
+  (a spectator's and everyone's too) against what its stream made known, and plays 24
+  forge-4p and 6 m2-4p whole games on four threads (about 15 s); an `#[ignore]`d long
+  variant (`APNAP_LEAK_GAMES`, default 200) is for the soak.
+- **Left on the host side:** `Session::declaration` — the whole attack or block, found by
+  answering "no" for each creature on a copy of the game, because the engine asks one
+  creature at a time; a remote client can't do that and would want the candidates and their
+  options in the decision. The app's spectating still shows seat 0's player view (an app
+  choice; `Seat::Spectator` is there for it).
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

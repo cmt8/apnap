@@ -1703,6 +1703,7 @@ fn menu_ui(app: &mut App, ui: &mut egui::Ui) {
 fn top_bar(
     ui: &mut egui::Ui,
     s: &Session,
+    v: &PlayerView,
     playing: bool,
     pace_ms: u64,
     list_options: bool,
@@ -1716,14 +1717,13 @@ fn top_bar(
             actions.push(Action::Save);
         }
         ui.separator();
-        let t = &s.st.turn;
-        let (whose, color) = if Some(t.active) == s.human {
+        let (whose, color) = if Some(v.active) == s.human {
             ("YOUR TURN".to_string(), GREEN)
         } else {
-            (format!("P{}'s turn", t.active.0), GOLD)
+            (format!("P{}'s turn", v.active.0), GOLD)
         };
         // A fixed width: the bar must not reflow (and the table resize) as turns change.
-        let turn = RichText::new(format!("Turn {} — {whose}", t.turn_number))
+        let turn = RichText::new(format!("Turn {} — {whose}", v.turn_number))
             .strong()
             .size(17.0)
             .color(color);
@@ -1737,7 +1737,7 @@ fn top_bar(
         );
         for step in STOP_STEPS {
             let text = RichText::new(step_name(step));
-            if step == t.step {
+            if step == v.step {
                 ui.label(
                     text.strong()
                         .color(GOLD)
@@ -2714,8 +2714,9 @@ fn game_ui(app: &mut App, ui: &mut egui::Ui) {
 /// One frame of the game screen. Returns true to go back to the menu.
 fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui::Ui) -> bool {
     advance(app, session, ui.ctx());
-    if session.st.decision_count != app.decision_id {
-        app.decision_id = session.st.decision_count;
+    let view = session.view();
+    if view.decision_count != app.decision_id {
+        app.decision_id = view.decision_count;
         app.picked.clear();
         app.alloc.clear();
         app.order.clear();
@@ -2723,7 +2724,6 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
         app.focus = None;
         app.search.clear();
     }
-    let view = session.view();
     let decision = session.human_decision().cloned();
     // Attacks and blocks are planned on the board as a whole (`combat`), not answered one
     // creature at a time.
@@ -2738,13 +2738,13 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
     } else if app
         .plan
         .as_ref()
-        .is_none_or(|p| p.decision_id != session.st.decision_count)
+        .is_none_or(|p| p.decision_id != view.decision_count)
     {
         app.plan = session
             .declaration()
-            .map(|d| Plan::new(session.st.decision_count, d));
+            .map(|d| Plan::new(view.decision_count, d));
     }
-    let cat = session.st.catalog.clone();
+    let cat = session.catalog();
     let picked = app.picked.clone();
     let plan = app.plan.clone();
     let cx = Ctx {
@@ -2765,6 +2765,7 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
         top_bar(
             ui,
             session,
+            &view,
             app.replay_playing,
             app.pace_ms,
             app.list_options,
@@ -2780,7 +2781,7 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
         // The prompt and its buttons get the same room whether or not there is anything
         // to decide, so the table above doesn't resize every time a decision comes or goes.
         let prompt_top = ui.cursor().top();
-        if let Some(result) = &session.st.result {
+        if let Some(result) = &view.result {
             let text = match result.winner {
                 Some(w) if Some(w) == session.human => "Game over — you win!".to_string(),
                 Some(w) => format!("Game over — P{} wins", w.0),
@@ -2792,13 +2793,9 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
         } else if session.replay_queue.is_some() {
             ui.weak("Replay: use Step or Play above.");
         } else {
-            let who = session
-                .st
-                .pending
-                .as_ref()
-                .map_or("Opponents are".to_string(), |d| {
-                    format!("P{} is", d.player.0)
-                });
+            let who = view
+                .waiting
+                .map_or("Opponents are".to_string(), |(p, _)| format!("P{} is", p.0));
             ui.weak(format!("{who} acting…"));
         }
         if !app.status.is_empty() {

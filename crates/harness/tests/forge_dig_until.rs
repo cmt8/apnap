@@ -96,7 +96,7 @@ fn reveal_until_a_land_onto_the_battlefield() {
         "the rest at the bottom"
     );
     // Another seat sees the revealed cards by name.
-    let theirs = harness::text::narrate(&st0, &s.events, engine_core::client::Seat::Player(P1));
+    let theirs = harness::narrate(&st0, &s.events, engine_core::client::Seat::Player(P1));
     // P1's own stream (redacted): the reveal is there, with the cards it shows.
     let mut view = engine_core::client::EventView::new(&st0, engine_core::client::Seat::Player(P1));
     let seen = view.redact(&s.events);

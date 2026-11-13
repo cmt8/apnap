@@ -29,7 +29,7 @@ fn game(sc: Scenario) -> (Script, GameState) {
 }
 
 fn log(start: &GameState, s: &Script, viewer: Option<PlayerId>) -> Vec<String> {
-    harness::text::narrate(
+    harness::narrate(
         start,
         &s.events,
         viewer.map_or(Seat::Everyone, Seat::Player),
@@ -90,7 +90,7 @@ fn zero_targets_say_so() {
         object: hand,
         targets: vec![],
     }];
-    let lines = harness::text::narrate(&st, &ev, Seat::Everyone);
+    let lines = harness::narrate(&st, &ev, Seat::Everyone);
     assert_eq!(lines, ["  with no targets"]);
 }
 
@@ -299,7 +299,7 @@ fn a_commander_going_to_the_command_zone_is_narrated() {
         face: 0,
         position: None,
     }];
-    let lines = harness::text::narrate(&st, &ev, Seat::Everyone);
+    let lines = harness::narrate(&st, &ev, Seat::Everyone);
     assert_eq!(lines, ["  Test Elf (P0) is put into the command zone"]);
 }
 
@@ -332,9 +332,9 @@ fn hidden_zone_moves_are_named_only_to_who_may_know() {
         position: Some(engine_core::zones::LibraryPosition::Top),
     };
     let ev = [up, down];
-    let omniscient = harness::text::narrate(&st, &ev, Seat::Everyone);
-    let owner = harness::text::narrate(&st, &ev, Seat::Player(P0));
-    let other = harness::text::narrate(&st, &ev, Seat::Player(P1));
+    let omniscient = harness::narrate(&st, &ev, Seat::Everyone);
+    let owner = harness::narrate(&st, &ev, Seat::Player(P0));
+    let other = harness::narrate(&st, &ev, Seat::Player(P1));
     assert_eq!(omniscient, owner);
     assert_eq!(
         owner,
@@ -465,7 +465,7 @@ fn life_changes_carry_amount_and_total() {
 fn lines_are_short_in_real_games() {
     for seed in 0..10 {
         let rec = harness::play_random(seed, harness::PlayOptions::default()).unwrap();
-        let lines = harness::text::narrate(&m0_game(seed), &rec.events, Seat::Everyone);
+        let lines = harness::narrate(&m0_game(seed), &rec.events, Seat::Everyone);
         for l in lines {
             if !l.contains(" draws ") {
                 assert!(l.chars().count() < 120, "seed {seed}: {l}");
@@ -502,7 +502,7 @@ fn attacking_does_not_also_tap() {
             defender: P1,
         },
     ];
-    let lines = harness::text::narrate(&st, &ev, Seat::Everyone);
+    let lines = harness::narrate(&st, &ev, Seat::Everyone);
     assert_eq!(
         lines,
         ["  Test Elf (P0) attacks P1", "  Test Golem (P0) attacks P1"]
@@ -647,7 +647,7 @@ fn something_that_fought_dies() {
             position: None,
         },
     ];
-    let lines = harness::text::narrate(&st, &ev, Seat::Everyone);
+    let lines = harness::narrate(&st, &ev, Seat::Everyone);
     assert!(lines[1].ends_with("dies"), "{lines:#?}");
 }
 
@@ -684,7 +684,7 @@ fn step_headings_appear_when_something_happens() {
             step: Step::Cleanup,
         },
     ];
-    let lines = harness::text::narrate(&st, &ev, Seat::Everyone);
+    let lines = harness::narrate(&st, &ev, Seat::Everyone);
     assert_eq!(
         lines,
         [
@@ -712,7 +712,7 @@ fn a_transformed_permanent_is_named_by_its_face() {
             defender: P1,
         },
     ];
-    let lines = harness::text::narrate(&st, &ev, Seat::Everyone);
+    let lines = harness::narrate(&st, &ev, Seat::Everyone);
     assert!(lines[1].contains("Test Moth (P0) attacks P1"), "{lines:#?}");
 }
 

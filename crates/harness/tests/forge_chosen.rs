@@ -819,7 +819,7 @@ fn heuristic_chooses_its_most_common_type_and_the_log_says_so() {
     );
     let before = s.events.len();
     s.respond(r);
-    let lines = harness::text::narrate(
+    let lines = harness::narrate(
         &s.st,
         &s.events[before..],
         engine_core::client::Seat::Everyone,
