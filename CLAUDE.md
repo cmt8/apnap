@@ -65,6 +65,16 @@ serialization and determinism come before UI and before AI strength.
   (what each seat may see, `object_ids`), and `crates/harness/tests/client_view.rs`
   (property test against a knowledge model) must pass. `PlayerView::waiting` tells every
   seat who decides and what kind of decision, never the options.
+- Events say what a client would otherwise guess (D-090 part 2): `ResolutionBegan`,
+  `SpellCast { face, alt, tax }`, `AbilityActivated { text, triggered }` (a trigger's link
+  to its stack object), `AbilityRemoved { reason: StackExit }`, `ContinuousEffectBegan`
+  with its effects and duration, `ManaPaid { mana }`, `ManaAdded { source, restricted }`,
+  `MayChosen`, `UnlessPaid`, `SearchFound` (a count only for other seats), `ZoneChange
+  { creature, face, position }`, `Tapped`/`Untapped { cause: TapCause }`. A new fact a
+  client needs goes into an event or a view, never into a client reading `GameState`. New
+  `Event` variants are appended last (the hasher writes variant indices). A field with
+  hidden content needs a direct test of what the opponent sees, not only the property
+  test (a model can share the redaction's mistake). Tests: `tests/events.rs`.
 - An ability is named by `AbilityId { card, index, granted }` — where its text is written —
   never by a bare index into its object's card: an object can have abilities of other
   cards (`CardDef::granted`, `ContinuousEffect::GrantAbilities`, D-064), and have one twice.
@@ -99,7 +109,8 @@ serialization and determinism come before UI and before AI strength.
   battlefield" is `replacement::as_it_would_exist`. "Triggers an additional time" is
   `AbilityDef::AdditionalTrigger`, counted in `triggers::queue_caused` (CR 603.2d); "can't be
   countered" is `AbilityDef::CantBeCountered`. One event creates at most
-  `MAX_TOKENS_AT_ONCE` = 10,000 tokens of a kind (a deviation from the CR the user approved on 2026-11-12; still silent — no event says it applied).
+  `MAX_TOKENS_AT_ONCE` = 10,000 tokens of a kind (a deviation from the CR the user approved on 2026-11-12; the cut is said by
+  `Event::TokensCapped { wanted, made }`).
   Tests: `forge_doublers.rs`.
 - A delayed triggered ability (CR 603.7, D-075) is `Effect::DelayedTrigger` with a
   `DelayWindow`, kept in `GameState::delayed`: it triggers once, and what it refers to (a
