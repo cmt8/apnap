@@ -408,6 +408,10 @@ fn the_mana_value_of_the_card_put_into_hand() {
          SVar:DBLose:DB$ LoseLife | LifeAmount$ X | SubAbility$ DBCleanup\n\
          SVar:DBCleanup:DB$ Cleanup | ClearRemembered$ True\n\
          SVar:X:Remembered$CardManaCost",
+    )
+    .replace(
+        "Oracle:Text.",
+        "Oracle:Reveal the top card of your library and put that card into your hand. You lose life equal to its mana value.",
     )];
     let mut s = build(&cards, |sc| {
         sc.card(P0, Zone::Battlefield, "Swamp");

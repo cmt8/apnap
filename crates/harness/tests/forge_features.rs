@@ -3428,6 +3428,10 @@ fn typecycling_searches_for_a_card_of_the_type() {
             "Camel",
             "4/4",
             "K:TypeCycling:Plains:2",
+        )
+        .replace(
+            "Oracle:Text.",
+            "Oracle:Plainscycling {2} ({2}, Discard this card: Search your library for a Plains card, reveal it, put it into your hand, then shuffle.)",
         ),
         creature(
             "Test Wayfinder",
@@ -3435,6 +3439,10 @@ fn typecycling_searches_for_a_card_of_the_type() {
             "Scout",
             "4/4",
             "K:TypeCycling:Basic:1",
+        )
+        .replace(
+            "Oracle:Text.",
+            "Oracle:Basic landcycling {1} ({1}, Discard this card: Search your library for a basic land card, reveal it, put it into your hand, then shuffle.)",
         ),
         // (A word in a filter is a subtype only if some card has it.)
         "Name:Test Steppe\nManaCost:no cost\nTypes:Land Plains\nOracle:Text.".to_string(),

@@ -379,6 +379,10 @@ fn cr_701_20_reveal_a_card_as_it_enters() {
         "Test Revealland",
         "Land",
         "UnlessCost$ Reveal<1/Island;Swamp/Island or Swamp> | UnlessPayer$ You",
+    )
+    .replace(
+        "Oracle:Text.",
+        "Oracle:As this land enters, you may reveal an Island or Swamp card from your hand. If you don't, this land enters tapped.",
     );
     let mut sc = scenario(&[&reveal]);
     sc.cards(
@@ -625,7 +629,7 @@ fn cr_113_6b_put_into_a_graveyard_from_anywhere_shuffle_it_into_the_library_inst
         PT:7/7\n\
         R:Event$ Moved | Destination$ Graveyard | ValidCard$ Card.Self | ReplaceWith$ DBShuffle | Description$ Text.\n\
         SVar:DBShuffle:DB$ ChangeZone | Hidden$ True | Origin$ All | Destination$ Library | Defined$ ReplacedCard | Reveal$ True | Shuffle$ True\n\
-        Oracle:Text.";
+        Oracle:If Test Colossus would be put into a graveyard from anywhere, reveal Test Colossus and shuffle it into its owner's library instead.";
     let mill = "Name:Test Mill\n\
         ManaCost:U\n\
         Types:Sorcery\n\
