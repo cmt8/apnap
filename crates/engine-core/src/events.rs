@@ -437,36 +437,6 @@ pub enum Event {
         card: card_model::CardDefId,
         abilities: alloc::vec::Vec<u16>,
     },
-    /// CR 608.2: the spell or ability `object` (on top of the stack) begins to resolve.
-    ResolutionBegan {
-        object: ObjectId,
-    },
-    /// "You may …" (CR 608.2d): `player` chose, as `object` resolved, whether to do it.
-    MayChosen {
-        player: PlayerId,
-        object: ObjectId,
-        yes: bool,
-    },
-    /// "… unless [player] pays …" (CR 118.12): whether they paid, as `object` resolved.
-    UnlessPaid {
-        player: PlayerId,
-        object: ObjectId,
-        paid: bool,
-    },
-    /// What `player`'s search of a library found (CR 701.23a), possibly nothing: those cards,
-    /// still in the library. Another seat may learn only how many, unless they are revealed.
-    SearchFound {
-        player: PlayerId,
-        cards: Vec<ObjectId>,
-    },
-    /// An effect would have created `wanted` tokens of one kind at once; at most `made` were
-    /// (`effects::MAX_TOKENS_AT_ONCE`, a limit of this engine the user approved, not a rule).
-    TokensCapped {
-        controller: PlayerId,
-        token: card_model::CardDefId,
-        wanted: u64,
-        made: u32,
-    },
     /// Never emitted by the engine: added by [`crate::client::EventView::redact`] when the
     /// seat gets to see `object` (it entered a public zone, was drawn into the seat's hand,
     /// was revealed or looked at): it is `card`, with face `face` up.
@@ -496,5 +466,35 @@ pub enum Event {
         player: PlayerId,
         at_stake: ObjectId,
         paid: bool,
+    },
+    /// CR 608.2: the spell or ability `object` (on top of the stack) begins to resolve.
+    ResolutionBegan {
+        object: ObjectId,
+    },
+    /// "You may …" (CR 608.2d): `player` chose, as `object` resolved, whether to do it.
+    MayChosen {
+        player: PlayerId,
+        object: ObjectId,
+        yes: bool,
+    },
+    /// "… unless [player] pays …" (CR 118.12): whether they paid, as `object` resolved.
+    UnlessPaid {
+        player: PlayerId,
+        object: ObjectId,
+        paid: bool,
+    },
+    /// What `player`'s search of a library found (CR 701.23a), possibly nothing: those cards,
+    /// still in the library. Another seat may learn only how many, unless they are revealed.
+    SearchFound {
+        player: PlayerId,
+        cards: Vec<ObjectId>,
+    },
+    /// An effect would have created `wanted` tokens of one kind at once; at most `made` were
+    /// (`effects::MAX_TOKENS_AT_ONCE`, a limit of this engine the user approved, not a rule).
+    TokensCapped {
+        controller: PlayerId,
+        token: card_model::CardDefId,
+        wanted: u64,
+        made: u32,
     },
 }
