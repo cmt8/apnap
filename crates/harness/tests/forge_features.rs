@@ -6033,7 +6033,7 @@ fn effect_objects_not_compiled() {
             "Triggers$ Later",
             "SVar:Later:Mode$ Phase | Phase$ Upkeep | Execute$ TrigDraw | TriggerDescription$ Text.\nSVar:TrigDraw:DB$ Draw"
         )),
-        ["Effect:Triggers"]
+        ["Effect:Triggers (delayed abilities for a while, CR 603.7b)"]
     );
     assert_eq!(
         forge_test_blockers(&with(

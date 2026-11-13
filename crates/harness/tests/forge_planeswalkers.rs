@@ -392,8 +392,9 @@ fn emblems_and_mana_loyalty_abilities_are_blocked() {
         "A:AB$ Effect | Cost$ SubCounter<6/LOYALTY> | Planeswalker$ True | Name$ Emblem — Test | StaticAbilities$ STPump | Duration$ Permanent | SpellDescription$ You get an emblem.\n\
          SVar:STPump:Mode$ Continuous | Affected$ Creature.YouCtrl | AddPower$ 1 | Description$ Creatures you control get +1/+0.",
     );
+    // Emblems are built since D-088 (forge_emblems.rs): this one compiles.
     assert!(
-        forge_test_blockers(&emblem).contains(&"emblem (CR 114)".to_string()),
+        forge_test_blockers(&emblem).is_empty(),
         "{:?}",
         forge_test_blockers(&emblem)
     );
@@ -409,6 +410,47 @@ fn emblems_and_mana_loyalty_abilities_are_blocked() {
         forge_test_blockers(&mana)
     );
     let _ = Target::Player(P0);
+}
+
+// A client sees only `PlayerView`s and decisions (D-088): it can read a planeswalker's
+// loyalty (CR 306.5c), which loyalty abilities are offered (CR 606.3), and for each
+// attacker the player or planeswalker it attacks (CR 506.3, 508.1b).
+#[test]
+fn a_client_reads_planeswalkers_from_the_view() {
+    let mut sc = scenario(&[WALKER, BRUISER]);
+    let pw = sc.card(P1, Zone::Battlefield, "Test Sage Walker");
+    let mine = sc.card(P0, Zone::Battlefield, "Test Sage Walker");
+    let ogre = sc.card(P0, Zone::Battlefield, "Test Walker Ogre");
+    sc.turn(P0, Step::PrecombatMain);
+    let st = with_loyalty(sc.build(), pw, 4);
+    let mut s = Script::new(with_loyalty(st, mine, 1));
+    // P1's view of P1's planeswalker: its loyalty.
+    let v = engine_core::player_view(&s.st, P1);
+    let o = v.battlefield.iter().find(|o| o.id == pw).unwrap();
+    assert!(o.counters.contains(&(CounterKind::LOYALTY, 4)));
+    // P0's decision lists the loyalty abilities it may activate: "+1" and "−X" (loyalty
+    // 1: not "−2"), each named by its ability and source.
+    let offered: Vec<u16> = s
+        .options()
+        .iter()
+        .filter_map(|o| match o {
+            OptionDesc::ActivateAbility { source, ability } if *source == mine => {
+                Some(ability.index)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(offered, [1, 3, 4]);
+    to_attack(&mut s, ogre);
+    s.pick("attack the planeswalker", |_, o| {
+        matches!(o, OptionDesc::AttackPlaneswalker { .. })
+    });
+    let v = engine_core::player_view(&s.st, P1);
+    let a = &v.combat.as_ref().unwrap().attackers[0];
+    assert_eq!(
+        (a.attacker, a.defender, a.planeswalker),
+        (ogre, P1, Some(pw))
+    );
 }
 
 /// What the heuristic agent answers P0's pending decision with (it sees only P0's view).

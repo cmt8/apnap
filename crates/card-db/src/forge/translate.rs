@@ -3418,13 +3418,11 @@ impl<'a> Tx<'a> {
                 }
             }
             // An effect object: abilities that work for a while on no permanent.
+            // CR 114: "you get an emblem with …".
+            "Effect" if rd.get("Name").is_some_and(|n| n.starts_with("Emblem")) => {
+                self.emblem(&rd)?
+            }
             "Effect" => {
-                // CR 114: "you get an emblem with …" — an object in the command zone that
-                // lasts the whole game. Not built.
-                if rd.get("Name").is_some_and(|n| n.starts_with("Emblem")) {
-                    self.block("emblem (CR 114)");
-                    return None;
-                }
                 let own_target = self.target(&rd, chain, false);
                 let last = (chain.targets.len() as u8).checked_sub(1);
                 let about = match rd.get("RememberObjects") {
@@ -3545,11 +3543,16 @@ impl<'a> Tx<'a> {
                     }
                 }
                 self.in_effect = was;
-                for key in ["Triggers", "Abilities"] {
-                    if rd.get(key).is_some() {
-                        self.block(format!("Effect:{key}"));
-                        carried = None;
-                    }
+                // "Until end of turn, whenever …": delayed triggered abilities that trigger
+                // every time during their duration (CR 603.7b) — not built (D-088: the
+                // engine's delayed abilities trigger once, on few kinds of events).
+                if rd.get("Triggers").is_some() {
+                    self.block("Effect:Triggers (delayed abilities for a while, CR 603.7b)");
+                    carried = None;
+                }
+                if rd.get("Abilities").is_some() {
+                    self.block("Effect:Abilities");
+                    carried = None;
                 }
                 // (The effect's name is shown nowhere.)
                 rd.get("Name");
@@ -5192,6 +5195,47 @@ impl<'a> Tx<'a> {
         }
     }
 
+    /// CR 114.2: "You get an emblem with …" — Forge's `DB$ Effect | Name$ Emblem — … |
+    /// Duration$ Permanent` with `StaticAbilities$`, `Triggers$` and/or
+    /// `ReplacementEffects$` (docs/forge/effects.md §10: a name starting with "Emblem" makes
+    /// the effect object an emblem). Owned by whoever gets it (`EffectOwner$` is not
+    /// compiled); nothing remembered; no activated abilities.
+    fn emblem(&mut self, rd: &Rd<'a>) -> Option<Effect> {
+        if rd.get("Duration") != Some("Permanent") {
+            self.block("emblem:duration");
+            return None;
+        }
+        // (Cosmetic and AI keys.)
+        for k in ["Image", "AILogic", "Stackable"] {
+            rd.get(k);
+        }
+        let mut abilities = Vec::new();
+        let was = std::mem::replace(&mut self.in_effect, true);
+        let mut ok = Some(());
+        for (key, kind) in [
+            ("StaticAbilities", Given::Static),
+            ("Triggers", Given::Triggered),
+            ("ReplacementEffects", Given::Replacement),
+        ] {
+            let Some(names) = rd.get(key) else { continue };
+            match self.grant(kind, names, ',') {
+                Some(given) => abilities.extend(given),
+                None => ok = None,
+            }
+        }
+        self.in_effect = was;
+        if rd.get("Abilities").is_some() {
+            self.block("emblem:activated abilities");
+            return None;
+        }
+        ok?;
+        if abilities.is_empty() {
+            self.block("emblem:nothing");
+            return None;
+        }
+        Some(Effect::Emblem { abilities })
+    }
+
     /// `K:Chapter:<N>:<SVar1>,…,<SVarN>` (CR 715.2): a Saga's chapter abilities, the i-th
     /// SVar being chapter i's effect. "I, II — [effect]" names the same SVar twice: two
     /// abilities (CR 715.2c), as Forge makes them.
@@ -6536,6 +6580,8 @@ impl<'a> Tx<'a> {
             };
             match rd.get("TriggerZones") {
                 Some("Battlefield") => {}
+                // An emblem's (or effect's) ability works from the command zone (CR 114.4).
+                Some("Command") if self.in_effect && self.granting > 0 => {}
                 None if own_event => {}
                 // An ability something is given works where that thing is given it.
                 None if self.granting > 0 => {}
@@ -6819,6 +6865,11 @@ impl<'a> Tx<'a> {
             // Rules about players, and about where cards may be played from.
             "Continuous" if Self::is_player_static(&rd) => self.player_static(&rd),
             "Continuous" => {
+                // "… on the battlefield": where a permanent is anyway.
+                if rd.get("AffectedZone").is_some_and(|z| z != "Battlefield") {
+                    self.block("param:static Continuous.AffectedZone");
+                    return None;
+                }
                 let affected = match (rd.get("AffectedDefined"), rd.get("Affected")) {
                     (None, Some("Card.Self")) | (Some("Self"), None | Some("Card.Self")) => {
                         Some(Affected::This)
@@ -9889,6 +9940,11 @@ fn oracle_words_missing(oracle: &str, def: &CardDef) -> Vec<&'static str> {
         if has_word(plain, "damage") && !has_word(compiled, "damage") {
             missing.push("says damage");
         }
+        // "You get an emblem with …" (CR 114): an object of its own in the command zone, not
+        // an effect that ends — which a script could make with the same Forge `Effect`.
+        if has_word(plain, "emblem") && !has_word(compiled, "emblem") {
+            missing.push("says emblem");
+        }
         // "A copy of …, except it has haste": the exceptions of a copy effect (CR 707.9)
         // are part of what the copy is.
         let sentences = |text: &str, all: &[&str]| {
@@ -10321,6 +10377,23 @@ mod tests {
             ..CardDef::default()
         });
         assert!(t.contains("other untapped"), "{t}");
+        // "emblem"
+        let t = text(&CardDef {
+            granted: vec![AbilityDef::Triggered {
+                when: Trigger::GainsLife(Who::You),
+                intervening_if: None,
+                body: Body::Effect(Mode {
+                    targets: vec![],
+                    effect: draw.clone(),
+                    groups: vec![],
+                }),
+            }],
+            ..spell(vec![], Effect::Emblem { abilities: vec![0] }, vec![])
+        });
+        assert!(
+            has_word(&t, "emblem") && t.contains("you get an emblem with \"whenever you gain life"),
+            "{t}"
+        );
         // "you may choose new targets for the copy"
         let t = text(&spell(
             vec![TargetFilter::Spell],

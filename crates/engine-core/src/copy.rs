@@ -127,6 +127,20 @@ pub fn text_def(st: &GameState, id: ObjectId) -> &CardDef {
 /// CR 202.3b.)
 pub fn base(st: &GameState, id: ObjectId, face: u8, controller: PlayerId) -> Characteristics {
     let o = st.object(id);
+    // CR 114.3: an emblem has no characteristics other than its abilities — no name, no
+    // types, no mana cost, no color.
+    if let Some(abilities) = &o.emblem {
+        let mut c = Characteristics::printed(o.card, &card_model::CardDef::default(), o.owner);
+        c.abilities = abilities
+            .iter()
+            .map(|&index| card_model::AbilityId {
+                card: o.card,
+                index,
+                granted: true,
+            })
+            .collect();
+        return c;
+    }
     match &o.copy {
         None => Characteristics::of_face(st, id, face, controller),
         Some(c) => characteristics(&st.catalog, &at_face(&st.catalog, c, face), controller),

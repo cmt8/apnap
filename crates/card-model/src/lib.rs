@@ -2286,6 +2286,13 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         except: Vec<CopyExcept>,
     },
+    /// CR 114.2: "You get an emblem with [abilities]": the controller puts an emblem into the
+    /// command zone, owned and controlled by them, whose only characteristics are these
+    /// abilities (indices into [`CardDef::granted`] of this card; CR 114.3). Its abilities
+    /// work from the command zone (CR 114.4); in them "this" is the emblem.
+    Emblem {
+        abilities: Vec<u16>,
+    },
 }
 
 /// When a delayed triggered ability ([`Effect::DelayedTrigger`]) can trigger.
@@ -2420,6 +2427,7 @@ impl Effect {
             | Effect::Regenerate { .. }
             | Effect::ChangeTargets { .. }
             | Effect::Lasting { .. }
+            | Effect::Emblem { .. }
             | Effect::Choose(_)
             | Effect::BecomeCopy { .. }
             | Effect::SacrificeIt { .. } => {}

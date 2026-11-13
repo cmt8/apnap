@@ -327,4 +327,12 @@ pub enum Event {
         attacker: ObjectId,
         planeswalker: ObjectId,
     },
+    /// CR 114.2: `player` got the emblem `object` (in the command zone), whose abilities
+    /// are these of `card`'s granted list. Public.
+    EmblemCreated {
+        object: ObjectId,
+        player: PlayerId,
+        card: card_model::CardDefId,
+        abilities: alloc::vec::Vec<u16>,
+    },
 }

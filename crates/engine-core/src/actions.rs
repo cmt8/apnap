@@ -110,6 +110,12 @@ pub enum GameAction {
         until_end_of_turn: bool,
         while_source: bool,
     },
+    /// CR 114.2: `owner` gets an emblem with these abilities of `card`'s granted list.
+    CreateEmblem {
+        card: CardDefId,
+        abilities: Vec<u16>,
+        owner: PlayerId,
+    },
     /// CR 603.7: a delayed triggered ability is created (its `id` is assigned here).
     AddDelayed {
         delayed: crate::effects::Delayed,
@@ -407,6 +413,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                     chosen: Vec::new(),
                     copy: copy.clone(),
                     spell_copy: false,
+                    emblem: None,
                 },
             );
             let o = st.object_mut(id);
@@ -498,6 +505,53 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             });
             st.emit(Event::ContinuousEffectBegan { id, source });
             ActionResult::Done
+        }
+        GameAction::CreateEmblem {
+            card,
+            abilities,
+            owner,
+        } => {
+            // CR 114.2: put into the command zone, owned and controlled by that player.
+            let id = st.alloc_object_id();
+            let timestamp = st.alloc_timestamp();
+            let card_instance = crate::ids::CardInstanceId(st.next_card_instance);
+            st.next_card_instance += 1;
+            st.objects.insert(
+                id,
+                GameObject {
+                    id,
+                    card_instance,
+                    card,
+                    owner,
+                    controller: owner,
+                    zone: Zone::Command,
+                    timestamp,
+                    tapped: false,
+                    damage_marked: 0,
+                    summoning_sick: false,
+                    counters: Default::default(),
+                    is_token: false,
+                    deathtouch_damage: false,
+                    attached_to: None,
+                    last_controller: owner,
+                    face: 0,
+                    transforms: 0,
+                    adventure: None,
+                    cast_with: None,
+                    chosen: Vec::new(),
+                    copy: None,
+                    spell_copy: false,
+                    emblem: Some(abilities.clone()),
+                },
+            );
+            st.zones.command.push(id);
+            st.emit(Event::EmblemCreated {
+                object: id,
+                player: owner,
+                card,
+                abilities,
+            });
+            ActionResult::Moved(id)
         }
         GameAction::AddDelayed { mut delayed } => {
             delayed.id = st.next_effect_id;
@@ -1131,6 +1185,7 @@ fn copy_stack_object(
                 chosen: Vec::new(),
                 copy,
                 spell_copy: true,
+                emblem: None,
             },
         );
     }
@@ -1247,6 +1302,7 @@ fn perform_move(
             None
         },
         spell_copy: old.spell_copy && to != Zone::Battlefield,
+        emblem: None,
     };
     st.objects.insert(new_id, obj);
     if to == Zone::Stack {
