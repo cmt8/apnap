@@ -813,7 +813,28 @@ fn ability_words(
     describe::ability_text_in(def, a, &|k| cat.find(k).map(|id| cat.get(id)))
 }
 
+/// What an emblem (CR 114) is drawn as: a card named after the card that made it, with no
+/// types or cost, whose abilities are the emblem's (written on that card).
+pub fn emblem_def(cat: &CardCatalog, o: &ObjectView) -> card_model::CardDef {
+    let src = cat.get(o.card);
+    card_model::CardDef {
+        name: format!("Emblem ({})", src.name),
+        abilities: o.granted.iter().map(|a| cat.ability(*a).clone()).collect(),
+        granted: src.granted.clone(),
+        colors: Some(Vec::new()),
+        ..card_model::CardDef::default()
+    }
+}
+
 fn card_text(o: &ObjectView, cat: &CardCatalog) -> String {
+    if o.emblem {
+        let def = emblem_def(cat, o);
+        return format!(
+            "{}\n{}",
+            def.name,
+            describe::rules_text_in(&def, &|k| cat.find(k).map(|id| cat.get(id))).join("\n")
+        );
+    }
     let def = cat.get(cat.face(o.card, o.face));
     let cost = def
         .mana_cost
@@ -1062,9 +1083,13 @@ fn card(
     if group.len() > 1 {
         label.push_str(&format!("\nx{}", group.len()));
     }
+    // An emblem (CR 114) is drawn as what it is: abilities and nothing else.
+    let emblem = o.emblem.then(|| emblem_def(cx.cat, o));
     let look = CardLook {
         // The face that is up (CR 712.6).
-        def: cx.cat.get(cx.cat.face(o.card, o.face)),
+        def: emblem
+            .as_ref()
+            .unwrap_or_else(|| cx.cat.get(cx.cat.face(o.card, o.face))),
         label: &label,
         height,
         tapped: o.tapped && on_battlefield,
@@ -1837,7 +1862,13 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
     let ppp = ctx.pixels_per_point();
     // The image's own size where the screen allows (one image pixel per screen pixel).
     let mut height = (680.0 / ppp).max(500.0).min(screen.height() - 70.0);
-    let def = cx.cat.get(pv.card);
+    // An emblem (CR 114) is shown as itself: its abilities, not the card that made it.
+    let emblem = pv
+        .object
+        .and_then(|id| find_object(cx.view, id))
+        .filter(|o| o.emblem)
+        .map(|o| emblem_def(cx.cat, o));
+    let def = emblem.as_ref().unwrap_or_else(|| cx.cat.get(pv.card));
     // Players may look at both faces of a double-faced card (CR 712.4): the other face is
     // shown beside the one that is up.
     let front = cx.cat.card_of(pv.card);
@@ -1934,6 +1965,10 @@ fn zoom_popup(ctx: &egui::Context, art: &mut Art, cx: &Ctx<'_>, hover: Hover) {
                 });
             }
         }
+    }
+    // (An emblem's abilities are its text, drawn on it.)
+    if emblem.is_some() {
+        gained.clear();
     }
     let lines = usize::from(credit.is_some()) + usize::from(!now.is_empty()) + gained.len();
     let size = card

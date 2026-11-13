@@ -3965,6 +3965,10 @@ pub fn this_word(def: &CardDef) -> String {
     if def.token {
         return "token".to_string();
     }
+    // What an app draws for an emblem (CR 114.3: no types; named after its card).
+    if def.card_types.is_empty() && def.name.starts_with("Emblem") {
+        return "emblem".to_string();
+    }
     for special in ["Aura", "Equipment", "Vehicle", "Saga", "Class", "Siege"] {
         if is(special) {
             return special.to_string();

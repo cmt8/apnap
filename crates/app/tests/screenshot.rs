@@ -260,6 +260,63 @@ fn render_planeswalker() {
     shot(&mut h, dir.join("planeswalker.png"));
 }
 
+/// Emblems (D-088): two in P0's area, each drawn with its text: `emblem.png`.
+#[test]
+#[ignore = "needs a renderer; writes PNGs to $APNAP_SHOT_DIR"]
+fn render_emblem() {
+    use engine_core::testing::Scenario;
+    use engine_core::zones::Zone;
+    let Some(dir) = std::env::var_os("APNAP_SHOT_DIR").map(std::path::PathBuf::from) else {
+        panic!("set APNAP_SHOT_DIR");
+    };
+    std::fs::create_dir_all(&dir).unwrap();
+    let rally = "Name:Test Rally Emblem\nManaCost:W\nTypes:Sorcery\n\
+        A:SP$ Effect | Name$ Emblem — Test Rally | StaticAbilities$ STPump | Duration$ Permanent | SpellDescription$ Text.\n\
+        SVar:STPump:Mode$ Continuous | Affected$ Creature.YouCtrl | AddPower$ 1 | AddToughness$ 1 | Description$ Creatures you control get +1/+1.\n\
+        Oracle:Text.";
+    let spark = "Name:Test Spark Emblem\nManaCost:R\nTypes:Sorcery\n\
+        A:SP$ Effect | Name$ Emblem — Test Spark | Triggers$ TrigCast | Duration$ Permanent | SpellDescription$ Text.\n\
+        SVar:TrigCast:Mode$ SpellCast | ValidActivatingPlayer$ You | TriggerZones$ Command | Execute$ DBDmg | TriggerDescription$ Text.\n\
+        SVar:DBDmg:DB$ DealDamage | ValidTgts$ Any | NumDmg$ 2\n\
+        Oracle:Text.";
+    let (p0, p1) = (PlayerId(0), PlayerId(1));
+    let mut sc = Scenario::new(
+        engine_core::GameConfig::commander(2),
+        harness::forge_test_catalog(&[rally, spark], &[]),
+        5,
+    );
+    for p in [p0, p1] {
+        sc.library(p, "Forest", 20);
+    }
+    sc.cards(p0, Zone::Battlefield, &["Plains", "Mountain"]);
+    sc.card(p0, Zone::Battlefield, "Test Golem");
+    sc.cards(p0, Zone::Hand, &["Test Rally Emblem", "Test Spark Emblem"]);
+    sc.turn(p0, engine_core::turn::Step::PrecombatMain);
+    let mut s = harness::script::Script::new(sc.build());
+    s.cast("Test Rally Emblem").pay().pass_all();
+    s.cast("Test Spark Emblem").pay().pass_all();
+    let mut app = App::with_saves_dir(dir.join("saves"));
+    app.session = Some(app::session::Session::from_state(
+        s.st,
+        Some(p0),
+        harness::Agents::Random,
+    ));
+    app.screen = app::ui::Screen::Game;
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .with_max_steps(64)
+        .wgpu()
+        .build_ui_state(|ui, app: &mut App| app::ui::ui(app, ui), app);
+    h.run_ok();
+    // Point at the second emblem: its text, enlarged.
+    h.query_all_by_label_contains("Emblem (Test Spark Emblem)")
+        .next()
+        .expect("the emblem is drawn")
+        .hover();
+    h.run_ok();
+    shot(&mut h, dir.join("emblem.png"));
+}
+
 /// Proxies (cards drawn from their definitions, with generated rules text) of a modal card
 /// and of a card that makes tokens, next to each other: `proxies.png`.
 #[test]

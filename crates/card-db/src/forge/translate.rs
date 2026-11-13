@@ -3446,11 +3446,16 @@ impl<'a> Tx<'a> {
                     }
                 }
                 self.in_effect = was;
-                for key in ["Triggers", "Abilities"] {
-                    if rd.get(key).is_some() {
-                        self.block(format!("Effect:{key}"));
-                        carried = None;
-                    }
+                // "Until end of turn, whenever …": delayed triggered abilities that trigger
+                // every time during their duration (CR 603.7b) — not built (D-088: the
+                // engine's delayed abilities trigger once, on few kinds of events).
+                if rd.get("Triggers").is_some() {
+                    self.block("Effect:Triggers (delayed abilities for a while, CR 603.7b)");
+                    carried = None;
+                }
+                if rd.get("Abilities").is_some() {
+                    self.block("Effect:Abilities");
+                    carried = None;
                 }
                 // (The effect's name is shown nowhere.)
                 rd.get("Name");
