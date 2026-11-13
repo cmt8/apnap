@@ -490,6 +490,63 @@ pub fn entering_abilities(st: &GameState, ev: &Proposed) -> Vec<AbilityId> {
     }
 }
 
+/// CR 303.4f: an Aura entering the battlefield other than by resolving as an Aura spell,
+/// where the effect doesn't say what it enchants — a card put onto the battlefield from
+/// another zone, a permanent entering as a copy of an Aura, a token copy of one: the player
+/// it enters under, and what it could enchant (chosen, not targeted: what it can legally
+/// enchant, CR 303.4a). `None` for any other event. Both a resolution putting cards onto
+/// the battlefield (`Work::Move`) and the replacement pipeline (copies) ask this.
+pub(crate) fn aura_hosts(st: &GameState, ev: &Proposed) -> Option<(PlayerId, Vec<ObjectId>)> {
+    let unattached = match ev {
+        Proposed::Move {
+            to: Zone::Battlefield,
+            attach_to: None,
+            object,
+            copy,
+            ..
+        } => {
+            let o = st.objects.get(object)?;
+            // As a copy; or a card from anywhere but the stack (an Aura spell resolving
+            // says what it enchants: its target).
+            copy.is_some() || o.copy.is_some() || !matches!(o.zone, Zone::Battlefield | Zone::Stack)
+        }
+        Proposed::TokenEnters {
+            copy: Some(_),
+            attach_to: None,
+            ..
+        } => true,
+        _ => false,
+    };
+    if !unattached {
+        return None;
+    }
+    let filter =
+        entering_abilities(st, ev)
+            .into_iter()
+            .find_map(|a| match st.catalog.ability(a) {
+                card_model::AbilityDef::Enchant(f) => Some(f.clone()),
+                _ => None,
+            })?;
+    let chooser = entering_controller(st, ev)?;
+    let hosts = st
+        .zones
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            crate::targeting::describes(
+                st,
+                &filter,
+                crate::stack::Target::Object(id),
+                chooser,
+                None,
+                None,
+            )
+        })
+        .collect();
+    Some((chooser, hosts))
+}
+
 /// The object entering with this event — the card moved, or [`crate::copy::ENTERING_TOKEN`]
 /// for a token — and whether it enters tapped so far.
 fn entering_object(ev: &Proposed) -> Option<(ObjectId, bool)> {

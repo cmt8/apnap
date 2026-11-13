@@ -1968,7 +1968,9 @@ impl ResolveFrame {
                         checked += 1;
                     }
                     while checked < moves.len() {
-                        let Some((chooser, mut hosts)) = aura_hosts(st, &moves[checked]) else {
+                        let Some((chooser, mut hosts)) =
+                            crate::replacement::aura_hosts(st, &moves[checked])
+                        else {
                             checked += 1;
                             continue;
                         };
@@ -3293,37 +3295,6 @@ fn move_to(object: ObjectId, to: CardDest) -> Proposed {
         *tapped = enters_tapped;
     }
     mv
-}
-
-/// CR 303.4f: if `mv` puts an Aura card onto the battlefield without saying what it
-/// enchants, the player who will control it and what it could legally enchant.
-fn aura_hosts(st: &GameState, mv: &Proposed) -> Option<(PlayerId, Vec<ObjectId>)> {
-    let Proposed::Move {
-        object,
-        to: Zone::Battlefield,
-        controller,
-        attach_to: None,
-        ..
-    } = mv
-    else {
-        return None;
-    };
-    let o = st.objects.get(object)?;
-    if matches!(o.zone, Zone::Battlefield | Zone::Stack) {
-        return None;
-    }
-    let filter = st.card_def(*object).enchant()?;
-    let chooser = controller.unwrap_or(o.owner);
-    let hosts = st
-        .zones
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|&id| {
-            crate::targeting::describes(st, &filter, Target::Object(id), chooser, None, None)
-        })
-        .collect();
-    Some((chooser, hosts))
 }
 
 /// The decision kind, count, and choosable objects for one player's part of an

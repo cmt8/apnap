@@ -1382,6 +1382,10 @@ pub fn option_line(v: &PlayerView, o: &OptionDesc) -> String {
             view_name(v, *card),
             ability.index
         ),
+        OptionDesc::TapToPay { source, mana } => match mana {
+            Some(m) => format!("tap {} to pay {m:?}", view_name(v, *source)),
+            None => format!("tap {} to pay {{1}}", view_name(v, *source)),
+        },
         OptionDesc::TapForMana {
             source,
             mana,

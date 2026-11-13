@@ -531,3 +531,31 @@ fn auras_returned_from_a_graveyard_enchant_what_their_controller_chooses() {
         .expect("returned");
     assert_eq!(s.st.object(ward).attached_to, Some(spare));
 }
+
+// Text only: a bonus counted per permanent reads "+1/+0 for each artifact you control" (as
+// the cards print it), not "+the number of …/+0".
+#[test]
+fn a_counted_bonus_reads_for_each() {
+    let kiln = card(
+        "Test Kiln Smith",
+        "3 R",
+        "Creature Dwarf",
+        "PT:2/2\nS:Mode$ Continuous | AffectedDefined$ Self | AddPower$ X | Description$ Text.\nSVar:X:Count$Valid Artifact.YouCtrl",
+    );
+    let elf = card(
+        "Test Elf Bane",
+        "3 B",
+        "Creature Horror",
+        "PT:5/5\nS:Mode$ Continuous | AffectedDefined$ Self | AddPower$ -X | AddToughness$ -X | Description$ Text.\nSVar:X:Count$Valid Creature",
+    );
+    let cat = forge_test_catalog(&[&kiln, &elf], &[]);
+    let text = |name: &str| card_model::describe::rules_text(cat.get(cat.find(name).unwrap()));
+    assert_eq!(
+        text("Test Kiln Smith"),
+        ["This creature gets +1/+0 for each artifact you control."]
+    );
+    assert_eq!(
+        text("Test Elf Bane"),
+        ["This creature gets -1/-1 for each creature on the battlefield."]
+    );
+}
