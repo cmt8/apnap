@@ -1,8 +1,10 @@
 //! A game session: the engine state, the AI seats, the human's stops, and the response log.
 //! No graphics here, so everything is testable headlessly; `ui.rs` only draws it.
 //!
-//! The session owns `GameState`. AI agents are handed only their `PlayerView` (CLAUDE.md
-//! invariant 6). "Stops" are a UI concern (spec §6): the engine always asks, and the session
+//! The session is the host (D-092): it owns `GameState`. AI agents are handed only their
+//! `PlayerView` (CLAUDE.md invariant 6); the UI (`ui.rs`, `cardview.rs`, `combat.rs`) reads
+//! only the view, the catalog, the human's decision and the log — never `st` (checked by
+//! `cargo xtask check-deps`). "Stops" are a UI concern (spec §6): the engine always asks, and the session
 //! answers trivial priority decisions for the human according to the configured stops.
 
 use engine_core::ObjectId;
@@ -101,7 +103,7 @@ impl Session {
     pub fn new(setup: Setup, seed: u64, human: Option<PlayerId>, opponents: Agents) -> Self {
         let mut st = setup.game(seed);
         let me = engine_core::client::Seat::Player(human.unwrap_or(PlayerId(0)));
-        let narrator = Narrator::new(&st, me);
+        let narrator = Narrator::new(st.catalog.clone(), &engine_core::seat_view(&st, me));
         let seat = engine_core::client::EventView::new(&st, me);
         let agents = (0..setup.players())
             .map(|s| opponents.make(seed, s, &st.catalog))
@@ -131,7 +133,7 @@ impl Session {
     /// it has no setup or seed to rebuild from.
     pub fn from_state(mut st: GameState, human: Option<PlayerId>, opponents: Agents) -> Self {
         let me = engine_core::client::Seat::Player(human.unwrap_or(PlayerId(0)));
-        let narrator = Narrator::new(&st, me);
+        let narrator = Narrator::new(st.catalog.clone(), &engine_core::seat_view(&st, me));
         let seat = engine_core::client::EventView::new(&st, me);
         let agents = (0..st.num_players() as u8)
             .map(|s| opponents.make(st.seed, s, &st.catalog))
@@ -174,8 +176,15 @@ impl Session {
         self.human.unwrap_or(PlayerId(0))
     }
 
+    /// The shown seat's view: with [`Session::catalog`], [`Session::human_decision`] and the
+    /// log, all the UI reads of the game (D-092).
     pub fn view(&self) -> PlayerView {
         player_view(&self.st, self.viewer())
+    }
+
+    /// The card catalog (shared, read-only): what every client is given besides its view.
+    pub fn catalog(&self) -> std::sync::Arc<card_model::CardCatalog> {
+        self.st.catalog.clone()
     }
 
     pub fn is_over(&self) -> bool {

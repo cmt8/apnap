@@ -1,7 +1,9 @@
-//! `PlayerView`: a redacted, per-player projection of the game (spec §5). Agents (AI and UI)
-//! only ever see this, never `GameState` (CLAUDE.md invariant 6). Opponents' hands and all
-//! libraries are counts only.
+//! `PlayerView`: a redacted, per-seat projection of the game (spec §5, D-092). Agents (AI and
+//! UI) only ever see this, never `GameState` (CLAUDE.md invariant 6). For a player,
+//! opponents' hands and all libraries are counts only; a spectator sees public information
+//! only; `Seat::Everyone` (replays) sees everything.
 
+use crate::client::Seat;
 use crate::decision::{OptionDesc, PendingDecision};
 use crate::frames::Frame;
 use crate::ids::CardInstanceId;
@@ -9,7 +11,7 @@ use crate::ids::{ObjectId, PlayerId};
 use crate::layers::chars;
 use crate::mana::ManaPool;
 use crate::stack::{StackKind, Target};
-use crate::state::{CombatState, GameState};
+use crate::state::{CombatState, GameResult, GameState};
 use crate::turn::Step;
 use crate::zones::Zone;
 use alloc::string::String;
@@ -121,6 +123,13 @@ pub struct PlayerPublic {
     /// The player's emblems (CR 114, public), in the order they got them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub emblems: Vec<EmblemView>,
+    /// The cards in the player's hand — only in the view of [`Seat::Everyone`] (a replay, a
+    /// referee; D-092). A player's own hand is [`PlayerView::hand`]; nobody else sees it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hand: Option<Vec<ObjectView>>,
+    /// The player's library, bottom to top — only in the view of [`Seat::Everyone`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library: Option<Vec<ObjectView>>,
 }
 
 /// An emblem (CR 114): an object in its owner's command zone with abilities and nothing
@@ -150,9 +159,17 @@ pub struct LastingView {
     pub until_end_of_turn: bool,
 }
 
+/// What one seat may see of the game now (D-090, D-092): with the catalog, the seat's
+/// [`crate::client::EventView`] stream and the [`PendingDecision`] (in `decision`), all a
+/// client gets. Built for every kind of seat by [`seat_view`], so a player's, a spectator's
+/// and a replay's views can't drift apart.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayerView {
+    /// The player whose view this is. For [`Seat::Spectator`] and [`Seat::Everyone`], who
+    /// are no player, it is player 0 (the seat a table is drawn from): read `seat`.
     pub viewer: PlayerId,
+    /// Whose view this is: a player, a spectator, or everything (D-092).
+    pub seat: Seat,
     pub turn_number: u32,
     pub active: PlayerId,
     pub step: Step,
@@ -184,6 +201,14 @@ pub struct PlayerView {
     /// cards in that player's hidden zones.
     #[serde(default)]
     pub waiting: Option<(PlayerId, crate::decision::ChoiceKind)>,
+    /// How many decisions have been answered so far: it changes with every decision, so a
+    /// client can tell two decisions apart (and that its own came back unchanged after an
+    /// illegal response). Public: every seat is told who decides each time (`waiting`).
+    #[serde(default)]
+    pub decision_count: u64,
+    /// How the game ended, once it has (CR 104): `winner` is `None` for a draw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<GameResult>,
 }
 
 fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
@@ -260,9 +285,36 @@ fn views(st: &GameState, ids: &[ObjectId]) -> Vec<ObjectView> {
 /// the viewer may see, CR 401.5), or another player's options. With the viewer's redacted
 /// events (`client::EventView`) it is all a client needs; agents get nothing else.
 pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
+    seat_view(st, Seat::Player(viewer))
+}
+
+/// What `seat` may see of the game now (D-092), by one piece of code for every seat:
+/// - `Seat::Player(p)`: [`player_view`] — public zones, `p`'s own hand, the top card of a
+///   library `p` may see, `p`'s own decision and the hidden cards it shows them.
+/// - `Seat::Spectator`: public information only — no hand, no decision (`waiting` still
+///   says who decides and what kind of decision), a library's top card only if it is
+///   revealed to everyone (CR 401.5).
+/// - `Seat::Everyone` (a replay, a referee): everything — every hand and library
+///   (`PlayerPublic::hand`/`library`), and the pending decision whoever's it is.
+pub fn seat_view(st: &GameState, seat: Seat) -> PlayerView {
     let rules = crate::players::in_force(st);
+    let (viewer, me) = match seat {
+        Seat::Player(p) => (p, Some(p)),
+        Seat::Spectator | Seat::Everyone => (PlayerId(0), None),
+    };
+    let all = seat == Seat::Everyone;
+    let decider = st.pending.as_ref().map(|d| d.player);
+    // Whose decision (and the hidden cards it shows) this seat gets.
+    let decides = match seat {
+        Seat::Player(p) => decider.filter(|d| *d == p),
+        Seat::Spectator => None,
+        Seat::Everyone => decider,
+    };
     PlayerView {
         viewer,
+        seat,
+        decision_count: st.decision_count,
+        result: st.result.clone(),
         turn_number: st.turn.turn_number,
         active: st.turn.active,
         step: st.turn.step,
@@ -293,7 +345,7 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
                 commander_damage: p.commander_damage.iter().map(|(c, n)| (*c, *n)).collect(),
                 commander_casts: p.commander_casts.iter().map(|(c, n)| (*c, *n)).collect(),
                 library_top: crate::players::library_top(st, p.id)
-                    .filter(|_| crate::players::sees_library_top(st, viewer, p.id))
+                    .filter(|_| all || crate::players::library_top_seen_by(st, me, p.id))
                     .map(|id| object_view(st, id)),
                 rules: rules
                     .iter()
@@ -305,9 +357,14 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
                     .filter(|&id| st.object(id).owner == p.id)
                     .map(|id| emblem_view(st, id))
                     .collect(),
+                hand: all.then(|| views(st, &st.zones.hands[p.id.index()])),
+                library: all.then(|| views(st, &st.zones.libraries[p.id.index()])),
             })
             .collect(),
-        hand: views(st, &st.zones.hands[viewer.index()]),
+        hand: match me {
+            Some(p) => views(st, &st.zones.hands[p.index()]),
+            None => Vec::new(),
+        },
         battlefield: views(st, &st.zones.battlefield),
         stack: st
             .stack
@@ -373,9 +430,12 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
             })
             .collect(),
         combat: st.combat.clone(),
-        decision: st.pending.clone().filter(|d| d.player == viewer),
+        decision: st.pending.clone().filter(|d| Some(d.player) == decides),
         waiting: st.pending.as_ref().map(|d| (d.player, d.kind)),
-        revealed: views(st, &shown_to(st, viewer)),
+        revealed: match decides {
+            Some(p) => views(st, &shown_to(st, p)),
+            None => Vec::new(),
+        },
         lasting: st
             .lasting
             .iter()

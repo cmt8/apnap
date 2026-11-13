@@ -13,6 +13,15 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
+/// The log lines `seat` reads for `truth`, the engine's events since `start` (the game as it
+/// was before them). Host side (D-092): it makes what a client gets — the seat's view of
+/// `start` and its redacted events — and hands only that to the narrator.
+pub fn narrate(start: &GameState, truth: &[Event], seat: engine_core::client::Seat) -> Vec<String> {
+    let mut events = engine_core::client::EventView::new(start, seat);
+    let view = engine_core::seat_view(start, seat);
+    text::Narrator::new(start.catalog.clone(), &view).lines(&events.redact(truth))
+}
+
 /// Default cap on decisions per game (stuck-loop detection).
 pub const MAX_DECISIONS: usize = 200_000;
 

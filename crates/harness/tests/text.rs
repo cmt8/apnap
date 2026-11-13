@@ -2,7 +2,7 @@
 //! and hides the opponent's draws in the player's log.
 
 use engine_core::client::Seat;
-use harness::text::narrate;
+use harness::narrate;
 use harness::{PlayOptions, m0_game, play_random};
 
 #[test]

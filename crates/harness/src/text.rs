@@ -1,6 +1,9 @@
 //! Plain-text rendering of events, views and decisions for `watch` and `play`.
 //! This is a client: it is fed one seat's redacted events (`client::EventView`, D-090) and
-//! names only what that seat may see; a prompt is built from the `PlayerView` only.
+//! names only what that seat may see; a prompt is built from the `PlayerView` only. It never
+//! sees the `GameState` (D-092, checked by `cargo xtask check-deps`): it starts from the
+//! catalog and the seat's view. `harness::narrate` is the host-side shortcut that makes both
+//! from a state.
 //!
 //! The engine's event order is not the order a reader wants (a spell's targets come before
 //! its `SpellCast`, a non-permanent spell's `Resolved` comes after its effects, a draw is a
@@ -17,14 +20,7 @@ use engine_core::stack::Target;
 use engine_core::turn::Step;
 use engine_core::view::{ObjectView, StackView};
 use engine_core::zones::Zone;
-use engine_core::{GameState, ObjectId, OptionDesc, PendingDecision, PlayerId, PlayerView};
-
-/// The log lines `seat` reads for `truth`, the engine's events since `start` (the game as it
-/// was before them): redacted for the seat, then narrated (D-090).
-pub fn narrate(start: &GameState, truth: &[Event], seat: Seat) -> Vec<String> {
-    let mut view = engine_core::client::EventView::new(start, seat);
-    Narrator::new(start, seat).lines(&view.redact(truth))
-}
+use engine_core::{ObjectId, OptionDesc, PendingDecision, PlayerId, PlayerView};
 
 fn p(p: PlayerId) -> String {
     format!("P{}", p.0)
@@ -127,42 +123,60 @@ impl Narrator {
     /// A narrator for `seat`: it names the objects the seat may see now, and learns the
     /// rest from the seat's redacted stream (`Event::Identified`), which is all it must be
     /// fed (D-090).
-    pub fn new(st: &GameState, seat: Seat) -> Self {
-        let creature = |id: ObjectId| {
-            st.card_def(id)
-                .card_types
-                .contains(&card_model::CardType::Creature)
+    ///
+    /// What it starts from is what a client has (D-092): the catalog, and the seat's view of
+    /// the game as the events begin (`engine_core::seat_view`).
+    pub fn new(catalog: std::sync::Arc<card_model::CardCatalog>, view: &PlayerView) -> Self {
+        let mut info = std::collections::BTreeMap::new();
+        let mut learn = |o: &ObjectView| {
+            // The printed name of the card (a copy is named by what it is, not what it shows).
+            let card = o.printed.unwrap_or(o.card);
+            info.insert(
+                o.id,
+                Info {
+                    name: format!("{} ({})", catalog.get(card).name, p(o.owner)),
+                    card: Some(card),
+                    face: o.face,
+                    owner: Some(o.owner),
+                    creature: o.card_types.contains(&card_model::CardType::Creature),
+                },
+            );
         };
-        let sees = |id: ObjectId| {
-            let o = st.object(id);
-            match (seat, o.zone) {
-                (Seat::Everyone, _) => true,
-                (_, Zone::Library) => false,
-                (Seat::Player(me), Zone::Hand) => o.owner == me,
-                (_, Zone::Hand) => false,
-                _ => true,
+        for o in view
+            .battlefield
+            .iter()
+            .chain(&view.hand)
+            .chain(&view.exile)
+            .chain(&view.command)
+            .chain(&view.revealed)
+        {
+            learn(o);
+        }
+        for pl in &view.players {
+            let hidden = pl.hand.iter().chain(&pl.library).flatten();
+            for o in pl.graveyard.iter().chain(&pl.library_top).chain(hidden) {
+                learn(o);
             }
-        };
-        let info = st
-            .objects
-            .keys()
-            .filter(|&&id| sees(id))
-            .map(|&id| {
-                (
-                    id,
-                    Info {
-                        name: format!("{} ({})", st.card_def(id).name, p(st.object(id).owner)),
-                        card: Some(st.object(id).card),
-                        face: 0,
-                        owner: Some(st.object(id).owner),
-                        creature: creature(id),
-                    },
-                )
-            })
-            .collect();
+        }
+        // Spells on the stack are objects too (abilities are named by their source).
+        for s in view.stack.iter().filter(|s| s.ability_of.is_none()) {
+            info.insert(
+                s.id,
+                Info {
+                    name: format!("{} ({})", catalog.get(s.card).name, p(s.controller)),
+                    card: Some(s.card),
+                    face: s.face,
+                    owner: Some(s.controller),
+                    creature: catalog
+                        .get(s.card)
+                        .card_types
+                        .contains(&card_model::CardType::Creature),
+                },
+            );
+        }
         Narrator {
             info,
-            catalog: st.catalog.clone(),
+            catalog,
             pend: None,
             announce: None,
             stack: Vec::new(),
@@ -1529,7 +1543,11 @@ pub fn board(v: &PlayerView) -> String {
         v.step
     ));
     for pl in &v.players {
-        let me = if pl.id == v.viewer { " (you)" } else { "" };
+        let me = if v.seat == Seat::Player(pl.id) {
+            " (you)"
+        } else {
+            ""
+        };
         out.push_str(&format!(
             "  {}{me}: {} life, hand {}, library {}, graveyard {}\n",
             p(pl.id),
