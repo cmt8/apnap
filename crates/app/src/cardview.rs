@@ -178,7 +178,14 @@ pub enum Corner {
     TopRight,
     BottomLeft,
     BottomRight,
+    /// Over the art, just below the title bar, on the left / right: state that must not
+    /// hide the card's name (counters, what it attacks or blocks).
+    ArtLeft,
+    ArtRight,
 }
+
+/// The part of a card's height its title bar takes; badges in the art corners start below.
+const TITLE_BAR: f32 = 0.13;
 
 /// A small label in a corner of a card: state the printed card can't show.
 #[derive(Clone, Debug)]
@@ -487,22 +494,44 @@ fn paint_badges(
     } else {
         (0.0, rect.height() * CREDIT_STRIP)
     };
+    // Where the title bar is: along the top of an upright card, along the right edge of a
+    // card turned a quarter clockwise.
+    let (title_x, title_y) = if sideways {
+        (rect.width() * TITLE_BAR, 0.0)
+    } else {
+        (0.0, rect.height() * TITLE_BAR)
+    };
     for corner in [
         Corner::TopLeft,
         Corner::TopRight,
         Corner::BottomLeft,
         Corner::BottomRight,
+        Corner::ArtLeft,
+        Corner::ArtRight,
     ] {
         let mut offset = 0.0;
         for b in badges.iter().filter(|b| b.corner == corner) {
-            let galley = painter.layout_no_wrap(b.text.clone(), font.clone(), b.fg);
+            // A badge never gets wider than the card: a long one is shortened, visibly.
+            let room = (rect.width() - 2.0 * inset - title_x - 2.0 * pad.x).max(8.0);
+            let mut text = b.text.clone();
+            let mut galley = painter.layout_no_wrap(text.clone(), font.clone(), b.fg);
+            while galley.size().x > room && text.chars().count() > 2 {
+                text = text.trim_end_matches('…').to_string();
+                text.pop();
+                text.push('…');
+                galley = painter.layout_no_wrap(text.clone(), font.clone(), b.fg);
+            }
             let size = galley.size() + 2.0 * pad;
             let x = match corner {
-                Corner::TopLeft | Corner::BottomLeft => rect.min.x + inset + clear_left,
+                Corner::TopLeft | Corner::BottomLeft | Corner::ArtLeft => {
+                    rect.min.x + inset + clear_left
+                }
                 Corner::TopRight | Corner::BottomRight => rect.max.x - inset - size.x,
+                Corner::ArtRight => rect.max.x - inset - title_x - size.x,
             };
             let y = match corner {
                 Corner::TopLeft | Corner::TopRight => rect.min.y + inset + offset,
+                Corner::ArtLeft | Corner::ArtRight => rect.min.y + inset + title_y + offset,
                 Corner::BottomLeft | Corner::BottomRight => {
                     rect.max.y - inset - clear_bottom - size.y - offset
                 }

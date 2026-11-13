@@ -906,7 +906,7 @@ fn badges(cx: &Ctx<'_>, o: &ObjectView, place: Place) -> Vec<Badge> {
             CounterKind::Named(_) => (Color32::from_rgb(52, 52, 84), Color32::WHITE),
         };
         out.push(Badge::new(
-            Corner::TopLeft,
+            Corner::ArtLeft,
             format!("{} x{n}", counter_name(*kind)),
             bg,
             fg,
@@ -935,16 +935,16 @@ fn badges(cx: &Ctx<'_>, o: &ObjectView, place: Place) -> Vec<Badge> {
             None => format!("P{}", defender.0),
         };
         out.push(Badge::new(
-            Corner::TopRight,
+            Corner::ArtRight,
             format!("ATK {at}"),
             RED,
             Color32::WHITE,
         ));
     } else if blocking {
-        out.push(Badge::new(Corner::TopRight, "BLK", BLUE, DARK));
+        out.push(Badge::new(Corner::ArtRight, "BLK", BLUE, DARK));
     } else if creature && o.summoning_sick {
         out.push(Badge::new(
-            Corner::TopRight,
+            Corner::ArtRight,
             "sick",
             Color32::from_gray(70),
             Color32::from_gray(225),
