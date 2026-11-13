@@ -25,7 +25,8 @@ pub use check::{CheckStage, StateCheckFrame};
 pub use put_triggers::PutTriggersFrame;
 
 pub use cast::{CastFrame, CastSource, CastStage};
-pub use combat::{CombatDamageFrame, DeclareAttackersFrame, DeclareBlockersFrame};
+pub(crate) use combat::declaration_preview;
+pub use combat::{CombatDamageFrame, DeclarationAsk, DeclareAttackersFrame, DeclareBlockersFrame};
 pub use mana::{ManaFrame, ManaStage, PayGoal};
 pub use priority::PriorityFrame;
 pub use resolve::{ResolveFrame, Work};

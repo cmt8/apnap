@@ -3265,7 +3265,8 @@ model); `cargo xtask check-deps` (the source check, with its own unit test).
   every seat — `waiting`. `Seat::Everyone` (replays, a referee) gets every hand and library
   (`PlayerPublic::hand` / `library`, `None` for every other seat) and the pending decision
   whoever's it is. `PlayerView::seat` says whose view it is; `viewer` stays (player 0 for the
-  two seats that are no player) so the AI and the app keep reading it.
+  two seats that are no player) so the AI and the app keep reading it (superseded by D-093:
+  `viewer()` is derived from the seat, `None` for those two).
 - **Moved into the view** (what the reference clients read from the state): the decision
   counter (`PlayerView::decision_count`: answers so far — public, since `waiting` tells every
   seat who decides each time), the result (`PlayerView::result`), whether an object is a token
@@ -3300,6 +3301,46 @@ model); `cargo xtask check-deps` (the source check, with its own unit test).
   creature at a time; a remote client can't do that and would want the candidates and their
   options in the decision. The app's spectating still shows seat 0's player view (an app
   choice; `Seat::Spectator` is there for it).
+
+## D-093 Boundary leftovers: a preview of the whole declaration, a viewer only for players, no invented event fields (2026-11-12)
+Rules text: docs/rules-notes/508.1-509.1-declarations.md (CR 508.1–508.1d, 509.1–509.1c,
+702.111b, 734.1). Tests: `client_boundary.rs` (`whole_declarations_planned_from_the_first_question`),
+`client_view.rs` (`only_a_players_view_has_a_viewer`, `an_agent_handed_a_spectators_view_fails_loudly`,
+and the knowledge model's view checks).
+- **The declaration preview.** Declarations stay one decision per creature (spec §8.5, pitfall
+  5). `PlayerView::declaration: Vec<DeclarationAsk { creature, options }>` lists, while the
+  seat's decision is a declaration of attackers or blockers, every creature still to be asked —
+  the one asked now first — in the order they will be asked, each with the options it will be
+  offered (built by the same `attack_options`/`block_options` the frames ask with). Empty, and
+  not serialised, for every other decision and every other seat. It is on the view, not on
+  `PendingDecision`: views aren't state, so **golden state hashes, decisions and events did not
+  move at all** (no re-bless); the golden test passes unchanged.
+- **Can a later creature's options depend on an earlier answer?** In the rules, yes: restrictions
+  and requirements are checked on the declaration as a whole (508.1c–d, 509.1b–c; "can't attack
+  alone", menace). In this engine, no: each creature is offered what is legal for it alone on the
+  game as the declaration began, and nothing changes the game between the questions (answers go
+  into the frame only). The one whole-declaration check built is menace (702.111b); when it
+  fails the declaration is undone (509.1, 734.1), `Event::BlockDeclarationIllegal { player }` is
+  emitted (it already existed), and that player is asked again from their first creature with a
+  new preview — that is how a client tells a restart from a new declaration. Not built:
+  "can't attack/block alone", "attacks/blocks if able", attack/block costs. When one is, the
+  preview's promise ("these are the questions that follow; the whole is checked at the end and
+  an illegal one is asked again") must still hold or the field's docs change.
+- **Consumers:** `Session::declaration` reads the preview instead of answering "no" on a clone
+  of the game. The heuristic AI keeps its own attack and block planning (it doesn't need the
+  preview); h-vs-r on cmd-4p, 200 games, the same seeds before and after: seat 0 (heuristic)
+  won 195 of 200 both times, identical games (avg 56.5 turns, 2,436 decisions).
+- **`viewer` is derived from the seat.** The field is gone; `PlayerView::viewer()` is
+  `Some(p)` for `Seat::Player(p)` and `None` for a spectator or everyone. The heuristic agent
+  panics if handed a view that is no player's (`"the heuristic agent was handed a Spectator
+  view"`); the app's table rotation draws a non-player view from player 0's seat.
+- **No invented event fields.** The `#[serde(default)]`s D-090 part 2 put on event fields —
+  including `no_ability()` (ability 0 of card 0) and `no_card()`, and the `Default`s of
+  `TapCause` (`Effect`) and `StackExit` (`Resolved`) — are gone: every field is required (an
+  `Option` still reads a missing field as `None`). Nothing depended on them: replays store
+  responses, not events; no event log is checked in; the state stores no events.
+- The app watching with no human seat still shows seat 0's player view (unchanged, out of
+  scope); `Seat::Spectator` exists for it.
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may

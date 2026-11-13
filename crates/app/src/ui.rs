@@ -786,7 +786,7 @@ fn commander_tax(v: &PlayerView, o: &ObjectView) -> u32 {
 fn whereabouts(v: &PlayerView, id: ObjectId) -> String {
     for p in &v.players {
         if p.graveyard.iter().any(|o| o.id == id) {
-            return if p.id == v.viewer {
+            return if Some(p.id) == v.viewer() {
                 "your graveyard".to_string()
             } else {
                 format!("P{}'s graveyard", p.id.0)
@@ -798,7 +798,7 @@ fn whereabouts(v: &PlayerView, id: ObjectId) -> String {
     }
     for p in &v.players {
         if p.library_top.as_ref().is_some_and(|o| o.id == id) {
-            return if p.id == v.viewer {
+            return if Some(p.id) == v.viewer() {
                 "the top of your library".to_string()
             } else {
                 format!("the top of P{}'s library", p.id.0)
@@ -1357,7 +1357,7 @@ fn player_area(
 ) {
     let v = cx.view;
     let pl = &v.players[p.index()];
-    let me = p == v.viewer;
+    let me = Some(p) == v.viewer();
     let mut head = format!(
         "P{}{} — {} life",
         p.0,
@@ -2837,7 +2837,9 @@ fn game_frame(app: &mut App, session: &mut Session, art: &mut Art, ui: &mut egui
     egui::CentralPanel::default().show(ui, |ui| {
         app.table_rect = ui.max_rect();
         let n = view.players.len();
-        let seat = |k: usize| PlayerId(((view.viewer.index() + k) % n) as u8);
+        // A view that is no player's is drawn from player 0's seat.
+        let first = view.viewer().map_or(0, |p| p.index());
+        let seat = |k: usize| PlayerId(((first + k) % n) as u8);
         let (top, bottom) = table_layout(n);
         let grid: Vec<(Vec<PlayerId>, bool)> = [(top, true), (bottom, false)]
             .into_iter()
@@ -3076,7 +3078,7 @@ fn pile_window(
         Pile::Graveyard => v.players[p.index()].graveyard.iter().rev().collect(),
         Pile::Exile => v.exile.iter().filter(|o| o.owner == p).rev().collect(),
     };
-    let who = if p == v.viewer {
+    let who = if Some(p) == v.viewer() {
         "Your".to_string()
     } else {
         format!("P{}'s", p.0)

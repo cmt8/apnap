@@ -185,6 +185,90 @@ pub(crate) fn can_block(
     true
 }
 
+/// CR 508.1b: what `creature` may attack — each opponent of `ap` in seat order, then the
+/// planeswalkers that player controls, in timestamp order (no battles yet). Judged on the
+/// game alone, never on the other attackers chosen (D-093).
+fn attack_options(st: &GameState, ap: PlayerId, creature: ObjectId) -> Vec<OptionDesc> {
+    let mut options = Vec::new();
+    for defender in st.opponents(ap) {
+        options.push(OptionDesc::Attack {
+            attacker: creature,
+            defender,
+        });
+        for &pw in &st.zones.battlefield {
+            let c = chars(st, pw);
+            if c.is(CardType::Planeswalker) && c.controller == defender {
+                options.push(OptionDesc::AttackPlaneswalker {
+                    attacker: creature,
+                    planeswalker: pw,
+                });
+            }
+        }
+    }
+    options
+}
+
+/// CR 509.1a: the creatures attacking `defender` that `blocker` may block. CR 509.1b /
+/// 702.9b: evasion (flying, …) is judged here; menace, which counts blockers, on the whole
+/// declaration. Never depends on the other blocks chosen (D-093).
+fn block_options(st: &GameState, defender: PlayerId, blocker: ObjectId) -> Vec<OptionDesc> {
+    st.combat
+        .as_ref()
+        .expect("combat")
+        .attackers
+        .iter()
+        .filter(|a| a.defender == defender)
+        .filter(|a| can_block(st, blocker, a.attacker, defender))
+        .map(|a| OptionDesc::Block {
+            blocker,
+            attacker: a.attacker,
+        })
+        .collect()
+}
+
+/// One creature still to be asked about in a declaration of attackers or blockers, with the
+/// options it will be offered (D-093, `PlayerView::declaration`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclarationAsk {
+    pub creature: ObjectId,
+    pub options: Vec<OptionDesc>,
+}
+
+/// The rest of the declaration in progress, if the top frame is one: every creature still
+/// to be asked about, the one asked now first, in the order they will be asked, each with its
+/// options (D-093). Nothing changes the game between these questions, so the options are the
+/// ones that will be offered (CR 508.1, 509.1: one action, checked as a whole at its end).
+pub(crate) fn declaration_preview(st: &GameState) -> Vec<DeclarationAsk> {
+    match st.frames.last() {
+        Some(Frame::DeclareAttackers(f)) => {
+            let ap = st.turn.active;
+            f.candidates
+                .iter()
+                .skip(f.next)
+                .map(|&c| DeclarationAsk {
+                    creature: c,
+                    options: attack_options(st, ap, c),
+                })
+                .collect()
+        }
+        Some(Frame::DeclareBlockers(f)) => {
+            let Some(&defender) = f.defenders.get(f.defender_idx) else {
+                return Vec::new();
+            };
+            f.candidates
+                .iter()
+                .skip(f.next)
+                .map(|&c| DeclarationAsk {
+                    creature: c,
+                    options: block_options(st, defender, c),
+                })
+                .filter(|a| !a.options.is_empty())
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeclareAttackersFrame {
     pub candidates: Vec<ObjectId>,
@@ -240,25 +324,7 @@ impl DeclareAttackersFrame {
             self.next += 1;
         }
         if let Some(&creature) = self.candidates.get(self.next) {
-            // CR 508.1b: which player or planeswalker each attacker attacks — each opponent
-            // in seat order, then the planeswalkers that player controls, in timestamp
-            // order (no battles yet).
-            let mut options = Vec::new();
-            for defender in st.opponents(ap) {
-                options.push(OptionDesc::Attack {
-                    attacker: creature,
-                    defender,
-                });
-                for &pw in &st.zones.battlefield {
-                    let c = chars(st, pw);
-                    if c.is(CardType::Planeswalker) && c.controller == defender {
-                        options.push(OptionDesc::AttackPlaneswalker {
-                            attacker: creature,
-                            planeswalker: pw,
-                        });
-                    }
-                }
-            }
+            let options = attack_options(st, ap, creature);
             return Flow::ask(
                 Frame::DeclareAttackers(self),
                 ap,
@@ -357,21 +423,7 @@ impl DeclareBlockersFrame {
         }
         while let Some(&defender) = self.defenders.get(self.defender_idx) {
             if let Some(&blocker) = self.candidates.get(self.next) {
-                // CR 509.1a: block one creature attacking that player. CR 509.1b / 702.9b:
-                // a creature with flying can't be blocked except by flying and/or reach.
-                let options: Vec<OptionDesc> = st
-                    .combat
-                    .as_ref()
-                    .expect("combat")
-                    .attackers
-                    .iter()
-                    .filter(|a| a.defender == defender)
-                    .filter(|a| can_block(st, blocker, a.attacker, defender))
-                    .map(|a| OptionDesc::Block {
-                        blocker,
-                        attacker: a.attacker,
-                    })
-                    .collect();
+                let options = block_options(st, defender, blocker);
                 if options.is_empty() {
                     self.next += 1;
                     continue;

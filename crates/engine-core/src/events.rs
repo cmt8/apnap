@@ -20,7 +20,7 @@ pub enum DamageTarget {
 }
 
 /// Why a permanent became tapped or untapped (D-090 part 2).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TapCause {
     /// Paying a cost ({T}, "tap an untapped creature you control", crew).
     Cost,
@@ -29,17 +29,15 @@ pub enum TapCause {
     /// Declared as an attacker (CR 508.1f).
     Attack,
     /// A resolving spell or ability ("tap target creature", "untap all lands").
-    #[default]
     Effect,
     /// The untap step (CR 502.3).
     UntapStep,
 }
 
 /// Why an ability left the stack (D-090 part 2).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StackExit {
     /// It resolved.
-    #[default]
     Resolved,
     /// It didn't: all its targets were illegal (CR 608.2b, `Fizzled`).
     NoLegalTargets,
@@ -52,14 +50,6 @@ pub enum StackExit {
     Abandoned,
     /// Its intervening "if" was false as it would resolve (CR 603.4): it did nothing.
     ConditionFalse,
-}
-
-fn no_ability() -> card_model::AbilityId {
-    card_model::AbilityId::printed(card_model::CardDefId(0), 0)
-}
-
-fn no_card() -> card_model::CardDefId {
-    card_model::CardDefId(0)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,12 +95,9 @@ pub enum Event {
         /// As it last existed where it was (CR 608.2h): a creature (it "dies" if it went
         /// from the battlefield to a graveyard, CR 700.4), and the face it had up there
         /// (CR 712.6). D-090 part 2.
-        #[serde(default)]
         creature: bool,
-        #[serde(default)]
         face: u8,
         /// Where in the library it went (top or bottom), if it went to one (CR 401.4).
-        #[serde(default)]
         position: Option<crate::zones::LibraryPosition>,
     },
     Drew {
@@ -131,9 +118,7 @@ pub enum Event {
         player: PlayerId,
         ability: ObjectId,
         source: ObjectId,
-        #[serde(default = "no_ability")]
         text: card_model::AbilityId,
-        #[serde(default)]
         triggered: bool,
     },
     /// CR 601.2b / 700.2a
@@ -163,7 +148,6 @@ pub enum Event {
     /// The ability `ability` left the stack without resolving, or after resolving: why.
     AbilityRemoved {
         ability: ObjectId,
-        #[serde(default)]
         reason: StackExit,
     },
     /// CR 701.21a
@@ -208,17 +192,11 @@ pub enum Event {
     ContinuousEffectBegan {
         id: u32,
         source: ObjectId,
-        #[serde(default = "no_card")]
         card: card_model::CardDefId,
-        #[serde(default)]
         effects: Vec<card_model::ContinuousEffect>,
-        #[serde(default)]
         affected: Vec<ObjectId>,
-        #[serde(default)]
         abilities: Vec<card_model::AbilityId>,
-        #[serde(default)]
         about: Option<ObjectId>,
-        #[serde(default)]
         until_end_of_turn: bool,
     },
     /// CR 615: `amount` damage that would have been dealt to `target` was prevented.
@@ -260,11 +238,8 @@ pub enum Event {
     SpellCast {
         player: PlayerId,
         spell: ObjectId,
-        #[serde(default)]
         face: u8,
-        #[serde(default)]
         alt: Option<card_model::AbilityId>,
-        #[serde(default)]
         tax: u32,
     },
     Resolved {
@@ -272,12 +247,10 @@ pub enum Event {
     },
     Tapped {
         object: ObjectId,
-        #[serde(default)]
         cause: TapCause,
     },
     Untapped {
         object: ObjectId,
-        #[serde(default)]
         cause: TapCause,
     },
     /// One mana added to `player`'s pool, by `source` (a mana ability's permanent, or the
@@ -286,16 +259,13 @@ pub enum Event {
     ManaAdded {
         player: PlayerId,
         mana: ManaType,
-        #[serde(default)]
         source: Option<ObjectId>,
-        #[serde(default)]
         restricted: bool,
     },
     /// `player` paid `amount` mana from their pool: these (one entry per mana).
     ManaPaid {
         player: PlayerId,
         amount: u32,
-        #[serde(default)]
         mana: Vec<ManaType>,
     },
     ManaEmptied {
@@ -457,7 +427,6 @@ pub enum Event {
         from: crate::zones::Zone,
         to: crate::zones::Zone,
         /// Where in the library it went, if it went to one: public (CR 401.4).
-        #[serde(default)]
         position: Option<crate::zones::LibraryPosition>,
     },
     /// CR 702.21a: `player` chose to pay (`paid`) or not to pay the cost that keeps the

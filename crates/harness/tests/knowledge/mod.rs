@@ -205,7 +205,17 @@ impl Model {
         assert_eq!(v.decision.is_some(), gets, "{seat:?}");
         if !gets {
             assert!(v.revealed.is_empty(), "{seat:?} is shown nothing");
+            assert!(
+                v.declaration.is_empty(),
+                "{seat:?} sees no one's plan of attack"
+            );
         }
+        // The preview names only objects every seat may know (creatures on the battlefield,
+        // players, planeswalkers).
+        for a in &v.declaration {
+            assert!(self.knows(a.creature));
+        }
+        assert_eq!(v.viewer().is_some(), matches!(seat, Seat::Player(_)));
         assert_eq!(v.waiting, st.pending.as_ref().map(|d| (d.player, d.kind)));
         assert_eq!(v.decision_count, st.decision_count);
         assert_eq!(v.result, st.result);

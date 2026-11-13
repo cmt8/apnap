@@ -215,8 +215,8 @@ impl Session {
     }
 
     /// The declaration the human is in the middle of being asked for, from the creature
-    /// currently asked about onwards. Found by answering "no" for each creature on a copy
-    /// of the game; nothing here is hidden from the human (they are their own creatures).
+    /// currently asked about onwards: the view's preview of it (D-093), as any client has
+    /// it — no copy of the game.
     pub fn declaration(&self) -> Option<Declaration> {
         let kind = self.human_decision()?.kind;
         if !matches!(
@@ -225,30 +225,15 @@ impl Session {
         ) {
             return None;
         }
-        let mut sim = self.st.clone();
-        let mut candidates = Vec::new();
-        while let Some(d) = sim.pending.clone() {
-            if Some(d.player) != self.human || d.kind != kind || candidates.len() >= 1_000 {
-                break;
-            }
-            let Some(creature) = subject(&d) else {
-                break;
-            };
-            // An illegal block declaration starts over (CR 734): the same creature again.
-            if candidates
-                .iter()
-                .any(|c: &Candidate| c.creature == creature)
-            {
-                break;
-            }
-            candidates.push(Candidate {
-                creature,
-                options: d.options,
-            });
-            if engine_core::step(&mut sim, Response::Pick(Vec::new())).is_err() {
-                break;
-            }
-        }
+        let candidates = self
+            .view()
+            .declaration
+            .into_iter()
+            .map(|a| Candidate {
+                creature: a.creature,
+                options: a.options,
+            })
+            .collect();
         Some(Declaration { kind, candidates })
     }
 
