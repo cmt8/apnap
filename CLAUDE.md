@@ -156,6 +156,13 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
   options are each opponent, then that player's planeswalkers
   (`OptionDesc::AttackPlaneswalker`, `AttackInfo::planeswalker`; `defender` stays the
   player). Tests: `forge_planeswalkers.rs`, `crates/app/tests/planeswalkers.rs`.
+- Tapping other permanents to pay (D-087): "tap an untapped creature you control" is
+  `Cost::tap_others`, chosen in `CastStage::ChooseTap`; Convoke/Improvise are units of mana
+  in the payment planner (`OptionDesc::TapToPay`), never a path around it; Crew is
+  `Cost::crew` and makes the Vehicle an artifact creature in layer 4 until end of turn. The
+  planner keeps offers exact: a creature tapped for mana can't also be the one tapped as
+  the cost. Gaining control (`GainControl`) is a layer-2 effect on D-029's control layer.
+  Tests: `forge_tap_costs.rs`.
 - The text of a compiled card (`card_model::describe`) is written like a printed card:
   number words, "this creature/land/Equipment", "Then" between instructions, a predefined
   token's reminder text on first mention. The Oracle guard (`oracle_words_missing`) reads
@@ -247,10 +254,10 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-086): 11,803 of 34,463 scripts compile (34.2%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-086: 98% of
+Status (D-087): 12,129 of 34,463 scripts compile (35.2%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-087: 98% of
 the 100 most played Commander cards compile (missing: Path of Ancestry, The One Ring),
-64% of the top 1,000, 38% of the top 5,000
+65% of the top 1,000, 39% of the top 5,000
 (`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
 the rest. Feature tests live in `crates/harness/tests/forge_features.rs` and, one file per
 feature area since D-066, `forge_<area>.rs` next to it: invented cards written
@@ -276,7 +283,7 @@ presence, `Defined$ Targeted` means every target of the chain, a trigger that ru
 Not built yet: the full generated-text-vs-Oracle round trip (a word-level guard exists),
 flip, meld, prepare and specialize cards, Fuse, Aftermath, Rooms, day/night, disturb,
 craft, "enters/cast transformed" and "when this transforms" triggers (modal double-faced,
-transforming, Adventure, Omen and split cards are built, D-071), searching another player's library, "X target creatures", changing a target to a fixed or restricted one (CR 115.7b/c), delve/convoke/improvise, flashback
+transforming, Adventure, Omen and split cards are built, D-071), searching another player's library, "X target creatures", changing a target to a fixed or restricted one (CR 115.7b/c), delve, tap costs inside mana abilities, gaining control for other durations than "until end of turn" or for good, flashback
 given to other cards, draw and mana replacement effects, effects that change life
 loss, memory that outlives a resolution (effect objects remembering
 cards, linked abilities per CR 607, delayed triggers that keep remembered cards past their chain), keyword, shield, stun and player counters (other named counters are built, D-084), "as this enters, choose …" other than a creature type or a color (D-076; how a permanent enters is otherwise built, D-067:
