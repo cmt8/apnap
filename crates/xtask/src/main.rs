@@ -137,22 +137,6 @@ fn boundary_violations(text: &str) -> Vec<(usize, &'static str)> {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::boundary_violations;
-
-    #[test]
-    fn the_boundary_check_finds_state_reads_and_nothing_else() {
-        let src = "let t = &session.st.turn;\nfn f(st: &GameState) {}\n\
-            let v = player_view(&x, p);\nlet a = s.stops; let b = v.step; // session.st\n\
-            let c = MyGameStateish; let d = first.st_x;\n#[cfg(test)]\nlet e = s.st;";
-        assert_eq!(
-            boundary_violations(src),
-            [(1, ".st"), (2, "GameState"), (3, "player_view")]
-        );
-    }
-}
-
 fn main() -> ExitCode {
     let cmd = std::env::args().nth(1).unwrap_or_default();
     match cmd.as_str() {
@@ -267,5 +251,21 @@ fn check_deps() -> ExitCode {
             eprintln!("check-deps: {e}");
         }
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::boundary_violations;
+
+    #[test]
+    fn the_boundary_check_finds_state_reads_and_nothing_else() {
+        let src = "let t = &session.st.turn;\nfn f(st: &GameState) {}\n\
+            let v = player_view(&x, p);\nlet a = s.stops; let b = v.step; // session.st\n\
+            let c = MyGameStateish; let d = first.st_x;\n#[cfg(test)]\nlet e = s.st;";
+        assert_eq!(
+            boundary_violations(src),
+            [(1, ".st"), (2, "GameState"), (3, "player_view")]
+        );
     }
 }
