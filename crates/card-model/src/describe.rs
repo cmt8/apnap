@@ -1511,7 +1511,7 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 }
             }
             if *shuffle {
-                t.push_str(&format!(", then shuffle"));
+                t.push_str(", then shuffle");
             }
             t
         }
