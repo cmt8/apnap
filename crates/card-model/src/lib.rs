@@ -334,6 +334,10 @@ pub struct CardDef {
     /// Such an entry is never a card of its own (no deck holds it, `find` skips it).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub face_of: Option<CardDefId>,
+    /// CR 306.5a: a planeswalker card's printed loyalty. (On the battlefield a planeswalker's
+    /// loyalty is the number of loyalty counters on it, CR 306.5c.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loyalty: Option<u32>,
 }
 
 /// How the faces of a card relate.
@@ -1380,6 +1384,8 @@ pub struct CounterName {
 impl CounterKind {
     /// Lore counters, which Sagas use to track their progress (CR 715.3).
     pub const LORE: CounterKind = CounterKind::Named(CounterName::constant("lore"));
+    /// Loyalty counters: a planeswalker's loyalty on the battlefield (CR 306.5c).
+    pub const LOYALTY: CounterKind = CounterKind::Named(CounterName::constant("loyalty"));
 }
 
 impl CounterName {
@@ -1608,6 +1614,10 @@ pub struct Cost {
     /// modify putting counters apply).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub add_counters: Option<(CounterKind, u32)>,
+    /// "Remove X [kind] counters from this permanent", X announced as the ability is
+    /// activated (CR 107.3a; a planeswalker's "−X", CR 606.6: no more than it has).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remove_x_counters: Option<CounterKind>,
 }
 
 impl Cost {
@@ -1635,6 +1645,7 @@ impl Cost {
             life_x: self.life_x || other.life_x,
             remove_counters: one(&self.remove_counters, &other.remove_counters)?,
             add_counters: one(&self.add_counters, &other.add_counters)?,
+            remove_x_counters: one(&self.remove_x_counters, &other.remove_x_counters)?,
         })
     }
 }
@@ -1703,6 +1714,10 @@ pub enum Timing {
     Instant,
     /// "Activate only as a sorcery."
     Sorcery,
+    /// A loyalty ability (CR 606.2: a loyalty symbol in its cost): only as a sorcery, and
+    /// only if no loyalty ability of the same permanent has been activated this turn
+    /// (CR 606.3).
+    Loyalty,
 }
 
 /// The mana a mana ability adds (one mana in M1).

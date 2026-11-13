@@ -735,6 +735,17 @@ impl Narrator {
                 let l = format!("  {} blocks {}", self.name(*blocker), self.name(*attacker));
                 self.emit(l, out);
             }
+            Event::AttacksPlaneswalker {
+                attacker,
+                planeswalker,
+            } => {
+                let l = format!(
+                    "    ({} attacks {})",
+                    self.name(*attacker),
+                    self.name(*planeswalker)
+                );
+                self.emit(l, out);
+            }
             Event::DamageDealt {
                 source,
                 target,
@@ -1391,6 +1402,14 @@ pub fn option_line(v: &PlayerView, o: &OptionDesc) -> String {
         OptionDesc::Attack { attacker, defender } => {
             format!("attack {} with {}", p(*defender), view_name(v, *attacker))
         }
+        OptionDesc::AttackPlaneswalker {
+            attacker,
+            planeswalker,
+        } => format!(
+            "attack {} with {}",
+            view_name(v, *planeswalker),
+            view_name(v, *attacker)
+        ),
         OptionDesc::Block { blocker, attacker } => {
             format!(
                 "block {} with {}",

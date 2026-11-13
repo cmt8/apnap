@@ -41,7 +41,9 @@ impl Default for Stops {
 /// The creature a per-creature decision is about (the attacker or blocker being asked).
 pub fn subject(d: &PendingDecision) -> Option<ObjectId> {
     d.options.iter().find_map(|o| match o {
-        OptionDesc::Attack { attacker, .. } => Some(*attacker),
+        OptionDesc::Attack { attacker, .. } | OptionDesc::AttackPlaneswalker { attacker, .. } => {
+            Some(*attacker)
+        }
         OptionDesc::Block { blocker, .. } => Some(*blocker),
         _ => None,
     })

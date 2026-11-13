@@ -321,4 +321,10 @@ pub enum Event {
         original: ObjectId,
         controller: PlayerId,
     },
+    /// CR 508.1b: the attacker just declared (`AttackerDeclared`, with the planeswalker's
+    /// controller as the defending player) attacks this planeswalker.
+    AttacksPlaneswalker {
+        attacker: ObjectId,
+        planeswalker: ObjectId,
+    },
 }

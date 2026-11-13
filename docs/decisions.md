@@ -2943,6 +2943,69 @@ Rules text: docs/rules-notes/707-spell-copies.md. Tests: `crates/harness/tests/f
   you activate" triggers (Rings of Brighthearth, Illusionist's Bracers).
 - Golden: see the commit.
 
+## D-086 Planeswalkers: loyalty, loyalty abilities, attacking them (2026-11-12)
+Rules text: docs/rules-notes/306-planeswalkers.md (306, 606, 115.4, 120.3c, 704.5i, 506.3–506.4,
+508.1b, 509.1a, 510.1b, 702.19, 903.3). Tests: `crates/harness/tests/forge_planeswalkers.rs`,
+`crates/app/tests/planeswalkers.rs`, `app::combat` unit tests.
+- **Loyalty** is the `loyalty` counter kind (`CounterKind::LOYALTY`, no longer blocked). A
+  planeswalker card has `CardDef::loyalty` (306.5a) and its intrinsic "enters with N loyalty
+  counters" compiled onto it as the ordinary `ThisEnters` replacement (306.5b), so doublers
+  and copies treat it like Sagas' lore counter; card-db requires it of every planeswalker.
+  `Loyalty:X` is blocked (`line:Loyalty not a number`).
+- **Loyalty abilities:** `Timing::Loyalty` (new, last) on an activated ability whose cost is
+  exactly one loyalty symbol: `add_counters` (+N; "[0]" is zero counters, also written
+  `SubCounter<0/…>`), `remove_counters` (−N) or the new `Cost::remove_x_counters` (−X: X
+  announced, at most the counters it has, 606.6). Offered only as a sorcery and only if no
+  loyalty ability of that permanent was activated this turn (606.3:
+  `GameState::loyalty_activated`, cleared as each turn begins; recorded as the cost is
+  paid). Putting the counters is a replaceable event (606.4: doublers make "+1" put two).
+  Text: "[+1]: …", "[−2]: …", "[0]: …", "[−X]: …". `Ultimate$` is read and ignored (Forge:
+  AI/achievement tag). A loyalty ability that adds mana is blocked (`loyalty:adds mana (not
+  a mana ability, CR 605.1a)`).
+- **Damage** to a planeswalker removes that many loyalty counters (120.3c); a creature
+  planeswalker also has it marked (120.3e). **704.5i** is a state-based action. **"Any
+  target"** includes planeswalkers (115.4).
+- **Attacking planeswalkers:** the declare-attackers option list is, per opponent in seat
+  order, that player (`OptionDesc::Attack`) then the planeswalkers they control in timestamp
+  order (`OptionDesc::AttackPlaneswalker`, new, last). `AttackInfo::planeswalker` (new) is
+  the planeswalker attacked; `defender` stays the defending player (508.5), so blocks
+  (509.1a) are unchanged. `Event::AttacksPlaneswalker` (new, last) follows the attacker's
+  `AttackerDeclared`. Unblocked, the attacker deals its damage to the planeswalker while it is
+  still in combat (on the battlefield, a planeswalker, controlled by the defending player:
+  506.4), else to nothing (506.4c, 510.1b); trample's excess goes to the planeswalker, never
+  its controller (702.19b, 702.19f). Trample over planeswalkers isn't built.
+- **Golden:** event logs unchanged (no planeswalker in the golden setups, so no option list
+  changed); state hashes moved (the new fields), re-blessed.
+- **Also fixed:** `PutCounter` of any kind (D-084 had compiled counters of any kind
+  everywhere but the "put N [kind] counters on …" effect); an activated ability without a
+  target that adds mana and isn't a loyalty ability is a mana ability (CR 605.1a), which
+  card-db now rejects (it took Empowered Autogenerator, which had just compiled as a
+  stack ability).
+- **AI (heuristic):** attacks an opponent's planeswalker when its attacker can take much of
+  its loyalty (above all kill it) and the player isn't the better target; uses a "+"/"0"
+  loyalty ability each turn unless it only hurts, a "−" one when it kills or removes
+  something and leaves the planeswalker alive (or is worth losing it); "−X" keeps one
+  counter. Targets of spells and abilities are now judged by card type (a planeswalker is
+  no "target creature"). PlayerView only, no budgets changed.
+- **App:** loyalty is the named-counter badge ("loyalty x4"); loyalty abilities are offered
+  by clicking the planeswalker, like other activated abilities ("Test Sage Walker — [+1]: …");
+  in the attack plan an attackable planeswalker is outlined, a click on it aims new
+  attackers at it (again, or a click on a player, aims them back), a creature can be
+  dropped onto it; arrows and the "ATK <name>" badge show it. Attacks on players work as
+  before. The glyph test now also covers the app's own string and character literals
+  (the "ⓘ" rules marker the fonts can't draw is "(i)").
+- **Not built:** emblems (CR 114: `emblem (CR 114)` blocks 99 scripts — 95 planeswalkers,
+  21 of them by it alone), loyalty abilities that add mana (21 planeswalkers), "can be your
+  commander" (903.3a), trample over planeswalkers, battles. Most of Forge's 354 planeswalker
+  scripts still wait on other features (`api:Cleanup`, `line:Text`, "until your next turn"
+  durations, gain control, …).
+- **Coverage:** 11,689 → 11,803 scripts (+114 against main, every one read against its
+  Oracle text: 25 planeswalkers, Oath of Gideon, two "remove X counters" costs (Cruel
+  Sadist, The Astonishing Ant-Man), and 86 cards that put counters of named kinds on things
+  — Thallids, Trigons, Quests and Expeditions, Smokestack, Black Market, Assemble the
+  Legion …). EDHREC top 1,000: 638 → 640; top 5,000:
+  1,899 → 1,915; top 10,000: 3,263 → 3,303.
+
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
    go to the command zone instead (a replacement effect that "may apply more than once…

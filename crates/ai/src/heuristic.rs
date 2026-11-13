@@ -263,10 +263,25 @@ fn value(o: &ObjectView) -> i64 {
     let kw: i64 = o.keywords.iter().map(|k| kw_value(*k)).sum();
     let base = if o.card_types.contains(&CardType::Creature) {
         3 * p + 2 * t + kw
+    } else if o.card_types.contains(&CardType::Planeswalker) {
+        // A planeswalker is worth about a card's mana plus what its loyalty can still do.
+        i64::from(o.mana_value) * 3 + 2 * loyalty(o)
     } else {
         i64::from(o.mana_value) * 2
     };
     base + i64::from(o.mana_value) + if o.is_commander { 6 } else { 0 }
+}
+
+/// A planeswalker's loyalty (CR 306.5c): its loyalty counters.
+fn loyalty(o: &ObjectView) -> i64 {
+    o.counters
+        .iter()
+        .find(|(k, _)| *k == card_model::CounterKind::LOYALTY)
+        .map_or(0, |(_, n)| i64::from(*n))
+}
+
+fn is_planeswalker(o: &ObjectView) -> bool {
+    o.card_types.contains(&CardType::Planeswalker)
 }
 
 fn has(o: &ObjectView, k: Keyword) -> bool {
@@ -277,8 +292,12 @@ fn power(o: &ObjectView) -> i64 {
     i64::from(o.power.unwrap_or(0)).max(0)
 }
 
-/// Damage still needed to destroy `o` (CR 704.5g).
+/// Damage still needed to destroy `o` (CR 704.5g); for a planeswalker that isn't a creature,
+/// its loyalty (CR 120.3c, 704.5i).
 fn remaining_toughness(o: &ObjectView) -> i64 {
+    if is_planeswalker(o) && !o.card_types.contains(&CardType::Creature) {
+        return loyalty(o);
+    }
     (i64::from(o.toughness.unwrap_or(0)) - i64::from(o.damage_marked)).max(0)
 }
 
@@ -293,8 +312,9 @@ pub struct HeuristicAgent {
     /// the declaration was illegal (a planned block wasn't possible, leaving a creature
     /// with menace blocked by one) and must be made anew.
     block_asked: Vec<ObjectId>,
-    /// The plan for the current combat's attacks: attacker → defender.
-    attack_plan: BTreeMap<ObjectId, PlayerId>,
+    /// The plan for the current combat's attacks: attacker → defending player, and the
+    /// planeswalker of theirs it attacks, if it attacks one.
+    attack_plan: BTreeMap<ObjectId, (PlayerId, Option<ObjectId>)>,
     attack_key: Option<u32>,
     /// The modes chosen for the spell currently being cast (targets come next).
     last_modes: Vec<u8>,
@@ -555,6 +575,37 @@ impl HeuristicAgent {
                         |t| matches!(t, Target::Object(id) if v.stack.iter().any(|s| s.id == *id)),
                     );
                 }
+                // Roughly what the slot can target, by card type (a planeswalker is no
+                // "target creature").
+                let types_of = |t: &Target| -> Option<Vec<CardType>> {
+                    match t {
+                        Target::Object(id) => v
+                            .battlefield
+                            .iter()
+                            .find(|o| o.id == *id)
+                            .map(|o| o.card_types.clone()),
+                        Target::Player(_) => None,
+                    }
+                };
+                match &m.targets[0] {
+                    card_model::TargetFilter::Creature => cands
+                        .retain(|t| types_of(t).is_some_and(|ts| ts.contains(&CardType::Creature))),
+                    card_model::TargetFilter::AnyTarget => cands.retain(|t| {
+                        types_of(t).is_none_or(|ts| {
+                            ts.contains(&CardType::Creature) || ts.contains(&CardType::Planeswalker)
+                        })
+                    }),
+                    card_model::TargetFilter::Permanent(sels)
+                        if sels.iter().all(|s| !s.types.is_empty()) =>
+                    {
+                        cands.retain(|t| {
+                            types_of(t).is_some_and(|ts| {
+                                sels.iter().any(|s| s.types.iter().any(|x| ts.contains(x)))
+                            })
+                        })
+                    }
+                    _ => {}
+                }
                 cands
                     .iter()
                     .map(|t| Self::target_score(v, t, pol, dmg))
@@ -763,9 +814,36 @@ impl HeuristicAgent {
                     if affordable.is_some_and(|n| mana > n) {
                         continue;
                     }
-                    match Self::find(v, *source) {
-                        Some(ov) => self.spell_score(v, ov.card, Some(*ability)) - 5,
-                        None => continue,
+                    let Some(ov) = Self::find(v, *source) else {
+                        continue;
+                    };
+                    let base = self.spell_score(v, ov.card, Some(*ability));
+                    match self.catalog.ability(*ability) {
+                        // A loyalty ability (CR 606): one a turn — a "+" or "0" one unless
+                        // it would only hurt; a "−" one when it does something worth it
+                        // (kills or removes something) and leaves the planeswalker alive,
+                        // or is worth even losing it.
+                        AbilityDef::Activated {
+                            timing: card_model::Timing::Loyalty,
+                            cost,
+                            ..
+                        } => {
+                            if cost.add_counters.is_some() {
+                                if base < -50 {
+                                    continue;
+                                }
+                                base.max(0) + 20
+                            } else {
+                                let spent = cost.remove_counters.map_or(1, |(_, n)| i64::from(n));
+                                let survives = spent < loyalty(ov);
+                                if base >= 25 && (survives || base >= 80) {
+                                    base + 25
+                                } else {
+                                    continue;
+                                }
+                            }
+                        }
+                        _ => base - 5,
                     }
                 }
                 _ => continue,
@@ -809,7 +887,7 @@ impl HeuristicAgent {
         let keep_home = Self::life(v, me) <= opp_power;
         let mut kept = false;
         for a in mine {
-            let mut best: Option<(i64, PlayerId)> = None;
+            let mut best: Option<(i64, (PlayerId, Option<ObjectId>))> = None;
             for &q in &opps {
                 let blockers: Vec<&ObjectView> =
                     Self::creatures_of(v, q).filter(|b| !b.tapped).collect();
@@ -834,7 +912,25 @@ impl HeuristicAgent {
                     score += 10_000;
                 }
                 if best.is_none_or(|(b, _)| score > b) {
-                    best = Some((score, q));
+                    best = Some((score, (q, None)));
+                }
+                // CR 506.3: or one of q's planeswalkers — worth it when the attacker can
+                // take most of its loyalty, above all when it would kill it (unless hitting
+                // the player is better, as when it is lethal).
+                for pw in v
+                    .battlefield
+                    .iter()
+                    .filter(|o| o.controller == q && is_planeswalker(o))
+                {
+                    let l = loyalty(pw);
+                    let dealt = power(a).min(l);
+                    let kills = power(a) >= l;
+                    let pw_score = value(pw) * dealt / l.max(1) * 4
+                        + if kills { 40 } else { 0 }
+                        + Self::threat(v, q) / 4;
+                    if dealt > 0 && best.is_none_or(|(b, _)| pw_score > b) {
+                        best = Some((pw_score, (q, Some(pw.id))));
+                    }
                 }
             }
             if let Some((_, q)) = best {
@@ -852,9 +948,18 @@ impl HeuristicAgent {
             self.attack_key = Some(v.turn_number);
             self.plan_attacks(v);
         }
-        let pick = d.options.iter().position(|o| {
-            matches!(o, OptionDesc::Attack { attacker, defender }
-                if self.attack_plan.get(attacker) == Some(defender))
+        let pick = d.options.iter().position(|o| match o {
+            OptionDesc::Attack { attacker, defender } => {
+                self.attack_plan.get(attacker) == Some(&(*defender, None))
+            }
+            OptionDesc::AttackPlaneswalker {
+                attacker,
+                planeswalker,
+            } => self
+                .attack_plan
+                .get(attacker)
+                .is_some_and(|(_, pw)| *pw == Some(*planeswalker)),
+            _ => false,
         });
         Response::Pick(pick.into_iter().collect())
     }
@@ -1372,6 +1477,15 @@ impl Agent for HeuristicAgent {
             {
                 let third = (Self::life(v, Self::me(v)).max(0) / 3) as u32;
                 Response::Number((*max).min(third))
+            }
+            // A planeswalker's "−X" (CR 606.6): all but one counter, to keep it.
+            (ChoiceKind::ChooseX, Primitive::PickNumber { max, .. })
+                if v.stack.last().and_then(|top| top.ability).is_some_and(|a| {
+                    matches!(self.catalog.ability(a), AbilityDef::Activated { cost, .. }
+                        if cost.remove_x_counters.is_some())
+                }) =>
+            {
+                Response::Number(max.saturating_sub(1))
             }
             (ChoiceKind::ChooseX, Primitive::PickNumber { max, .. }) => Response::Number(*max),
             // Trample: as much as allowed to the player (lethal to blockers is required first).
