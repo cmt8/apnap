@@ -392,8 +392,9 @@ fn emblems_and_mana_loyalty_abilities_are_blocked() {
         "A:AB$ Effect | Cost$ SubCounter<6/LOYALTY> | Planeswalker$ True | Name$ Emblem — Test | StaticAbilities$ STPump | Duration$ Permanent | SpellDescription$ You get an emblem.\n\
          SVar:STPump:Mode$ Continuous | Affected$ Creature.YouCtrl | AddPower$ 1 | Description$ Creatures you control get +1/+0.",
     );
+    // Emblems are built since D-088 (forge_emblems.rs): this one compiles.
     assert!(
-        forge_test_blockers(&emblem).contains(&"emblem (CR 114)".to_string()),
+        forge_test_blockers(&emblem).is_empty(),
         "{:?}",
         forge_test_blockers(&emblem)
     );
