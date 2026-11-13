@@ -3202,10 +3202,53 @@ Rules text: docs/rules-notes/400-hidden-information.md (CR 400.2, 400.7, 401, 40
   by event against an independent knowledge model (public zones, own hand, revealed, looked
   at), and every seat's `PlayerView` at every decision. It found no leak in the
   implementation; with the redaction weakened (library cards visible) it fails at once.
-- **Not built (D-090 part 5, its own landing):** the events clients were missing (the
-  wishlist: spell cast face/alternative cost, activated ability id, what a continuous effect
-  does, mana details, "may"/"unless"/search outcomes, zone change details, resolution begun,
-  trigger links and removal reasons, tap/untap causes, the token cap).
+- **Not built here (part 2, below):** the events clients were missing.
+
+### D-090 part 2: the events say what a client had to guess (2026-11-12)
+Tests: `crates/harness/tests/events.rs`, two direct per-seat tests in `client_view.rs`.
+Events only report: every golden game makes the same decisions and reaches the same state at
+each of them (checked with `log_hash`/`event_count` zeroed, 48,432 decisions); event logs and
+hashes moved once (re-bless commit). New variants are last (after `PaidToSave`); new fields
+are `#[serde(default)]`.
+- `SpellCast` + `face` (which face was cast, CR 601.3e), `alt: Option<AbilityId>` (the
+  alternative cost it was cast for — flashback, evoke, "without paying its mana cost" …:
+  read the `AlternativeCost` it names), `tax` (commander tax paid, CR 903.8). Tax is on the
+  cast, not on `ManaPaid`, because it is part of the total cost, not a payment of its own.
+- `AbilityActivated` + `text: AbilityId` (which ability: where its text is written) and
+  `triggered` (a triggered ability put on the stack). That is the trigger's link to its stack
+  object: `Triggered { source }` then `AbilityActivated { ability, source, text, triggered:
+  true }`; no extra id was needed.
+- `AbilityRemoved` + `reason: StackExit` (`Resolved`, `NoLegalTargets`, `Countered`,
+  `ControllerLeft` (800.4a), `Abandoned` (a trigger removed while being put on the stack),
+  `ConditionFalse` (an intervening "if", 603.4)).
+- `ResolutionBegan { object }` as a spell or ability starts to resolve (608.2): a client no
+  longer counts passes. `Resolved`/`Fizzled`/`AbilityRemoved` still end it.
+- `ContinuousEffectBegan` + `card`, `effects: Vec<ContinuousEffect>`, `affected` (the
+  objects, when locked in, 611.2c), `abilities` (abilities granted, as `AbilityId`s),
+  `about` (the object "that permanent" refers to) and `until_end_of_turn`: enough to say
+  what it does, to what, until when (`card_model::describe::continuous_text`).
+- `ManaPaid` + `mana: Vec<ManaType>` (what was spent, by diffing the pool); `ManaAdded` +
+  `source: Option<ObjectId>` (the permanent or spell that made it) and `restricted`.
+- `MayChosen { player, object, yes }` ("you may", 608.2d); `UnlessPaid { player, object,
+  paid }` (every "pay or not" a resolution asks, 118.12 — ward keeps `PaidToSave`);
+  `SearchFound { player, cards }` after a library search (701.23a), possibly empty. Redacted:
+  the searcher (and `Everyone`) gets the ids and `Identified`; other seats get `HIDDEN` for
+  each card — a count, which the rules let them know; a reveal that follows names them.
+- `ZoneChange` + `creature` (it was a creature as it last existed: "dies", 700.4), `face`
+  (the face it showed), `position: Option<LibraryPosition>` (top/bottom/Nth, public — also
+  on `MovedUnseen`).
+- `Tapped`/`Untapped` + `cause: TapCause` (`Cost`, `Mana`, `Attack`, `Effect`,
+  `UntapStep`).
+- `TokensCapped { controller, token, wanted, made }` when `MAX_TOKENS_AT_ONCE` cuts a count:
+  the user-approved deviation is no longer silent.
+- Not built: a face-down flag on exile moves (face-down objects aren't built yet; the field
+  belongs with them).
+- Found on the way: `perform_move` reads the object's characteristics before the move (for
+  `creature`), which cached a pre-move layer view at an unchanged generation; the layer cache
+  is now invalidated after each move (derived data only).
+- Consumers: the narrator uses `ResolutionBegan` (no pass counting), names alternative costs,
+  the mana spent, what a continuous effect does, declined "may"s, unless payments, search
+  results and the token cap, and tap causes instead of guessing from the step.
 
 ## Spec discrepancies found (CR wins; reported to the user 2026-11-08)
 1. **CR 903.9b** still exists: a commander that would go to its owner's hand or library may
