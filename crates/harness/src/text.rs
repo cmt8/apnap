@@ -735,6 +735,34 @@ impl Narrator {
                 let l = format!("  {} blocks {}", self.name(*blocker), self.name(*attacker));
                 self.emit(l, out);
             }
+            // CR 114.2.
+            Event::EmblemCreated {
+                player,
+                card,
+                abilities,
+                ..
+            } => {
+                let def = self.catalog.get(*card);
+                let texts: Vec<String> = abilities
+                    .iter()
+                    .map(|&index| {
+                        let id = card_model::AbilityId {
+                            card: *card,
+                            index,
+                            granted: true,
+                        };
+                        let t = describe::ability_text(def, self.catalog.ability(id));
+                        format!("\"{}\"", t.replace("this permanent", "this emblem"))
+                    })
+                    .collect();
+                let l = format!(
+                    "{} gets an emblem ({}) with {}",
+                    p(*player),
+                    def.name,
+                    texts.join(" and ")
+                );
+                self.emit(l, out);
+            }
             Event::AttacksPlaneswalker {
                 attacker,
                 planeswalker,

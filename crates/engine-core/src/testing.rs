@@ -74,6 +74,7 @@ impl Scenario {
                 chosen: Vec::new(),
                 copy: None,
                 spell_copy: false,
+                emblem: None,
             },
         );
         if zone == Zone::Stack {

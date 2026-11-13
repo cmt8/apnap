@@ -174,6 +174,7 @@ pub fn new_game_with_commanders(
                     chosen: Vec::new(),
                     copy: None,
                     spell_copy: false,
+                    emblem: None,
                 },
             );
             if zone == Zone::Command {

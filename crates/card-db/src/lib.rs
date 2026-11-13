@@ -400,6 +400,17 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
             }
         }
     }
+    // The abilities of the emblems the card makes (CR 114).
+    let mut emblem: Vec<usize> = Vec::new();
+    for list in text.split("Emblem { abilities: [").skip(1) {
+        let list = list.split(']').next().unwrap_or_default();
+        for index in list.split(", ").filter(|i| !i.is_empty()) {
+            match index.parse::<usize>() {
+                Ok(i) if i < c.granted.len() => emblem.push(i),
+                _ => p.push(format!("no granted ability {index} for an emblem")),
+            }
+        }
+    }
     // The delayed triggered abilities the card creates (CR 603.7).
     let mut delayed: Vec<usize> = Vec::new();
     // Those that remember an amount ("that much" of the delayed ability).
@@ -482,6 +493,35 @@ fn validate_face(c: &CardDef, back: Option<Layout>) -> Vec<String> {
                 p.push(at("not a delayed triggered ability the engine has".into()));
                 continue;
             }
+        }
+        // CR 114.4: an emblem's abilities work from the command zone, about nothing on it
+        // and nothing it is attached to: static abilities about what matches, triggered
+        // and replacement abilities, rules about players and combat. Not activated (Forge's
+        // `Abilities$` isn't compiled) and nothing for one object only.
+        if granted && emblem.contains(&i) {
+            let fits = match a {
+                AbilityDef::Static { affected, .. } | AbilityDef::CombatRule { affected, .. } => {
+                    matches!(affected, card_model::Affected::All(_))
+                }
+                AbilityDef::Triggered { when, .. } => when.events().iter().all(|t| {
+                    !format!("{t:?}").contains("This") && !format!("{t:?}").contains("Host")
+                }),
+                AbilityDef::Replacement { replaces, .. } => {
+                    !matches!(replaces, Replaces::ThisEnters | Replaces::ThisToGraveyard)
+                }
+                AbilityDef::PlayerRule { rule, .. } => {
+                    !matches!(rule, card_model::PlayerRule::PlayThisFrom(_))
+                }
+                _ => false,
+            };
+            if !fits
+                || lasting.contains(&i)
+                || delayed.contains(&i)
+                || format!("{a:?}").contains("Remembered")
+            {
+                p.push(at("not an ability an emblem can have (yet)".into()));
+            }
+            continue;
         }
         let carried = granted && lasting.contains(&i);
         if carried {
@@ -1914,6 +1954,11 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
             }
             if let Some(a) = a {
                 amount(a, p);
+            }
+        }
+        Effect::Emblem { abilities } => {
+            if abilities.is_empty() {
+                p("an emblem with no ability".into());
             }
         }
         Effect::Lasting { about, .. } => {

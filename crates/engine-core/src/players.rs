@@ -43,7 +43,15 @@ impl InForce<'_> {
 /// of permanents whose condition holds now, and those lasting effects carry.
 pub fn in_force(st: &GameState) -> Vec<InForce<'_>> {
     let mut out = Vec::new();
-    for &id in &st.zones.battlefield {
+    // Permanents, then emblems (CR 114.4: their abilities work from the command zone).
+    let sources: Vec<crate::ids::ObjectId> = st
+        .zones
+        .battlefield
+        .iter()
+        .copied()
+        .chain(crate::effects::emblems(st))
+        .collect();
+    for id in sources {
         let controller = controller_of(st, id);
         for (_, a) in abilities(st, id) {
             // ("Cast this card from your graveyard" works off the battlefield only.)

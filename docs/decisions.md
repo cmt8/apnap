@@ -3050,6 +3050,61 @@ Rules text: docs/rules-notes/d087-tap-costs.md. Tests: `crates/harness/tests/for
   `CastFrame::convoked`.
 - Golden: see the commit.
 
+## D-088 Emblems; badges off the card's name (2026-11-12)
+Rules text: docs/rules-notes/114-emblems.md. Tests: `crates/harness/tests/forge_emblems.rs`
+(and a view-level test in `forge_planeswalkers.rs`).
+- **An emblem is an object** (CR 114): a `GameObject` in its owner's command zone with
+  `emblem: Some(abilities)` — indices into the granted list of `card`, the card whose effect
+  made it (`Effect::Emblem`, new last; `GameAction::CreateEmblem`; `Event::EmblemCreated`,
+  new last, public). `copy::base` gives it no characteristics but those abilities (114.3);
+  it is owned and controlled by the player who got it (114.2), no permanent (114.5: nothing
+  targets or moves it), and leaves the game with its owner (800.4a: `leave_game`, which
+  emits `ObjectLeftGame`).
+- **One representation for its abilities:** they are read like any object's
+  (`layers::abilities`, `AbilityId` with `granted`), and work from the command zone (114.4):
+  static abilities take part in the layer walk (`Key::Emblem`, "you" its owner); triggered
+  abilities are detected with the permanents' (`battlefield_sources` takes emblems too);
+  replacement/prevention effects, rules about players and combat rules are gathered with
+  the permanents'. Two emblems are two objects and both work (tested: +2/+2). "This emblem
+  deals damage": the emblem is the source (colorless, no characteristics).
+- **Compiler:** Forge's `DB$ Effect | Name$ Emblem — … | Duration$ Permanent` with
+  `StaticAbilities$` / `Triggers$` / `ReplacementEffects$` (docs/forge/effects.md §10: a name
+  starting with "Emblem" makes the effect object an emblem); `TriggerZones$ Command` is
+  accepted there, and `AffectedZone$ Battlefield` on any continuous static (it is where a
+  permanent is anyway — this alone compiled several cards). Text: `You get an emblem with
+  "…"`; the Oracle guard "says emblem" is pinned in `guard_phrases_are_still_written`.
+  Named: `emblem:activated abilities` (Forge `Abilities$`), `emblem:duration`; card-db
+  rejects an emblem ability about one object or anything remembered.
+- **`effects::Lasting` and emblems:** Lasting (D-065) stays what a resolving spell or
+  ability leaves behind for a while on no object (611.2, 603.7: "creatures can't block this
+  turn") — no object, a duration, its source the spell. An emblem is an object for the whole
+  game. Forge writes both as `Effect`; the engine keeps them apart by the name.
+  **Not built:** `Effect:Triggers` without an emblem — "until end of turn, whenever …",
+  delayed triggered abilities that trigger every time during their duration (CR 603.7b);
+  the blocker is now named `Effect:Triggers (delayed abilities for a while, CR 603.7b)`
+  (139 scripts). It would need `effects::Delayed` to trigger repeatedly until its window ends
+  and to be detected by every trigger kind (today: one trigger, at steps, attacks and
+  blocks), with its source as it last existed (`source_lki`) — not an emblem object.
+- **Clients (the engine is the product):** `PlayerView::players[p].emblems` lists each
+  player's emblems with the card that made them and each ability's text (public to every
+  seat); `EmblemCreated` says who got which, `ObjectLeftGame` when it leaves with its owner;
+  a triggered ability of an emblem is on the stack with the emblem as `ability_of`, and its
+  decisions are ordinary ones. Tested from another seat's view and the events. For
+  planeswalkers (D-086) a view-level test reads loyalty, the loyalty abilities offered and
+  what each attacker attacks.
+- **App (reference client, minimal):** an emblem is drawn as itself (named after its card,
+  its abilities as text; enlarged on hover), the narrator says "P0 gets an emblem (…) with
+  "…"". Counter and combat badges now sit over the art below the title bar, and a badge is
+  shortened to the card's width with an ellipsis ("ATK Test S…").
+- **Coverage:** 12,129 → 12,149 scripts (+20 against main, every one read against its Oracle
+  text): 6 cards with emblems (Ajani Resolute, Elspeth, Knight-Errant, Elspeth, Sun's
+  Champion, Gideon, Ally of Zendikar, Huatli, Radiant Champion, Professor Dellian Fel) and 14
+  through `AffectedZone$ Battlefield` (Falter, Seismic Stomp, Gruul Charm, Goblin
+  Trashmaster, Leaf-Crowned Visionary, …). EDHREC top 1,000: 642 → 644; top 5,000: 1,960 →
+  1,964. Of Forge's 104 scripts with emblems, 98 still wait on other features
+  (`api:Cleanup`, `line:Text`, "until your next turn", mana loyalty abilities, …);
+  `emblem:activated abilities` is in 3.
+
 ## D-089 Reveals the card makes; "becomes the target" and ward; revealing until (2026-11-12)
 Rules text: docs/rules-notes/d089-ward-dig-until.md. Tests: `crates/harness/tests/forge_ward.rs`,
 `forge_dig_until.rs`, narration.rs `no_reveal_the_card_doesnt_make`.

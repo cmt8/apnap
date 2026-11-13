@@ -684,6 +684,12 @@ enum Key {
         source: ObjectId,
         index: u16,
     },
+    /// Static ability `ability` of the emblem `source`, which works from the command zone
+    /// (CR 114.4).
+    Emblem {
+        source: ObjectId,
+        ability: AbilityId,
+    },
 }
 
 /// One continuous effect taking part in the walk.
@@ -861,7 +867,7 @@ impl Walk<'_> {
             Key::Static { .. } | Key::Granted(_) => {
                 view.get(&e.source).map_or(e.controller, |c| c.controller)
             }
-            Key::Resolved(_) | Key::FromZone { .. } => e.controller,
+            Key::Resolved(_) | Key::FromZone { .. } | Key::Emblem { .. } => e.controller,
         }
     }
 
@@ -1185,6 +1191,34 @@ fn compute(st: &GameState) -> View {
                         held: None,
                     });
                 }
+            }
+        }
+    }
+    // CR 114.4: static abilities of emblems, which work from the command zone; "you" is the
+    // emblem's owner and controller.
+    for id in crate::effects::emblems(st) {
+        let o = st.object(id);
+        for ability in crate::copy::base(st, id, 0, o.owner).abilities {
+            if let AbilityDef::Static {
+                affected,
+                effects,
+                only_if,
+            } = st.catalog.ability(ability)
+            {
+                effs.push(Eff {
+                    cond: only_if.as_ref(),
+                    key: Key::Emblem {
+                        source: id,
+                        ability,
+                    },
+                    timestamp: o.timestamp,
+                    source: id,
+                    controller: o.owner,
+                    parts: effects,
+                    affected: Aff::Dynamic(affected),
+                    card: ability.card,
+                    held: None,
+                });
             }
         }
     }

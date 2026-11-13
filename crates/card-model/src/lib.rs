@@ -2296,6 +2296,13 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         except: Vec<CopyExcept>,
     },
+    /// CR 114.2: "You get an emblem with [abilities]": the controller puts an emblem into the
+    /// command zone, owned and controlled by them, whose only characteristics are these
+    /// abilities (indices into [`CardDef::granted`] of this card; CR 114.3). Its abilities
+    /// work from the command zone (CR 114.4); in them "this" is the emblem.
+    Emblem {
+        abilities: Vec<u16>,
+    },
     /// CR 701.6a: "counter that spell or ability" — the spell or ability `what` names (a
     /// "becomes the target" trigger's), if it is still on the stack. A countered spell goes
     /// to its owner's graveyard; a countered ability is removed from the stack.
@@ -2451,6 +2458,7 @@ impl Effect {
             | Effect::Regenerate { .. }
             | Effect::ChangeTargets { .. }
             | Effect::Lasting { .. }
+            | Effect::Emblem { .. }
             | Effect::Choose(_)
             | Effect::BecomeCopy { .. }
             | Effect::SacrificeIt { .. } => {}

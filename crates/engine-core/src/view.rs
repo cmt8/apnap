@@ -53,6 +53,10 @@ pub struct ObjectView {
     /// this is the card or token it is itself ("Test Clone"). Public (CR 707.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed: Option<card_model::CardDefId>,
+    /// CR 114: an emblem (in the command zone): its abilities are `granted` (written on
+    /// `card`, the card whose effect made it); it has no other characteristics. Public.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub emblem: bool,
 }
 
 /// A commander designation (CR 903.3): public for the whole game, wherever the card is.
@@ -114,6 +118,23 @@ pub struct PlayerPublic {
     /// "may play an additional land", "hexproof".
     #[serde(default)]
     pub rules: Vec<card_model::PlayerRule>,
+    /// The player's emblems (CR 114, public), in the order they got them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emblems: Vec<EmblemView>,
+}
+
+/// An emblem (CR 114): an object in its owner's command zone with abilities and nothing
+/// else. Public, to every seat.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmblemView {
+    pub id: ObjectId,
+    /// The card whose effect made it (its abilities are written on that card).
+    pub card: card_model::CardDefId,
+    /// That card's name ("an emblem from Elspeth, Sun's Champion"; the emblem has none).
+    pub from: String,
+    pub abilities: Vec<card_model::AbilityId>,
+    /// What each ability says, in the order of `abilities`.
+    pub text: Vec<String>,
 }
 
 /// An effect that holds for a while without being on any object (CR 611.2; public):
@@ -196,6 +217,30 @@ fn object_view(st: &GameState, id: ObjectId) -> ObjectView {
         },
         chosen: o.chosen.clone(),
         printed: o.copy.as_ref().map(|_| o.card),
+        emblem: o.emblem.is_some(),
+    }
+}
+
+/// An emblem as every seat sees it, with what its abilities say ("this" in them is the
+/// emblem, CR 114.4).
+pub fn emblem_view(st: &GameState, id: ObjectId) -> EmblemView {
+    let o = st.object(id);
+    let def = st.catalog.get(o.card);
+    let abilities = chars(st, id).abilities;
+    let text = abilities
+        .iter()
+        .map(|a| {
+            card_model::describe::ability_text(def, st.catalog.ability(*a))
+                .replace("this permanent", "this emblem")
+                .replace("This permanent", "This emblem")
+        })
+        .collect();
+    EmblemView {
+        id,
+        card: o.card,
+        from: def.name.clone(),
+        abilities,
+        text,
     }
 }
 
@@ -243,6 +288,11 @@ pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
                     .iter()
                     .filter(|r| r.about(p.id))
                     .map(|r| r.rule.clone())
+                    .collect(),
+                emblems: crate::effects::emblems(st)
+                    .into_iter()
+                    .filter(|&id| st.object(id).owner == p.id)
+                    .map(|id| emblem_view(st, id))
                     .collect(),
             })
             .collect(),

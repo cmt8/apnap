@@ -5,6 +5,15 @@ Rust workspace. `docs/spec.md` is the architecture source of truth; deviations a
 Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules.txt`
 (gitignored — never commit it). When the spec and the CR disagree, **the CR wins**: flag it.
 
+## What this project is for (the user, 2026-11-12)
+The product is the **engine**: a pure state machine advanced one `step` at a time, correct
+by the Comprehensive Rules, that many different apps can embed. The desktop app is only a
+reference client. So: no app polish and no app-only features; keep the app building and
+its tests passing as a consumer of the public API. Everything a client needs must come
+out of `PendingDecision`, `PlayerView` and events — a feature is not done if a client
+would have to read `GameState` to use it. Correctness, the step/decision API, events,
+serialization and determinism come before UI and before AI strength.
+
 ## Invariants (never violate)
 1. engine-core has NO I/O, threads, wall clock, or ambient RNG. Randomness = `state.rng`
    only. engine-core and card-model are `#![no_std]` (D-003); keep them that way.
@@ -156,6 +165,19 @@ Comprehensive Rules (effective **2026-11-06**) are at `docs/rules/MagicCompRules
   options are each opponent, then that player's planeswalkers
   (`OptionDesc::AttackPlaneswalker`, `AttackInfo::planeswalker`; `defender` stays the
   player). Tests: `forge_planeswalkers.rs`, `crates/app/tests/planeswalkers.rs`.
+- Tapping other permanents to pay (D-087): "tap an untapped creature you control" is
+  `Cost::tap_others`, chosen in `CastStage::ChooseTap`; Convoke/Improvise are units of mana
+  in the payment planner (`OptionDesc::TapToPay`), never a path around it; Crew is
+  `Cost::crew` and makes the Vehicle an artifact creature in layer 4 until end of turn. The
+  planner keeps offers exact: a creature tapped for mana can't also be the one tapped as
+  the cost. Gaining control (`GainControl`) is a layer-2 effect on D-029's control layer.
+  Tests: `forge_tap_costs.rs`.
+- An emblem (CR 114, D-088) is a `GameObject` in its owner's command zone with
+  `emblem: Some(abilities)`: no characteristics, not a permanent, its abilities read like
+  any object's through `layers::abilities` and working from the command zone; it leaves
+  with its owner. Clients see it in `PlayerView::players[p].emblems` and `EmblemCreated`.
+  It is not `effects::Lasting` (a rule a resolving spell leaves on no object for a while).
+  Tests: `forge_emblems.rs`.
 - The text of a compiled card (`card_model::describe`) is written like a printed card:
   number words, "this creature/land/Equipment", "Then" between instructions, a predefined
   token's reminder text on first mention. The Oracle guard (`oracle_words_missing`) reads
@@ -247,10 +269,10 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-086): 11,803 of 34,463 scripts compile (34.2%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-086: 98% of
+Status (D-088): 12,149 of 34,463 scripts compile (35.3%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-088: 98% of
 the 100 most played Commander cards compile (missing: Path of Ancestry, The One Ring),
-64% of the top 1,000, 38% of the top 5,000
+65% of the top 1,000, 39% of the top 5,000
 (`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
 the rest. Feature tests live in `crates/harness/tests/forge_features.rs` and, one file per
 feature area since D-066, `forge_<area>.rs` next to it: invented cards written
@@ -276,15 +298,15 @@ presence, `Defined$ Targeted` means every target of the chain, a trigger that ru
 Not built yet: the full generated-text-vs-Oracle round trip (a word-level guard exists),
 flip, meld, prepare and specialize cards, Fuse, Aftermath, Rooms, day/night, disturb,
 craft, "enters/cast transformed" and "when this transforms" triggers (modal double-faced,
-transforming, Adventure, Omen and split cards are built, D-071), searching another player's library, "X target creatures", changing a target to a fixed or restricted one (CR 115.7b/c), delve/convoke/improvise, flashback
+transforming, Adventure, Omen and split cards are built, D-071), searching another player's library, "X target creatures", changing a target to a fixed or restricted one (CR 115.7b/c), delve, tap costs inside mana abilities, gaining control for other durations than "until end of turn" or for good, flashback
 given to other cards, draw and mana replacement effects, effects that change life
 loss, memory that outlives a resolution (effect objects remembering
 cards, linked abilities per CR 607, delayed triggers that keep remembered cards past their chain), keyword, shield, stun and player counters (other named counters are built, D-084), "as this enters, choose …" other than a creature type or a color (D-076; how a permanent enters is otherwise built, D-067:
 `ReplaceWith::EntersTappedUnless…`, the choice asked inside `ApplyFrame` as
 `ChoiceKind::AsEnters`), "sacrifice … instead" lands, "lands enter untapped", "exile it
 instead. When you do, …", static regeneration and "when it regenerates this way", abilities given to cards that aren't on
-the battlefield, "becomes the target" triggers, protection, read ahead and transforming Sagas, emblems (CR 114; 95 planeswalkers wait on them), loyalty
-abilities that add mana, "can be your commander",
+the battlefield, "becomes the target" triggers, protection, read ahead and transforming Sagas, abilities that hold for a while and trigger every time (`Effect:Triggers`, CR 603.7b; 139
+scripts), loyalty abilities that add mana, "can be your commander",
 and of Forge's "Effect" objects everything but combat rules and "prevent all damage"
 (`effects::Lasting`, D-065: no triggers, no characteristic changes, nothing about
 players yet). `forge-coverage --families` ranks what is left by kind of feature.

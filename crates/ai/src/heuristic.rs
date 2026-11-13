@@ -124,9 +124,10 @@ fn effect_polarity(e: &Effect) -> Polarity {
         },
         Effect::Apply { effects, .. } => continuous_polarity(effects),
         // What it does is in abilities written elsewhere on the card: no preference.
-        Effect::Lasting { .. } | Effect::DelayedTrigger { .. } | Effect::SacrificeIt { .. } => {
-            Polarity::Neutral
-        }
+        Effect::Lasting { .. }
+        | Effect::DelayedTrigger { .. }
+        | Effect::Emblem { .. }
+        | Effect::SacrificeIt { .. } => Polarity::Neutral,
         Effect::DrawUpTo { .. }
         | Effect::Shuffle { .. }
         | Effect::ChangeTargets { .. }
