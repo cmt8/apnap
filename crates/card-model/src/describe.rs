@@ -1080,6 +1080,30 @@ fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
         .enumerate()
         .map(|(i, e)| match e {
             ContinuousEffect::GainControl => "is under your control".to_string(),
+            // "Becomes an artifact creature in addition to its other types".
+            ContinuousEffect::AddTypes {
+                card_types,
+                subtypes,
+                land_types,
+            } if subtypes.is_empty() && land_types.is_empty() && !card_types.is_empty() => {
+                let mut ts = card_types.clone();
+                // "artifact creature", "enchantment creature": the creature type last.
+                ts.sort_by_key(|t| *t == CardType::Creature);
+                let mut words: Vec<String> = ts.iter().map(|t| card_type(*t).to_string()).collect();
+                if plural {
+                    let last = words.pop().unwrap_or_default();
+                    words.push(format!("{last}s"));
+                    format!(
+                        "{become_} {} in addition to their other types",
+                        words.join(" ")
+                    )
+                } else {
+                    format!(
+                        "{become_} {} in addition to its other types",
+                        with_article(&words.join(" "))
+                    )
+                }
+            }
             ContinuousEffect::AddTypes {
                 card_types,
                 subtypes,
@@ -1835,10 +1859,34 @@ fn effect(mode: &Mode, e: &Effect) -> String {
                 until_end_of_turn,
             } = &**inner
             {
+                // "You may have this Vehicle become an artifact creature": one object, the
+                // verbs in their base form.
+                let mut verbs = continuous(effects, false);
+                if let Some((first, rest)) = verbs.split_once(' ') {
+                    let base = match first {
+                        "has" => "have".to_string(),
+                        "is" => "be".to_string(),
+                        v => base_verb(v),
+                    };
+                    verbs = format!("{base} {rest}");
+                }
+                for (third, base) in [
+                    ("gets ", "get "),
+                    ("has ", "have "),
+                    ("loses ", "lose "),
+                    ("is ", "be "),
+                    ("becomes ", "become "),
+                ] {
+                    for joint in [" and ", ", "] {
+                        verbs =
+                            verbs.replace(&format!("{joint}{third}"), &format!("{joint}{base}"));
+                    }
+                }
+                verbs = verbs.replace("be also ", "also be ");
                 format!(
                     "you may have {} {}{}",
                     obj(mode, *what),
-                    continuous(effects, true),
+                    verbs,
                     if *until_end_of_turn {
                         " until end of turn"
                     } else {
@@ -3139,12 +3187,7 @@ fn trigger_event(t: &Trigger) -> String {
                         Who::You => "you cast your",
                         Who::Opponent => "an opponent casts their",
                     },
-                    match n {
-                        1 => "first".to_string(),
-                        2 => "second".to_string(),
-                        3 => "third".to_string(),
-                        n => format!("{n}th"),
-                    }
+                    ordinal(*n)
                 ),
             }
         }
