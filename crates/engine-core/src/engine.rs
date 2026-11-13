@@ -202,6 +202,17 @@ pub fn new_game_with_commanders(
 }
 
 /// Run until the first decision (or return the current one if already suspended).
+///
+/// What an embedder may rely on (D-090):
+/// - **The engine is a pure state machine.** It never calls out: whenever a player must
+///   choose, it stops and returns that decision (`StepOutput::next`); nothing advances until
+///   [`step`] answers it. No I/O, threads, clocks or ambient randomness: the same game
+///   (`new_game` arguments and seed) answered with the same responses gives the same events
+///   and the same state, on every platform (`GameState::log_hash` fingerprints it).
+/// - **`StepOutput::truth` is engine truth**, hidden information included. Show a player
+///   (or an agent, or a spectator) only what their seat's
+///   [`crate::client::EventView::redact`] returns, and their [`crate::player_view`].
+/// - A `GameState` is plain data: clone it to explore, serialise it to save.
 pub fn start(st: &mut GameState) -> StepOutput {
     if st.pending.is_some() || st.is_over() {
         return StepOutput {
@@ -214,7 +225,11 @@ pub fn start(st: &mut GameState) -> StepOutput {
 
 /// Answer the current pending decision and run until the next one.
 ///
-/// An illegal response is rejected **before any mutation**: the state is left unchanged.
+/// An illegal response is rejected **before any mutation**: the state is left unchanged
+/// (its hash too), and the same decision is still pending. Responses are checked only
+/// against the decision's shape and options (`PendingDecision::validate`): every option
+/// offered is legal. Deterministic (see [`start`]); the events in the output are engine
+/// truth — redact them per seat ([`crate::client::EventView`]).
 pub fn step(st: &mut GameState, resp: Response) -> Result<StepOutput, IllegalResponse> {
     let pending = st
         .pending

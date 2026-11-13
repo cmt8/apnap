@@ -251,6 +251,16 @@ impl EventView {
     }
 }
 
+/// Every object id `e` names, in field order (for a client that indexes events by object).
+pub fn object_ids(e: &Event) -> Vec<ObjectId> {
+    let mut out = Vec::new();
+    map_ids(e, &mut |id| {
+        out.push(id);
+        id
+    });
+    out
+}
+
 /// `e` with each object id it names passed through `f`.
 fn map_ids(e: &Event, f: &mut dyn FnMut(ObjectId) -> ObjectId) -> Event {
     let t = |t: &Target, f: &mut dyn FnMut(ObjectId) -> ObjectId| match t {

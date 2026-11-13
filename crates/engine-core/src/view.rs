@@ -249,6 +249,12 @@ fn views(st: &GameState, ids: &[ObjectId]) -> Vec<ObjectView> {
     ids.iter().map(|&id| object_view(st, id)).collect()
 }
 
+/// What `viewer` may see of the game now (D-090): every public zone, their own hand, the
+/// counts of hidden ones, the cards their own pending decision lets them look at, their own
+/// decision with its options, and — for everyone — who the game waits for and for what kind
+/// of decision (`waiting`). Never another player's hand, a library's cards (but a top card
+/// the viewer may see, CR 401.5), or another player's options. With the viewer's redacted
+/// events (`client::EventView`) it is all a client needs; agents get nothing else.
 pub fn player_view(st: &GameState, viewer: PlayerId) -> PlayerView {
     let rules = crate::players::in_force(st);
     PlayerView {
