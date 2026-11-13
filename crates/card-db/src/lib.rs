@@ -1842,6 +1842,24 @@ fn check_effect(e: &Effect, mode: &Mode, has_x: bool, p: &mut dyn FnMut(String))
                 "ChangeTargets needs a target on the stack, got {other:?}"
             )),
         },
+        // CR 701.20: revealing until; the found cards and the rest go somewhere.
+        Effect::DigUntil {
+            until,
+            count: a,
+            found_to,
+            rest_to,
+            ..
+        } => {
+            amount(a, p);
+            if until.is_empty() {
+                p("DigUntil needs what it reveals until".into());
+            }
+            if matches!(found_to, card_model::CardDest::Stay)
+                || matches!(rest_to, card_model::CardDest::Stay)
+            {
+                p("DigUntil puts the cards somewhere".into());
+            }
+        }
         // CR 701.6a: "counter that spell or ability" of a "becomes the target" trigger.
         Effect::CounterIt { what } => {
             if *what != ObjRef::Triggering {

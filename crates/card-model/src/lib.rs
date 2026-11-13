@@ -2302,6 +2302,21 @@ pub enum Effect {
     CounterIt {
         what: ObjRef,
     },
+    /// CR 701.20: "[who] reveals cards from the top of their library until they reveal
+    /// `count` [cards matching `until`]. Put those cards `found_to` and the rest `rest_to`"
+    /// (in a random order with `rest_random`), then (`shuffle`) shuffle. With fewer such
+    /// cards, every card is revealed and the found ones go `found_to` all the same.
+    DigUntil {
+        who: PlayerRef,
+        until: Vec<Selector>,
+        count: Amount,
+        found_to: CardDest,
+        rest_to: CardDest,
+        #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+        rest_random: bool,
+        #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+        shuffle: bool,
+    },
 }
 
 /// When a delayed triggered ability ([`Effect::DelayedTrigger`]) can trigger.
@@ -2441,6 +2456,12 @@ impl Effect {
             | Effect::SacrificeIt { .. } => {}
             Effect::CopySpell { count, .. } => count.selectors_mut(f),
             Effect::CounterIt { .. } => {}
+            Effect::DigUntil { until, count, .. } => {
+                for s in until {
+                    f(s);
+                }
+                count.selectors_mut(f);
+            }
         }
     }
 

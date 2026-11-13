@@ -2740,6 +2740,77 @@ impl ResolveFrame {
             // CR 701.21a: a player can sacrifice only a permanent they control. "Its
             // controller sacrifices it" (CR 702.74a): whoever that is now.
             // CR 701.21a: only what its controller controls.
+            // CR 701.20: each player reveals cards from the top of their library until they
+            // reveal `count` matching cards (or run out); the found cards are put where they
+            // go first, then the rest (Forge's DigUntilEffect).
+            Effect::DigUntil {
+                who,
+                until,
+                count,
+                found_to,
+                rest_to,
+                rest_random,
+                shuffle,
+            } => {
+                let n = self.amount(st, k, &count);
+                if n == 0 {
+                    return Vec::new();
+                }
+                let players = self.players_apnap(st, k, who);
+                // Last pushed is done first: the first player's cards first.
+                for p in players.into_iter().rev() {
+                    let lib = st.zones.list(Zone::Library, p).clone();
+                    let (mut revealed, mut found) = (Vec::new(), Vec::new());
+                    for &c in lib.iter().rev() {
+                        if found.len() as u32 >= n {
+                            break;
+                        }
+                        revealed.push(c);
+                        if until
+                            .iter()
+                            .any(|s| crate::targeting::card_matches(st, c, s))
+                        {
+                            found.push(c);
+                        }
+                    }
+                    if revealed.is_empty() {
+                        continue;
+                    }
+                    st.emit(Event::Revealed {
+                        player: p,
+                        cards: revealed.clone(),
+                    });
+                    let rest: Vec<ObjectId> = revealed
+                        .iter()
+                        .copied()
+                        .filter(|c| !found.contains(c))
+                        .collect();
+                    if shuffle {
+                        self.work.push(Work::Shuffle { players: vec![p] });
+                    }
+                    if !rest.is_empty() {
+                        self.work.push(Work::Place {
+                            player: p,
+                            by: p,
+                            cards: rest,
+                            to: rest_to,
+                            random: rest_random,
+                            ordered: false,
+                        });
+                    }
+                    if !found.is_empty() {
+                        self.work.push(Work::Place {
+                            player: p,
+                            by: p,
+                            cards: found,
+                            to: found_to,
+                            random: false,
+                            ordered: false,
+                        });
+                    }
+                }
+                Vec::new()
+            }
             // CR 701.6a: counter the spell or ability that made this trigger (ward), if it is
             // still on the stack: a spell goes to its owner's graveyard, an ability is
             // removed from the stack.

@@ -1466,6 +1466,55 @@ fn effect(mode: &Mode, e: &Effect) -> String {
             out
         }
         Effect::SacrificeIt { what } => format!("you sacrifice {}", obj(mode, *what)),
+        Effect::DigUntil {
+            who,
+            until,
+            count,
+            found_to,
+            rest_to,
+            rest_random,
+            shuffle,
+        } => {
+            let p = player(mode, *who);
+            let you = p == "you";
+            let (reveals, their) = if you {
+                ("reveal", "your")
+            } else {
+                ("reveals", "their")
+            };
+            let they = if you { "you" } else { "they" };
+            let n = amount(count);
+            let one = n == "1";
+            let what = if one {
+                with_article(&card_list(until, false))
+            } else {
+                format!("{n} {}", card_list(until, true))
+            };
+            // "Reveal cards …" (you), "each opponent reveals cards …".
+            let subject = if you { String::new() } else { format!("{p} ") };
+            let mut t = format!(
+                "{subject}{reveals} cards from the top of {their} library until {they} reveal{} {what}. Put {} {}",
+                if you { "" } else { "s" },
+                if one { "that card" } else { "those cards" },
+                dest(*found_to, their)
+            );
+            if found_to == rest_to {
+                t = format!(
+                    "{subject}{reveals} cards from the top of {their} library until {they} reveal{} {what}. Put all cards revealed this way {}",
+                    if you { "" } else { "s" },
+                    dest(*found_to, their)
+                );
+            } else {
+                t.push_str(&format!(" and the rest {}", dest(*rest_to, their)));
+                if *rest_random {
+                    t.push_str(" in a random order");
+                }
+            }
+            if *shuffle {
+                t.push_str(&format!(", then shuffle"));
+            }
+            t
+        }
         Effect::CounterIt { what } => match what {
             ObjRef::Triggering => "counter that spell or ability".to_string(),
             other => format!("counter {}", obj(mode, *other)),

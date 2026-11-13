@@ -2815,6 +2815,64 @@ impl<'a> Tx<'a> {
             }
             // "Look at / reveal the top N cards of your library; put some of them
             // somewhere and the rest somewhere else" (docs/forge/effects.md §16).
+            // CR 701.20: "reveal cards from the top of your library until you reveal a [card].
+            // Put that card [somewhere] and the rest [somewhere else]" (Forge's
+            // DigUntilEffect: found cards move first, then the rest; without
+            // `FoundDestination$` the found cards go with the rest).
+            "DigUntil" => {
+                if rd.rec.get("ValidTgts").is_some() {
+                    self.block("DigUntil:target");
+                    return None;
+                }
+                let who = self.player(&rd, chain, triggered);
+                rd.get("ValidDescription");
+                let until = self.card_alts(rd.get("Valid").unwrap_or("Card"), true);
+                let count = self.amount(rd.get("Amount").unwrap_or("1"), chain);
+                let tapped = rd.get("Tapped").is_some();
+                let place = |tx: &mut Self, zone: Option<&str>, pos: Option<&str>| match (zone, pos)
+                {
+                    (Some("Hand"), None) => Some(CardDest::Hand),
+                    (Some("Graveyard"), None) => Some(CardDest::Graveyard),
+                    (Some("Exile"), None) => Some(CardDest::Exile),
+                    (Some("Battlefield"), None) => Some(CardDest::Battlefield { tapped }),
+                    (Some("Library"), Some("-1")) => Some(CardDest::LibraryBottom),
+                    (Some("Library"), None | Some("0")) => Some(CardDest::LibraryTop),
+                    (z, _) => {
+                        tx.block(format!("DigUntil:to {}", z.unwrap_or("?")));
+                        None
+                    }
+                };
+                let rest_to = place(
+                    self,
+                    rd.get("RevealedDestination"),
+                    rd.get("RevealedLibraryPosition"),
+                );
+                let found_to = match rd.get("FoundDestination") {
+                    None => rest_to,
+                    Some(z) => place(self, Some(z), rd.get("FoundLibraryPosition")),
+                };
+                if tapped && !matches!(found_to, Some(CardDest::Battlefield { .. })) {
+                    self.block("DigUntil:Tapped");
+                    return None;
+                }
+                // `GainControl$`: onto the battlefield under the activator's control — the
+                // same as the owner's when it is your own library.
+                if rd.get("GainControl").is_some() && who != Some(PlayerRef::You) {
+                    self.block("DigUntil:GainControl of another player's cards");
+                    return None;
+                }
+                let shuffle = rd.get("Shuffle").is_some();
+                let rest_random = rd.get("RevealRandomOrder").is_some();
+                Effect::DigUntil {
+                    who: who?,
+                    until: until?,
+                    count: count?,
+                    found_to: found_to?,
+                    rest_to: rest_to?,
+                    rest_random,
+                    shuffle,
+                }
+            }
             "Dig" => {
                 let slot = self.target(&rd, chain, false);
                 let who = match slot {
