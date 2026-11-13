@@ -1035,7 +1035,15 @@ impl ResolveFrame {
                             options,
                         );
                     }
-                    None => self.work.push(Work::Eval { k, effect: unpaid }),
+                    None => {
+                        // Couldn't pay (or has left the game): not paid.
+                        st.emit(Event::UnlessPaid {
+                            player,
+                            object: self.object.expect("started"),
+                            paid: false,
+                        });
+                        self.work.push(Work::Eval { k, effect: unpaid })
+                    }
                     Some(inp) => {
                         let accepted = matches!(
                             inp.picked_one(),
@@ -1045,6 +1053,12 @@ impl ResolveFrame {
                             st.emit(Event::PaidToSave {
                                 player,
                                 at_stake,
+                                paid: accepted,
+                            });
+                        } else {
+                            st.emit(Event::UnlessPaid {
+                                player,
+                                object: self.object.expect("started"),
                                 paid: accepted,
                             });
                         }
@@ -1156,7 +1170,13 @@ impl ResolveFrame {
                     if let Some(inp) = input.take() {
                         for object in picked_cards(&inp) {
                             if st.objects.get(&object).is_some_and(|o| o.tapped) {
-                                execute(st, GameAction::Untap { object });
+                                execute(
+                                    st,
+                                    GameAction::Untap {
+                                        object,
+                                        cause: crate::events::TapCause::Effect,
+                                    },
+                                );
                             }
                         }
                         continue;
@@ -1406,7 +1426,13 @@ impl ResolveFrame {
                     // CR 800.4a: a player who has left the game decides nothing.
                     None => {}
                     Some(inp) => {
-                        if matches!(inp.picked_one(), Some(OptionDesc::Accept)) {
+                        let yes = matches!(inp.picked_one(), Some(OptionDesc::Accept));
+                        st.emit(Event::MayChosen {
+                            player,
+                            object: self.object.expect("started"),
+                            yes,
+                        });
+                        if yes {
                             self.work.push(Work::Eval { k, effect });
                         }
                     }
@@ -1433,7 +1459,14 @@ impl ResolveFrame {
                     };
                     if let Some(mana) = mana {
                         for _ in 0..count {
-                            execute(st, GameAction::AddMana { player, mana });
+                            execute(
+                                st,
+                                GameAction::AddMana {
+                                    player,
+                                    mana,
+                                    source: Some(self.source),
+                                },
+                            );
                         }
                     }
                 }
@@ -1450,7 +1483,13 @@ impl ResolveFrame {
                     }
                     None => {}
                     Some(inp) => {
-                        if matches!(inp.picked_one(), Some(OptionDesc::Accept)) {
+                        let yes = matches!(inp.picked_one(), Some(OptionDesc::Accept));
+                        st.emit(Event::MayChosen {
+                            player: inp.decision.player,
+                            object: self.object.expect("started"),
+                            yes,
+                        });
+                        if yes {
                             self.work.push(Work::Eval { k, effect });
                         }
                     }
@@ -1645,6 +1684,15 @@ impl ResolveFrame {
                     }
                     // Everyone has chosen.
                     let players: Vec<PlayerId> = chosen.iter().map(|(p, _)| *p).collect();
+                    // CR 701.23a: what each search found (D-090 part 2).
+                    if spec.from == CardZone::Library && !among_noted(&spec) {
+                        for (player, cards) in &chosen {
+                            st.emit(Event::SearchFound {
+                                player: *player,
+                                cards: cards.clone(),
+                            });
+                        }
+                    }
                     if spec.reveal {
                         for (player, cards) in &chosen {
                             if !cards.is_empty() {
@@ -2099,6 +2147,8 @@ impl ResolveFrame {
     fn start(&mut self, st: &mut GameState) -> Option<Flow> {
         let top = st.stack.last().expect("resolve with empty stack").clone();
         self.object = Some(top.id);
+        // CR 608.2: it begins to resolve.
+        st.emit(Event::ResolutionBegan { object: top.id });
         self.controller = top.controller;
         self.x = top.x;
         self.sacrificed_power = top.sacrificed_power;
@@ -2177,7 +2227,13 @@ impl ResolveFrame {
                     } => {
                         // CR 603.4 / 608.2a: re-check an intervening "if" on resolution.
                         if !condition_holds(st, intervening_if.as_ref(), top.controller, *source) {
-                            execute(st, GameAction::RemoveAbility { ability: top.id });
+                            execute(
+                                st,
+                                GameAction::RemoveAbility {
+                                    ability: top.id,
+                                    reason: crate::events::StackExit::ConditionFalse,
+                                },
+                            );
                             return Some(Flow::done());
                         }
                         body.clone()
@@ -2326,7 +2382,14 @@ impl ResolveFrame {
                 let amount = self.amount(st, k, &amount);
                 for player in self.players(st, k, who) {
                     for _ in 0..amount {
-                        execute(st, GameAction::AddMana { player, mana });
+                        execute(
+                            st,
+                            GameAction::AddMana {
+                                player,
+                                mana,
+                                source: Some(self.source),
+                            },
+                        );
                     }
                 }
                 Vec::new()
@@ -2602,7 +2665,13 @@ impl ResolveFrame {
             Effect::Tap { what } => {
                 for object in self.objs(st, k, what) {
                     if !st.object(object).tapped {
-                        execute(st, GameAction::Tap { object });
+                        execute(
+                            st,
+                            GameAction::Tap {
+                                object,
+                                cause: crate::events::TapCause::Effect,
+                            },
+                        );
                     }
                 }
                 Vec::new()
@@ -2610,7 +2679,13 @@ impl ResolveFrame {
             Effect::Untap { what } => {
                 for object in self.objs(st, k, what) {
                     if st.object(object).tapped {
-                        execute(st, GameAction::Untap { object });
+                        execute(
+                            st,
+                            GameAction::Untap {
+                                object,
+                                cause: crate::events::TapCause::Effect,
+                            },
+                        );
                     }
                 }
                 Vec::new()
@@ -2618,7 +2693,13 @@ impl ResolveFrame {
             Effect::TapAll(sel) => {
                 for object in self.matching(st, &sel) {
                     if !st.object(object).tapped {
-                        execute(st, GameAction::Tap { object });
+                        execute(
+                            st,
+                            GameAction::Tap {
+                                object,
+                                cause: crate::events::TapCause::Effect,
+                            },
+                        );
                     }
                 }
                 Vec::new()
@@ -2626,7 +2707,13 @@ impl ResolveFrame {
             Effect::UntapAll(sel) => {
                 for object in self.matching(st, &sel) {
                     if st.object(object).tapped {
-                        execute(st, GameAction::Untap { object });
+                        execute(
+                            st,
+                            GameAction::Untap {
+                                object,
+                                cause: crate::events::TapCause::Effect,
+                            },
+                        );
                     }
                 }
                 Vec::new()
@@ -2844,7 +2931,13 @@ impl ResolveFrame {
                     }
                     Some((ability, StackKind::Ability { .. })) => {
                         st.emit(Event::Countered { object: ability });
-                        execute(st, GameAction::RemoveAbility { ability });
+                        execute(
+                            st,
+                            GameAction::RemoveAbility {
+                                ability,
+                                reason: crate::events::StackExit::Countered,
+                            },
+                        );
                         Vec::new()
                     }
                     _ => Vec::new(),
@@ -3318,7 +3411,18 @@ impl ResolveFrame {
                 Flow::then(Frame::Apply(ApplyFrame::new(st, vec![mv])))
             }
             Some(StackKind::Ability { .. }) => {
-                execute(st, GameAction::RemoveAbility { ability: id });
+                let reason = if cause == MoveCause::Fizzled {
+                    crate::events::StackExit::NoLegalTargets
+                } else {
+                    crate::events::StackExit::Resolved
+                };
+                execute(
+                    st,
+                    GameAction::RemoveAbility {
+                        ability: id,
+                        reason,
+                    },
+                );
                 Flow::done()
             }
             None => Flow::done(),

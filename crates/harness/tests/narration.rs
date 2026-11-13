@@ -295,6 +295,9 @@ fn a_commander_going_to_the_command_zone_is_narrated() {
         card_instance: engine_core::CardInstanceId(1),
         from: Zone::Graveyard,
         to: Zone::Command,
+        creature: false,
+        face: 0,
+        position: None,
     }];
     let lines = harness::text::narrate(&st, &ev, Seat::Everyone);
     assert_eq!(lines, ["  Test Elf (P0) is put into the command zone"]);
@@ -314,6 +317,9 @@ fn hidden_zone_moves_are_named_only_to_who_may_know() {
         card_instance: engine_core::CardInstanceId(1),
         from: Zone::Library,
         to: Zone::Hand,
+        creature: false,
+        face: 0,
+        position: None,
     };
     let down = Event::ZoneChange {
         old: held,
@@ -321,6 +327,9 @@ fn hidden_zone_moves_are_named_only_to_who_may_know() {
         card_instance: engine_core::CardInstanceId(2),
         from: Zone::Hand,
         to: Zone::Library,
+        creature: false,
+        face: 0,
+        position: Some(engine_core::zones::LibraryPosition::Top),
     };
     let ev = [up, down];
     let omniscient = harness::text::narrate(&st, &ev, Seat::Everyone);
@@ -476,8 +485,14 @@ fn attacking_does_not_also_tap() {
         Event::StepBegan {
             step: engine_core::turn::Step::DeclareAttackers,
         },
-        Event::Tapped { object: a },
-        Event::Tapped { object: b },
+        Event::Tapped {
+            object: a,
+            cause: engine_core::events::TapCause::Attack,
+        },
+        Event::Tapped {
+            object: b,
+            cause: engine_core::events::TapCause::Attack,
+        },
         Event::AttackerDeclared {
             attacker: a,
             defender: P1,
@@ -627,6 +642,9 @@ fn something_that_fought_dies() {
             card_instance: engine_core::CardInstanceId(1),
             from: Zone::Battlefield,
             to: Zone::Graveyard,
+            creature: false,
+            face: 0,
+            position: None,
         },
     ];
     let lines = harness::text::narrate(&st, &ev, Seat::Everyone);

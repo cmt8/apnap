@@ -169,6 +169,8 @@ pub enum GameAction {
     },
     Tap {
         object: ObjectId,
+        /// What tapped it (reported in the event).
+        cause: crate::events::TapCause,
     },
     /// CR 701.27: a double-faced permanent turns over.
     Transform {
@@ -181,10 +183,13 @@ pub enum GameAction {
     },
     Untap {
         object: ObjectId,
+        cause: crate::events::TapCause,
     },
     AddMana {
         player: PlayerId,
         mana: ManaType,
+        /// What made it (reported in the event).
+        source: Option<ObjectId>,
     },
     /// CR 601.2h: pay specific symbols plus the chosen generic allocation.
     PayMana {
@@ -252,6 +257,8 @@ pub enum GameAction {
     /// CR 608.2n / 608.2b / 701.6a: an ability leaves the stack and ceases to exist.
     RemoveAbility {
         ability: ObjectId,
+        /// Why (reported in the event).
+        reason: crate::events::StackExit,
     },
     /// CR 800.4a: a player leaves a multiplayer game.
     LeaveGame {
@@ -275,6 +282,7 @@ pub enum GameAction {
         mana: ManaType,
         ability: AbilityId,
         chosen: Option<card_model::Chosen>,
+        source: Option<ObjectId>,
     },
     /// CR 106.6: `amount` of the restricted mana at `entry` is about to pay for something
     /// it may be spent on: it joins the rest of the pool, to be paid with it.
@@ -474,12 +482,21 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 timestamp,
                 source,
                 controller,
-                affected,
-                effects,
+                affected: affected.clone(),
+                effects: effects.clone(),
                 until_end_of_turn,
                 card,
             });
-            st.emit(Event::ContinuousEffectBegan { id, source });
+            st.emit(Event::ContinuousEffectBegan {
+                id,
+                source,
+                card,
+                effects,
+                affected,
+                abilities: Vec::new(),
+                about: None,
+                until_end_of_turn,
+            });
             ActionResult::Done
         }
         GameAction::AddLasting {
@@ -498,12 +515,21 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 timestamp,
                 source,
                 controller,
-                abilities,
+                abilities: abilities.clone(),
                 about,
                 until_end_of_turn,
                 while_source,
             });
-            st.emit(Event::ContinuousEffectBegan { id, source });
+            st.emit(Event::ContinuousEffectBegan {
+                id,
+                source,
+                card: abilities.first().map_or(CardDefId(0), |a| a.card),
+                effects: Vec::new(),
+                affected: Vec::new(),
+                abilities,
+                about,
+                until_end_of_turn,
+            });
             ActionResult::Done
         }
         GameAction::CreateEmblem {
@@ -599,7 +625,13 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 execute(st, GameAction::RemoveDamage { object });
             }
             if !st.object(object).tapped {
-                execute(st, GameAction::Tap { object });
+                execute(
+                    st,
+                    GameAction::Tap {
+                        object,
+                        cause: crate::events::TapCause::Effect,
+                    },
+                );
             }
             let in_combat = st.combat.as_ref().is_some_and(|c| {
                 c.attackers
@@ -749,23 +781,32 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             st.emit(Event::Transformed { object, face });
             ActionResult::Done
         }
-        GameAction::Tap { object } => {
+        GameAction::Tap { object, cause } => {
             let o = st.object_mut(object);
             debug_assert!(!o.tapped, "tapping a tapped permanent");
             o.tapped = true;
-            st.emit(Event::Tapped { object });
+            st.emit(Event::Tapped { object, cause });
             // CR 603.2e: "becomes tapped" triggers (D-080).
             crate::triggers::detect_tapped(st, object);
             ActionResult::Done
         }
-        GameAction::Untap { object } => {
+        GameAction::Untap { object, cause } => {
             st.object_mut(object).tapped = false;
-            st.emit(Event::Untapped { object });
+            st.emit(Event::Untapped { object, cause });
             ActionResult::Done
         }
-        GameAction::AddMana { player, mana } => {
+        GameAction::AddMana {
+            player,
+            mana,
+            source,
+        } => {
             st.player_mut(player).mana_pool.add(mana, 1);
-            st.emit(Event::ManaAdded { player, mana });
+            st.emit(Event::ManaAdded {
+                player,
+                mana,
+                source,
+                restricted: false,
+            });
             ActionResult::Done
         }
         GameAction::PayMana {
@@ -773,10 +814,20 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             requirement,
             generic,
         } => {
+            let before = st.player(player).mana_pool;
             requirement.pay(&mut st.player_mut(player).mana_pool, &generic);
+            // Which mana left the pool, type by type.
+            let after = st.player(player).mana_pool;
+            let mut mana = Vec::new();
+            for t in crate::mana::ManaType::ALL {
+                for _ in after.amounts[t.index()]..before.amounts[t.index()] {
+                    mana.push(t);
+                }
+            }
             st.emit(Event::ManaPaid {
                 player,
                 amount: requirement.total(),
+                mana,
             });
             ActionResult::Done
         }
@@ -785,6 +836,7 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             mana,
             ability,
             chosen,
+            source,
         } => {
             let pool = &mut st.player_mut(player).restricted_mana;
             match pool
@@ -799,7 +851,12 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                     chosen,
                 }),
             }
-            st.emit(Event::ManaAdded { player, mana });
+            st.emit(Event::ManaAdded {
+                player,
+                mana,
+                source,
+                restricted: true,
+            });
             ActionResult::Done
         }
         GameAction::ReleaseRestrictedMana {
@@ -974,6 +1031,8 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
                 player: controller,
                 ability: id,
                 source,
+                text: ability,
+                triggered,
             });
             ActionResult::Moved(id)
         }
@@ -999,13 +1058,13 @@ pub fn execute(st: &mut GameState, action: GameAction) -> ActionResult {
             }
             ActionResult::Done
         }
-        GameAction::RemoveAbility { ability } => {
+        GameAction::RemoveAbility { ability, reason } => {
             if let Some(so) = st.stack.iter().find(|s| s.id == ability).cloned() {
                 st.left_stack.push((so, None));
             }
             st.stack.retain(|s| s.id != ability);
             forget_left_stack(st);
-            st.emit(Event::AbilityRemoved { ability });
+            st.emit(Event::AbilityRemoved { ability, reason });
             ActionResult::Done
         }
         GameAction::CopyStackObject {
@@ -1253,6 +1312,9 @@ fn perform_move(
         Zone::Battlefield => st.stack_object(id).and_then(|s| s.alt),
         _ => None,
     };
+    // What it was where it was, for the event (CR 608.2h).
+    let was_creature = crate::layers::chars(st, id).is(card_model::CardType::Creature);
+    let was_face = st.object(id).face;
     let old = detach(st, id);
     // CR 712.6a: off the stack and battlefield a card has only its front face up. CR
     // 712.10: a resolving spell becomes a permanent with the face it had on the stack.
@@ -1342,7 +1404,13 @@ fn perform_move(
         card_instance: old.card_instance,
         from: old.zone,
         to,
+        creature: was_creature,
+        face: was_face,
+        position: (to == Zone::Library).then_some(position),
     });
+    // The layered view worked out above for `was_creature` is of the game before this move,
+    // at a generation the move doesn't change: drop it (derived; no hash moves).
+    st.layer_cache.invalidate();
     new_id
 }
 
@@ -1369,7 +1437,10 @@ fn leave_game(st: &mut GameState, p: PlayerId) {
         .collect();
     for ability in abilities {
         st.stack.retain(|s| s.id != ability);
-        st.emit(Event::AbilityRemoved { ability });
+        st.emit(Event::AbilityRemoved {
+            ability,
+            reason: crate::events::StackExit::ControllerLeft,
+        });
     }
     // Control effects from objects that just left have ended (layer 2 is recomputed).
     st.generation += 1;

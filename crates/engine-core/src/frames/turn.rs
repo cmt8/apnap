@@ -76,7 +76,13 @@ impl StepStage {
                         for id in st.zones.battlefield.clone() {
                             let o = st.object(id);
                             if o.tapped && crate::layers::controller_of(st, id) == ap {
-                                execute(st, GameAction::Untap { object: id });
+                                execute(
+                                    st,
+                                    GameAction::Untap {
+                                        object: id,
+                                        cause: crate::events::TapCause::UntapStep,
+                                    },
+                                );
                             }
                         }
                         // CR 502.4: no player receives priority during the untap step.

@@ -714,7 +714,7 @@ fn cr_111_6_an_opponents_token_enters_tapped() {
     let soldier = s.find(P0, Zone::Battlefield, SOLDIER).unwrap();
     assert!(s.st.object(soldier).tapped);
     assert_eq!(
-        s.count(|e| matches!(e, engine_core::Event::Tapped { object } if *object == soldier)),
+        s.count(|e| matches!(e, engine_core::Event::Tapped { object, .. } if *object == soldier)),
         0
     );
 

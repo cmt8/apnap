@@ -1062,6 +1062,11 @@ fn signed(n: i32) -> String {
     }
 }
 
+/// "gets +1/+1 and has flying": what continuous effects do, for a client's log.
+pub fn continuous_text(effects: &[ContinuousEffect], plural: bool) -> String {
+    continuous(effects, plural)
+}
+
 /// "gets +1/+1 and has flying" for a subject (`plural` picks get/gets, have/has).
 fn continuous(effects: &[ContinuousEffect], plural: bool) -> String {
     let (get, have, lose, is, become_) = if plural {

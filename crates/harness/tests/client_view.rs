@@ -65,6 +65,10 @@ impl Model {
             Event::LookedAt { player, cards } if self.seat == Seat::Player(*player) => {
                 self.shown.extend(cards.iter().copied())
             }
+            // CR 701.23a: the searcher looked through the library and knows what it found.
+            Event::SearchFound { player, cards } if self.seat == Seat::Player(*player) => {
+                self.shown.extend(cards.iter().copied())
+            }
             // CR 701.20d: shuffled or otherwise reordered (put on the top or the bottom).
             Event::Shuffled { player } | Event::LibraryArranged { player, .. } => {
                 let lib: Vec<ObjectId> = self
@@ -263,7 +267,7 @@ fn cr_402_3_draws_and_tutors() {
     assert!(identified(&mine).contains(&plains), "the owner knows");
     assert!(!identified(&theirs).contains(&plains), "the others don't");
     assert!(theirs.iter().any(|e| matches!(e,
-        Event::MovedUnseen { owner, from: Zone::Library, to: Zone::Hand, old, new }
+        Event::MovedUnseen { owner, from: Zone::Library, to: Zone::Hand, old, new, .. }
             if *owner == P0 && *old == HIDDEN && *new == HIDDEN)));
     // A revealing tutor (for a Forest of the library).
     let start = s.st.clone();
@@ -395,4 +399,70 @@ fn mulligans_and_a_spectator() {
             }
         }
     }
+}
+
+/// "Put a card from your hand on top of your library."
+const STASH: &str = "Name:Test Stash\nManaCost:U\nTypes:Sorcery\n\
+    A:SP$ ChangeZone | Origin$ Hand | Destination$ Library | ChangeType$ Card | ChangeNum$ 1 | Mandatory$ True | SpellDescription$ Put a card from your hand on top of your library.\n\
+    Oracle:Put a card from your hand on top of your library.";
+
+// D-090 part 2, CR 701.23a: what a search found. The searcher is told which cards; the
+// opponent only how many (each HIDDEN) — the same search, read by each seat.
+#[test]
+fn a_search_result_is_named_only_to_the_searcher() {
+    let mut sc = scenario(&[DIG]);
+    sc.cards(P0, Zone::Battlefield, &["Swamp"]);
+    sc.card(P0, Zone::Hand, "Test Quiet Tutor");
+    sc.card(P0, Zone::Library, "Plains");
+    sc.turn(P0, Step::PrecombatMain);
+    let start = sc.build();
+    let mut s = Script::new(start.clone());
+    s.cast("Test Quiet Tutor").pay().pass_all();
+    s.pick(
+        "Plains",
+        |s, o| matches!(o, OptionDesc::Card { card } if s.name(*card) == "Plains"),
+    );
+    let found = |t: &[Event]| {
+        t.iter()
+            .find_map(|e| match e {
+                Event::SearchFound { player, cards } if *player == P0 => Some(cards.clone()),
+                _ => None,
+            })
+            .expect("a search result")
+    };
+    let mine = found(&told(&start, &s, Seat::Player(P0)));
+    let theirs = found(&told(&start, &s, Seat::Player(P1)));
+    let watching = found(&told(&start, &s, Seat::Spectator));
+    assert_eq!(mine.len(), 1);
+    assert_ne!(mine[0], HIDDEN, "the searcher knows the card");
+    assert_eq!(theirs, [HIDDEN], "the opponent: one card, not which");
+    assert_eq!(watching, [HIDDEN], "a spectator likewise");
+}
+
+// D-090 part 2, CR 401.4: where a card went in a library is public; which card isn't. The
+// opponent is told a card of P0's went from hand to the top of the library.
+#[test]
+fn library_position_is_public_the_card_is_not() {
+    let mut sc = scenario(&[STASH]);
+    sc.cards(P0, Zone::Battlefield, &["Island"]);
+    sc.card(P0, Zone::Hand, "Test Stash");
+    sc.card(P0, Zone::Hand, "Test Golem");
+    sc.turn(P0, Step::PrecombatMain);
+    let start = sc.build();
+    let mut s = Script::new(start.clone());
+    s.cast("Test Stash").pay().pass_all();
+    if s.kind() != engine_core::ChoiceKind::Priority {
+        let first = s.options()[0].clone();
+        s.pick("the Golem", |_, o| *o == first);
+    }
+    let theirs = told(&start, &s, Seat::Player(P1));
+    let golem = s.st.catalog.find("Test Golem").unwrap();
+    assert!(!identified(&theirs).contains(&golem), "{theirs:#?}");
+    assert!(
+        theirs.iter().any(|e| matches!(e,
+            Event::MovedUnseen { owner, from: Zone::Hand, to: Zone::Library, old, new,
+                position: Some(engine_core::zones::LibraryPosition::Top) }
+                if *owner == P0 && *old == HIDDEN && *new == HIDDEN)),
+        "{theirs:#?}"
+    );
 }

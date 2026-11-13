@@ -144,6 +144,8 @@ impl EventView {
                 card_instance,
                 from,
                 to,
+                position,
+                ..
             } => {
                 let before = self.objects.get(old).copied();
                 let seen_before = self.visible(*old);
@@ -171,6 +173,7 @@ impl EventView {
                         new: if seen_after { *new } else { HIDDEN },
                         from: *from,
                         to: *to,
+                        position: *position,
                     });
                 }
                 if seen_after {
@@ -224,6 +227,24 @@ impl EventView {
                     cards: cards.iter().map(|c| self.id(*c)).collect(),
                 });
             }
+            // CR 701.23a: the searcher looked at the library and knows what they found;
+            // everyone else learns how many cards (each `HIDDEN`), unless they are revealed.
+            Event::SearchFound { player, cards } => {
+                let mine = matches!(self.seat, Seat::Player(p) if p == *player)
+                    || self.seat == Seat::Everyone;
+                if mine {
+                    for c in cards {
+                        if let Some(k) = self.objects.get_mut(c) {
+                            k.shown = true;
+                        }
+                        self.identified(*c, out);
+                    }
+                }
+                out.push(Event::SearchFound {
+                    player: *player,
+                    cards: cards.iter().map(|c| self.id(*c)).collect(),
+                });
+            }
             Event::TokenCreated { object, card, .. } => {
                 self.objects.insert(
                     *object,
@@ -267,242 +288,113 @@ pub fn object_ids(e: &Event) -> Vec<ObjectId> {
 
 /// `e` with each object id it names passed through `f`.
 fn map_ids(e: &Event, f: &mut dyn FnMut(ObjectId) -> ObjectId) -> Event {
-    let t = |t: &Target, f: &mut dyn FnMut(ObjectId) -> ObjectId| match t {
-        Target::Object(o) => Target::Object(f(*o)),
-        p => *p,
-    };
-    let dt = |d: &DamageTarget, f: &mut dyn FnMut(ObjectId) -> ObjectId| match d {
-        DamageTarget::Object(o) => DamageTarget::Object(f(*o)),
-        p => *p,
-    };
+    let mut e = e.clone();
+    let mut one = |id: &mut ObjectId| *id = f(*id);
     use Event as E;
-    match e {
-        E::Drew { player, card } => E::Drew {
-            player: *player,
-            card: f(*card),
-        },
+    match &mut e {
+        E::Drew { card, .. } | E::Discarded { card, .. } | E::Cycled { card, .. } => one(card),
         E::AbilityActivated {
-            player,
-            ability,
-            source,
-        } => E::AbilityActivated {
-            player: *player,
-            ability: f(*ability),
-            source: f(*source),
-        },
-        E::ModesChosen { object, modes } => E::ModesChosen {
-            object: f(*object),
-            modes: modes.clone(),
-        },
-        E::XChosen { object, x } => E::XChosen {
-            object: f(*object),
-            x: *x,
-        },
+            ability, source, ..
+        } => {
+            one(ability);
+            one(source);
+        }
+        E::ModesChosen { object, .. }
+        | E::XChosen { object, .. }
+        | E::Fizzled { object }
+        | E::Countered { object }
+        | E::Sacrificed { object, .. }
+        | E::ObjectLeftGame { object }
+        | E::TokenCreated { object, .. }
+        | E::CountersPut { object, .. }
+        | E::CountersRemoved { object, .. }
+        | E::CeasedToExist { object }
+        | E::ControlChanged { object, .. }
+        | E::Tapped { object, .. }
+        | E::Untapped { object, .. }
+        | E::DamageRemoved { object }
+        | E::Unattached { object }
+        | E::RemovedFromCombat { object }
+        | E::Transformed { object, .. }
+        | E::Chose { object, .. }
+        | E::Regenerated { object }
+        | E::BecameCopy { object, .. }
+        | E::TargetsChanged { object }
+        | E::EmblemCreated { object, .. }
+        | E::Identified { object, .. }
+        | E::ResolutionBegan { object }
+        | E::MayChosen { object, .. }
+        | E::UnlessPaid { object, .. } => one(object),
         E::TargetsChosen { object, targets } => {
-            let object = f(*object);
-            E::TargetsChosen {
-                object,
-                targets: targets.iter().map(|x| t(x, f)).collect(),
+            one(object);
+            for t in targets {
+                if let Target::Object(o) = t {
+                    one(o);
+                }
             }
         }
-        E::Fizzled { object } => E::Fizzled { object: f(*object) },
-        E::Countered { object } => E::Countered { object: f(*object) },
-        E::AbilityRemoved { ability } => E::AbilityRemoved {
-            ability: f(*ability),
-        },
-        E::Sacrificed { player, object } => E::Sacrificed {
-            player: *player,
-            object: f(*object),
-        },
-        E::ObjectLeftGame { object } => E::ObjectLeftGame { object: f(*object) },
-        E::TokenCreated {
-            object,
-            card,
-            controller,
-        } => E::TokenCreated {
-            object: f(*object),
-            card: *card,
-            controller: *controller,
-        },
-        E::CountersPut { object, kind, n } => E::CountersPut {
-            object: f(*object),
-            kind: *kind,
-            n: *n,
-        },
-        E::CountersRemoved { object, kind, n } => E::CountersRemoved {
-            object: f(*object),
-            kind: *kind,
-            n: *n,
-        },
-        E::CeasedToExist { object } => E::CeasedToExist { object: f(*object) },
-        E::ContinuousEffectBegan { id, source } => E::ContinuousEffectBegan {
-            id: *id,
-            source: f(*source),
-        },
-        E::DamagePrevented { target, amount } => E::DamagePrevented {
-            target: dt(target, f),
-            amount: *amount,
-        },
-        E::Replaced { source } => E::Replaced { source: f(*source) },
-        E::Attached { aura, to } => E::Attached {
-            aura: f(*aura),
-            to: f(*to),
-        },
-        E::ControlChanged { object, controller } => E::ControlChanged {
-            object: f(*object),
-            controller: *controller,
-        },
-        E::Triggered {
+        E::AbilityRemoved { ability, .. } => one(ability),
+        E::ContinuousEffectBegan {
             source,
-            controller,
-            ability,
-        } => E::Triggered {
-            source: f(*source),
-            controller: *controller,
-            ability: *ability,
-        },
-        E::LandPlayed { player, land } => E::LandPlayed {
-            player: *player,
-            land: f(*land),
-        },
-        E::SpellCast { player, spell } => E::SpellCast {
-            player: *player,
-            spell: f(*spell),
-        },
-        E::Resolved { spell } => E::Resolved { spell: f(*spell) },
-        E::Tapped { object } => E::Tapped { object: f(*object) },
-        E::Untapped { object } => E::Untapped { object: f(*object) },
-        E::AttackerDeclared { attacker, defender } => E::AttackerDeclared {
-            attacker: f(*attacker),
-            defender: *defender,
-        },
-        E::BlockerDeclared { blocker, attacker } => E::BlockerDeclared {
-            blocker: f(*blocker),
-            attacker: f(*attacker),
-        },
-        E::DamageDealt {
-            source,
-            target,
-            amount,
-            combat,
-        } => E::DamageDealt {
-            source: f(*source),
-            target: dt(target, f),
-            amount: *amount,
-            combat: *combat,
-        },
-        E::DamageRemoved { object } => E::DamageRemoved { object: f(*object) },
-        E::Discarded { player, card } => E::Discarded {
-            player: *player,
-            card: f(*card),
-        },
-        E::Unattached { object } => E::Unattached { object: f(*object) },
-        E::Revealed { player, cards } => E::Revealed {
-            player: *player,
-            cards: cards.iter().map(|c| f(*c)).collect(),
-        },
-        E::LookedAt { player, cards } => E::LookedAt {
-            player: *player,
-            cards: cards.iter().map(|c| f(*c)).collect(),
-        },
-        E::Cycled { player, card } => E::Cycled {
-            player: *player,
-            card: f(*card),
-        },
-        E::RemovedFromCombat { object } => E::RemovedFromCombat { object: f(*object) },
-        E::Transformed { object, face } => E::Transformed {
-            object: f(*object),
-            face: *face,
-        },
-        E::Chose {
-            player,
-            object,
-            chosen,
-        } => E::Chose {
-            player: *player,
-            object: f(*object),
-            chosen: *chosen,
-        },
-        E::Regenerated { object } => E::Regenerated { object: f(*object) },
-        E::BecameCopy { object, card } => E::BecameCopy {
-            object: f(*object),
-            card: *card,
-        },
-        E::TargetsChanged { object } => E::TargetsChanged { object: f(*object) },
-        E::CopiedOnStack {
-            copy,
-            original,
-            controller,
-        } => E::CopiedOnStack {
-            copy: f(*copy),
-            original: f(*original),
-            controller: *controller,
-        },
+            affected,
+            about,
+            ..
+        } => {
+            one(source);
+            affected.iter_mut().for_each(&mut one);
+            if let Some(a) = about {
+                one(a);
+            }
+        }
+        E::DamagePrevented { target, .. } => {
+            if let DamageTarget::Object(o) = target {
+                one(o);
+            }
+        }
+        E::Replaced { source } => one(source),
+        E::Attached { aura, to } => {
+            one(aura);
+            one(to);
+        }
+        E::Triggered { source, .. } => one(source),
+        E::PaidToSave { at_stake, .. } => one(at_stake),
+        E::LandPlayed { land, .. } => one(land),
+        E::SpellCast { spell, .. } => one(spell),
+        E::Resolved { spell } => one(spell),
+        E::ManaAdded { source, .. } => {
+            if let Some(s) = source {
+                one(s);
+            }
+        }
+        E::AttackerDeclared { attacker, .. } => one(attacker),
+        E::BlockerDeclared { blocker, attacker } => {
+            one(blocker);
+            one(attacker);
+        }
+        E::DamageDealt { source, target, .. } => {
+            one(source);
+            if let DamageTarget::Object(o) = target {
+                one(o);
+            }
+        }
+        E::Revealed { cards, .. } | E::LookedAt { cards, .. } | E::SearchFound { cards, .. } => {
+            cards.iter_mut().for_each(&mut one)
+        }
+        E::CopiedOnStack { copy, original, .. } => {
+            one(copy);
+            one(original);
+        }
         E::AttacksPlaneswalker {
             attacker,
             planeswalker,
-        } => E::AttacksPlaneswalker {
-            attacker: f(*attacker),
-            planeswalker: f(*planeswalker),
-        },
-        E::EmblemCreated {
-            object,
-            player,
-            card,
-            abilities,
-        } => E::EmblemCreated {
-            object: f(*object),
-            player: *player,
-            card: *card,
-            abilities: abilities.clone(),
-        },
-        // Public: a spell or ability on the stack, and whether its controller paid.
-        E::PaidToSave {
-            player,
-            at_stake,
-            paid,
-        } => E::PaidToSave {
-            player: *player,
-            at_stake: f(*at_stake),
-            paid: *paid,
-        },
-        E::Identified {
-            object,
-            card,
-            face,
-            owner,
-        } => E::Identified {
-            object: f(*object),
-            card: *card,
-            face: *face,
-            owner: *owner,
-        },
-        E::MovedUnseen {
-            owner,
-            old,
-            new,
-            from,
-            to,
-        } => E::MovedUnseen {
-            owner: *owner,
-            old: f(*old),
-            new: f(*new),
-            from: *from,
-            to: *to,
-        },
-        E::ZoneChange {
-            old,
-            new,
-            card_instance,
-            from,
-            to,
-        } => E::ZoneChange {
-            old: f(*old),
-            new: f(*new),
-            card_instance: *card_instance,
-            from: *from,
-            to: *to,
-        },
+        } => {
+            one(attacker);
+            one(planeswalker);
+        }
+        E::ZoneChange { old, new, .. } | E::MovedUnseen { old, new, .. } => {
+            one(old);
+            one(new);
+        }
         // No object in them.
         E::GameStarted { .. }
         | E::StartingPlayerChosen { .. }
@@ -514,7 +406,6 @@ fn map_ids(e: &Event, f: &mut dyn FnMut(ObjectId) -> ObjectId) -> Event {
         | E::PriorityPassed { .. }
         | E::PlayerLeftGame { .. }
         | E::BlockDeclarationIllegal { .. }
-        | E::ManaAdded { .. }
         | E::ManaPaid { .. }
         | E::ManaEmptied { .. }
         | E::LifeChanged { .. }
@@ -524,6 +415,8 @@ fn map_ids(e: &Event, f: &mut dyn FnMut(ObjectId) -> ObjectId) -> Event {
         | E::LookedAtLibrary { .. }
         | E::Scried { .. }
         | E::Surveilled { .. }
-        | E::LibraryArranged { .. } => e.clone(),
+        | E::LibraryArranged { .. }
+        | E::TokensCapped { .. } => {}
     }
+    e
 }

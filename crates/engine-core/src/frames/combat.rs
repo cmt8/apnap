@@ -271,7 +271,13 @@ impl DeclareAttackersFrame {
         // (CR 702.20b: unless they have vigilance).
         for &(attacker, _) in &self.chosen {
             if !chars(st, attacker).has(Keyword::Vigilance) {
-                execute(st, GameAction::Tap { object: attacker });
+                execute(
+                    st,
+                    GameAction::Tap {
+                        object: attacker,
+                        cause: crate::events::TapCause::Attack,
+                    },
+                );
             }
         }
         // CR 508.1k: they become attacking creatures.
