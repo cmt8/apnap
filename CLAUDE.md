@@ -145,8 +145,8 @@ serialization and determinism come before UI and before AI strength.
   Tests: `forge_top100.rs`.
 - Changing targets (CR 115.7, D-082): "you may choose new targets" offers the current
   target first (it may be kept); "change the target of … with a single target" offers only
-  other legal targets and leaves it if there are none. "Becomes the target" triggers, when
-  built, must hook in there. A mass move of "your" cards touches only your zones and only
+  other legal targets and leaves it if there are none. "Becomes the target" triggers
+  (D-089) hook in there. A mass move of "your" cards touches only your zones and only
   you shuffle. Tests: `forge_top1000.rs`.
 - Counters (CR 122, D-084) have one representation: `CounterKind::PlusOne/MinusOne/
   Named(CounterName)`; doublers, proliferate, "enters with", counter costs
@@ -185,6 +185,17 @@ serialization and determinism come before UI and before AI strength.
   with its owner. Clients see it in `PlayerView::players[p].emblems` and `EmblemCreated`.
   It is not `effects::Lasting` (a rule a resolving spell leaves on no object for a while).
   Tests: `forge_emblems.rs`.
+- Revealing (CR 701.20, D-089): a card found by a search or a look is revealed only on its
+  way to a hidden zone and only if the card says "reveal" (Forge reveals more; guard
+  `oracle:reveals`). "Reveal cards until …" is `Effect::DigUntil`. Revealed library cards
+  stop being known when that library is shuffled or arranged (701.20d): `EventView` and
+  the knowledge model in `client_view.rs` both end it on `Event::LibraryArranged`.
+  "Becomes the target" (`Trigger::BecomesTarget`, on the permanent itself) fires on cast,
+  on an ability or copy put on the stack, and on a changed target (not a kept one), once
+  per spell or ability. Ward (CR 702.21a) is that trigger with `Effect::CounterIt` unless
+  the cost is paid: asked as `ChoiceKind::PayToSave { at_stake }` with
+  `OptionDesc::PayCost`, reported by `Event::PaidToSave`; `StackView::about` names what a
+  trigger on the stack is about. Tests: `forge_ward.rs`, `forge_dig_until.rs`.
 - The text of a compiled card (`card_model::describe`) is written like a printed card:
   number words, "this creature/land/Equipment", "Then" between instructions, a predefined
   token's reminder text on first mention. The Oracle guard (`oracle_words_missing`) reads
@@ -276,10 +287,10 @@ extend the vocabulary/engine *generally* (not for one card), add its test, re-ru
 `--sample` of compiled cards against their Oracle text after every step: it is how
 mis-compilations were found. The 90 hand-scripted cards are the regression set
 (`tests/forge_compile.rs`: the compiler must reproduce each of them).
-Status (D-088): 12,149 of 34,463 scripts compile (35.3%). Since 2026-11-10 the order of
-work is EDHREC popularity (the user's wish), not raw count; measured after D-088: 98% of
+Status (D-089): 12,256 of 34,463 scripts compile (35.6%). Since 2026-11-10 the order of
+work is EDHREC popularity (the user's wish), not raw count; measured after D-089: 98% of
 the 100 most played Commander cards compile (missing: Path of Ancestry, The One Ring),
-65% of the top 1,000, 39% of the top 5,000
+65% of the top 1,000, 40% of the top 5,000
 (`forge-coverage --top 0 --ranked`, which joins `edhrec_rank` from the Scryfall bulk file). Precons: `harness coverage --verbose` lists what blocks
 the rest. Feature tests live in `crates/harness/tests/forge_features.rs` and, one file per
 feature area since D-066, `forge_<area>.rs` next to it: invented cards written
@@ -312,7 +323,7 @@ cards, linked abilities per CR 607, delayed triggers that keep remembered cards 
 `ReplaceWith::EntersTappedUnless…`, the choice asked inside `ApplyFrame` as
 `ChoiceKind::AsEnters`), "sacrifice … instead" lands, "lands enter untapped", "exile it
 instead. When you do, …", static regeneration and "when it regenerates this way", abilities given to cards that aren't on
-the battlefield, "becomes the target" triggers, protection, read ahead and transforming Sagas, abilities that hold for a while and trigger every time (`Effect:Triggers`, CR 603.7b; 139
+the battlefield, "becomes the target" of something other than the permanent itself, heroic, ward with a choice of costs, protection, read ahead and transforming Sagas, abilities that hold for a while and trigger every time (`Effect:Triggers`, CR 603.7b; 139
 scripts), loyalty abilities that add mana, "can be your commander",
 and of Forge's "Effect" objects everything but combat rules and "prevent all damage"
 (`effects::Lasting`, D-065: no triggers, no characteristic changes, nothing about
