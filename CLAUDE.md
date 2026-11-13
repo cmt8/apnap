@@ -72,6 +72,13 @@ serialization and determinism come before UI and before AI strength.
   `harness::text`, crate `ai` — never names `GameState` or a session's `st`;
   `cargo xtask check-deps` enforces it. `tests/client_boundary.rs` plays whole games over
   JSON; `tests/knowledge` is the shared model of what a seat may know.
+  `PlayerView::viewer()` is `None` for a spectator's or everyone's view; agents fail loudly
+  on one. While a seat declares attackers or blockers, `PlayerView::declaration` previews
+  every creature still to be asked, in order, with its options (D-093): exact, because
+  nothing changes between the questions and menace is the only whole-declaration check; a
+  menace restart is `BlockDeclarationIllegal`. A future whole-declaration rule
+  (requirements, "can't attack alone", goad, attack costs — none built) must keep that
+  promise or change its docs.
 - Events say what a client would otherwise guess (D-090 part 2): `ResolutionBegan`,
   `SpellCast { face, alt, tax }`, `AbilityActivated { text, triggered }` (a trigger's link
   to its stack object), `AbilityRemoved { reason: StackExit }`, `ContinuousEffectBegan`
