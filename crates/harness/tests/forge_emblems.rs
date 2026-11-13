@@ -198,3 +198,74 @@ fn cr_114_2_emblem_text_and_what_stays_blocked() {
         forge_test_blockers(&activated)
     );
 }
+
+// A client sees only `PlayerView`s and events (D-088): from another seat's view and the
+// (public) events alone it can tell who has which emblem and what it does, see that an
+// emblem's triggered ability is on the stack, and see the emblem leave with its owner
+// (CR 114.2, 800.4a).
+#[test]
+fn a_client_reads_emblems_from_the_view_and_the_events() {
+    let mut sc = scenario(&[RALLY, SPARK], 3);
+    sc.cards(P0, Zone::Battlefield, &["Plains", "Mountain", "Mountain"]);
+    sc.cards(
+        P0,
+        Zone::Hand,
+        &[
+            "Test Rally Emblem",
+            "Test Spark Emblem",
+            "Test Spark Emblem",
+        ],
+    );
+    sc.turn(P0, Step::PrecombatMain);
+    let mut s = Script::new(sc.build());
+    s.cast("Test Rally Emblem").pay().pass_all();
+    s.cast("Test Spark Emblem").pay().pass_all();
+    // What P1 sees.
+    let v = engine_core::player_view(&s.st, P1);
+    let mine = &v.players[P0.index()].emblems;
+    assert_eq!(mine.len(), 2);
+    assert_eq!(mine[0].from, "Test Rally Emblem");
+    assert_eq!(mine[0].text, ["Creatures you control get +1/+1."]);
+    assert_eq!(
+        mine[1].text,
+        ["Whenever you cast a spell, this emblem deals 2 damage to any target."]
+    );
+    assert!(v.players[P1.index()].emblems.is_empty());
+    // The events say who got which emblem.
+    let got: Vec<(PlayerId, ObjectId)> = s
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            Event::EmblemCreated { player, object, .. } => Some((*player, *object)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(got, [(P0, mine[0].id), (P0, mine[1].id)]);
+    // The emblem's trigger: the stack names the emblem as its source, and the decision to
+    // choose its target is P0's, with the targets listed.
+    s.cast("Test Spark Emblem").pay();
+    let v = engine_core::player_view(&s.st, P1);
+    let top = v.stack.last().unwrap();
+    assert_eq!(top.ability_of, Some(mine[1].id));
+    assert_eq!(s.kind(), ChoiceKind::ChooseTargets { slot: 0 });
+    assert!(
+        s.has(|_, o| matches!(o, OptionDesc::Target { target: Target::Player(p) } if *p == P1))
+    );
+    s.target_player(P1).pass_all().pass_all();
+    // It leaves with its owner: P0 loses (CR 704.5a) and leaves the game (800.4a).
+    let ids: Vec<ObjectId> = mine.iter().map(|e| e.id).collect();
+    s.st.players[P0.index()].life = 0;
+    s.pass();
+    let v = engine_core::player_view(&s.st, P1);
+    assert!(v.players[P0.index()].has_lost);
+    assert!(v.players[P0.index()].emblems.is_empty());
+    let left: Vec<ObjectId> = s
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ObjectLeftGame { object } if ids.contains(object) => Some(*object),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(left, ids);
+}
